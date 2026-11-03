@@ -283,6 +283,9 @@ Current-state catalog capture coalesces small single-ref leaf visibility bodies
 within the remaining control-intake byte budget. Reads exclude Git/file payloads
 and duplicate descriptor bytes; each selected page still authenticates against
 its captured roots. Compacted histories and Git views retain selected paging.
+Selected leaf scalar proofs load in bounded concurrent waves before ordered
+reconciliation, avoiding one serial network round trip per leaf. Compacted
+members retain demand paging rather than speculative cache fills.
 
 Ref deletion removes its live visibility closure even when the capsule has no
 visibility payload. Retained dictionary objects cannot supply a new ref's base;

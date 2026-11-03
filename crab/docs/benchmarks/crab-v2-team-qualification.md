@@ -233,6 +233,15 @@ byte and no-repair qualification of this follow-up remains pending.
 Evidence: [failed candidate diagnostic](https://github.com/crabbuild/crab/actions/runs/41575183746),
 `metadata-bytes-before.log`, `metadata-coalesced-all.log`, `before.log`.
 
+The metadata-only follow-up also exposed serial first-proof reads after concurrent
+footer capture. With a deterministic 8 ms delay per GET, 64 leaves take 544 ms.
+Selected leaf scalar proofs now load in bounded concurrent waves before the
+unchanged ordered reconciliation; the same regression completes within 128 ms.
+All 777 metadata tests pass (three pre-existing ignores), including unchanged
+read/byte counts and compacted-run paging. This is a simulated round-trip proof,
+not a team latency result; fresh installed/Linux qualification remains required.
+Evidence: `visibility-waves-before.log`, `visibility-leaf-waves-final-all.log`.
+
 The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
 evicting a warmed point proof. Large cold spans now use one exact transfer;
 complete warm spans remain transfer-free. All 775 metadata tests pass, including

@@ -11,7 +11,7 @@ use crate::error::{MetadataError, Result};
 use crate::git_visibility::GitVisibilityIndex;
 use crab_storage::{Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -136,6 +136,29 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     .await?;
     let selected = select_ref_control_frontiers(root, &visible.frontiers, &runs)?;
     let pending = select_ref_journal_controls(root, &selected.required, &runs)?;
+    // Validated single-member runs are leaves; pooled members keep demand paging.
+    let leaf_transactions = runs
+        .values()
+        .filter_map(|(_, capsules)| match capsules.as_slice() {
+            [capsule] => Some(capsule.transaction_id()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    // Fetch selected scalar proofs before serial history reconciliation. Small
+    // leaves then fill their admitted metadata blocks concurrently; unselected
+    // compacted members and payloads remain cold.
+    let leaves = selected
+        .root_controls
+        .iter()
+        .chain(pending.values())
+        .filter(|control| leaf_transactions.contains(control.transaction_id()));
+    futures_util::stream::iter(leaves)
+        .map(Ok::<_, MetadataError>)
+        .try_for_each_concurrent(32, |control| async move {
+            control.paged_visibility_headers(layout.store()).await?;
+            Ok(())
+        })
+        .await?;
     let initial = match checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.visibility_reader(layout, MAX_CATALOG_BYTES))
@@ -215,15 +238,21 @@ mod tests {
     #[cfg(feature = "file-index-reader")]
     use crate::file_index_lookup::FileIndexLookupSession;
     use crate::git_visibility::GitVisibilityEdit;
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn leaf_capture_reads(file_data_bytes: usize) -> (usize, usize, u64) {
+    async fn leaf_capture_reads(
+        file_data_bytes: usize,
+        delay: std::time::Duration,
+    ) -> (usize, usize, u64, std::time::Duration) {
         let reads = Arc::new(AtomicUsize::new(0));
         let bytes = Arc::new(AtomicU64::new(0));
         let observed = reads.clone();
         let observed_bytes = bytes.clone();
-        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        let origin = Arc::new(object_store::throttle::ThrottledStore::new(
+            object_store::memory::InMemory::new(),
+            object_store::throttle::ThrottleConfig::default(),
+        ));
+        let store = Store::new(origin.clone())
             .with_read_request_observer(Arc::new(move |_| {
                 observed.fetch_add(1, Ordering::SeqCst);
             }))
@@ -309,7 +338,12 @@ mod tests {
         }
         reads.store(0, Ordering::SeqCst);
         bytes.store(0, Ordering::SeqCst);
-        let lookup = load_pointer_catalog_lookup_from_root(&layout, &root)
+        origin.config_mut(|config| config.wait_get_per_call = delay);
+        let started = tokio::time::Instant::now();
+        fn send<F: std::future::Future + Send>(future: F) -> F {
+            future
+        }
+        let lookup = send(load_pointer_catalog_lookup_from_root(&layout, &root))
             .await
             .unwrap();
         assert!(
@@ -322,12 +356,17 @@ mod tests {
         );
         let observed = reads.load(Ordering::SeqCst);
         assert!(bytes.load(Ordering::SeqCst) <= (count * 16 * 1024) as u64);
-        (count, observed, bytes.load(Ordering::SeqCst))
+        (
+            count,
+            observed,
+            bytes.load(Ordering::SeqCst),
+            started.elapsed(),
+        )
     }
 
     #[tokio::test]
     async fn small_ref_leaf_capture_coalesces_metadata_only() {
-        let (count, observed, _) = leaf_capture_reads(0).await;
+        let (count, observed, _, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
         assert_eq!(
             observed,
             3 * count,
@@ -337,7 +376,8 @@ mod tests {
 
     #[tokio::test]
     async fn large_ref_leaves_keep_payloads_cold_and_coalesce_metadata() {
-        let (count, observed, _) = leaf_capture_reads(64 * 1024).await;
+        let (count, observed, _, _) =
+            leaf_capture_reads(64 * 1024, std::time::Duration::ZERO).await;
         assert_eq!(
             observed,
             3 * count,
@@ -347,11 +387,21 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_capture_keeps_small_leaf_payloads_cold() {
-        let (count, _, baseline) = leaf_capture_reads(0).await;
-        let (_, _, with_payload) = leaf_capture_reads(8 * 1024).await;
+        let (count, _, baseline, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
+        let (_, _, with_payload, _) = leaf_capture_reads(8 * 1024, std::time::Duration::ZERO).await;
         assert!(
             with_payload <= baseline + (count * 256) as u64,
             "payload changed control traffic from {baseline} to {with_payload} bytes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leaf_proof_latency_is_bounded_by_concurrent_waves() {
+        let delay = std::time::Duration::from_millis(8);
+        let (_, _, _, elapsed) = leaf_capture_reads(0, delay).await;
+        assert!(
+            elapsed <= delay * 16,
+            "capture serialized proof reads: {elapsed:?}"
         );
     }
 
