@@ -50,8 +50,8 @@ jobs:
         run: cargo test --release -p crab-desktop-agent --locked
       - name: Build desktop runtime and application
         run: npm run build
-      - name: Build unpacked application
-        run: npx electron-builder --dir --publish never
+      - name: Build unsigned installers and unpacked application
+        run: npx electron-builder --publish never
       - name: Smoke packaged Electron and the real sidecar
         if: matrix.os == 'macos-15-intel'
         run: npm run test:e2e-smoke
@@ -68,8 +68,6 @@ jobs:
       - name: Qualify native v2 storage through the packaged app
         if: matrix.os == 'macos-15' || runner.os == 'Windows'
         run: python scripts/qualify-v2.py
-      - name: Build unsigned installers
-        run: npx electron-builder --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: Crab-desktop-${{ runner.os }}-${{ runner.arch }}
@@ -80,6 +78,7 @@ jobs:
             packages/desktop/release/*.deb
             packages/desktop/release/*.exe
             packages/desktop/release/*.blockmap
+            packages/desktop/release/latest*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
         run: npm test -- --maxWorkers 2 --minWorkers 1

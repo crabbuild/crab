@@ -1,8 +1,8 @@
 import { useAutoUpdater } from "../hooks/useAutoUpdater";
 
 /**
- * Non-intrusive update banner. Shows only when an update is available
- * or downloaded. Sits at the top of the app chrome (below the title bar).
+ * Shows desktop update availability, download progress, and concise failures.
+ * Sits at the top of the app chrome below the title bar.
  */
 export function UpdateBanner() {
   const { status, info, progress, error, downloadUpdate, quitAndInstall } =
@@ -13,10 +13,18 @@ export function UpdateBanner() {
   }
 
   if (status === "error") {
-    // Only show transient errors briefly — don't nag the user.
     return (
-      <div className="flex items-center gap-2 px-4 py-1.5 bg-red-900/40 text-red-200 text-xs border-b border-red-800/50">
-        <span>Update check failed: {error}</span>
+      <div role="alert" className="flex items-center gap-2 px-4 py-1.5 bg-red-900/40 text-red-200 text-xs border-b border-red-800/50">
+        <span>{error}</span>
+      </div>
+    );
+  }
+
+  if (status === "unavailable") {
+    return (
+      <div role="status" className="flex flex-wrap items-center gap-2 border-b border-gx-border bg-gx-surface px-4 py-1.5 text-xs text-gx-muted">
+        <span>{error}</span>
+        <a className="ml-auto underline hover:text-gx-text" href="https://github.com/crabbuild/crab/releases" target="_blank" rel="noreferrer">View Crab releases</a>
       </div>
     );
   }

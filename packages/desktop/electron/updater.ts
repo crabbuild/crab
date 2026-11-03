@@ -17,6 +17,7 @@ autoUpdater.logger = log;
  */
 
 let mainWindow: BrowserWindow | null = null;
+let initialCheck: ReturnType<typeof setTimeout> | null = null;
 let checkInterval: ReturnType<typeof setInterval> | null = null;
 
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -25,6 +26,19 @@ function send(channel: string, payload: unknown) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function updateFailure(error: unknown) {
+  const code = error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
+  // GitHub releases can contain only CLI archives. electron-updater 6.8
+  // identifies missing desktop channel metadata separately from network failures.
+  const unavailable = code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" || code === "ERR_UPDATER_NO_PUBLISHED_VERSIONS";
+  return {
+    channel: unavailable ? "updater:unavailable" : "updater:error",
+    message: unavailable
+      ? "Automatic desktop updates are not published for this platform yet."
+      : "Could not update Crab. Check your connection and try again.",
+  };
 }
 
 export function initAutoUpdater(win: BrowserWindow) {
@@ -71,7 +85,8 @@ export function initAutoUpdater(win: BrowserWindow) {
   });
 
   autoUpdater.on("error", (err: Error) => {
-    send("updater:error", { message: err.message });
+    const failure = updateFailure(err);
+    send(failure.channel, { message: failure.message });
   });
 
   // --- IPC handlers (renderer → main) ---
@@ -81,8 +96,7 @@ export function initAutoUpdater(win: BrowserWindow) {
       const result = await autoUpdater.checkForUpdates();
       return { success: true, version: result?.updateInfo?.version ?? null };
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { success: false, error: message };
+      return { success: false, error: updateFailure(err).message };
     }
   });
 
@@ -91,8 +105,7 @@ export function initAutoUpdater(win: BrowserWindow) {
       await autoUpdater.downloadUpdate();
       return { success: true };
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { success: false, error: message };
+      return { success: false, error: updateFailure(err).message };
     }
   });
 
@@ -109,7 +122,8 @@ export function initAutoUpdater(win: BrowserWindow) {
   // --- Periodic check ---
 
   // Initial check after a short delay (let the app finish loading).
-  setTimeout(() => {
+  initialCheck = setTimeout(() => {
+    initialCheck = null;
     autoUpdater.checkForUpdates().catch(() => {
       // Swallow — network may be unavailable at launch.
     });
@@ -121,11 +135,16 @@ export function initAutoUpdater(win: BrowserWindow) {
 }
 
 /**
- * Cleanup — call on app quit to clear the interval.
+ * Cancel scheduled checks and detach the window on app quit.
  */
 export function stopAutoUpdater() {
+  if (initialCheck) {
+    clearTimeout(initialCheck);
+    initialCheck = null;
+  }
   if (checkInterval) {
     clearInterval(checkInterval);
     checkInterval = null;
   }
+  mainWindow = null;
 }

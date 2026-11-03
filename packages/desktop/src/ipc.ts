@@ -1775,6 +1775,7 @@ declare global {
         onChecking: (listener: () => void) => () => void;
         onUpdateAvailable: (listener: (info: { version: string; releaseDate: string; releaseNotes: unknown }) => void) => () => void;
         onUpdateNotAvailable: (listener: (info: { version: string }) => void) => () => void;
+        onUnavailable: (listener: (info: { message: string }) => void) => () => void;
         onProgress: (listener: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => () => void;
         onUpdateDownloaded: (listener: (info: { version: string; releaseDate: string; releaseNotes: unknown }) => void) => () => void;
         onError: (listener: (err: { message: string }) => void) => () => void;

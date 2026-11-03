@@ -1419,6 +1419,11 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.on("updater:not-available", handler);
       return () => { ipcRenderer.removeListener("updater:not-available", handler); };
     },
+    onUnavailable: (listener: (info: { message: string }) => void) => {
+      const handler = (_e: unknown, payload: { message: string }) => listener(payload);
+      ipcRenderer.on("updater:unavailable", handler);
+      return () => { ipcRenderer.removeListener("updater:unavailable", handler); };
+    },
     onProgress: (listener: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => {
       const handler = (_e: unknown, payload: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => listener(payload);
       ipcRenderer.on("updater:progress", handler);

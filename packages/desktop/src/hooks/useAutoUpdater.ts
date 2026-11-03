@@ -5,6 +5,7 @@ export type UpdateStatus =
   | "checking"
   | "available"
   | "not-available"
+  | "unavailable"
   | "downloading"
   | "downloaded"
   | "error";
@@ -62,6 +63,13 @@ export function useAutoUpdater(): AutoUpdaterState {
     unsubs.push(
       window.crab.updater.onUpdateNotAvailable(() => {
         setStatus("not-available");
+      }),
+    );
+
+    unsubs.push(
+      window.crab.updater.onUnavailable((result) => {
+        setStatus("unavailable");
+        setError(result.message);
       }),
     );
 

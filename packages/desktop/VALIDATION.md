@@ -80,6 +80,35 @@ URL targets, failed reconnects, removal, persistence failures, and redaction.
 Live public-cloud GCS/Azure accounts and OS keyrings on Linux/Windows remain
 qualification gates; saved configuration tests do not substitute for them.
 
+## Desktop update feed
+
+The packaged feed uses `crabbuild/crab`, matching the package's source repository.
+The immutable v1.2.4 release currently has CLI archives and no desktop metadata;
+the retired `crabbuild/crab-release` v1.0.14 feed likewise lacks `latest-mac.yml`.
+Changing only the repository would therefore still produce a missing-metadata
+failure. The app now distinguishes unpublished desktop updates from other
+failures without showing provider stack traces, headers, or misleading token
+advice in the renderer.
+
+The locked `electron-updater` 6.8.3 GitHub provider fetches channel metadata before
+comparing versions. A 404 for that metadata produces
+`ERR_UPDATER_CHANNEL_FILE_NOT_FOUND`; the provider also defines
+`ERR_UPDATER_NO_PUBLISHED_VERSIONS` when no release tag is selected. Only those cases become an informational
+unavailable state. Other failures remain errors. Manual check/download responses
+use the same safe messages, and shutdown clears both scheduled checks.
+
+Eight focused updater tests cover the publishing repository, typed failure
+classification, IPC responses, genuine updates, download/downgrade policy and
+shutdown. Seven failed against the old source before the fix. The packaged E2E
+uses the real GitHub provider and Electron HTTP session with a local release
+fixture, covering absent metadata, a valid newer desktop version and corrupt
+metadata through the production preload and rendered banner. Linux's unpacked
+smoke skips this scenario because `AppImageUpdater.isUpdaterActive` requires the
+installed AppImage runtime; its common GitHub-provider handling is covered by the
+focused tests. Full installer builds now precede packaged checks in CI, and CI
+retains the generated `latest*.yml` files alongside installer artifacts. Publishing
+qualified/signed desktop binaries and metadata remains a release gate.
+
 ## JavaScript failure resolution
 
 The 38 reproduced failures are resolved. Per the accepted product model, local

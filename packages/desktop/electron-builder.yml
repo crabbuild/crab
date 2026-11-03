@@ -32,7 +32,7 @@ icon: build/icon.png
 publish:
   provider: github
   owner: crabbuild
-  repo: crab-release
+  repo: crab
   releaseType: release
 mac:
   icon: build/icon.icns

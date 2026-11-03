@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 
 function packagedExecutable(): string {
   const release = path.resolve(__dirname, "../../release");
@@ -21,6 +22,68 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
     return bridge.rpc(method, params);
   }, { method, params });
 }
+
+test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
+  test.skip(process.platform === "linux", "electron-updater disables checks outside the installed AppImage runtime");
+  test.setTimeout(90_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-updater-"));
+  const requests: string[] = [];
+  let metadata: "missing" | "published" | "invalid" = "missing";
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    requests.push(url.pathname);
+    response.setHeader("Cache-Control", "no-store");
+    if (url.pathname === "/crabbuild/crab/releases.atom") {
+      response.setHeader("Content-Type", "application/atom+xml");
+      response.end('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Crab v2.0.1</title><link href="https://github.com/crabbuild/crab/releases/tag/v2.0.1"/><content>Desktop release</content></entry></feed>');
+    } else if (url.pathname === "/crabbuild/crab/releases/latest") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ tag_name: "v2.0.1" }));
+    } else if (url.pathname.startsWith("/crabbuild/crab/releases/download/v2.0.1/") && url.pathname.endsWith(".yml")) {
+      if (metadata === "missing") { response.writeHead(404); response.end("No desktop metadata"); return; }
+      response.setHeader("Content-Type", "text/yaml");
+      response.end(metadata === "invalid" ? "version: [invalid" : `version: 2.0.1\nfiles:\n  - url: Crab-2.0.1.zip\n    sha512: ${Buffer.alloc(64).toString("base64")}\n    size: 1\n`);
+    } else { response.writeHead(404); response.end("Unexpected release request"); }
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fixture server has no port");
+  const base = `http://127.0.0.1:${address.port}`;
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`] });
+    // Exercise electron-updater's real GitHub provider/HTTP parser through its
+    // dedicated Electron session, without depending on mutable public releases.
+    await application.evaluate(({ session }, base) => {
+      session.fromPartition("electron-updater", { cache: false }).webRequest.onBeforeRequest(
+        { urls: ["https://github.com/crabbuild/*"] },
+        (details, callback) => { const url = new URL(details.url); callback({ redirectURL: base + url.pathname + url.search }); },
+      );
+    }, base);
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const check = () => page.evaluate(() => window.crab.updater.checkForUpdate());
+    await expect(page.getByRole("status").filter({ hasText: "Automatic desktop updates are not published for this platform yet." })).toBeVisible({ timeout: 30_000 });
+    expect((await check()).success).toBe(false);
+    await expect(page.getByRole("link", { name: "View Crab releases" })).toHaveAttribute("href", "https://github.com/crabbuild/crab/releases");
+    await expect(page.getByText("Update check failed:", { exact: false })).toHaveCount(0);
+    expect(requests.every(url => url.startsWith("/crabbuild/crab/"))).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("desktop-updater.png") });
+    metadata = "published";
+    expect((await check()).version).toBe("2.0.1");
+    await expect(page.getByRole("button", { name: "Download", exact: true })).toBeVisible();
+    expect(requests.some(url => url.endsWith(".zip"))).toBe(false);
+    metadata = "invalid";
+    expect((await check()).success).toBe(false);
+    await expect(page.getByRole("alert")).toHaveText("Could not update Crab. Check your connection and try again.");
+  } finally {
+    await application?.close();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("packaged desktop opens and reads a real repository through its v2 agent", async () => {
   const executablePath = packagedExecutable();

@@ -55,10 +55,26 @@ build. The PTY daemon and its native dependencies ship together outside ASAR.
 `build:electron` also copies the agent manifests and verifies the daemon entry.
 
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
-Windows x64 artifacts. It runs the Rust and JavaScript tests and a packaged
-Electron smoke before producing unsigned installers. CI artifacts are not signed
+Windows x64 artifacts. It builds unsigned installers and tests the unpacked application from that
+same build, alongside the Rust and JavaScript checks. CI artifacts are not signed
 or notarized public releases; release signing credentials and evidence must be
 provided by the release environment. Packaging commands never publish.
+
+## Desktop updates
+
+The app checks [Crab's open-source releases](https://github.com/crabbuild/crab/releases).
+Desktop updates require Electron's platform metadata (`latest-mac.yml`,
+`latest.yml`, or `latest-linux*.yml`) and the installers referenced by it. CLI
+archives are not desktop updates. A release without desktop metadata displays a
+short informational notice and a link to releases; network or malformed metadata
+errors display a concise failure. Detailed diagnostics stay in the updater log.
+
+Full installer builds generate `app-update.yml` inside the app and matching
+`latest*.yml` files beside the installers. The desktop CI artifact includes those
+metadata files. Publish them with the matching desktop binaries in the canonical
+Crab release when release qualification and signing are complete. The desktop CI
+workflow does not publish releases or change existing CLI-only releases. Public
+update checks do not require a GitHub authentication token.
 
 ## Built-in storage authentication
 
