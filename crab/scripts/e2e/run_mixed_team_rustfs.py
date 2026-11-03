@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 from dataclasses import asdict
@@ -35,6 +36,10 @@ class MixedTeam(ConcurrentPushSmoke):
     def __init__(self, args):
         super().__init__(args)
         self.payload_history: dict[int, list[dict]] = {}
+        self.next_round = 1
+        self.stop_round = getattr(args, "stop_after_round", None)
+        if self.stop_round is None:
+            self.stop_round = args.branch_update_rounds
         self.edit_round = max(1, args.branch_update_rounds // 2)
         self.report.artifacts["mixed_team_script_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         self.report.workload.update(
@@ -136,6 +141,9 @@ class MixedTeam(ConcurrentPushSmoke):
         return {
             "remote_url": self.remote_url, "endpoint_url": self.args.endpoint_url,
             "agents": self.args.agents, "rounds": self.args.branch_update_rounds,
+            "push_workers": self.args.max_parallel_pushes,
+            "reader_workers": self.args.max_parallel_readers,
+            "timeout": self.args.timeout, "push_timeout": self.args.push_timeout,
             "source": str(self.args.source),
             "binary_sha256": hashlib.sha256(Path(self.args.crab_bin).read_bytes()).hexdigest(),
             "git_binary_sha256": hashlib.sha256(Path(self.args.git_bin).read_bytes()).hexdigest(),
@@ -143,13 +151,15 @@ class MixedTeam(ConcurrentPushSmoke):
                         for name in ("run_mixed_team_rustfs.py", "run_concurrent_push_smoke.py")},
         }
 
-    def seal_pushes(self) -> None:
-        expected = self.args.agents * (1 + self.args.branch_update_rounds)
+    def seal_pushes(self, through_round: int | None = None) -> None:
+        if through_round is None:
+            through_round = self.args.branch_update_rounds
+        expected = self.args.agents * (1 + through_round)
         records = self.report.branch_fanout + self.report.branch_updates
-        if (len(records) != expected or len(self.report.push_batches) != 1 + self.args.branch_update_rounds
+        if (len(records) != expected or len(self.report.push_batches) != 1 + through_round
                 or any(row["status"] != "ok" or row["command"]["exit_code"] != 0 for row in records)):
             raise SmokeError("cannot seal incomplete or rejected pushes")
-        branches = [f"refs/heads/agent-{index:03d}" for index in range(self.args.agents)]
+        branches = sorted(f"refs/heads/agent-{index:03d}" for index in range(self.args.agents))
         for round_index, batch in enumerate(self.report.push_batches):
             cohort = (self.report.branch_fanout if round_index == 0 else
                       [row for row in self.report.branch_updates if row["round"] == round_index])
@@ -159,13 +169,61 @@ class MixedTeam(ConcurrentPushSmoke):
         refs = {f"refs/heads/agent-{index:03d}": self.git_value(
                     self.branch_agents / f"branch-agent-{index:03d}", ["rev-parse", "HEAD"])
                 for index in range(self.args.agents)}
+        refs["refs/heads/main"] = self.git_value(self.seed, ["rev-parse", "HEAD"])
+        complete = through_round == self.args.branch_update_rounds
+        self.report.status = "pushes-complete" if complete else "pushes-paused"
         self.write_report(force=True)
         report = asdict(self.report)
-        report["status"] = "pushes-complete"
-        self.write_checkpoint(self.artifacts / "push-checkpoint.json", {
+        name = "push-checkpoint.json" if complete else f"pause-through-{through_round:02d}.json"
+        self.write_checkpoint(self.artifacts / name, {
             "schema": "crab.mixed-team-push-checkpoint", "identity": self.checkpoint_identity(),
-            "expected_refs": refs, "report": report,
+            "through_round": through_round, "expected_refs": refs, "report": report,
         })
+
+    def restore_report(self, report: dict) -> None:
+        self.report = SmokeReport(**report)
+        self.command_index = len(self.report.commands)
+        self.source_identity = self.report.workload["source_identity"]
+        self.payload_history = {int(index): versions for index, versions in
+                                self.report.artifacts["payload_history"].items()}
+
+    def resume_pushes(self) -> None:
+        report = json.loads((self.artifacts / "report.json").read_text())
+        through_round = len(report["push_batches"]) - 1
+        checkpoint = self.artifacts / f"pause-through-{through_round:02d}.json"
+        saved = json.loads(checkpoint.read_text())
+        if (saved.get("schema") != "crab.mixed-team-push-checkpoint"
+                or saved.get("identity") != self.checkpoint_identity()
+                or saved.get("through_round") != through_round
+                or saved["report"] != report or report["status"] != "pushes-paused"
+                or not 0 <= through_round < self.stop_round <= self.args.branch_update_rounds):
+            raise SmokeError("push resume requires an unchanged, cleanly paused checkpoint")
+
+        # Inspect without the recording helpers: a rejected resume must leave
+        # the sealed report and its command logs untouched.
+        def git(repo: Path, args: list[str]) -> str:
+            result = subprocess.run([self.args.git_bin, "-C", str(repo), *args],
+                                    env=self.env, capture_output=True, text=True,
+                                    timeout=self.args.timeout, check=True)
+            return result.stdout.strip()
+
+        source = {"head": git(self.args.source, ["rev-parse", "HEAD"]),
+                  "status": git(self.args.source, ["status", "--porcelain"])}
+        if source != report["workload"]["source_identity"]:
+            raise SmokeError("push resume source changed")
+        for name, oid in saved["expected_refs"].items():
+            writer = (self.seed if name == "refs/heads/main" else
+                      self.branch_agents / f"branch-{name.removeprefix('refs/heads/')}")
+            if (git(writer, ["rev-parse", "HEAD"]) != oid
+                    or git(writer, ["status", "--porcelain"])):
+                raise SmokeError(f"push resume writer changed: {name}")
+        visible = git(self.seed, ["ls-remote", "--refs", self.remote_url])
+        refs = {name: oid for oid, name in (line.split() for line in visible.splitlines())}
+        if refs != saved["expected_refs"]:
+            raise SmokeError("push resume remote refs changed")
+        self.restore_report(report)
+        self.next_round = through_round + 1
+        self.report.status = "running"
 
     def resume_verification(self) -> None:
         checkpoint = self.artifacts / "push-checkpoint.json"
@@ -175,11 +233,7 @@ class MixedTeam(ConcurrentPushSmoke):
                 or saved.get("identity") != self.checkpoint_identity()
                 or saved["report"]["status"] != "pushes-complete"):
             raise SmokeError("verification checkpoint identity does not match this run")
-        self.report = SmokeReport(**saved["report"])
-        self.command_index = len(self.report.commands)
-        self.source_identity = self.report.workload["source_identity"]
-        self.payload_history = {int(index): versions for index, versions in
-                                self.report.artifacts["payload_history"].items()}
+        self.restore_report(saved["report"])
         # Each attempt gets new logs, Git consumers and data caches. Keep the
         # original writers and the sealed push report as read-only evidence.
         self.run_root = Path(tempfile.mkdtemp(prefix="verification-", dir=self.run_root))
@@ -196,13 +250,14 @@ class MixedTeam(ConcurrentPushSmoke):
         self.write_report(force=True)
         self.check("verification-source-unchanged", self.source_state() == self.source_identity)
         for name, oid in saved["expected_refs"].items():
-            writer = self.branch_agents / f"branch-{name.removeprefix('refs/heads/')}"
+            writer = (self.seed if name == "refs/heads/main" else
+                      self.branch_agents / f"branch-{name.removeprefix('refs/heads/')}")
             self.check(f"verification-{name}-writer-unchanged",
                        self.git_value(writer, ["rev-parse", "HEAD"]) == oid)
 
     def run_branch_updates(self) -> None:
-        updates = []
-        for round_index in range(1, self.args.branch_update_rounds + 1):
+        updates = list(self.report.branch_updates)
+        for round_index in range(self.next_round, self.stop_round + 1):
             request_before = self.request_proxy.snapshot() if self.request_proxy else None
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.max_parallel_pushes) as pool:
@@ -217,11 +272,15 @@ class MixedTeam(ConcurrentPushSmoke):
                            for result in results)
             self.report.branch_updates = updates
             self.request_snapshot(f"mixed-round-{round_index}-{self.args.push_client}", request_before,
-                                  attempted_pushes=len(results), successful_pushes=len(results))
-            self.save_batch(round_index, updates[-len(results):])
-            self.check(f"mixed-round-{round_index}-all-acknowledged",
-                       len(results) == self.args.agents
-                       and all(result.status == "ok" and result.command.exit_code == 0 for result in results))
+                                  attempted_pushes=len(results),
+                                  successful_pushes=sum(result.status == "ok" and result.command.exit_code == 0
+                                                        for result in results))
+            try:
+                self.check(f"mixed-round-{round_index}-all-acknowledged",
+                           len(results) == self.args.agents
+                           and all(result.status == "ok" and result.command.exit_code == 0 for result in results))
+            finally:
+                self.save_batch(round_index, updates[-len(results):])
             self.write_report(force=True)
 
     def verify_payloads(self, index: int) -> None:
@@ -273,23 +332,38 @@ class MixedTeam(ConcurrentPushSmoke):
     def run(self) -> int:
         phase = getattr(self.args, "phase", "all")
         self.verification_report_started = False
-        if phase != "verify" and self.run_root.exists():
-            print(f"FAILED: refusing to overwrite retained run: {self.run_root}")
-            return 1
+        writable = False
+        locked = False
+        lock = self.args.root / f".{self.run_id}.push-controller"
         try:
             if phase == "verify":
                 self.resume_verification()
             else:
-                self.preflight()
-                self.init_seed()
-                self.run_branch_fanout()
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.mkdir()
+                locked = True
+                if getattr(self.args, "resume", False):
+                    self.resume_pushes()
+                    writable = True
+                    # Invalidate the paused status before preparing any work.
+                    # An interrupted batch cannot reuse the older checkpoint.
+                    self.write_report(force=True)
+                else:
+                    if self.run_root.exists():
+                        raise SmokeError(f"refusing to overwrite retained run: {self.run_root}")
+                    writable = True
+                    self.preflight()
+                    self.init_seed()
+                    self.run_branch_fanout()
                 self.run_branch_updates()
-                self.seal_pushes()
-            if phase != "push":
+                self.save_meter_total()
+                self.seal_pushes(self.stop_round)
+            paused = self.report.status == "pushes-paused"
+            if phase != "push" and not paused:
                 self.verify_cold_team()
                 self.run_fsck()
-            self.report.status = "pushes-complete" if phase == "push" else "ok"
-            self.write_report(force=True)
+                self.report.status = "ok"
+                self.write_report(force=True)
             print(f"{self.report.status}: {self.artifacts / 'report.json'}")
             return 0
         except Exception as error:
@@ -297,30 +371,48 @@ class MixedTeam(ConcurrentPushSmoke):
             self.report.checks.append({"name": "exception", "ok": False,
                                        "detail": {"error": str(error)}, "timestamp": utc_now()})
             # A rejected resume must not rewrite an existing push report.
-            if phase != "verify" or self.verification_report_started:
+            if writable or self.verification_report_started:
                 self.write_report(force=True)
             print(f"FAILED: {error}")
             return 1
         finally:
-            if self.request_proxy is not None:
-                try:
-                    if phase != "verify" or self.verification_report_started:
-                        path = self.artifacts / "request-meter-total.json"
-                        path.write_text(json.dumps(self.request_proxy.snapshot(include_paths=False), indent=2) + "\n")
-                        self.report.artifacts["request_meter_total"] = str(path)
-                        self.write_report(force=True)
-                finally:
-                    self.request_proxy.close()
+            try:
+                if self.request_proxy is not None:
+                    try:
+                        if self.report.status in ("failed", "ok") and (writable or self.verification_report_started):
+                            self.save_meter_total()
+                    finally:
+                        self.request_proxy.close()
+            finally:
+                if locked:
+                    lock.rmdir()
+
+    def save_meter_total(self) -> None:
+        if self.request_proxy is None:
+            return
+        path = self.artifacts / f"request-meter-total-{time.time_ns()}.json"
+        self.write_checkpoint(path, self.request_proxy.snapshot(include_paths=False))
+        self.report.artifacts.setdefault("request_meter_totals", []).append(str(path))
+        self.report.artifacts["request_meter_total"] = str(path)
+        self.write_report(force=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--phase", choices=["all", "push", "verify"], default="all")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--stop-after-round", type=int)
     phase, remaining = parser.parse_known_args()
     args = parse_args(remaining)
     args.phase = phase.phase
+    args.resume = phase.resume
+    args.stop_after_round = phase.stop_after_round
     if args.phase == "verify" and not args.run_id:
         raise SmokeError("verification requires the original --run-id")
+    if ((args.resume and (not args.run_id or args.phase == "verify"))
+            or (args.stop_after_round is not None
+                and (args.phase == "verify" or not 0 <= args.stop_after_round <= args.branch_update_rounds))):
+        raise SmokeError("push resumption requires --run-id; stop round must be within the planned push rounds")
     if (not args.source or args.branch_update_rounds < 1 or not args.skip_same_branch
             or args.skip_branch_fanout or args.consumer_mode != "cold-final"
             or args.push_client != "native" or args.skip_fsck or args.crash_boundary or args.marker_faults):

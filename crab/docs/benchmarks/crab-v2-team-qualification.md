@@ -32,8 +32,28 @@ child directory. Keep the same persistent RustFS backend, filesystem, source,
 Git/Crab binaries and drivers. Mismatched identities fail before modifying any
 push evidence. Failed audit attempts remain available; a subsequent attempt
 uses new consumers and caches. This resumes verification of a complete push
-cohort; it does not infer acknowledgements for an interrupted batch or resume
-partially prepared writers.
+cohort.
+
+For a planned pause, keep the full `--branch-update-rounds` workload and add
+`--stop-after-round N` (zero includes the initial fanout). After that drained
+batch, `pushes-paused` and an immutable `pause-through-NN.json` retain all
+acknowledgements, timings, request totals and expected refs. Continue with the
+same arguments, `--resume` and a later stop round, or omit the stop round to
+finish. Resumption checks the source, clean writer tips, all remote refs and
+driver/binary identities before changing the report. A controller lock prevents
+two generation processes from owning a run. Interrupted or rejected batches
+remain non-qualifying; the driver never infers their acknowledgements or
+replaces their timings. A stale lock after a killed controller requires manual
+investigation; resumption does not steal it.
+
+The dedicated Linux/RustFS smoke completed 80 pushes from eight developers in
+three generation processes, pausing after rounds 3 and 5 before finishing round
+9. An independent verification process checked both historical Git/Xet/LFS
+payload versions and fsck without repair. An additional audit compared the
+sealed pause reports and all ten batch receipts against the final report:
+original acknowledgement records and latency distributions were preserved.
+Nine checkpoint tests and 31 existing concurrent-driver tests pass. This proves
+the pause/resume lifecycle at smoke scale; 10,000-push qualification is pending.
 
 The merged stable-capture implementation reproduces its exhausted-retry failure
 with a deterministic 900 ms write burst. The follow-up permits 32 bounded

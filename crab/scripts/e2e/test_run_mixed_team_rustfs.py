@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from run_concurrent_push_smoke import SmokeError, parse_args
 from run_mixed_team_rustfs import MixedTeam
@@ -87,6 +88,7 @@ class QualificationCheckpointTest(unittest.TestCase):
             smoke = self.fixture(Path(directory))
             for method in ("preflight", "init_seed", "run_branch_fanout", "run_branch_updates", "seal_pushes"):
                 setattr(smoke, method, Mock())
+            smoke.seal_pushes.side_effect = lambda _: setattr(smoke.report, "status", "pushes-complete")
             smoke.verify_cold_team = Mock()
             smoke.run_fsck = Mock()
             self.assertEqual(smoke.run(), 0)
@@ -130,6 +132,80 @@ class QualificationCheckpointTest(unittest.TestCase):
             self.assertNotEqual(attempts[0], attempts[1])
             self.assertEqual(checkpoint.read_bytes(), raw)
             self.assertEqual((original.artifacts / "report.json").read_bytes(), report)
+
+    def paused(self, root):
+        smoke = self.fixture(root)
+        smoke.args.branch_update_rounds = 3
+        smoke.stop_round = 1
+        smoke.artifacts.mkdir(parents=True)
+        record = {"branch": "refs/heads/agent-000", "status": "ok", "command": {"exit_code": 0,
+                  "duration_ms": 1234}}
+        smoke.report.branch_fanout = [record]
+        smoke.report.branch_updates = [{"round": 1, **record}]
+        smoke.report.push_batches = [{"jobs": 1, "successful": 1, "service_ms": {"p95": 1234}}] * 2
+        smoke.seal_pushes(1)
+        return smoke
+
+    @staticmethod
+    def readonly_git(argv, **kwargs):
+        args = argv[3:]
+        if args == ["rev-parse", "HEAD"]:
+            stdout = ("1" if Path(argv[2]).name == "source" else "2") * 40
+        elif args == ["status", "--porcelain"]:
+            stdout = ""
+        else:
+            stdout = "\n".join(f"{'2' * 40}\trefs/heads/{name}" for name in ["main", "agent-000"])
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    def test_push_resume_preserves_original_measurements_and_starts_the_next_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.paused(root)
+            checkpoint = original.artifacts / "pause-through-01.json"
+            raw = checkpoint.read_bytes()
+            smoke = self.fixture(root)
+            smoke.args.branch_update_rounds = 3
+            smoke.stop_round = 3
+            with patch("run_mixed_team_rustfs.subprocess.run", side_effect=self.readonly_git):
+                smoke.resume_pushes()
+            self.assertEqual((smoke.next_round, smoke.report.branch_fanout, smoke.report.branch_updates,
+                              smoke.report.push_batches, checkpoint.read_bytes()),
+                             (2, original.report.branch_fanout, original.report.branch_updates,
+                              original.report.push_batches, raw))
+
+    def test_push_resume_rejects_changed_state_without_rewriting_pause_evidence(self):
+        for field in ("source", "writer", "dirty-writer", "remote", "workers", "running", "failed", "controller"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = self.paused(root)
+                report = original.artifacts / "report.json"
+                if field in ("running", "failed"):
+                    data = json.loads(report.read_text())
+                    data["status"] = field
+                    report.write_text(json.dumps(data))
+                before = {p.name: p.read_bytes() for p in original.artifacts.iterdir()}
+                smoke = self.fixture(root)
+                smoke.args.branch_update_rounds = smoke.stop_round = 3
+                smoke.args.resume = True
+                if field == "workers":
+                    smoke.args.max_parallel_pushes += 1
+                if field == "controller":
+                    (root / f".{smoke.run_id}.push-controller").mkdir()
+
+                def changed(argv, **kwargs):
+                    result = self.readonly_git(argv, **kwargs)
+                    if ((field == "source" and Path(argv[2]).name == "source")
+                            or (field == "writer" and Path(argv[2]).name == "branch-agent-000")
+                            or (field == "remote" and argv[3] == "ls-remote")):
+                        result.stdout = ""
+                    if (field == "dirty-writer" and Path(argv[2]).name == "branch-agent-000"
+                            and argv[3:] == ["status", "--porcelain"]):
+                        result.stdout = " M agents/agent-000.txt"
+                    return result
+
+                with patch("run_mixed_team_rustfs.subprocess.run", side_effect=changed):
+                    self.assertEqual(smoke.run(), 1)
+                self.assertEqual({p.name: p.read_bytes() for p in original.artifacts.iterdir()}, before)
 
 
 if __name__ == "__main__":
