@@ -48,17 +48,19 @@ try:
     p = subprocess.run(['/usr/bin/git', 'fast-import', '--quiet'], cwd=s.seed, env=s.env, input=''.join(chunks), text=True, capture_output=True)
     assert p.returncode == 0, p.stderr
     s.run_crab(s.seed, ['push', 'origin', 'main'])
+    state['acknowledged'] = 1
     tip = s.git_value(s.seed, ['rev-parse', 'HEAD'])
     tree = s.git_value(s.seed, ['rev-parse', 'HEAD^{tree}'])
     for i in range(1, 500):
         tip = s.git_value(s.seed, ['commit-tree', tree, '-p', tip, '-m', f'pooled proof {i}'])
         s.run_git(s.seed, ['update-ref', 'refs/heads/main', tip])
         s.run_crab(s.seed, ['push', 'origin', 'main'])
+        state['acknowledged'] += 1
         if i % 100 == 0:
-            state['acknowledged'] = i + 1
             save()
             print('pooled acknowledged', i + 1, flush=True)
-    s.check('five-hundred-publications-acknowledged', True)
+    save()
+    s.check('five-hundred-publications-acknowledged', state['acknowledged'] == 500)
     prefix = f'{q.REMOTE_PREFIX}/{s.run_id}'
     def get(key, label):
         output = s.artifacts / (label + '.bin')
@@ -90,6 +92,7 @@ try:
     exact = sum(x.get('range') == f"bytes={big['start']}-{big['end']-1}" and x['key'].endswith(pointer['hash']) for x in paths)
     s.check('one-exact-large-bulk-transfer', exact == 1, {'transfers': exact, 'range': big})
     s.check('independent-exact-tip', s.git_value(reader, ['rev-parse', 'refs/remotes/origin/main']) == tip)
+    s.check('independent-exact-history-length', int(s.git_value(reader, ['rev-list', '--count', base + '..refs/remotes/origin/main'])) == 500)
     s.check('independent-object-directory', not (reader / '.git/objects/info/alternates').exists())
     s.run_git(reader, ['fsck', '--strict', '--full'])
     archive = s.artifacts / 'proof.tar'
