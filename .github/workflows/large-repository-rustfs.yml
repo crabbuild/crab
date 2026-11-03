@@ -1,593 +1,41 @@
-name: Large repository RustFS qualification
-
+name: Short RustFS metadata diagnostic
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/large-repository-rustfs.yml"
-      - "crab/scripts/e2e/run_large_repo_rustfs.py"
-      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
-      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
-      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
-      - "crab/docs/design/capsule-layered-packs.md"
-      - "crab/scripts/verify-large-repo-rustfs-report.py"
-      - "crab/docs/guides/large-repository-qualification.md"
-      - "crates/crab-read/src/upload_pack.rs"
-      - "crates/crab-metadata/src/git_object_locator/**"
-      - "crates/crab-metadata/src/split_commit_graph.rs"
-      - "crab/src/cmd/metadb.rs"
-      - "crates/crab-remote-git/src/budget.rs"
-      - "crates/crab-remote-git/src/operation.rs"
-      - "crates/crab-remote-git/src/pack.rs"
-      - "crab/docs/architecture/git-integration.md"
-      - "crab/docs/architecture/git-protocol-v2.md"
-      - "crab/docs/guides/metadb.md"
-      - "crab/src/git/push.rs"
-      - "crab/src/git/fetch.rs"
-      - "crab/src/git/remote_helper.rs"
-      - "crab/src/git/upload_pack_wire.rs"
-      - "crab/docs/architecture/caching-architecture.md"
-      - "crates/crab-cache/**"
-      - "crates/crab-cache-store/**"
-      - "crates/crab-cache-server/**"
-      - "Cargo.lock"
-      - "crates/crab-coordination/src/lib.rs"
-      - "crates/crab-coordination/src/push_lock.rs"
-      - "crates/crab-coordination/src/read_admission.rs"
-      - "plans/001-large-repository-scale-roadmap.md"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/large-repository-rustfs.yml"
-      - "crab/scripts/e2e/run_large_repo_rustfs.py"
-      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
-      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
-      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
-      - "crab/docs/design/capsule-layered-packs.md"
-      - "crab/scripts/verify-large-repo-rustfs-report.py"
-      - "crab/docs/guides/large-repository-qualification.md"
-      - "crates/crab-read/src/upload_pack.rs"
-      - "crates/crab-metadata/src/git_object_locator/**"
-      - "crates/crab-metadata/src/split_commit_graph.rs"
-      - "crab/src/cmd/metadb.rs"
-      - "crates/crab-remote-git/src/budget.rs"
-      - "crates/crab-remote-git/src/operation.rs"
-      - "crates/crab-remote-git/src/pack.rs"
-      - "crab/docs/architecture/git-integration.md"
-      - "crab/docs/architecture/git-protocol-v2.md"
-      - "crab/docs/guides/metadb.md"
-      - "crab/src/git/push.rs"
-      - "crab/src/git/fetch.rs"
-      - "crab/src/git/remote_helper.rs"
-      - "crab/src/git/upload_pack_wire.rs"
-      - "crab/docs/architecture/caching-architecture.md"
-      - "crates/crab-cache/**"
-      - "crates/crab-cache-store/**"
-      - "crates/crab-cache-server/**"
-      - "Cargo.lock"
-      - "crates/crab-coordination/src/lib.rs"
-      - "crates/crab-coordination/src/push_lock.rs"
-      - "crates/crab-coordination/src/read_admission.rs"
-      - "plans/001-large-repository-scale-roadmap.md"
-  schedule:
-    - cron: "31 7 * * 0"
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
-  report-contract:
-    name: Qualification report contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify report contract tests
-        run: |
-          python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
-          python3 -m unittest crab/scripts/e2e/test_run_capsule_k8s_rustfs.py
-          python3 -m py_compile \
-            crab/scripts/e2e/run_large_repo_rustfs.py \
-            crab/scripts/verify-large-repo-rustfs-report.py \
-            crab/scripts/e2e/run_capsule_k8s_rustfs.py
-
-  kubernetes-rustfs:
-    name: Kubernetes 1,000-commit RustFS qualification
-    if: github.ref != 'refs/heads/codex/pr640-final-848127' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: report-contract
-    runs-on: [self-hosted, macOS, crab-large-repo]
-    timeout-minutes: 1440
-    env:
-      AWS_ACCESS_KEY_ID: crab
-      AWS_SECRET_ACCESS_KEY: crab
-      AWS_REGION: us-east-1
-      AWS_ENDPOINT_URL: http://127.0.0.1:9000
-      CRAB_CACHE_SERVICE_URL: http://127.0.0.1:19002
-      CRAB_CACHE_PSK: cache-smoke-psk
-      CARGO_TARGET_DIR: /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification-${{ github.run_id }}-${{ github.run_attempt }}
-      QUALIFICATION_ROOT: /Volumes/Workspace/CrabBuild/crabbuild-qualification
-      RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
-      RUSTFS_CONTAINER: crab-large-repo-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Preflight dedicated runner
-        run: |
-          set -euo pipefail
-          test -d /Volumes/Workspace
-          mkdir -p "$CARGO_TARGET_DIR" "$QUALIFICATION_ROOT"
-          test -w "$CARGO_TARGET_DIR"
-          test -w "$QUALIFICATION_ROOT"
-          test -d /Volumes/Workspace/Github/kubernetes/kubernetes/.git
-          test -x "$(command -v aws)"
-          test -x "$(command -v docker)"
-          test -x "$(command -v curl)"
-          docker info >/dev/null
-
-      - name: Build release Crab
-        run: |
-          GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
-          cargo build -p crab-cache-server --bin crab-cache-server --release --locked
-
-      - name: Start pinned RustFS
-        run: |
-          set -euo pipefail
-          data_root="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$data_root"
-          sudo chown 10001:10001 "$data_root"
-          docker pull "$RUSTFS_IMAGE"
-          docker run -d \
-            --name "$RUSTFS_CONTAINER" \
-            -p 9000:9000 \
-            -e RUSTFS_ACCESS_KEY=crab \
-            -e RUSTFS_SECRET_KEY=crab \
-            -v "$data_root:/data" \
-            "$RUSTFS_IMAGE" server /data --address :9000
-          for _ in $(seq 1 90); do
-            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs "$RUSTFS_CONTAINER" >&2 || true
-          exit 1
-
-      - name: Verify and retain RustFS version
-        run: |
-          set -euo pipefail
-          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
-          docker exec "$RUSTFS_CONTAINER" rustfs --version | tee "$version_file"
-          test "$(head -n 1 "$version_file")" = "rustfs 1.0.0"
-
-      - name: Start cache service
-        run: |
-          set -euo pipefail
-          cache_root="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cache_config="${cache_root}/config.toml"
-          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
-          mkdir -p "$cache_root/data"
-          cat > "$cache_config" <<EOF
-          [server]
-          listen_addr = "127.0.0.1:19002"
-          drain_timeout_secs = 30
-          mutable_path_mode = "strict"
-
-          [auth]
-          mechanism = "psk"
-          psk_hash = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
-
-          [origin]
-          url = "s3://crab"
-
-          [cache]
-          root = "${cache_root}/data"
-          max_bytes = 21474836480
-
-          [dedup]
-          scope = "all"
-          EOF
-          "${CARGO_TARGET_DIR}/release/crab-cache-server" \
-            --config "$cache_config" serve > "$cache_log" 2>&1 &
-          echo $! > "$cache_pid"
-          for _ in $(seq 1 90); do
-            if curl --fail --silent --show-error \
-              "${CRAB_CACHE_SERVICE_URL}/v1/health" >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" >&2 || true
-          exit 1
-
-      - name: Run consecutive qualifications
-        run: |
-          set -euo pipefail
-          first="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-a"
-          second="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-b"
-          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
-          object_store_version="$(head -n 1 "$version_file")"
-          common=(
-            --crab-bin "${CARGO_TARGET_DIR}/release/crab"
-            --root "$QUALIFICATION_ROOT"
-            --source /Volumes/Workspace/Github/kubernetes/kubernetes
-            --object-store-version "$object_store_version"
-            --require-cache-service
-            --cold-clone-fanout 50
-            --warm-clone-fanout 100
-            --team-load
-          )
-          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
-          python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service
-          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
-          python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service
-          python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service \
-            --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-
-      - name: Capture cache service logs
-        if: always()
-        run: |
-          set -euo pipefail
-          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
-          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          if test -s "$cache_pid"; then
-            kill "$(cat "$cache_pid")" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-              kill -0 "$(cat "$cache_pid")" >/dev/null 2>&1 || break
-              sleep 1
-            done
-          fi
-          if test -f "$cache_log"; then
-            sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" > \
-              "${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-captured.log"
-          fi
-
-      - name: Capture RustFS logs
-        if: always()
-        run: |
-          docker logs "$RUSTFS_CONTAINER" \
-            > "$QUALIFICATION_ROOT/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log" 2>&1 || true
-          docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
-
-      - name: Upload qualification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: large-repository-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-a/artifacts/**
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-b/artifacts/**
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/comparison-${{ github.run_id }}-${{ github.run_attempt }}.json
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/cache-service-${{ github.run_id }}-${{ github.run_attempt }}-captured.log
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}.log
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}-version.txt
-          if-no-files-found: warn
-          retention-days: 30
-
-
-
-  pinned-product-build:
-    name: Build one pinned official installation
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/pr640-final-848127'
-    needs: report-contract
+  short-metadata:
+    name: Short metadata diagnostic (${{ matrix.label }})
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/pr640-short-metadata-diagnostic'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    outputs:
-      artifact_id: ${{ steps.install-artifact.outputs.artifact-id }}
-      artifact_digest: ${{ steps.install-artifact.outputs.artifact-digest }}
-    env:
-      QUAL_ROOT: ${{ github.workspace }}-final-build
-      CARGO_TARGET_DIR: ${{ github.workspace }}-final-build/cargo
-      CARGO_BUILD_JOBS: '2'
-      PYTHONDONTWRITEBYTECODE: '1'
-      PRODUCT_HEAD: 01e1da3623e8af94f898dcb8319a22bd10c79606
-      PRODUCT_TREE: e8597ce5d97f7a71d2b0aaa8b25b2489df08b8ef
-    steps:
-      - name: Checkout the exact product revision
-        uses: actions/checkout@v4
-        with:
-          ref: 01e1da3623e8af94f898dcb8319a22bd10c79606
-          fetch-depth: 0
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Prepare the disposable build runner
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-          sudo apt-get update -y
-          sudo apt-get install -y libfuse3-dev
-          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/bundle" "$CARGO_TARGET_DIR"
-          test "$(git rev-parse HEAD)" = "$PRODUCT_HEAD"
-          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
-          test -z "$(git status --porcelain)"
-          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
-
-      - name: Official private make install with all variants
-        run: |
-          set -euo pipefail
-          prefix="$QUAL_ROOT/install/bin"
-          make -C crab install "PREFIX=$prefix" "CARGO_BIN=$prefix" \
-            "TARGET_DIR=$CARGO_TARGET_DIR" 'RELEASE_FLAGS=--release --locked' \
-            2>&1 | tee "$QUAL_ROOT/provenance/build.log"
-          "$prefix/crab" version --json > "$QUAL_ROOT/provenance/version.json"
-          python3 - <<'PYBUILD'
-          import hashlib,json,os,subprocess
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);p=r/'install/bin';v=json.loads((r/'provenance/version.json').read_text())['data']
-          assert v['crab_version']=='2.0.0' and os.environ['PRODUCT_HEAD'].startswith(v['git_sha'])
-          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['PRODUCT_HEAD']
-          assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
-          files={x.name:hashlib.sha256(x.read_bytes()).hexdigest() for x in p.iterdir() if x.is_file()}
-          assert {'crab','git-remote-crab','crab-cache-server','crab-fuse-mount','crab-nfs-mount'}<=set(files)
-          result={'status':'ok','commit':os.environ['PRODUCT_HEAD'],'tree':os.environ['PRODUCT_TREE'],'version':v,'binary':str(p/'crab'),'binary_sha256':files['crab'],'installed_files_sha256':files,'method':'official make install, complete FUSE/noFUSE/mount/cache variants','build_log_sha256':hashlib.sha256((r/'provenance/build.log').read_bytes()).hexdigest()}
-          (r/'bundle/install.json').write_text(json.dumps(result,indent=2)+'\n')
-          PYBUILD
-          tar -C "$prefix" -czf "$QUAL_ROOT/bundle/installed.tar.gz" crab git-remote-crab
-
-      - name: Upload the shared installed binary
-        id: install-artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-official-install-${{ github.run_id }}
-          path: ${{ env.QUAL_ROOT }}/bundle/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
-      - name: Retain official build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-official-build-${{ github.run_id }}
-          path: ${{ env.QUAL_ROOT }}/provenance/**
-          if-no-files-found: error
-          retention-days: 30
-
-  pinned-final-runtime:
-    name: Pinned final runtime (${{ matrix.profile }})
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/pr640-final-848127'
-    needs: pinned-product-build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      contents: read
-      actions: read
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        profile: [team, history, kubernetes]
-    env:
-      QUAL_ROOT: ${{ github.workspace }}-final-${{ matrix.profile }}
-      PRODUCT_HEAD: 01e1da3623e8af94f898dcb8319a22bd10c79606
-      PRODUCT_TREE: e8597ce5d97f7a71d2b0aaa8b25b2489df08b8ef
-      INSTALL_ARTIFACT: ${{ needs.pinned-product-build.outputs.artifact_id }}
-      INSTALL_ARTIFACT_DIGEST: ${{ needs.pinned-product-build.outputs.artifact_digest }}
-      AWS_ACCESS_KEY_ID: crab
-      AWS_SECRET_ACCESS_KEY: crab
-      AWS_REGION: us-east-1
-      AWS_DEFAULT_REGION: us-east-1
-      AWS_ALLOW_HTTP: 'true'
-      AWS_EC2_METADATA_DISABLED: 'true'
-      AWS_ENDPOINT_URL: http://127.0.0.1:9000
-      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
-      RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
-      PYTHONDONTWRITEBYTECODE: '1'
-    steps:
-      - name: Checkout the exact product revision
-        uses: actions/checkout@v4
-        with:
-          ref: 01e1da3623e8af94f898dcb8319a22bd10c79606
-          fetch-depth: 0
-
-      - name: Prepare the independent disposable runtime
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-          sudo apt-get update -y
-          sudo apt-get install -y libfuse3-dev git-lfs
-          pipx install awscli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/bin" "$QUAL_ROOT/drivers"
-          test "$(git rev-parse HEAD)" = "$PRODUCT_HEAD"
-          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
-          git fetch --no-tags origin "$GITHUB_SHA"
-          for name in fixture.py team.py pooled.py large.py; do
-            git show "$GITHUB_SHA:.github/qualification/$name" > "$QUAL_ROOT/drivers/$name"
-          done
-          sha256sum "$QUAL_ROOT"/drivers/*.py > "$QUAL_ROOT/provenance/drivers-sha256.txt"
-          echo 'cd8d8e5b05a093a2ff844a80e09ce15d7711275a2eb0948aa1fb61621a04a6cf  crab/scripts/e2e/run_capsule_k8s_rustfs.py' | sha256sum --check --strict
-          echo 'f708954c4c121509512f9fb7d5249ceac748f3b63d06e38b45824ac6977cd802  crab/scripts/e2e/run_concurrent_push_smoke.py' | sha256sum --check --strict
-          echo '2e5ec81d120ab4d3f018805b3f7809e15e9b29ec1b5d2cf1bf20e960ce3f4e41  crab/scripts/e2e/run_mixed_team_rustfs.py' | sha256sum --check --strict
-          lscpu > "$QUAL_ROOT/provenance/cpu.txt"
-          free -b > "$QUAL_ROOT/provenance/memory.txt"
-          uname -a > "$QUAL_ROOT/provenance/kernel.txt"
-          git --version > "$QUAL_ROOT/provenance/git-version.txt"
-          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
-
-      - name: Verify and unpack the same official installation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api "repos/crabbuild/crab/actions/artifacts/$INSTALL_ARTIFACT/zip" > "$QUAL_ROOT/install.zip"
-          python3 - <<'PYINSTALL'
-          import hashlib,json,os,tarfile,zipfile
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);body=(r/'install.zip').read_bytes()
-          assert hashlib.sha256(body).hexdigest()==os.environ['INSTALL_ARTIFACT_DIGEST'].removeprefix('sha256:')
-          with zipfile.ZipFile(r/'install.zip') as z:
-              assert set(z.namelist())=={'install.json','installed.tar.gz'}
-              z.extractall(r/'bundle')
-          p=json.loads((r/'bundle/install.json').read_text());assert p['status']=='ok' and p['commit']==os.environ['PRODUCT_HEAD'] and p['tree']==os.environ['PRODUCT_TREE']
-          with tarfile.open(r/'bundle/installed.tar.gz') as t:
-              assert set(t.getnames())=={'crab','git-remote-crab'}
-              assert t.getmember('crab').isfile() and t.getmember('git-remote-crab').issym() and t.getmember('git-remote-crab').linkname=='crab'
-              t.extractall(r/'bin',filter='data')
-          assert hashlib.sha256((r/'bin/crab').read_bytes()).hexdigest()==p['binary_sha256']
-          p['producer_binary']=p['binary'];p['binary']=str(r/'bin/crab');p['artifact_id']=os.environ['INSTALL_ARTIFACT'];p['artifact_digest']=os.environ['INSTALL_ARTIFACT_DIGEST']
-          (r/'provenance/install.json').write_text(json.dumps(p,indent=2)+'\n')
-          PYINSTALL
-          "$QUAL_ROOT/bin/crab" version --json > "$QUAL_ROOT/provenance/runtime-version.json"
-          echo "$QUAL_ROOT/bin" >> "$GITHUB_PATH"
-
-      - name: Start the pinned isolated RustFS
-        run: |
-          set -euo pipefail
-          mkdir -p "$QUAL_ROOT/rustfs"
-          sudo chown 10001:10001 "$QUAL_ROOT/rustfs"
-          docker run -d --name pinned-rustfs -p 9000:9000 \
-            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
-            -v "$QUAL_ROOT/rustfs:/data" "$RUSTFS_IMAGE" server /data --address :9000
-          ready=false
-          for _ in $(seq 1 90); do
-            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then ready=true; break; fi
-            sleep 1
-          done
-          test "$ready" = true
-          docker exec pinned-rustfs rustfs --version > "$QUAL_ROOT/provenance/rustfs-version.txt"
-          test "$(head -n 1 "$QUAL_ROOT/provenance/rustfs-version.txt")" = 'rustfs 1.0.0'
-
-      - name: Generate the common deterministic 10000-commit fixture
-        if: matrix.profile != 'kubernetes'
-        run: python3 "$QUAL_ROOT/drivers/fixture.py"
-
-      - name: Metered 64-developer complete workday
-        if: matrix.profile == 'team'
-        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label metered-64 --meter
-
-      - name: Direct 64-developer matched complete workday
-        if: matrix.profile == 'team'
-        run: |
-          set -euo pipefail
-          python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label direct-64
-          python3 - <<'PYMATCH'
-          import json,os
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);reports=[json.loads((r/m/'final-workday-10-64/artifacts/report.json').read_text()) for m in ['metered-64','direct-64']]
-          assert all(d['status']=='ok' for d in reports)
-          for i in range(64):assert [v['files'] for v in reports[0]['artifacts']['payload_history'][str(i)]]==[v['files'] for v in reports[1]['artifacts']['payload_history'][str(i)]]
-          (r/'provenance/matched-64.json').write_text(json.dumps({'status':'ok','agents':64,'versions':2,'kinds':['Git','Xet','LFS'],'metered_batches':reports[0]['push_batches'],'direct_batches':reports[1]['push_batches'],'scope':'Sequential paired counter/measurement-overhead probe on one isolated runner; fresh buckets/caches, exact identical payload bytes. No AWS claim.'},indent=2)+'\n')
-          PYMATCH
-
-      - name: Direct 1000-developer 10000-push complete integrity and latency gates
-        if: matrix.profile == 'team'
-        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 1000 --label direct-1000
-
-      - name: Native Git 2.56 full and partial-clone lifecycle
-        if: matrix.profile == 'history'
-        run: |
-          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
-            --crab-bin "$QUAL_ROOT/bin/crab" --git-bin /usr/bin/git \
-            --bucket crab-final-native-protocol --endpoint-url "$AWS_ENDPOINT_URL" \
-            --root "$QUAL_ROOT" --run-id native-protocol --source-root "$GITHUB_WORKSPACE"
-
-      - name: Actual large pooled proof transfer and every blob byte
-        if: matrix.profile == 'history'
-        run: python3 "$QUAL_ROOT/drivers/pooled.py"
-
-      - name: Three historical 2GiB Xet and LFS versions with independent cold readback
-        if: matrix.profile == 'history'
-        run: python3 "$QUAL_ROOT/drivers/large.py"
-
-      - name: Fetch the pinned complete Kubernetes source
-        if: matrix.profile == 'kubernetes'
-        run: |
-          set -euo pipefail
-          source="$HOME/Workspace/Github/kubernetes/kubernetes"
-          test ! -e "$source"
-          mkdir -p "$source"
-          git -C "$source" init
-          git -C "$source" remote add origin https://github.com/kubernetes/kubernetes.git
-          git -C "$source" fetch --no-tags origin 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
-          git -C "$source" checkout --detach 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
-          test -z "$(git -C "$source" status --porcelain)"
-          test "$(git -C "$source" rev-parse HEAD)" = 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
-          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket --bucket pinned-kubernetes
-
-      - name: Full 1000-commit and 500-commit-fetch gates with approved native maintenance policy
-        if: matrix.profile == 'kubernetes'
-        run: |
-          python3 crab/scripts/e2e/run_capsule_k8s_rustfs.py \
-            --source "$HOME/Workspace/Github/kubernetes/kubernetes" \
-            --crab-bin "$QUAL_ROOT/bin/crab" --git-bin /usr/bin/git \
-            --root "$QUAL_ROOT/runs" --run-id pinned-kubernetes \
-            --endpoint-url "$AWS_ENDPOINT_URL" --bucket pinned-kubernetes \
-            --commits 1000 --interval 500
-
-      - name: Retain runtime diagnostics and source/binary guards
-        if: always()
-        run: |
-          mkdir -p "$QUAL_ROOT/provenance"
-          docker logs pinned-rustfs > "$QUAL_ROOT/provenance/rustfs.log" 2>&1 || true
-          df -h > "$QUAL_ROOT/provenance/disk-after.txt"
-          python3 - <<'PYEND'
-          import hashlib,json,os,subprocess
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);p=r/'provenance/install.json'
-          if p.exists():
-              d=json.loads(p.read_text());assert hashlib.sha256(Path(d['binary']).read_bytes()).hexdigest()==d['binary_sha256']
-              assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['PRODUCT_HEAD']
-              assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
-          PYEND
-          docker rm -f pinned-rustfs >/dev/null 2>&1 || true
-
-      - name: Upload complete pinned runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-runtime-${{ matrix.profile }}-${{ github.run_id }}
-          path: |
-            ${{ env.QUAL_ROOT }}/provenance/**
-            ${{ env.QUAL_ROOT }}/drivers/**
-            ${{ env.QUAL_ROOT }}/runs/pinned-kubernetes/artifacts/**
-            ${{ env.QUAL_ROOT }}/pooled/artifacts/**
-            ${{ env.QUAL_ROOT }}/pooled/logs/**
-            ${{ env.QUAL_ROOT }}/native-protocol/artifacts/**
-            ${{ env.QUAL_ROOT }}/large/report.json
-            ${{ env.QUAL_ROOT }}/*/final-workday-*/artifacts/**
-            ${{ env.QUAL_ROOT }}/*/final-workday-*/logs/**
-          if-no-files-found: error
-          retention-days: 30
-
-  pinned-native-request-runtime:
-    name: Calibrated native1000developer request and latency evidence
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/pr640-final-848127'
-    needs: pinned-product-build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
+        include:
+          - label: candidate
+            product: 01e1da3623e8af94f898dcb8319a22bd10c79606
+            tree: e8597ce5d97f7a71d2b0aaa8b25b2489df08b8ef
+            artifact: '13197312330'
+            digest: 77538b9ba629dc4723b7750ca6e13f53316c5c9679d945981c1e48fd21b287aa
+          - label: control
+            product: e1c9da0edde4ee4fe361540410204a3f370c5b8e
+            tree: d13688bc636240dd8d386aa6bdf3aadb7c07e8a3
+            artifact: '13201802073'
+            digest: 3b87ab7dd3a0428ee41bdf631aeda0df93f19c6b35911e66a7f9fad09b4b4d8a
     permissions:
       contents: read
       actions: read
     env:
-      QUAL_ROOT: ${{ github.workspace }}-final-native-counter
-      PRODUCT_HEAD: 01e1da3623e8af94f898dcb8319a22bd10c79606
-      PRODUCT_TREE: e8597ce5d97f7a71d2b0aaa8b25b2489df08b8ef
-      INSTALL_ARTIFACT: ${{ needs.pinned-product-build.outputs.artifact_id }}
-      INSTALL_ARTIFACT_DIGEST: ${{ needs.pinned-product-build.outputs.artifact_digest }}
+      QUAL_ROOT: ${{ github.workspace }}-short-metadata-${{ matrix.label }}
+      PRODUCT_HEAD: ${{ matrix.product }}
+      PRODUCT_TREE: ${{ matrix.tree }}
+      INSTALL_ARTIFACT: ${{ matrix.artifact }}
+      INSTALL_ARTIFACT_DIGEST: ${{ matrix.digest }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
       AWS_REGION: us-east-1
@@ -602,7 +50,7 @@ jobs:
       - name: Checkout the exact product revision
         uses: actions/checkout@v4
         with:
-          ref: 01e1da3623e8af94f898dcb8319a22bd10c79606
+          ref: ${{ matrix.product }}
           fetch-depth: 0
 
       - name: Prepare the independent disposable runtime
@@ -622,7 +70,6 @@ jobs:
             git show "$GITHUB_SHA:.github/qualification/$name" > "$QUAL_ROOT/drivers/$name"
           done
           sha256sum "$QUAL_ROOT"/drivers/*.py > "$QUAL_ROOT/provenance/drivers-sha256.txt"
-          echo 'cd8d8e5b05a093a2ff844a80e09ce15d7711275a2eb0948aa1fb61621a04a6cf  crab/scripts/e2e/run_capsule_k8s_rustfs.py' | sha256sum --check --strict
           echo 'f708954c4c121509512f9fb7d5249ceac748f3b63d06e38b45824ac6977cd802  crab/scripts/e2e/run_concurrent_push_smoke.py' | sha256sum --check --strict
           echo '2e5ec81d120ab4d3f018805b3f7809e15e9b29ec1b5d2cf1bf20e960ce3f4e41  crab/scripts/e2e/run_mixed_team_rustfs.py' | sha256sum --check --strict
           lscpu > "$QUAL_ROOT/provenance/cpu.txt"
@@ -704,12 +151,6 @@ jobs:
           (r/'provenance/native-matched-64.json').write_text(json.dumps({'status':'ok','agents':64,'versions':2,'native_meter_batches':ds[0]['push_batches'],'direct_batches':ds[1]['push_batches'],'native_meter_snapshots':ds[0]['request_snapshots'],'scope':'Exact same payload bytes on one isolated runner; native meter and direct server timings retained, no AWS claim.'},indent=2)+'\n')
           PYMATCH
 
-      - name: Native metered1000developer10000push integrity request and latency gates
-        env:
-          AWS_ENDPOINT_URL: http://127.0.0.1:19020
-          AWS_ENDPOINT_URL_S3: http://127.0.0.1:19020
-        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 1000 --label native-1000 --native-meter
-
       - name: Retain native counter diagnostics
         if: always()
         run: |
@@ -736,7 +177,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-native-counter-${{ github.run_id }}
+          name: short-metadata-${{ matrix.label }}-${{ github.run_id }}
           path: |
             ${{ env.QUAL_ROOT }}/provenance/**
             ${{ env.QUAL_ROOT }}/drivers/**
