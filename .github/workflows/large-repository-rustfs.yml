@@ -1,285 +1,74 @@
-name: Large repository RustFS qualification
-
+name: Native meter qualification probe
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/large-repository-rustfs.yml"
-      - "crab/scripts/e2e/run_large_repo_rustfs.py"
-      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
-      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
-      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
-      - "crab/docs/design/capsule-layered-packs.md"
-      - "crab/scripts/verify-large-repo-rustfs-report.py"
-      - "crab/docs/guides/large-repository-qualification.md"
-      - "crates/crab-read/src/upload_pack.rs"
-      - "crates/crab-metadata/src/git_object_locator/**"
-      - "crates/crab-metadata/src/split_commit_graph.rs"
-      - "crab/src/cmd/metadb.rs"
-      - "crates/crab-remote-git/src/budget.rs"
-      - "crates/crab-remote-git/src/operation.rs"
-      - "crates/crab-remote-git/src/pack.rs"
-      - "crab/docs/architecture/git-integration.md"
-      - "crab/docs/architecture/git-protocol-v2.md"
-      - "crab/docs/guides/metadb.md"
-      - "crab/src/git/push.rs"
-      - "crab/src/git/fetch.rs"
-      - "crab/src/git/remote_helper.rs"
-      - "crab/src/git/upload_pack_wire.rs"
-      - "crab/docs/architecture/caching-architecture.md"
-      - "crates/crab-cache/**"
-      - "crates/crab-cache-store/**"
-      - "crates/crab-cache-server/**"
-      - "Cargo.lock"
-      - "crates/crab-coordination/src/lib.rs"
-      - "crates/crab-coordination/src/push_lock.rs"
-      - "crates/crab-coordination/src/read_admission.rs"
-      - "plans/001-large-repository-scale-roadmap.md"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/large-repository-rustfs.yml"
-      - "crab/scripts/e2e/run_large_repo_rustfs.py"
-      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
-      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
-      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
-      - "crab/docs/design/capsule-layered-packs.md"
-      - "crab/scripts/verify-large-repo-rustfs-report.py"
-      - "crab/docs/guides/large-repository-qualification.md"
-      - "crates/crab-read/src/upload_pack.rs"
-      - "crates/crab-metadata/src/git_object_locator/**"
-      - "crates/crab-metadata/src/split_commit_graph.rs"
-      - "crab/src/cmd/metadb.rs"
-      - "crates/crab-remote-git/src/budget.rs"
-      - "crates/crab-remote-git/src/operation.rs"
-      - "crates/crab-remote-git/src/pack.rs"
-      - "crab/docs/architecture/git-integration.md"
-      - "crab/docs/architecture/git-protocol-v2.md"
-      - "crab/docs/guides/metadb.md"
-      - "crab/src/git/push.rs"
-      - "crab/src/git/fetch.rs"
-      - "crab/src/git/remote_helper.rs"
-      - "crab/src/git/upload_pack_wire.rs"
-      - "crab/docs/architecture/caching-architecture.md"
-      - "crates/crab-cache/**"
-      - "crates/crab-cache-store/**"
-      - "crates/crab-cache-server/**"
-      - "Cargo.lock"
-      - "crates/crab-coordination/src/lib.rs"
-      - "crates/crab-coordination/src/push_lock.rs"
-      - "crates/crab-coordination/src/read_admission.rs"
-      - "plans/001-large-repository-scale-roadmap.md"
-  schedule:
-    - cron: "31 7 * * 0"
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  report-contract:
-    name: Qualification report contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify report contract tests
-        run: |
-          python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
-          python3 -m unittest crab/scripts/e2e/test_run_capsule_k8s_rustfs.py
-          python3 -m py_compile \
-            crab/scripts/e2e/run_large_repo_rustfs.py \
-            crab/scripts/verify-large-repo-rustfs-report.py \
-            crab/scripts/e2e/run_capsule_k8s_rustfs.py
-
-  kubernetes-rustfs:
-    name: Kubernetes 1,000-commit RustFS qualification
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    needs: report-contract
-    runs-on: [self-hosted, macOS, crab-large-repo]
-    timeout-minutes: 1440
+  calibrated-counter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
+      QUAL_ROOT: ${{ github.workspace }}-meter-probe
+      PYTHONDONTWRITEBYTECODE: '1'
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
       AWS_REGION: us-east-1
-      AWS_ENDPOINT_URL: http://127.0.0.1:9000
-      CRAB_CACHE_SERVICE_URL: http://127.0.0.1:19002
-      CRAB_CACHE_PSK: cache-smoke-psk
-      CARGO_TARGET_DIR: /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification-${{ github.run_id }}-${{ github.run_attempt }}
-      QUALIFICATION_ROOT: /Volumes/Workspace/CrabBuild/crabbuild-qualification
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: 'true'
       RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
-      RUSTFS_CONTAINER: crab-large-repo-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          ref: 4938b757f45b5f2763c0ea8279056938935214c5
           fetch-depth: 0
-
-      - name: Preflight dedicated runner
+      - name: Prepare disposable native counter
         run: |
           set -euo pipefail
-          test -d /Volumes/Workspace
-          mkdir -p "$CARGO_TARGET_DIR" "$QUALIFICATION_ROOT"
-          test -w "$CARGO_TARGET_DIR"
-          test -w "$QUALIFICATION_ROOT"
-          test -d /Volumes/Workspace/Github/kubernetes/kubernetes/.git
-          test -x "$(command -v aws)"
-          test -x "$(command -v docker)"
-          test -x "$(command -v curl)"
-          docker info >/dev/null
-
-      - name: Build release Crab
-        run: |
-          GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
-          cargo build -p crab-cache-server --bin crab-cache-server --release --locked
-
-      - name: Start pinned RustFS
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update -y
+          sudo apt-get install -y nginx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/drivers" "$QUAL_ROOT/data"
+          sudo chown 10001:10001 "$QUAL_ROOT/data"
+          git fetch --no-tags origin "$GITHUB_SHA"
+          for name in native_meter.py setup_native_meter.py calibrate_native_meter.py; do
+            git show "$GITHUB_SHA:.github/qualification/$name" > "$QUAL_ROOT/drivers/$name"
+          done
+          sha256sum "$QUAL_ROOT"/drivers/*.py > "$QUAL_ROOT/provenance/drivers-sha256.txt"
+      - name: Start isolated RustFS and prove all thirteen HTTP attempts
         run: |
           set -euo pipefail
-          data_root="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$data_root"
-          sudo chown 10001:10001 "$data_root"
-          docker pull "$RUSTFS_IMAGE"
-          docker run -d \
-            --name "$RUSTFS_CONTAINER" \
-            -p 9000:9000 \
-            -e RUSTFS_ACCESS_KEY=crab \
-            -e RUSTFS_SECRET_KEY=crab \
-            -v "$data_root:/data" \
-            "$RUSTFS_IMAGE" server /data --address :9000
+          docker run -d --name native-meter-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            -v "$QUAL_ROOT/data:/data" "$RUSTFS_IMAGE" server /data --address :9000
+          ready=false
           for _ in $(seq 1 90); do
-            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then
-              exit 0
-            fi
+            if aws --endpoint-url http://127.0.0.1:9000 s3api list-buckets >/dev/null 2>&1; then ready=true; break; fi
             sleep 1
           done
-          docker logs "$RUSTFS_CONTAINER" >&2 || true
-          exit 1
-
-      - name: Verify and retain RustFS version
-        run: |
-          set -euo pipefail
-          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
-          docker exec "$RUSTFS_CONTAINER" rustfs --version | tee "$version_file"
-          test "$(head -n 1 "$version_file")" = "rustfs 1.0.0"
-
-      - name: Start cache service
-        run: |
-          set -euo pipefail
-          cache_root="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cache_config="${cache_root}/config.toml"
-          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
-          mkdir -p "$cache_root/data"
-          cat > "$cache_config" <<EOF
-          [server]
-          listen_addr = "127.0.0.1:19002"
-          drain_timeout_secs = 30
-          mutable_path_mode = "strict"
-
-          [auth]
-          mechanism = "psk"
-          psk_hash = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
-
-          [origin]
-          url = "s3://crab"
-
-          [cache]
-          root = "${cache_root}/data"
-          max_bytes = 21474836480
-
-          [dedup]
-          scope = "all"
-          EOF
-          "${CARGO_TARGET_DIR}/release/crab-cache-server" \
-            --config "$cache_config" serve > "$cache_log" 2>&1 &
-          echo $! > "$cache_pid"
-          for _ in $(seq 1 90); do
-            if curl --fail --silent --show-error \
-              "${CRAB_CACHE_SERVICE_URL}/v1/health" >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" >&2 || true
-          exit 1
-
-      - name: Run consecutive qualifications
-        run: |
-          set -euo pipefail
-          first="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-a"
-          second="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-b"
-          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
-          object_store_version="$(head -n 1 "$version_file")"
-          common=(
-            --crab-bin "${CARGO_TARGET_DIR}/release/crab"
-            --root "$QUALIFICATION_ROOT"
-            --source /Volumes/Workspace/Github/kubernetes/kubernetes
-            --object-store-version "$object_store_version"
-            --require-cache-service
-            --cold-clone-fanout 50
-            --warm-clone-fanout 100
-            --team-load
-          )
-          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
-          python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service
-          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
-          python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service
-          python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
-            --require-team-load \
-            --require-cache-service \
-            --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-
-      - name: Capture cache service logs
+          test "$ready" = true
+          python3 "$QUAL_ROOT/drivers/setup_native_meter.py"
+          python3 "$QUAL_ROOT/drivers/calibrate_native_meter.py"
+          test "$(git rev-parse HEAD)" = 4938b757f45b5f2763c0ea8279056938935214c5
+          test -z "$(git status --porcelain)"
+      - name: Retain raw diagnostics
         if: always()
         run: |
-          set -euo pipefail
-          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
-          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          if test -s "$cache_pid"; then
-            kill "$(cat "$cache_pid")" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-              kill -0 "$(cat "$cache_pid")" >/dev/null 2>&1 || break
-              sleep 1
-            done
-          fi
-          if test -f "$cache_log"; then
-            sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" > \
-              "${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-captured.log"
-          fi
-
-      - name: Capture RustFS logs
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p "$QUAL_ROOT/provenance"
+          docker logs native-meter-rustfs > "$QUAL_ROOT/provenance/rustfs.log" 2>&1 || true
+          if test -f "$QUAL_ROOT/metrics/nginx.pid"; then nginx -p "$QUAL_ROOT/metrics" -c "$QUAL_ROOT/metrics/nginx.conf" -s quit || true; fi
+          docker rm -f native-meter-rustfs >/dev/null 2>&1 || true
+      - uses: actions/upload-artifact@v4
         if: always()
-        run: |
-          docker logs "$RUSTFS_CONTAINER" \
-            > "$QUALIFICATION_ROOT/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log" 2>&1 || true
-          docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
-
-      - name: Upload qualification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: large-repository-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
+          name: native-meter-calibration-${{ github.run_id }}
           path: |
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-a/artifacts/**
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-b/artifacts/**
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/comparison-${{ github.run_id }}-${{ github.run_attempt }}.json
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/cache-service-${{ github.run_id }}-${{ github.run_attempt }}-captured.log
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}.log
-            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}-version.txt
-          if-no-files-found: warn
+            ${{ env.QUAL_ROOT }}/provenance/**
+            ${{ env.QUAL_ROOT }}/drivers/**
+            ${{ env.QUAL_ROOT }}/metrics/*.json*
+            ${{ env.QUAL_ROOT }}/metrics/*.conf
+            ${{ env.QUAL_ROOT }}/metrics/*.log
+          if-no-files-found: error
           retention-days: 30
