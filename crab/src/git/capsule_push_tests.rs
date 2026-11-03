@@ -1405,7 +1405,7 @@ async fn real_git_incremental_push_round_trips_with_bounded_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn xet_push_checkpoints_accumulated_git_history_and_releases_admission() {
+async fn xet_push_amortizes_global_checkpoints_and_releases_admission() {
     use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
 
     let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
@@ -1435,7 +1435,7 @@ async fn xet_push_checkpoints_accumulated_git_history_and_releases_admission() {
         dst: "refs/heads/main".to_owned(),
     };
     let cancel = CancellationToken::new();
-    for index in 0..crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN {
+    for index in 0..32 {
         commit(source.path(), &format!("version {index}"));
         let (result, _) = run(
             &config,
@@ -1481,6 +1481,79 @@ async fn xet_push_checkpoints_accumulated_git_history_and_releases_admission() {
     std::fs::write(source.path().join("model.bin"), pointer.serialize()).unwrap();
     git(source.path(), &["add", "model.bin"]);
     git(source.path(), &["commit", "-m", "managed payload"]);
+    staging.close().await.unwrap();
+    let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());
+    let (result, _) = run(
+        &config,
+        std::slice::from_ref(&spec),
+        &store,
+        &router,
+        None,
+        &[],
+        Some(&staging),
+        None,
+        None,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(result.all_ok());
+    assert!(
+        crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .unwrap()
+            .record()
+            .root()
+            .checkpoint()
+            .is_none(),
+        "one completed per-ref tier must not force a global history rewrite"
+    );
+    for index in 33..128 {
+        commit(source.path(), &format!("version {index}"));
+        let (result, _) = run(
+            &config,
+            std::slice::from_ref(&spec),
+            &store,
+            &router,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(result.all_ok());
+    }
+    drop(staging);
+    let staging_root = source.path().join(".crab/staging");
+    let staging = crab_staging::StagingArea::open(staging_root.clone())
+        .await
+        .unwrap();
+    let staged = stage_reader_streaming(
+        &mut std::io::Cursor::new(b"later checkpoint payload"),
+        Path::new("model.bin"),
+        &staging,
+        StreamStageProgress::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    staging
+        .delegate_publication(&[(&staged.batch_id, Path::new("model.bin"))])
+        .unwrap();
+    let later_pointer = crab_types::pointer::Pointer {
+        file_hash: staged.file_hash,
+        size: staged.size,
+        shard_hint: None,
+    };
+    std::fs::write(source.path().join("model.bin"), later_pointer.serialize()).unwrap();
+    git(source.path(), &["add", "model.bin"]);
+    git(
+        source.path(),
+        &["commit", "-m", "managed payload after four tiers"],
+    );
     let tip = git(source.path(), &["rev-parse", "HEAD"]);
     staging.close().await.unwrap();
     let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());

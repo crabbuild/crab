@@ -18,6 +18,36 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
+Published `c02e7cb9f34` passes 902 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks and an 80-push smoke.
+The smoke verifies all 40,388 reachable Git objects against original bytes;
+overall / worst-batch p95 is 2.149 / 2.852 seconds. Its actual Linux ARM64 server
+image also builds successfully from the frozen source archive.
+
+Its matched 64-developer replay completes 640 pushes per build, all ten sealed
+batches, 918 history/no-repair checks per build and every reachable Git object
+byte. Capsule GETs fall 67.5% (112,249 to 36,458), and capsule response bytes
+fall 14.5% (404,087,281 to 345,620,973). Conservative all-metadata response bytes
+increase from 493,743,678 to 503,507,691: **1.98% more, failing the byte budget**.
+Overall p95 passes at 7.553 seconds, but first-batch p95 is **11.373 seconds**,
+failing the per-batch gate. Known request-body bytes increase 13.2%, with zero
+unknown lengths. All foreground checkpoint/compaction work is included.
+
+The controller stops before generating the 1,000-developer cohort. Raw recount
+finds 56,850,361 checkpoint response bytes and 20,097,246 pack-layer response
+bytes; the first batch reads 43,868,067 more response bytes than control and
+publishes one checkpoint. These measurements motivate testing a 128-capsule
+global threshold, amortizing the full captured-ref pass across four ordinary
+per-ref tiers. Its complete Linux replay and matched team-scale budgets remain
+unproven. [Exact-head CI for `c02e7cb`](https://github.com/crabbuild/crab/actions/runs/41702955192)
+is pending; the following preceding results remain retained.
+
+The real-Git lifecycle regression rejects an early global rewrite after one
+32-capsule tier on the previous policy. With a 128-capsule global threshold it
+passes both deferred and eventual publication, same-epoch catalog recapture
+after head rebase, and subsequent global/repository GC sweep admission. This
+focused host result is not Linux or team-scale qualification.
+
 Published `8cdf15d1949` passes 899 dedicated Linux checks, official private
 all-variant installation, 776 old-format readback checks, and an 80-push smoke
 with 134 history/no-repair checks. Its matched 64-developer replay completes
@@ -28,8 +58,9 @@ Capsule GETs fall 62.1% (112,403 to 42,630) and capsule response bytes fall 5.2%
 but conservative all-metadata response bytes increase from 499,072,312 to
 609,527,236: **22.1% more, failing the byte budget**. Known request-body bytes
 increase 13.6%; all foreground compaction is included, with zero unknown lengths.
-The controller stops before generating its 1,000-developer cohort. Full
-[exact-head CI](https://github.com/crabbuild/crab/actions/runs/41689953288) is pending.
+The controller stops before generating its 1,000-developer cohort. Its
+[exact-head CI](https://github.com/crabbuild/crab/actions/runs/41689953288) was
+superseded and cancelled; it does not establish full CI qualification.
 
 Raw request recount attributes 126,406,083 response bytes to checkpoint GETs and
 20,097,372 to a pack-layer GET. The next change uses 4 KiB leaves for shared
@@ -44,7 +75,8 @@ The rebased desktop member also exposes a separate image-build failure: the
 service Docker stages omit `packages/desktop/agent`, so Cargo cannot load the
 workspace. The follow-up includes that member in all five service builders and
 the Docker context allowlist. A real Docker context export resolves all 26
-members with locked offline Cargo metadata; full image qualification remains CI-owned.
+members with locked offline Cargo metadata; the actual server image build
+subsequently passes on `c02e7cb`, as recorded above.
 
 The preceding `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
 and all matched 64-developer gates: 51.8% fewer capsule GETs, 15.3% fewer capsule

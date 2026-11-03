@@ -26,6 +26,9 @@ use crate::git::remote_helper::PushSpec;
 mod shared_visibility;
 
 const LOCAL_OBJECT_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+// A global pass rereads all captured refs. Amortize it across four ordinary
+// per-ref tiers instead of repeating that work at each tier boundary.
+const CATALOG_CHECKPOINT_THRESHOLD: usize = 128;
 
 /// Publish one remote-helper push batch through per-ref capsule heads.
 ///
@@ -676,8 +679,7 @@ async fn run_inner(
         && gc_writer.is_some()
         && config.active_active_replication.is_none()
         && layout.store().staging_write_prefix().is_none()
-        && xet_stats.pending_catalog_capsules
-            >= crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN
+        && xet_stats.pending_catalog_capsules >= CATALOG_CHECKPOINT_THRESHOLD
     {
         let maintenance = crab_write::generation::with_generation_owner::<_, CrabError>(
             layout.store(),
@@ -687,7 +689,7 @@ async fn run_inner(
             async {
                 crab_remote::checkpoint::publish_capsule_checkpoint(
                     &layout,
-                    crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN as u32,
+                    CATALOG_CHECKPOINT_THRESHOLD as u32,
                     crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
                     cancel,
                 )
