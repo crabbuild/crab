@@ -5,11 +5,6 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
-### Desktop
-
-- Removed the desktop Kanban board, tracker integrations, and board automation.
-  Agent tasks and workflows remain available; existing task history is retained.
-
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop
@@ -18,6 +13,8 @@ the current stable release.
 
 ### Desktop
 
+- Removed the desktop Kanban board, tracker integrations, and board automation.
+  Agent tasks and workflows remain available; existing task history is retained.
 - Added the Electron desktop app with the matching v2 CLI and native SDK sidecar,
   separate local and remote workspaces, and saved S3-compatible, GCS, and Azure
   storage connections with built-in connection testing.

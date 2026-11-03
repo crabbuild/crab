@@ -13,6 +13,8 @@ Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
 by Cargo and Electron native modules. Build each OS and architecture on its
 native runner. The desktop CLI enables NFS and the release provider/workflow
 features; it does not require a FUSE driver.
+Windows native modules require Visual Studio 2022 with the C++ desktop workload;
+the current Electron rebuild tooling does not recognize Visual Studio 2026.
 
 On macOS, mount the Workspace volume and give the **Codex process running the
 commands** access to it. Each checkout needs its own Cargo target directory.
@@ -36,6 +38,10 @@ scratch directory instead of the developer's Workspace volume.
 `build:agent` builds and stages the complete Rust runtime in
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
+
+Run native integration tests after building the runtime, with `CRAB_BIN` set to
+`$CARGO_TARGET_DIR/release/crab` (`crab.exe` on Windows). Worktree tests invoke
+the real CLI, so building only the sidecar is insufficient.
 
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses
