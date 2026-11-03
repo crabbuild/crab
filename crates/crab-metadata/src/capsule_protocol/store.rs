@@ -528,7 +528,14 @@ pub async fn capture_ref_heads(
     // and S3's mutable null version do not identify content; always GET those
     // bodies again unless an ETag identifies them. Activations are never cached.
     let mut previous = BTreeMap::<object_store::path::Path, (CapsuleRefHead, ETag)>::new();
-    for _ in 0..8 {
+    for attempt in 0_u32..8 {
+        // Full inventories span independent writers. Pace the bounded retries
+        // so a finite publication burst can finish; a successful capture still
+        // requires identical listings and freshly resolved activations.
+        if attempt > 0 {
+            let delay = std::time::Duration::from_millis(10_u64 << (attempt - 1).min(4));
+            tokio::time::sleep(delay).await;
+        }
         let before = list_ref_head_objects(router).await?;
         let head_router = router.clone();
         let cached_heads = &previous;
