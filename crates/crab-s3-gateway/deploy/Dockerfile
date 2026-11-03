@@ -8,6 +8,7 @@ COPY vendor/nfs3_server/ vendor/nfs3_server/
 COPY .cargo/ .cargo/
 COPY crab/ crab/
 COPY crates/ crates/
+COPY packages/desktop/agent/ packages/desktop/agent/
 RUN cargo build --release --locked -p crab-s3-gateway
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171

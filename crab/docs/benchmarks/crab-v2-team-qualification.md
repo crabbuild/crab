@@ -40,6 +40,12 @@ at 808,020 and 8,437 bytes respectively. All 130 focused visibility checks pass,
 with two existing ignores. These local proof-byte results do not qualify Linux
 push latency, the matched byte budget or a complete 10,000-push replay.
 
+The rebased desktop member also exposes a separate image-build failure: the
+service Docker stages omit `packages/desktop/agent`, so Cargo cannot load the
+workspace. The follow-up includes that member in all five service builders and
+the Docker context allowlist. A real Docker context export resolves all 26
+members with locked offline Cargo metadata; full image qualification remains CI-owned.
+
 The preceding `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
 and all matched 64-developer gates: 51.8% fewer capsule GETs, 15.3% fewer capsule
 response bytes, 16.3% fewer conservative all-metadata response bytes, and
