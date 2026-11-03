@@ -108,6 +108,14 @@ def self_test() -> None:
         assert alpha["version"] == "2.0.0-alpha.1"
         assert alpha["tag"] == "v2.0.0-alpha.1"
 
+        for tag in ("v2.0.0.alpha-1", "v2.0.0-alpha.01"):
+            try:
+                generate(tag, dist)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"invalid SemVer tag was accepted: {tag}")
+
         (dist / ARTIFACTS[0][1]).unlink()
         try:
             generate("v1.2.3", dist)
@@ -115,13 +123,6 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("missing release archive was accepted")
-
-        try:
-            generate("v2.0.0.alpha-1", dist)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("invalid SemVer tag was accepted")
 
 
 def main() -> int:
