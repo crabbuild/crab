@@ -12,7 +12,7 @@ const REF_HEAD_VERSION: u32 = 5;
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
 pub const MAX_CAPSULE_REF_FRONTIER: usize = 64;
-/// Equal-level suffix runs folded in one bounded compaction wave.
+/// Normal equal-level fan-in outside the writer's bounded small-input tier.
 pub const CAPSULE_REF_COMPACTION_FAN_IN: usize = 32;
 /// Capsules coalesced into one recent per-ref run for bounded incremental reads.
 pub const CAPSULE_REF_ROLLUP_WINDOW: usize = 500;
