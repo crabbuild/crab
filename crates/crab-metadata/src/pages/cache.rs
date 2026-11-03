@@ -443,12 +443,46 @@ impl PageCache {
             source_bytes,
             path.as_ref(),
         )?);
+        self.remember_page(key, reference, kind, page)
+    }
+
+    pub(crate) fn prime(
+        &self,
+        path: &object_store::path::Path,
+        layer: usize,
+        source: std::ops::Range<u64>,
+        reference: &PageRef,
+        kind: Kind,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
+        let offset = source
+            .start
+            .checked_add(reference.offset)
+            .ok_or_else(|| corruption("page source offset overflows"))?;
+        // Inline routing pages use the same hash, bounds and coverage decoder
+        // as origin reads. Query admission still charges every referenced page.
+        let page = Arc::new(decode(bytes, reference, kind, source_bytes, path.as_ref())?);
+        self.remember_page((layer, offset), reference, kind, page)?;
+        Ok(())
+    }
+
+    fn remember_page(
+        &self,
+        key: (usize, u64),
+        reference: &PageRef,
+        kind: Kind,
+        page: Arc<Page>,
+    ) -> Result<Arc<Page>> {
         let weight = page_weight(reference, &page);
         if weight <= CACHE_BYTES {
             let mut cache = self.state()?;
             if let Some((previous_kind, previous, existing)) = cache.pages.get(&key) {
                 if *previous_kind != kind || previous != reference {
-                    return Err(corruption("concurrent page routing metadata changed"));
+                    return Err(corruption("cached page routing metadata changed"));
                 }
                 return Ok(existing.clone());
             }

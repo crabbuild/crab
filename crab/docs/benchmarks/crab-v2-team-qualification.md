@@ -18,6 +18,30 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
+Published `0402bb83236` passes 902 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks and an 80-push smoke.
+Its matched 64-developer replay completes 640 pushes per build, all ten sealed
+batches, 918 history/no-repair checks per build and byte comparison of all
+43,076 reachable Git objects. Latency passes at 3.885 seconds overall and
+4.787 seconds worst-batch p95. Capsule GETs fall 51.0% (112,547 to 55,182), but
+capsule response bytes increase 6.08% (403,263,244 to 427,771,839) and conservative
+all-metadata response bytes increase 6.73% (492,799,891 to 525,945,500). Both
+byte gates fail. Known request-body bytes increase 14.0%, with zero unknown
+lengths; foreground checkpoint/compaction work remains included. The controller
+stops before generating the 1,000-developer cohort.
+
+Raw recount finds 6,024 repeated 10,516-byte directory / 8,174-byte leaf pairs:
+112,588,560 response bytes. The next singleton-layout regression reproduces
+1,226,644 bytes for 64 cold, scattered tips in 40,000-object closures. Version 6
+uses 4 KiB leaves/directories and authenticated inline routing roots; it passes
+the unchanged 768 KiB bound at 661,896 bytes, retaining exactly 192 requests.
+This focused result does not qualify matched traffic, Linux latency or the full
+10,000-push replay. Original version-3/4/5 data remains readable through its
+declared geometry. Readers must be upgraded before version-6 writers.
+
+[Full CI for `0402bb8`](https://github.com/crabbuild/crab/actions/runs/41711621839)
+is pending. The following preceding results remain retained.
+
 Published `c02e7cb9f34` passes 902 dedicated Linux checks, official private
 all-variant installation, 776 old-format readback checks and an 80-push smoke.
 The smoke verifies all 40,388 reachable Git objects against original bytes;
@@ -39,8 +63,8 @@ bytes; the first batch reads 43,868,067 more response bytes than control and
 publishes one checkpoint. These measurements motivate testing a 128-capsule
 global threshold, amortizing the full captured-ref pass across four ordinary
 per-ref tiers. Its complete Linux replay and matched team-scale budgets remain
-unproven. [Exact-head CI for `c02e7cb`](https://github.com/crabbuild/crab/actions/runs/41702955192)
-is pending; the following preceding results remain retained.
+unproven. [CI for `c02e7cb`](https://github.com/crabbuild/crab/actions/runs/41702955192)
+was superseded and cancelled.
 
 The real-Git lifecycle regression rejects an early global rewrite after one
 32-capsule tier on the previous policy. With a 128-capsule global threshold it

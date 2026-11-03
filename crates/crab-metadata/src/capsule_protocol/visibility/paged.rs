@@ -8,6 +8,8 @@ use crate::shared_visibility as shared;
 
 const SHARED_VERSION: u32 = 4;
 const POINT_VERSION: u32 = 5;
+const SINGLE_REF_VERSION: u32 = 6;
+const INLINE_ROOT_BYTES: usize = 4 * 1024;
 
 #[cfg(feature = "storage")]
 mod reader;
@@ -41,6 +43,10 @@ pub struct VisibilityEditHeader {
     removed: Option<PageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shared: Option<SharedEdits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inline_added_root: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inline_removed_root: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,18 +62,25 @@ pub(super) fn encode(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
 }
 
 fn encode_version(delta: &CapsuleVisibilityDelta, version: Option<u32>) -> Result<Bytes> {
-    // Versions 3 and 4 shipped in v2.0.0-alpha.1. Rebuild their exact geometry
-    // when validating immutable history; changing it would reject valid old data.
+    // Declared versions retain their exact geometry when validating immutable
+    // history. Singleton routing roots pay for smaller directories without an
+    // extra request; other layouts keep their existing geometry.
+    let has_shared = delta.edits.values().any(|edit| {
+        edit.added.shared_dictionary().is_some() || edit.removed.shared_dictionary().is_some()
+    });
     let shared = match version {
         Some(VISIBILITY_DELTA_VERSION) => false,
         Some(SHARED_VERSION) => true,
-        None | Some(POINT_VERSION) => delta.edits.values().any(|edit| {
-            edit.added.shared_dictionary().is_some() || edit.removed.shared_dictionary().is_some()
-        }),
+        None | Some(POINT_VERSION) => has_shared,
+        Some(SINGLE_REF_VERSION) if delta.edits.len() == 1 && !has_shared => false,
         _ => return Err(contract_error("visibility page version is unsupported")),
     };
-    let mut writer = if matches!(version, None | Some(POINT_VERSION)) {
-        Writer::with_leaf_target(8 * 1024)
+    let compact =
+        delta.edits.len() == 1 && !shared && matches!(version, None | Some(SINGLE_REF_VERSION));
+    let mut writer = if compact {
+        Writer::with_targets(4 * 1024, 4 * 1024)
+    } else if matches!(version, None | Some(POINT_VERSION)) {
+        Writer::with_targets(8 * 1024, 32 * 1024)
     } else {
         Writer::default()
     };
@@ -87,6 +100,14 @@ fn encode_version(delta: &CapsuleVisibilityDelta, version: Option<u32>) -> Resul
     for (name, edit) in &delta.edits {
         let added = objects(&mut writer, &edit.added)?;
         let removed = objects(&mut writer, &edit.removed)?;
+        let (inline_added_root, inline_removed_root) = if compact {
+            (
+                inline_root(&writer, added.as_ref())?,
+                inline_root(&writer, removed.as_ref())?,
+            )
+        } else {
+            (None, None)
+        };
         let row = VisibilityEditHeader {
             name: name.clone(),
             old_oid: edit.old_oid.clone(),
@@ -95,6 +116,8 @@ fn encode_version(delta: &CapsuleVisibilityDelta, version: Option<u32>) -> Resul
             added,
             removed,
             shared: None,
+            inline_added_root,
+            inline_removed_root,
         };
         let key = blake3::hash(name.as_bytes()).as_bytes().to_vec();
         let value = serde_json::to_vec(&row)
@@ -141,6 +164,8 @@ fn encode_shared(
                 added,
                 removed,
             }),
+            inline_added_root: None,
+            inline_removed_root: None,
         };
         let key = blake3::hash(name.as_bytes()).as_bytes().to_vec();
         let value = serde_json::to_vec(&row)
@@ -163,7 +188,11 @@ fn finish(
     // shipped encoding rather than changing immutable identities without benefit.
     let version = version.unwrap_or_else(|| {
         if writer.has_branches() {
-            POINT_VERSION
+            if shared.is_none() && refs.count == 1 {
+                SINGLE_REF_VERSION
+            } else {
+                POINT_VERSION
+            }
         } else if shared.is_some() {
             SHARED_VERSION
         } else {
@@ -301,12 +330,30 @@ fn objects(
     writer.tree(Kind::VisibilityChanges, rows).map(Some)
 }
 
+fn inline_root(writer: &Writer, root: Option<&PageRef>) -> Result<Option<Vec<u8>>> {
+    let Some(root) =
+        root.filter(|root| root.height > 0 && root.bytes as usize <= INLINE_ROOT_BYTES)
+    else {
+        return Ok(None);
+    };
+    let start = usize::try_from(root.offset)
+        .map_err(|_| contract_error("inline root offset cannot be represented"))?;
+    let end = start
+        .checked_add(root.bytes as usize)
+        .ok_or_else(|| contract_error("inline root span overflows"))?;
+    writer
+        .bytes
+        .get(start..end)
+        .map(|bytes| Some(bytes.to_vec()))
+        .ok_or_else(|| contract_error("inline root is outside its visibility body"))
+}
+
 impl Descriptor {
     fn supported(&self) -> bool {
         matches!(
             (self.version, self.shared.is_some()),
             (VISIBILITY_DELTA_VERSION, false) | (SHARED_VERSION, true) | (POINT_VERSION, _)
-        )
+        ) || (self.version == SINGLE_REF_VERSION && self.shared.is_none() && self.refs.count == 1)
     }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < TRAILER_BYTES
@@ -392,6 +439,13 @@ impl VisibilityEditHeader {
     fn decode(key: &[u8], bytes: &[u8], descriptor: &Descriptor) -> Result<Self> {
         let row: Self = serde_json::from_slice(bytes)
             .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
+        if (row.inline_added_root.is_some() || row.inline_removed_root.is_some())
+            && descriptor.version != SINGLE_REF_VERSION
+        {
+            return Err(corrupt(
+                "inline roots require singleton visibility encoding",
+            ));
+        }
         if !row.name.starts_with("refs/")
             || !valid_ref_name(&row.name)
             || blake3::hash(row.name.as_bytes()).as_bytes() != key
@@ -431,7 +485,7 @@ impl VisibilityEditHeader {
             return Ok(row);
         }
         if row.shared.is_some() {
-            return Err(corrupt("legacy visibility header contains shared roots"));
+            return Err(corrupt("unshared visibility header contains shared roots"));
         }
         let count = row.added.as_ref().map_or(0, |root| u64::from(root.count))
             + row.removed.as_ref().map_or(0, |root| u64::from(root.count));
@@ -442,6 +496,23 @@ impl VisibilityEditHeader {
         }
         for root in [&row.added, &row.removed].into_iter().flatten() {
             root.validate(Kind::VisibilityChanges, descriptor.body_bytes)?;
+        }
+        for (root, inline) in [
+            (&row.added, &row.inline_added_root),
+            (&row.removed, &row.inline_removed_root),
+        ] {
+            if let Some(bytes) = inline {
+                let root = root
+                    .as_ref()
+                    .ok_or_else(|| corrupt("inline visibility root has no reference"))?;
+                if root.height == 0
+                    || bytes.len() > INLINE_ROOT_BYTES
+                    || bytes.len() != root.bytes as usize
+                    || *blake3::hash(bytes).as_bytes() != root.hash
+                {
+                    return Err(corrupt("inline visibility root differs from its reference"));
+                }
+            }
         }
         Ok(row)
     }
@@ -532,6 +603,8 @@ mod tests {
             added: Some(changes.clone()),
             removed: Some(changes),
             shared: None,
+            inline_added_root: None,
+            inline_removed_root: None,
         };
         let refs = writer
             .tree(
@@ -653,10 +726,20 @@ mod tests {
 
         let mut originals = Vec::new();
         let mut leaves = Vec::new();
+        let singleton = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/singleton".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(
+                None,
+                format!("{:040x}", 1000),
+                (0..2000).map(|value| format!("{value:040x}")).collect(),
+            ),
+        )]))
+        .unwrap();
         for (version, delta) in [
             (VISIBILITY_DELTA_VERSION, shared_fixture(1)),
             (SHARED_VERSION, shared_fixture(3)),
             (POINT_VERSION, shared_fixture(5)),
+            (SINGLE_REF_VERSION, singleton),
         ] {
             let edits = delta
                 .edits()

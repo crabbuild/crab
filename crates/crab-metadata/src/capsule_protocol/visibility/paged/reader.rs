@@ -117,6 +117,9 @@ impl CapsuleVisibilityReader {
             if row.as_ref().is_some_and(|row| row.name != *name) {
                 return Err(corrupt("visibility lookup ref hash collides"));
             }
+            if let Some(header) = &row {
+                self.prime_roots(header)?;
+            }
             Ok(row)
         })
         .collect()
@@ -255,6 +258,7 @@ impl CapsuleVisibilityReader {
         if row.name != ref_name {
             return Err(corrupt("visibility lookup ref hash collides"));
         }
+        self.prime_roots(&row)?;
         // Page-key deduplication cannot account for duplicate output rows.
         // Admit logical query work before either encoding allocates its results.
         let bytes = (oids.len() as u64)
@@ -333,6 +337,31 @@ impl CapsuleVisibilityReader {
         Ok(Some(changes.into_iter().take(oids.len()).collect()))
     }
 
+    fn prime_roots(&self, row: &VisibilityEditHeader) -> Result<()> {
+        // Authenticated header bytes seed the existing page cache. Lookups still
+        // traverse and admit every root and child through the canonical reader.
+        let end = self
+            .offset
+            .checked_add(self.descriptor.body_bytes)
+            .ok_or_else(|| corrupt("visibility body span overflows"))?;
+        for (root, bytes) in [
+            (&row.added, &row.inline_added_root),
+            (&row.removed, &row.inline_removed_root),
+        ] {
+            if let (Some(root), Some(bytes)) = (root, bytes) {
+                self.cache.prime(
+                    &self.path,
+                    0,
+                    self.offset..end,
+                    root,
+                    Kind::VisibilityChanges,
+                    bytes,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     async fn rows(
         &self,
         store: &Store,
@@ -372,6 +401,9 @@ impl PartialEq for CapsuleVisibilityReader {
 impl Eq for CapsuleVisibilityReader {}
 
 #[cfg(test)]
+mod point_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::capsule_protocol::{
@@ -385,7 +417,12 @@ mod tests {
 
         let mut leaves = Vec::new();
         let mut expected = Vec::new();
-        for version in [VISIBILITY_DELTA_VERSION, SHARED_VERSION, POINT_VERSION] {
+        for version in [
+            VISIBILITY_DELTA_VERSION,
+            SHARED_VERSION,
+            POINT_VERSION,
+            SINGLE_REF_VERSION,
+        ] {
             let base = u128::from(version) << 64;
             let name = format!("refs/heads/version-{version}");
             let tip = format!("{:040x}", base + 500);
@@ -394,7 +431,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let mut edit =
                 GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects.clone());
-            if version != VISIBILITY_DELTA_VERSION {
+            if matches!(version, SHARED_VERSION | POINT_VERSION) {
                 edit.added = GitVisibilityObjects::from_shared_ordinals(
                     GitVisibilityDictionary::new(objects).unwrap(),
                     (0..1000).collect(),
@@ -471,6 +508,16 @@ mod tests {
             }
             let delta =
                 CapsuleVisibilityDelta::new(BTreeMap::from([(name.to_owned(), edit)])).unwrap();
+            assert_eq!(
+                blake3::hash(&encode_version(&delta, Some(POINT_VERSION)).unwrap())
+                    .to_hex()
+                    .as_str(),
+                if shared {
+                    "ae3deb28dfd83e04bb7c2289777de0c3eeb682246d8a7061cf9c58a0e148213f"
+                } else {
+                    "ac5e1237fb4d2f115a7250bb07e7cb4fc94e77df53a4c02b11fceccb7f4daeb5"
+                }
+            );
             let transaction = CapsuleTransaction::new(
                 &"1".repeat(64),
                 vec![CapsuleRefEdit::new(name, None, Some(oid), None)],
@@ -482,12 +529,8 @@ mod tests {
                 VISIBILITY_DELTA_VERSION
             };
             let mut observations = Vec::new();
-            for version in [shipped, POINT_VERSION] {
-                let encoded = if version == POINT_VERSION {
-                    delta.encode().unwrap()
-                } else {
-                    encode_version(&delta, Some(version)).unwrap()
-                };
+            for version in [Some(shipped), Some(POINT_VERSION), None] {
+                let encoded = encode_version(&delta, version).unwrap();
                 let capsule = Capsule::build(
                     &transaction,
                     vec![],
@@ -533,11 +576,20 @@ mod tests {
                 );
                 observations.push((bytes.load(Relaxed), reads.load(Relaxed)));
             }
-            let [(old_bytes, old_reads), (new_bytes, new_reads)] = observations.as_slice() else {
+            let [
+                (old_bytes, old_reads),
+                (prior_bytes, prior_reads),
+                (new_bytes, new_reads),
+            ] = observations.as_slice()
+            else {
                 panic!("missing versioned observations");
             };
             assert!(
-                new_bytes < old_bytes && *new_bytes <= 24 * 1024 && new_reads <= old_reads,
+                new_bytes < old_bytes
+                    && *new_bytes <= 24 * 1024
+                    && new_reads <= old_reads
+                    && new_bytes <= prior_bytes
+                    && new_reads <= prior_reads,
                 "shared={shared}, shipped/new proof bytes and requests: {observations:?}"
             );
         }

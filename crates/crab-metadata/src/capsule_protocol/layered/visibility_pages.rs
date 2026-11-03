@@ -121,7 +121,7 @@ fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) ->
     let mut writer = if use_shared && matches!(version, None | Some(3)) {
         // Reconciliation probes scattered tips across the shared history. A
         // larger capsule-edit leaf repeats that history for every captured ref.
-        Writer::with_leaf_target(4 * 1024)
+        Writer::with_targets(4 * 1024, 32 * 1024)
     } else {
         Writer::default()
     };

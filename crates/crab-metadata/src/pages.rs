@@ -193,6 +193,7 @@ pub(crate) struct Writer {
     pub(crate) bytes: Vec<u8>,
     pages: std::collections::BTreeMap<[u8; 32], PageRef>,
     leaf_target_bytes: usize,
+    directory_target_bytes: usize,
 }
 
 impl Default for Writer {
@@ -201,14 +202,16 @@ impl Default for Writer {
             bytes: Vec::new(),
             pages: std::collections::BTreeMap::new(),
             leaf_target_bytes: TARGET_BYTES,
+            directory_target_bytes: TARGET_BYTES,
         }
     }
 }
 
 impl Writer {
-    pub(crate) fn with_leaf_target(leaf_target_bytes: usize) -> Self {
+    pub(crate) fn with_targets(leaf_target_bytes: usize, directory_target_bytes: usize) -> Self {
         Self {
             leaf_target_bytes,
+            directory_target_bytes,
             ..Self::default()
         }
     }
@@ -276,9 +279,7 @@ impl Writer {
             pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
             level.push(self.append(pending, 0, count, first, previous)?);
         }
-        // Small point leaves cut read bytes; keep directory fan-out unchanged
-        // so this change does not also reduce routing capacity per request.
-        let fanout = (TARGET_BYTES - HEADER) / ref_bytes(kind);
+        let fanout = (self.directory_target_bytes - HEADER) / ref_bytes(kind);
         while level.len() > 1 {
             let mut parents = Vec::new();
             for children in level.chunks(fanout) {

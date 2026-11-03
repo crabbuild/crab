@@ -545,12 +545,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paged_tip_capture_reads_only_mandatory_proof_pages() {
+    async fn paged_tip_capture_reuses_authenticated_inline_roots() {
         let (count, reads, _, _) = capture_reads(0, 4096, 1, std::time::Duration::ZERO).await;
         assert_eq!(
             reads,
-            count * 5,
-            "head, run, scalar, directory and tip leaf"
+            count * 4,
+            "head, run, scalar with inline root, and tip leaf"
         );
     }
 

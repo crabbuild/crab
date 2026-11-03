@@ -633,6 +633,19 @@ missing ref, an unchanged OID and a missing/corrupt page have distinct results.
 Replacement edits must admit their new tip; queried OIDs cannot belong to both
 change sets. These changes alone never authorize a ref or object want.
 
+Split single-ref, non-shared visibility uses version 6 with 4 KiB leaf and
+directory targets. The authenticated ref header carries directory-root bytes
+up to 4 KiB per direction. They pass the same page hash, kind, bounds, ancestry
+and coverage decoder before entering the existing bounded cache. Point queries
+still admit every root and child, including warm or inline pages. This pays for
+the smaller directory fan-out without an additional origin request.
+
+Shared and multi-ref split layouts retain version 5's 8 KiB leaves and 32 KiB
+directories. Unsplit layouts retain version 3 or 4. Full validation rebuilds
+each declared geometry, preserving original version-3/4/5 bytes; changing only
+the version is rejected. Upgrade readers before writers: older readers reject
+version 6.
+
 The capsule delta's retired JSON shape has no reader or serialization alias;
 retired run prefixes require republishing. Released v1 visibility index and
 manifest/catalog formats are unchanged.
@@ -896,7 +909,8 @@ or hold a synchronous lock through an await.
 
 The captured lookup reports its uncheckpointed logical capsule count. Direct
 CLI Xet pushes use that count to elect one foreground checkpoint owner once
-the suffix reaches the existing 32-capsule fan-in. The owner retains GC admission
+the suffix reaches 128 capsules, amortizing the pass across four ordinary
+per-ref tiers. The owner retains GC admission
 and uses the existing exact-root/ref-position checkpoint CAS; losing election or
 failing maintenance cannot revoke the already committed ref. Protected staging
 and replicated publication retain their existing publication owners: a local
