@@ -214,6 +214,25 @@ Evidence: `pooled-visibility-before.json`,
 `small-leaf-catalog-before.json`, `metadata-range-coalescing-before.json`,
 `metadata-range-canonical-final.log`.
 
+The later isolated Linux 64-developer comparison rejects that whole-leaf policy:
+capsule GETs decrease 56.47%, but capsule response bodies increase 13.79%.
+The candidate also rejects one of 640 pushes after exhausting eight immediate
+stable-inventory attempts during concurrent publication. The original failed
+report remains evidence; neither observation qualifies the 1,000-developer run.
+
+The follow-up replaces complete leaf reads with metadata-only visibility-body
+read-ahead. A 64-ref capture uses 192 reads for both small and payload-bearing
+leaves; unrelated payload size no longer increases control traffic beyond the
+small authenticated descriptor-size difference. Remaining aggregate byte
+headroom is reserved before read-ahead, while compacted runs and Git views keep
+selected paging. Stable-inventory retries retain eight attempts and both identity
+checks, with capped Tokio timer backoff so finite write bursts can settle.
+Both failures have deterministic before/after regressions. All 776 metadata
+tests pass (three pre-existing ignores); final Linux cost, latency, historical
+byte and no-repair qualification of this follow-up remains pending.
+Evidence: [failed candidate diagnostic](https://github.com/crabbuild/crab/actions/runs/41575183746),
+`metadata-bytes-before.log`, `metadata-coalesced-all.log`, `before.log`.
+
 The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
 evicting a warmed point proof. Large cold spans now use one exact transfer;
 complete warm spans remain transfer-free. All 775 metadata tests pass, including

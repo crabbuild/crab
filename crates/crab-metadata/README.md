@@ -105,7 +105,10 @@ Current-epoch activation and checkpoint-chain errors still fail closed.
 `capture_ref_heads` and `resolve_referenced_activations` own that stable capture
 for metadata and read orchestration. Transactionless heads must match the
 compacted root; selected-ref capture reuses the same activation validator while
-keeping its targeted ETag probes. Current-state catalog lookups reuse that owner together with the shared
+keeping its targeted ETag probes. Contended full-inventory retries use capped
+Tokio timer backoff, retaining the same attempt bound and complete stability checks.
+Selected-ref reads probe only their target keys, so unrelated branch updates do
+not widen that retry window. Current-state catalog lookups reuse that owner together with the shared
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
@@ -275,6 +278,11 @@ Protected receive selects from separately authorized source/filtered captures.
 Captured revision, remote-mount and current-state hydration use the shared paged
 lookup. Control capture and selected closure queries are measured separately;
 complete opening and history-amplification qualification remain required.
+
+Current-state catalog capture coalesces small single-ref leaf visibility bodies
+within the remaining control-intake byte budget. Reads exclude Git/file payloads
+and duplicate descriptor bytes; each selected page still authenticates against
+its captured roots. Compacted histories and Git views retain selected paging.
 
 Ref deletion removes its live visibility closure even when the capsule has no
 visibility payload. Retained dictionary objects cannot supply a new ref's base;
@@ -636,7 +644,7 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 
 | Feature | Adds |
 | --- | --- |
-| `storage` | Object-store manifest, segmented-index, and prefilter helpers |
+| `storage` | Object-store manifest, segmented-index, prefilter helpers and timed ref capture |
 | `file-index-reader` | Read-only file-index lookup sessions |
 | `local-index` | SQLite-backed local chunk index |
 | `remote-index` | SlateDB remote index readers and writers |

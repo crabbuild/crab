@@ -22,6 +22,14 @@ enum Identity {
 }
 
 #[derive(Debug)]
+struct WriteBurst {
+    path: object_store::path::Path,
+    until: tokio::time::Instant,
+    bodies: [Bytes; 2],
+    next: usize,
+}
+
+#[derive(Debug)]
 struct ChangingHeads {
     inner: object_store::memory::InMemory,
     identity: Identity,
@@ -29,6 +37,7 @@ struct ChangingHeads {
     reads: Mutex<BTreeMap<String, usize>>,
     lists: AtomicUsize,
     always_changing: bool,
+    burst: Mutex<Option<WriteBurst>>,
 }
 
 impl std::fmt::Display for ChangingHeads {
@@ -86,6 +95,18 @@ impl ObjectStore for ChangingHeads {
             result.meta.e_tag = None;
         }
         let replacement = self.replacements.lock().unwrap().remove(path);
+        let burst = {
+            let mut burst = self.burst.lock().unwrap();
+            burst
+                .as_mut()
+                .filter(|burst| burst.path == *path && tokio::time::Instant::now() < burst.until)
+                .map(|burst| {
+                    let body = burst.bodies[burst.next % 2].clone();
+                    burst.next += 1;
+                    Some(body)
+                })
+        };
+        let replacement = burst.or(replacement);
         if let Some(body) = replacement {
             // Publish between the first listing/body read and the second listing.
             match body {
@@ -181,6 +202,7 @@ async fn fixture(
         reads: Mutex::new(BTreeMap::new()),
         lists: AtomicUsize::new(0),
         always_changing,
+        burst: Mutex::new(None),
     });
     let layout = StoreLayout::new(
         Store::new(store.clone()),
@@ -255,6 +277,40 @@ async fn ref_capture_reuse_preserves_the_bounded_stability_check() {
     let (layout, root, store) = fixture(Identity::ETag, false, true).await;
     assert!(capture_ref_heads(&layout, &root).await.is_err());
     assert_eq!(store.lists.load(Ordering::SeqCst), 16);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ref_capture_waits_for_a_finite_write_burst() {
+    let (layout, root, store) = fixture(Identity::ETag, false, false).await;
+    store.replacements.lock().unwrap().clear();
+    let name = "refs/heads/changed";
+    let path = layout.capsule_ref_head_path(&capsule_ref_name_key(name));
+    let current = CapsuleRefHead::from_root(name, root.ref_epoch().to_owned(), None, None)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let retired = CapsuleRefHead::from_root(name, "2".repeat(64), None, None)
+        .unwrap()
+        .encode()
+        .unwrap();
+    *store.burst.lock().unwrap() = Some(WriteBurst {
+        path: path.clone(),
+        until: tokio::time::Instant::now() + std::time::Duration::from_millis(40),
+        bodies: [retired, current],
+        next: 0,
+    });
+
+    let captured = capture_ref_heads(&layout, &root).await.unwrap();
+    let mut expected = Vec::new();
+    for name in ["refs/heads/changed", "refs/heads/unchanged"] {
+        let path = layout.capsule_ref_head_path(&capsule_ref_name_key(name));
+        let body = store.inner.get(&path).await.unwrap().bytes().await.unwrap();
+        let head = CapsuleRefHead::decode(&body).unwrap();
+        if head.ref_epoch() == root.ref_epoch() {
+            expected.push(head);
+        }
+    }
+    assert_eq!(captured, (expected, BTreeSet::new()));
 }
 
 #[tokio::test]

@@ -54,6 +54,24 @@ impl CapsuleVisibilityReader {
         self.descriptor.refs.count
     }
 
+    pub(crate) fn coalesce_small_edit(&mut self, headroom: &std::sync::atomic::AtomicU64) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let bytes = self.descriptor.body_bytes;
+        // Coalesce a bounded single-ref proof region, excluding payloads and
+        // duplicate descriptor bytes. Reserve aggregate headroom before I/O
+        // and retain each query's normal page admission and authentication.
+        if self.ref_count() == 1
+            && bytes <= crate::pages::READ_AHEAD_BYTES.min(self.maximum)
+            && headroom
+                .fetch_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
+                .is_ok()
+        {
+            self.cache =
+                std::sync::Arc::new(PageCache::for_region(self.offset..self.offset + bytes));
+        }
+    }
+
     /// Read only scalar edit metadata, preserving requested ref order and authenticated misses.
     pub async fn headers(
         &self,
@@ -359,6 +377,66 @@ mod tests {
         Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn leaf_read_ahead_shares_headroom_without_overdrawing_it() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        let name = "refs/heads/main";
+        let oid = "2".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid]),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                delta.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "repositories/bounded-leaf".into(),
+        );
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let (control, _) = run.verified_controls().unwrap();
+        let reader = || {
+            control
+                .visibility_reader(&layout, capsule.hash(), crate::pages::READ_AHEAD_BYTES)
+                .unwrap()
+                .unwrap()
+        };
+        let body_bytes = reader().descriptor.body_bytes;
+        for available in [0, body_bytes - 1, body_bytes, 2 * body_bytes - 1] {
+            let headroom = AtomicU64::new(available);
+            for _ in 0..2 {
+                let mut reader = reader();
+                reader.coalesce_small_edit(&headroom);
+                assert_eq!(
+                    reader
+                        .objects(layout.store(), name, VisibilityChange::Added)
+                        .await
+                        .unwrap(),
+                    vec![[0x22; 20]]
+                );
+            }
+            assert_eq!(headroom.load(Relaxed), available % body_bytes);
+        }
+    }
 
     #[tokio::test]
     async fn visibility_lookup_distinguishes_removed_unchanged_and_absent_refs() {

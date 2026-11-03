@@ -13,8 +13,9 @@ use crab_storage::{Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
-/// Capture current-state catalog roots with bounded control and small-leaf reads.
+/// Capture current-state catalog roots with bounded metadata-only reads.
 ///
 /// The caller retains the captured roots against GC. Missing dependencies remain
 /// errors. Control intake and each selected catalog query use the format byte bound.
@@ -112,25 +113,24 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             "catalog control intake exceeds the format byte bound",
         ));
     }
-    let inline = inline_leaf_reads(&visible.pointers, MAX_CATALOG_BYTES - intake);
+    let read_ahead = AtomicU64::new(MAX_CATALOG_BYTES - intake);
     let checkpoint = match root.checkpoint() {
         Some(pointer) => Some(load_layered_checkpoint_control(layout, pointer).await?),
         None => None,
     };
     let run_layout = layout.clone();
-    let runs = futures_util::stream::iter(visible.pointers.into_iter().zip(inline).map(
-        move |(pointer, inline)| {
-            let layout = run_layout.clone();
-            async move {
-                let (control, capsules) =
-                    super::store::load_run_git_control(&layout, &pointer, inline).await?;
-                if !control.git_packs().is_empty() {
-                    control.source_descriptor()?;
-                }
-                Ok::<_, MetadataError>((control.hash().to_owned(), (control, capsules)))
+    let headroom = &read_ahead;
+    let runs = futures_util::stream::iter(visible.pointers.into_iter().map(move |pointer| {
+        let layout = run_layout.clone();
+        async move {
+            let (control, capsules) =
+                super::store::load_run_git_control(&layout, &pointer, Some(headroom)).await?;
+            if !control.git_packs().is_empty() {
+                control.source_descriptor()?;
             }
-        },
-    ))
+            Ok::<_, MetadataError>((control.hash().to_owned(), (control, capsules)))
+        }
+    }))
     .buffer_unordered(32)
     .try_collect::<BTreeMap<_, _>>()
     .await?;
@@ -196,24 +196,6 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     })
 }
 
-fn inline_leaf_reads(pointers: &[super::CapsulePointer], mut headroom: u64) -> Vec<bool> {
-    pointers
-        .iter()
-        .map(|pointer| {
-            // Footer intake is already admitted. Only unused byte headroom may
-            // pay for a complete leaf; larger histories retain paged controls.
-            // Compacted histories retain selected-member paging even when small.
-            let inline = pointer.level() == 0
-                && pointer.size() <= crate::pages::TARGET_BYTES as u64
-                && pointer.control_offset() <= headroom;
-            if inline {
-                headroom -= pointer.control_offset();
-            }
-            inline
-        })
-        .collect()
-}
-
 fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
         path: "capsule-protocol catalog capture".to_owned(),
@@ -234,42 +216,9 @@ mod tests {
     use crate::file_index_lookup::FileIndexLookupSession;
     use crate::git_visibility::GitVisibilityEdit;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn inline_leaf_reads_stay_within_the_admitted_headroom() {
-        let pointer = |index: u64, size, offset, count| {
-            CapsulePointer::new(
-                format!("{index:064x}"),
-                size,
-                offset,
-                size - offset,
-                "f".repeat(64),
-                if count == 1 { 0 } else { 1 },
-                (0..count)
-                    .map(|n| format!("{:064x}", index * 10 + n))
-                    .collect(),
-                "0".repeat(64),
-            )
-            .unwrap()
-        };
-        let pointers = [
-            pointer(1, 32_000, 25_000, 1),
-            pointer(2, 8_000, 6_000, 1),
-            pointer(3, 33_000, 1_000, 1),
-            pointer(4, 8_000, 6_000, 2),
-        ];
-        for (headroom, expected) in [
-            (0, [false, false, false, false]),
-            (6_000, [false, true, false, false]),
-            (31_000, [true, true, false, false]),
-            (u64::MAX, [true, true, false, false]),
-        ] {
-            assert_eq!(inline_leaf_reads(&pointers, headroom), expected);
-        }
-    }
-
-    async fn leaf_capture_reads(file_data_bytes: usize) -> (usize, usize) {
+    async fn leaf_capture_reads(file_data_bytes: usize) -> (usize, usize, u64) {
         let reads = Arc::new(AtomicUsize::new(0));
         let bytes = Arc::new(AtomicU64::new(0));
         let observed = reads.clone();
@@ -373,22 +322,36 @@ mod tests {
         );
         let observed = reads.load(Ordering::SeqCst);
         assert!(bytes.load(Ordering::SeqCst) <= (count * 16 * 1024) as u64);
-        (count, observed)
+        (count, observed, bytes.load(Ordering::SeqCst))
     }
 
     #[tokio::test]
-    async fn small_ref_leaf_capture_uses_one_source_read_per_ref() {
-        let (count, observed) = leaf_capture_reads(0).await;
-        assert_eq!(observed, 2 * count, "one head and one source read per ref");
+    async fn small_ref_leaf_capture_coalesces_metadata_only() {
+        let (count, observed, _) = leaf_capture_reads(0).await;
+        assert_eq!(
+            observed,
+            3 * count,
+            "one head and two metadata reads per ref"
+        );
     }
 
     #[tokio::test]
     async fn large_ref_leaves_keep_payloads_cold_and_coalesce_metadata() {
-        let (count, observed) = leaf_capture_reads(64 * 1024).await;
+        let (count, observed, _) = leaf_capture_reads(64 * 1024).await;
         assert_eq!(
             observed,
-            4 * count,
-            "one head and three metadata reads per ref"
+            3 * count,
+            "one head and two metadata reads per ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_capture_keeps_small_leaf_payloads_cold() {
+        let (count, _, baseline) = leaf_capture_reads(0).await;
+        let (_, _, with_payload) = leaf_capture_reads(8 * 1024).await;
+        assert!(
+            with_payload <= baseline + (count * 256) as u64,
+            "payload changed control traffic from {baseline} to {with_payload} bytes"
         );
     }
 

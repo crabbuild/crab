@@ -438,25 +438,22 @@ pub async fn load_capsule_run_git_control(
     router: &StoreLayout<Store>,
     pointer: &super::CapsulePointer,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
-    load_run_git_control(router, pointer, false).await
+    load_run_git_control(router, pointer, None).await
 }
 
-// Catalog callers admit complete small leaves; Git views keep bodies cold.
-// Both plans keep OIDs paged and share the same footer/page validation.
+// Catalog capture can coalesce small visibility bodies within admitted headroom.
+// Git views retain selected paging; both paths keep payloads cold and authenticate pages.
 pub(super) async fn load_run_git_control(
     router: &StoreLayout<Store>,
     pointer: &super::CapsulePointer,
-    inline: bool,
+    read_ahead: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
     super::root::validate_capsule_pointer(pointer)?;
     let path = router.capsule_path(pointer.hash());
     // A publication leaf can share one control read with its small admission
     // pages. Compacted histories retain selected-member paging.
-    let prefetch = inline
-        || (pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES);
-    let start = if inline {
-        0
-    } else if prefetch {
+    let prefetch = pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES;
+    let start = if prefetch {
         pointer.control_offset()
     } else {
         pointer
@@ -464,25 +461,12 @@ pub(super) async fn load_run_git_control(
             .checked_sub(CapsuleRunControl::trailer_bytes())
             .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?
     };
-    let body = if inline {
-        router
-            .store()
-            .get_immutable_bounded(&path, pointer.size())
-            .await?
-    } else {
-        router
-            .store()
-            .range_get(&path, start..pointer.size())
-            .await?
-    };
+    let body = router
+        .store()
+        .range_get(&path, start..pointer.size())
+        .await?;
     if body.len() as u64 != pointer.size() - start {
         return Err(corrupt(&path, "capsule control read is truncated"));
-    }
-    if inline && blake3::hash(&body).to_hex().as_str() != pointer.hash() {
-        return Err(corrupt(
-            &path,
-            "capsule run content hash differs from its pointer",
-        ));
     }
     let trailer_start = body
         .len()
@@ -520,8 +504,7 @@ pub(super) async fn load_run_git_control(
             ));
         }
     }
-    let inline_source = inline.then_some(body);
-    let capsules = control.materialize_capsules_with_paged_visibility(router, inline_source)?;
+    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
     Ok((control, capsules))
 }
 
@@ -573,7 +556,7 @@ pub async fn load_pointer_catalog_from_root(
 /// Capture one stable, epoch-filtered ref-head view and its committed activations.
 ///
 /// Rejects mismatched object identities, activation records and uncommitted base
-/// heads. Concurrent changes retry within the existing bounded capture policy.
+/// heads. Concurrent changes retry with bounded backoff on a Tokio runtime.
 pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
@@ -583,7 +566,14 @@ pub async fn capture_ref_heads(
     // and S3's mutable null version do not identify content; always GET those
     // bodies again unless an ETag identifies them. Activations are never cached.
     let mut previous = BTreeMap::<object_store::path::Path, (CapsuleRefHead, ETag)>::new();
-    for _ in 0..8 {
+    for attempt in 0_u32..8 {
+        // Full inventories span independent writers. Pace the bounded retries
+        // so a finite publication burst can finish; a successful capture still
+        // requires identical listings and freshly resolved activations.
+        if attempt > 0 {
+            let delay = std::time::Duration::from_millis(10_u64 << (attempt - 1).min(4));
+            tokio::time::sleep(delay).await;
+        }
         let before = list_ref_head_objects(router).await?;
         let head_router = router.clone();
         let cached_heads = &previous;

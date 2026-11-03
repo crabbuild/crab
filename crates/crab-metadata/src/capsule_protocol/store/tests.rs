@@ -52,12 +52,15 @@ async fn run_fixture() -> (
 #[tokio::test]
 async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
     let (layout, pointer, _) = run_fixture().await;
+    let headroom = std::sync::atomic::AtomicU64::new(u64::MAX);
     load_capsule_run(&layout, &pointer).await.unwrap();
     load_capsule_run_control(&layout, &pointer).await.unwrap();
     load_capsule_run_git_control(&layout, &pointer)
         .await
         .unwrap();
-    load_run_git_control(&layout, &pointer, true).await.unwrap();
+    load_run_git_control(&layout, &pointer, Some(&headroom))
+        .await
+        .unwrap();
     for field in ["footer_hash", "control_boundary"] {
         let mut changed = serde_json::to_value(&pointer).unwrap();
         if field == "footer_hash" {
@@ -81,35 +84,12 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
                 .is_err(),
             "paged Git control: {field}"
         );
-        assert!(load_run_git_control(&layout, &changed, true).await.is_err());
-    }
-}
-
-#[tokio::test]
-async fn inline_control_rejects_unrequested_source_corruption() {
-    let (layout, pointer, _) = run_fixture().await;
-    let path = layout.capsule_path(pointer.hash());
-    let mut body = layout
-        .store()
-        .get_immutable_bounded(&path, pointer.size())
-        .await
-        .unwrap()
-        .to_vec();
-    body[0] ^= 1;
-    layout
-        .store()
-        .put_overwrite(&path, body.into())
-        .await
-        .unwrap();
-    assert_eq!(
-        (
-            load_capsule_run_git_control(&layout, &pointer)
+        assert!(
+            load_run_git_control(&layout, &changed, Some(&headroom))
                 .await
-                .is_ok(),
-            load_run_git_control(&layout, &pointer, true).await.is_err(),
-        ),
-        (true, true),
-    );
+                .is_err()
+        );
+    }
 }
 
 #[tokio::test]
@@ -187,9 +167,15 @@ async fn run_control_includes_verified_member_admission_in_one_read() {
         );
         if count == 1 {
             reads.store(0, Ordering::SeqCst);
-            let (inline, _) = load_run_git_control(&layout, &pointer, true).await.unwrap();
+            let headroom = std::sync::atomic::AtomicU64::new(u64::MAX);
+            let (coalesced, _) = load_run_git_control(&layout, &pointer, Some(&headroom))
+                .await
+                .unwrap();
             assert_eq!(
-                (inline.admission().is_none(), reads.load(Ordering::SeqCst)),
+                (
+                    coalesced.admission().is_none(),
+                    reads.load(Ordering::SeqCst)
+                ),
                 (true, 1)
             );
         }
