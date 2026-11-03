@@ -21,6 +21,7 @@ bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
 crc32fast = { workspace = true }
 crab-types = { workspace = true }
+dunce = { workspace = true }
 flate2 = { workspace = true }
 gix = { workspace = true, optional = true }
 gix-attributes = { workspace = true }

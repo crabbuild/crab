@@ -667,11 +667,19 @@ impl CapsuleRunControl {
     pub(crate) fn materialize_capsules_with_paged_visibility(
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        inline_source: Option<Bytes>,
     ) -> Result<Vec<CapsuleControl>> {
         // One immutable run owns this bounded cache. All of its logical edits
         // share co-located proof blocks; each decoded page still authenticates
         // against the original capsule's roots and consumes its query budget.
-        let cache = self.visibility_cache();
+        // Inline bytes match the admitted run's content hash. They seed
+        // transport only; selected pages still validate their captured roots.
+        let cache = match inline_source {
+            Some(body) => {
+                std::sync::Arc::new(crate::pages::PageCache::for_prefetched_region(0, body)?)
+            }
+            None => self.visibility_cache(),
+        };
         let mut controls = self.materialize_controls(
             |location| {
                 self.visibility_reader_with_cache(

@@ -270,7 +270,7 @@ async fn catalog_control_identity_is_independent_of_materialization() {
         .unwrap();
     let (control, full) = run.verified_controls().unwrap();
     let paged = control
-        .materialize_capsules_with_paged_visibility(&layout)
+        .materialize_capsules_with_paged_visibility(&layout, None)
         .unwrap();
     assert_eq!(paged, full);
     assert_eq!(

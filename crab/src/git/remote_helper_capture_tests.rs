@@ -1,6 +1,114 @@
 use super::tests::{GitEnvCwdGuard, capsule_history_fixture, git_object_exists, run_git};
 use super::*;
 
+#[tokio::test]
+async fn warm_classic_opening_defers_visibility_objects_until_selected() {
+    use crab_metadata::capsule_protocol::{
+        Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
+        CapsuleTransaction, CapsuleVisibilityDelta, RepositoryRoot, RootRecord,
+    };
+    use crab_metadata::git_visibility::GitVisibilityEdit;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = reads.clone();
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::SeqCst);
+        }));
+    let layout = crab_storage::StoreLayout::new(store, "repositories/classic-intake".into());
+    let root =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    crab_metadata::capsule_protocol::create_root(&layout, root.clone())
+        .await
+        .unwrap();
+    let objects = (1..=32_000)
+        .map(|index| format!("{index:040x}"))
+        .collect::<Vec<_>>();
+    let tip = objects.last().unwrap().clone();
+    let transaction = CapsuleTransaction::new(
+        root.digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(tip.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".into(),
+        GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects),
+    )]))
+    .unwrap();
+    let run = CapsuleRun::leaf(
+        Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                delta.encode().unwrap(),
+            )],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let next = RootRecord::encode(
+        root.root()
+            .advance(
+                root.digest(),
+                BTreeMap::from([("refs/heads/main".into(), tip)]),
+                BTreeMap::new(),
+                vec![pointer],
+                transaction.id().unwrap().as_str(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), next.bytes().clone())
+        .await
+        .unwrap();
+    let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(
+        layout.clone(),
+        crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    reads.store(0, Ordering::SeqCst);
+    let view = open_capsule_fetch_view_minimal(&capture, 8 * 1024 * 1024, false, None)
+        .await
+        .unwrap();
+    assert!(
+        reads.load(Ordering::SeqCst) < 64 * 1024,
+        "warm classic setup read unrelated object sets"
+    );
+    let names = vec!["refs/heads/main".to_owned()];
+    let selected = view.tip_bound_transitions(&names).await.unwrap();
+    assert_eq!(selected[&names[0]][0].added, delta.edits()[&names[0]].added);
+}
+
 struct RefAdvance {
     store: crate::storage::store::Store,
     router: StoreLayout,

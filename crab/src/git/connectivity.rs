@@ -105,6 +105,7 @@ pub async fn check_connectivity_with_frontier_quiet(
 /// present object through a pipe. Git still verifies that each reachable
 /// commit, tree, and blob exists, while avoiding the large textual OID stream
 /// that dominates a cold clone with a pre-indexed pack.
+/// Explicit tips define its roots; the caller's unfinished ref database is isolated.
 pub async fn check_connectivity_with_fsck(
     git_dir: &Path,
     ref_tips: &[String],
@@ -150,12 +151,36 @@ fn check_connectivity_fsck_sync(
         });
     }
 
-    let stdout = tempfile::NamedTempFile::new()?;
-    let stderr = tempfile::NamedTempFile::new()?;
-    let mut command = Command::new("git");
+    let tips = ref_tips
+        .iter()
+        .filter(|tip| ObjectId::from_hex(tip.as_bytes()).is_ok())
+        .collect::<Vec<_>>();
+    if tips.is_empty() {
+        return Ok(ConnectivityResult {
+            objects_checked: 0,
+            missing: Vec::new(),
+            complete: true,
+        });
+    }
+
+    // Native clone's refdb is unfinished while its helper runs. Check the
+    // installed object graph in a private refdb, never reading or rewriting HEAD.
+    let workspace = tempfile::Builder::new()
+        .prefix("crab-fetch-connectivity-")
+        .tempdir()?;
+    gix::create::into(
+        workspace.path().to_owned(),
+        gix::create::Kind::Bare,
+        gix::create::Options::default(),
+    )
+    .map_err(|error| CrabError::Io(std::io::Error::other(error)))?;
+    let objects_dir = dunce::canonicalize(git_dir.join("objects"))?;
+    let mut command = crab_git::raw_object_command(workspace.path());
     command
-        .arg("--git-dir")
-        .arg(git_dir)
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_NAMESPACE")
+        .env("GIT_OBJECT_DIRECTORY", objects_dir)
         .args([
             "fsck",
             "--full",
@@ -164,42 +189,35 @@ fn check_connectivity_fsck_sync(
             "--no-progress",
             "--no-reflogs",
         ])
-        .stdout(Stdio::from(stdout.reopen()?))
-        .stderr(Stdio::from(stderr.reopen()?));
-    let mut valid_tips = 0usize;
-    for tip in ref_tips {
-        if ObjectId::from_hex(tip.as_bytes()).is_ok() {
-            command.arg(tip);
-            valid_tips += 1;
+        .args(tips);
+    // Retain the refdb until the supervisor has drained every Git child and
+    // pipe, including cancellation during refs/commit-graph verification.
+    let output = match super::process::run(
+        command,
+        cancel,
+        None::<fn(std::process::ChildStdin) -> Result<()>>,
+        |stdout| {
+            Ok(super::process::capture_output(
+                stdout,
+                super::process::MAX_CAPTURE_BYTES,
+            )?)
+        },
+    ) {
+        Err(CrabError::Cancelled) => {
+            return Ok(ConnectivityResult {
+                objects_checked: 0,
+                missing: Vec::new(),
+                complete: false,
+            });
         }
-    }
-    if valid_tips == 0 {
-        return Ok(ConnectivityResult {
-            objects_checked: 0,
-            missing: Vec::new(),
-            complete: true,
-        });
-    }
-    let mut child = command.spawn().map_err(CrabError::Io)?;
-    let status = loop {
-        match child.try_wait().map_err(CrabError::Io)? {
-            Some(status) => break status,
-            None if cancel.is_cancelled() => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(ConnectivityResult {
-                    objects_checked: 0,
-                    missing: Vec::new(),
-                    complete: false,
-                });
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
+        result => result?,
     };
-    let stdout = std::fs::read_to_string(stdout.path())?;
-    let stderr = std::fs::read_to_string(stderr.path())?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let missing = parse_fsck_missing(&stdout, &stderr);
-    if !status.success() && missing.is_empty() {
+    if !output.status.success() && missing.is_empty() {
         return Err(CrabError::Internal(format!(
             "git fsck failed: {}",
             stderr.trim()
@@ -638,6 +656,63 @@ mod tests {
                 "abcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn fsck_connectivity_ignores_unfinished_refs_and_preserves_missing_object_checks() {
+        let source = tempfile::tempdir().unwrap();
+        assert!(init_frontier_test_repo(source.path()));
+        std::fs::write(source.path().join("payload"), b"original bytes\n").unwrap();
+        commit_all(source.path(), "original");
+        let tip = git_output(source.path(), ["rev-parse", "HEAD"]).unwrap();
+        let blob = git_output(source.path(), ["rev-parse", "HEAD:payload"]).unwrap();
+        std::fs::write(source.path().join("replacement"), b"replacement bytes\n").unwrap();
+        let replacement = git_output(source.path(), ["hash-object", "-w", "replacement"]).unwrap();
+        assert!(
+            git_status(source.path(), ["replace", &blob, &replacement])
+                .unwrap()
+                .success()
+        );
+        let source_git_dir = source.path().join(".git");
+        let alternate = tempfile::tempdir().unwrap();
+        crab_git::initialize_bare_git_dir(alternate.path()).unwrap();
+        std::fs::write(
+            alternate.path().join("objects/info/alternates"),
+            format!("{}\n", source_git_dir.join("objects").display()),
+        )
+        .unwrap();
+        let pending_head = b"ref: refs/heads/.invalid\n";
+        for git_dir in [source_git_dir.as_path(), alternate.path()] {
+            // Git clone leaves this refdb unfinished while its helper runs.
+            std::fs::write(git_dir.join("HEAD"), pending_head).unwrap();
+            let result = check_connectivity_with_fsck(
+                git_dir,
+                std::slice::from_ref(&tip),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(result.complete && result.missing.is_empty());
+            assert_eq!(std::fs::read(git_dir.join("HEAD")).unwrap(), pending_head);
+        }
+        std::fs::remove_file(
+            source_git_dir
+                .join("objects")
+                .join(&blob[..2])
+                .join(&blob[2..]),
+        )
+        .unwrap();
+        for git_dir in [source_git_dir.as_path(), alternate.path()] {
+            let result = check_connectivity_with_fsck(
+                git_dir,
+                std::slice::from_ref(&tip),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(result.complete);
+            assert_eq!(result.missing, [blob.clone()]);
+        }
     }
 
     #[tokio::test]

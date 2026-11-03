@@ -226,8 +226,9 @@ rayon = "1.10"
 # SQLite for staging, cache metadata, and local warm indexes.
 rusqlite = { workspace = true }
 
-# Atomic file writes (tempfile + rename).
+# Temporary workspaces and native Git paths.
 tempfile = { workspace = true }
+dunce = { workspace = true }
 
 # File mtime manipulation for LRU cache eviction.
 filetime = "0.2"

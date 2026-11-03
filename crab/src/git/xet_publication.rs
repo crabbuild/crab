@@ -218,42 +218,40 @@ pub(crate) async fn prepare_delta(
         prepared_files.push((file_hash, file_size, chunks, plan));
     }
 
-    // Query only the outgoing recipes. Selected xorb recipes are verified
-    // against the reverse chunk index before any staged payload is reused.
     let mut needed_chunks = prepared_files
         .iter()
-        .flat_map(|(_, _, chunks, _)| chunks.iter().map(|(hash, _)| hash.hex()))
-        .collect::<HashSet<_>>();
-    let requested_chunks = needed_chunks.iter().cloned().collect::<Vec<_>>();
-    let base_chunks = lookup.chunks(layout.store(), &requested_chunks).await?;
-    for (hash, entry) in base_chunks.xorbs() {
-        if needed_chunks.is_empty() {
-            break;
-        }
-        let mut selected = false;
-        for (index, chunk) in entry.chunks().iter().enumerate() {
-            if !needed_chunks.remove(chunk.hash()) {
-                continue;
-            }
-            let chunk_hash = parse_merkle_hash(chunk.hash(), "catalog chunk")?;
-            placements.insert(
-                chunk_hash,
-                ChunkPlacement {
-                    chunk_hash,
-                    xorb_hash: parse_merkle_hash(hash, "base xorb")?,
-                    chunk_index: u32::try_from(index).map_err(|_| {
-                        CrabError::Internal("catalog xorb has too many chunks".to_owned())
-                    })?,
-                    uncompressed_size: chunk.uncompressed_size(),
-                },
-            );
-            selected = true;
-        }
-        if selected {
-            xorb_entries.insert(parse_merkle_hash(hash, "base xorb")?, entry.clone());
-        }
+        .flat_map(|(_, _, chunks, _)| chunks.iter().map(|(hash, size)| (hash.hex(), *size)))
+        .collect::<HashMap<_, _>>();
+    let requested_chunks = needed_chunks.keys().cloned().collect::<Vec<_>>();
+    let hinted_xorbs = staged_candidates
+        .values()
+        .map(|candidate| candidate.xorb_ref.xorb_hash.hex())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Staged IDs only narrow discovery. Current catalog recipes establish the
+    // chunk positions and lengths; a staged hint cannot authorize remote bytes.
+    // Reusing those recipes avoids rediscovering their chunks across every run.
+    if !hinted_xorbs.is_empty() {
+        let hinted = lookup.xorbs(layout.store(), &hinted_xorbs).await?;
+        adopt_catalog_xorbs(
+            &hinted,
+            &mut needed_chunks,
+            &mut xorb_entries,
+            &mut placements,
+        )?;
     }
-    drop(base_chunks);
+    let hinted_catalog_chunks = placements.len();
+    if !needed_chunks.is_empty() {
+        let unresolved = needed_chunks.keys().cloned().collect::<Vec<_>>();
+        let discovered = lookup.chunks(layout.store(), &unresolved).await?;
+        adopt_catalog_xorbs(
+            &discovered,
+            &mut needed_chunks,
+            &mut xorb_entries,
+            &mut placements,
+        )?;
+    }
     drop(needed_chunks);
 
     // The recipe retains the exact add-time IDs. Re-read their immutable
@@ -265,6 +263,7 @@ pub(crate) async fn prepare_delta(
             .await?;
     tracing::debug!(
         planned_existing,
+        hinted_catalog_chunks,
         stale_existing = planned_existing.saturating_sub(verified_staged.candidates.len()),
         global_existing = 0,
         "capsule staged remote proof adoption complete",
@@ -711,6 +710,53 @@ pub(crate) async fn prepare_delta(
             origins,
         },
     ))
+}
+
+fn adopt_catalog_xorbs(
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+    needed: &mut HashMap<String, u64>,
+    entries: &mut HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
+    placements: &mut ChunkPlacementMap,
+) -> Result<()> {
+    for (hash, entry) in catalog.xorbs() {
+        if needed.is_empty() {
+            break;
+        }
+        let xorb_hash = parse_merkle_hash(hash, "catalog xorb")?;
+        let mut selected = false;
+        for (index, chunk) in entry.chunks().iter().enumerate() {
+            let Some(expected_size) = needed.remove(chunk.hash()) else {
+                continue;
+            };
+            if u64::from(chunk.uncompressed_size()) != expected_size {
+                return Err(CrabError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason: format!(
+                        "chunk {} has catalog size {}, recipe declares {expected_size}",
+                        chunk.hash(),
+                        chunk.uncompressed_size()
+                    ),
+                });
+            }
+            let chunk_hash = parse_merkle_hash(chunk.hash(), "catalog chunk")?;
+            placements.insert(
+                chunk_hash,
+                ChunkPlacement {
+                    chunk_hash,
+                    xorb_hash,
+                    chunk_index: u32::try_from(index).map_err(|_| {
+                        CrabError::Internal("catalog xorb has too many chunks".to_owned())
+                    })?,
+                    uncompressed_size: chunk.uncompressed_size(),
+                },
+            );
+            selected = true;
+        }
+        if selected {
+            entries.insert(xorb_hash, entry.clone());
+        }
+    }
+    Ok(())
 }
 
 async fn publish_built_xorb(
@@ -1423,6 +1469,150 @@ mod tests {
                 delta.shards()[shard_hash].xorb_hashes().len()
             ),
             (1024, 0, 1),
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_placements_reduce_catalog_reads_without_uploading_reused_bytes() {
+        use crab_staging::push_plan::{ExistingChunkCandidate, ExistingChunkLookup};
+        use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Hint {
+            hash: MerkleHash,
+            candidate: ExistingChunkCandidate,
+        }
+
+        #[async_trait::async_trait]
+        impl ExistingChunkLookup for Hint {
+            async fn lookup_existing_candidates(
+                &self,
+                chunks: &[(MerkleHash, u64)],
+            ) -> crab_staging::Result<Vec<Option<ExistingChunkCandidate>>> {
+                Ok(chunks
+                    .iter()
+                    .map(|(hash, _)| (*hash == self.hash).then_some(self.candidate))
+                    .collect())
+            }
+        }
+
+        let bytes = b"staged remote data";
+        let mut observations = Vec::new();
+        for position in [None, Some(0), Some(1)] {
+            let xorb = build_xorb(bytes, CompressionScheme::None);
+            let (mut catalog, _) = pointer_catalog(64, 64);
+            let entry = catalog_xorb_entry(
+                xorb.bytes.len() as u64,
+                blake3::hash(&xorb.bytes).to_hex().to_string(),
+                &xorb.placements,
+            )
+            .unwrap();
+            catalog.insert_xorb(xorb.hash.hex(), entry).unwrap();
+            catalog
+                .insert_shard(
+                    "a".repeat(64),
+                    ShardCatalogEntry::new(1, vec![xorb.hash.hex()]),
+                )
+                .unwrap();
+            catalog
+                .insert_file(
+                    "b".repeat(64),
+                    FileCatalogEntry::new(bytes.len() as u64, "a".repeat(64)),
+                )
+                .unwrap();
+            let (layout, base) = publish_catalog(catalog.encode().unwrap()).await;
+            layout
+                .store()
+                .create_strict(&layout.xorb_path(&xorb.hash), xorb.bytes.clone())
+                .await
+                .unwrap();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            let store = layout
+                .store()
+                .clone()
+                .with_read_request_observer(Arc::new(move |_| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }));
+            let layout = crab_storage::StoreLayout::with_global_prefix(
+                store,
+                layout.repo_prefix().to_owned(),
+                layout.global_prefix().to_owned(),
+            );
+            let root = tempfile::tempdir().unwrap();
+            let staging = crab_staging::StagingArea::open(root.path().to_owned())
+                .await
+                .unwrap();
+            let existing_lookup = position.map(|chunk_index| {
+                Arc::new(Hint {
+                    hash: compute_data_hash(bytes),
+                    candidate: ExistingChunkCandidate {
+                        xorb_ref: XorbRef {
+                            xorb_hash: xorb.hash,
+                            chunk_index,
+                            uncompressed_size: bytes.len() as u32,
+                        },
+                        placement_id: [1; 32],
+                        origin_proof_id: [2; 32],
+                    },
+                }) as Arc<dyn ExistingChunkLookup>
+            });
+            let staged = stage_reader_streaming(
+                &mut std::io::Cursor::new(bytes),
+                Path::new("model.bin"),
+                &staging,
+                StreamStageProgress {
+                    existing_lookup,
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            staging
+                .delegate_publication(&[(&staged.batch_id, Path::new("model.bin"))])
+                .unwrap();
+            staging.close().await.unwrap();
+            let staging = Arc::new(
+                StagingAreaReadOnly::open(root.path().to_owned())
+                    .await
+                    .unwrap(),
+            );
+            let pointer = Pointer {
+                file_hash: staged.file_hash,
+                size: staged.size,
+                shard_hint: None,
+            };
+            reads.store(0, Ordering::Relaxed);
+            let (delta, stats) = prepare_delta(
+                &layout,
+                &base,
+                std::slice::from_ref(&pointer),
+                Some(&staging),
+                None,
+                None,
+                1,
+                false,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            observations.push(reads.load(Ordering::Relaxed));
+            assert_eq!(stats.xorb_bytes_uploaded, 0);
+            crab_read::verify_catalog_file_recipe(
+                &layout,
+                &pointer,
+                &delta.files()[&MerkleHash::from(pointer.file_hash).hex()],
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        eprintln!("catalog provider reads, local/valid/stale position: {observations:?}");
+        assert!(
+            observations[1] < observations[0],
+            "valid staged placements should reduce provider reads; local/valid/stale: {observations:?}"
         );
     }
 
