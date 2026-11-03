@@ -1,11 +1,15 @@
-import { GitBranchPlus } from "lucide-react";
+import crabLogo from "../assets/crab.svg";
 
 export function EmptyState() {
   return (
     <div className="flex h-full w-full items-center justify-center p-10">
       <div className="max-w-md text-center">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-gx-border bg-gx-surface">
-          <GitBranchPlus size={24} className="text-gx-accent" />
+          <span
+            aria-hidden="true"
+            className="h-8 w-8 bg-gx-accent"
+            style={{ mask: `url("${crabLogo}") center / contain no-repeat` }}
+          />
         </div>
         <h1 className="mb-2 text-xl font-semibold">Crab</h1>
         <p className="text-sm text-gx-muted">

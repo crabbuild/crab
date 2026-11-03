@@ -37,6 +37,10 @@ scratch directory instead of the developer's Workspace volume.
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
 
+The desktop logo comes from `packages/web/crab.optimized.svg`. Run
+`npm run build:icons` after changing it; this requires `rsvg-convert` and uses
+macOS `iconutil` to regenerate the checked-in `.icns` file.
+
 For live renderer development, run `npm run build:agent` once, then `npm run dev`.
 This compiles the Electron entry point and starts Vite and Electron together.
 

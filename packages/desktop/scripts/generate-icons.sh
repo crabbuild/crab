@@ -1,98 +1,56 @@
 #!/usr/bin/env bash
-# Generate app icons from the SVG source for all platforms.
-# Requires: rsvg-convert (from librsvg) and iconutil (macOS built-in).
-#
-# Install rsvg-convert: brew install librsvg
-#
-# Usage: ./scripts/generate-icons.sh
-
+# Regenerate the desktop icons from packages/web/crab.optimized.svg.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-SVG="$BUILD_DIR/icon.svg"
+SOURCE_SVG="$PROJECT_DIR/../web/crab.optimized.svg"
+APP_SVG="$BUILD_DIR/icon.svg"
 
-if ! command -v rsvg-convert &>/dev/null; then
-  echo "Error: rsvg-convert not found. Install with: brew install librsvg"
+if ! command -v rsvg-convert >/dev/null; then
+  echo "error: rsvg-convert is required to regenerate desktop icons" >&2
   exit 1
 fi
 
-echo "Generating icons from $SVG..."
-
-# --- PNG icons for electron-builder ---
-# electron-builder expects icon.png (256x256 minimum) in the build dir.
-# It also uses icon.icns (macOS) and icon.ico (Windows).
-
-SIZES=(16 32 64 128 256 512 1024)
-for size in "${SIZES[@]}"; do
-  rsvg-convert -w "$size" -h "$size" "$SVG" > "$BUILD_DIR/icon-${size}.png"
-  echo "  ✓ icon-${size}.png"
-done
-
-# Default icon.png at 512x512 for electron-builder
-cp "$BUILD_DIR/icon-512.png" "$BUILD_DIR/icon.png"
-echo "  ✓ icon.png (512x512)"
-
-# --- macOS .icns ---
-ICONSET_DIR="$BUILD_DIR/icon.iconset"
-rm -rf "$ICONSET_DIR"
-mkdir -p "$ICONSET_DIR"
-
-# macOS iconset requires specific filenames
-rsvg-convert -w 16   -h 16   "$SVG" > "$ICONSET_DIR/icon_16x16.png"
-rsvg-convert -w 32   -h 32   "$SVG" > "$ICONSET_DIR/icon_16x16@2x.png"
-rsvg-convert -w 32   -h 32   "$SVG" > "$ICONSET_DIR/icon_32x32.png"
-rsvg-convert -w 64   -h 64   "$SVG" > "$ICONSET_DIR/icon_32x32@2x.png"
-rsvg-convert -w 128  -h 128  "$SVG" > "$ICONSET_DIR/icon_128x128.png"
-rsvg-convert -w 256  -h 256  "$SVG" > "$ICONSET_DIR/icon_128x128@2x.png"
-rsvg-convert -w 256  -h 256  "$SVG" > "$ICONSET_DIR/icon_256x256.png"
-rsvg-convert -w 512  -h 512  "$SVG" > "$ICONSET_DIR/icon_256x256@2x.png"
-rsvg-convert -w 512  -h 512  "$SVG" > "$ICONSET_DIR/icon_512x512.png"
-rsvg-convert -w 1024 -h 1024 "$SVG" > "$ICONSET_DIR/icon_512x512@2x.png"
-
-if command -v iconutil &>/dev/null; then
-  iconutil -c icns "$ICONSET_DIR" -o "$BUILD_DIR/icon.icns"
-  echo "  ✓ icon.icns"
-else
-  echo "  ⚠ iconutil not found (macOS only), skipping .icns"
-fi
-
-# Clean up iconset directory
-rm -rf "$ICONSET_DIR"
-
-# --- Windows .ico ---
-# electron-builder can generate .ico from .png, but if we have
-# ImageMagick available, we can create a proper multi-resolution .ico
-if command -v convert &>/dev/null; then
-  convert "$BUILD_DIR/icon-16.png" "$BUILD_DIR/icon-32.png" \
-          "$BUILD_DIR/icon-64.png" "$BUILD_DIR/icon-128.png" \
-          "$BUILD_DIR/icon-256.png" "$BUILD_DIR/icon.ico"
-  echo "  ✓ icon.ico"
-else
-  echo "  ⚠ ImageMagick not found, skipping .ico (electron-builder will generate from .png)"
-fi
-
-# --- Linux ---
-# Linux uses icon.png (already generated above)
-
-# --- Tray icon (monochrome, for menu bar) ---
-# A simplified white-on-transparent version for the system tray
-cat > "$BUILD_DIR/tray-icon.svg" << 'EOF'
-<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M6 3v12"/>
-  <path d="M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
-  <path d="M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
-  <path d="M15 6a9 9 0 0 0-9 9"/>
-  <path d="M18 15v6"/>
-  <path d="M21 18h-6"/>
+# The source uses a 400-unit viewBox; keep the existing rounded desktop tile.
+cat > "$APP_SVG" <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="228" fill="url(#background)"/>
+  <g transform="translate(80 80) scale(2.16)" fill="white">
+EOF
+sed '1d;$d' "$SOURCE_SVG" >> "$APP_SVG"
+cat >> "$APP_SVG" <<'EOF'
+  </g>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
 </svg>
 EOF
 
-# Tray icon PNGs (macOS uses @1x and @2x)
-rsvg-convert -w 22 -h 22 "$BUILD_DIR/tray-icon.svg" > "$BUILD_DIR/tray-icon.png"
-rsvg-convert -w 44 -h 44 "$BUILD_DIR/tray-icon.svg" > "$BUILD_DIR/tray-icon@2x.png"
-echo "  ✓ tray-icon.png + @2x"
+cp "$APP_SVG" "$PROJECT_DIR/public/icon.svg"
+cp "$SOURCE_SVG" "$PROJECT_DIR/src/assets/crab.svg"
+cp "$SOURCE_SVG" "$BUILD_DIR/tray-icon.svg"
+for size in 16 32 64 128 256 512 1024; do
+  rsvg-convert -w "$size" -h "$size" -o "$BUILD_DIR/icon-$size.png" "$APP_SVG"
+done
+cp "$BUILD_DIR/icon-512.png" "$BUILD_DIR/icon.png"
+rsvg-convert -w 22 -h 22 -o "$BUILD_DIR/tray-icon.png" "$SOURCE_SVG"
+rsvg-convert -w 44 -h 44 -o "$BUILD_DIR/tray-icon@2x.png" "$SOURCE_SVG"
 
-echo ""
-echo "Done! Icons generated in $BUILD_DIR/"
+if command -v iconutil >/dev/null; then
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-icons.XXXXXX")"
+  trap 'rm -r "$temp_dir"' EXIT
+  iconset="$temp_dir/icon.iconset"
+  mkdir "$iconset"
+  for size in 16 32 128 256 512; do
+    cp "$BUILD_DIR/icon-$size.png" "$iconset/icon_${size}x${size}.png"
+    cp "$BUILD_DIR/icon-$((size * 2)).png" "$iconset/icon_${size}x${size}@2x.png"
+  done
+  iconutil -c icns "$iconset" -o "$BUILD_DIR/icon.icns"
+else
+  echo "macOS icon not regenerated: iconutil is available on macOS only"
+fi
+echo "Desktop icons regenerated from $SOURCE_SVG"
