@@ -1374,7 +1374,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
             if !capture.may_have_layered_cold_clone_packs() {
                 return Ok::<_, CrabError>(None);
             }
-            let view = open_capsule_fetch_view_minimal(capture, maximum, None).await?;
+            let view = open_capsule_fetch_view_minimal(capture, maximum, true, None).await?;
             let direct = view
                 .layered_cold_clone_packs(capture.layout(), maximum)
                 .map(|packs| packs.is_some());
@@ -2835,18 +2835,24 @@ async fn open_capsule_fetch_view(
 async fn open_capsule_fetch_view_minimal(
     capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     maximum: u64,
+    cold_clone: bool,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
 ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
     if let Some(view) = cached_view {
         return Ok(view);
     }
-    capture
-        .layered_control_view(crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: maximum,
-            max_frontier_bytes: maximum,
-        })
-        .await
-        .map_err(Into::into)
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: maximum,
+        max_frontier_bytes: maximum,
+    };
+    // Cold installation needs complete member admission. Warm classic fetches
+    // share wire fetch's paged controls and expand only requested transitions.
+    if cold_clone {
+        capture.layered_control_view(limits).await
+    } else {
+        capture.tip_bound_control_view(limits).await
+    }
+    .map_err(Into::into)
 }
 
 async fn fetch_capsule_packs(
@@ -2870,7 +2876,8 @@ async fn fetch_capsule_packs(
     let haves = local_fetch_have_tips(&git_dir)?;
     let local_haves_ms = haves_started.elapsed().as_millis() as u64;
     let view_started = std::time::Instant::now();
-    let mut view = open_capsule_fetch_view_minimal(capture, maximum, cached_view).await?;
+    let mut view =
+        open_capsule_fetch_view_minimal(capture, maximum, haves.is_empty(), cached_view).await?;
     let view_open_ms = view_started.elapsed().as_millis() as u64;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement

@@ -677,10 +677,8 @@ pub fn tip_bound_transitions_cover_wants(
         return false;
     };
     selected.iter().zip(wants).all(|(name, want)| {
-        transitions
-            .get(*name)
-            .and_then(|history| transition_path_for_haves(history, *want, haves))
-            .is_some()
+        let history = transitions.get(*name).map_or(&[][..], Vec::as_slice);
+        transition_path_for_haves(history, *want, haves).is_some()
     })
 }
 
@@ -2906,6 +2904,42 @@ mod tests {
     }
 
     #[test]
+    fn already_held_tips_need_no_transition_history() {
+        let references = references();
+        let names = vec!["refs/heads/main".to_owned()];
+        let visible = tip_bound_visible_refs(&references, &names);
+        let histories = BTreeMap::new();
+        for history in [None, Some(&histories)] {
+            for have in [oid('1'), oid('9')] {
+                let request = UploadPackRequest {
+                    wants: vec![oid('1')],
+                    haves: vec![have],
+                    ..Default::default()
+                };
+                let plan = plan_from_tip_bound_transitions(&visible, history, &request, 1)
+                    .unwrap()
+                    .map(|plan| (plan.object_ids, plan.common_haves));
+                assert_eq!(
+                    (
+                        tip_bound_transitions_cover_wants(
+                            &references,
+                            &names,
+                            &histories,
+                            &request.wants,
+                            &request.haves,
+                        ),
+                        plan,
+                    ),
+                    (
+                        have == oid('1'),
+                        (have == oid('1')).then(|| (Vec::new(), vec![have])),
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tip_bound_transition_delta_folds_additions_and_removals() {
         let transitions = vec![
             CapsuleVisibilityTransition {
@@ -2933,27 +2967,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    #[test]
-    fn tip_bound_existing_tip_needs_no_transition_history() {
-        let request = UploadPackRequest {
-            wants: vec![oid('1')],
-            haves: vec![oid('1')],
-            ..Default::default()
-        };
-        let visible = HashMap::from([("refs/heads/main".to_owned(), oid('1'))]);
-        let transitions = BTreeMap::new();
-        for transitions in [None, Some(&transitions)] {
-            let plan = plan_from_tip_bound_transitions(&visible, transitions, &request, 100)
-                .unwrap()
-                .expect("an advertised tip already present needs no transfer");
-
-            assert_eq!(
-                (plan.object_ids, plan.common_haves),
-                (vec![], vec![oid('1')])
-            );
-        }
     }
 
     #[test]

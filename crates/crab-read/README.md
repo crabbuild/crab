@@ -65,13 +65,18 @@ Paged transition materialization uses the same bound and preserves input order.
 Fetch callers expand transitions only for the planner's requested visible refs;
 unrelated transaction histories stay cold. Protocol-v2 negotiation adds new
 wanted refs from the same capture and retains already loaded transitions.
-Warm protocol-v2 opening authenticates paged ref headers and pack-member counts
-without loading complete visibility, catalogs or object-placement dictionaries.
-Selected transition sets still receive complete verification before planning.
-Classic pack installation and cold-clone streaming retain their existing member
-admission. Repository-wide ref-head capture remains required by all these views.
+Warm classic and protocol-v2 fetch opening authenticate paged ref headers and
+pack-member counts without loading complete visibility, catalogs or placement
+dictionaries. Selected transition sets retain complete hash and object-set
+verification. Cold streaming and classic installation retain complete member
+admission; only maintenance retains small complete run bodies. Repository-wide
+ref-head capture remains required by all these views.
 Historical non-tip wants require complete visibility under the caller's policy;
 their ordinary wire shape does not make them advertised tips.
+An advertised tip already present in client haves needs no transition history
+to prove an empty delta. Missing history still cannot prove any different base.
+Classic follow-tags fetches use complete visibility when tags are advertised,
+matching the protocol-v2 policy, and retain annotated-tag object installation.
 This limits active work across the union of per-ref histories; full views still
 retain their admitted decoded metadata and payloads until the caller releases them.
 Captured views share immutable admission tables when cloned. Overlapping

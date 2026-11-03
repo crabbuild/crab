@@ -750,6 +750,95 @@ fn new_ref_visibility_is_self_contained() {
 }
 
 #[tokio::test]
+async fn exact_pack_lfs_absence_matches_range_discovery() {
+    let pointer = |url, size, extensions: &str| {
+        format!(
+            "version {url}\n{extensions}oid sha256:{}\nsize {size}\n",
+            "7".repeat(64)
+        )
+        .into_bytes()
+    };
+    let canonical = pointer(crab_git::lfs_pointer::LFS_VERSION_URL, 42, "");
+    let mut longest = canonical.clone();
+    longest.resize(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE - 1, b'\n');
+    let mut cutoff = longest.clone();
+    cutoff.push(b'\n');
+    let extension = format!("ext-0-compress sha256:{}\n", "8".repeat(64));
+    let cases = [
+        ("ordinary", b"ordinary bytes\n".to_vec(), true),
+        ("empty", Vec::new(), true),
+        ("canonical", canonical, false),
+        (
+            "legacy-media",
+            pointer("http://git-media.io/v/2", 42, ""),
+            false,
+        ),
+        (
+            "legacy-hawser",
+            pointer("https://hawser.github.com/spec/v1", 42, ""),
+            false,
+        ),
+        (
+            "extension",
+            pointer(crab_git::lfs_pointer::LFS_VERSION_URL, 42, &extension),
+            false,
+        ),
+        ("largest-discoverable", longest, false),
+        ("discovery-size-cutoff", cutoff, true),
+        (
+            "empty-lfs",
+            pointer(crab_git::lfs_pointer::LFS_VERSION_URL, 0, ""),
+            true,
+        ),
+    ];
+    for (label, body, empty) in cases {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let old = commit(source.path(), "base");
+        std::fs::write(source.path().join("candidate"), body).unwrap();
+        git(source.path(), &["add", "candidate"]);
+        let tip = commit(source.path(), label);
+        let git_dir = source.path().join(".git");
+        if label == "canonical" {
+            let original = git(source.path(), &["rev-parse", "HEAD:candidate"]);
+            let replacement = git(source.path(), &["rev-parse", "HEAD:tracked.txt"]);
+            git(source.path(), &["replace", &original, &replacement]);
+        }
+        let prepared = prepare_git_packs(
+            &git_dir,
+            &BTreeMap::from([("refs/heads/main".to_owned(), old.clone())]),
+            &[RefUpdate {
+                ref_name: "refs/heads/main".to_owned(),
+                old_sha: Some(old.clone()),
+                new_sha: tip.clone(),
+                force: false,
+            }],
+            16 * 1024 * 1024,
+            false,
+        )
+        .await
+        .unwrap();
+        let discovered = crate::lfs::discovery::collect_pointers_from_range_in(
+            &git_dir,
+            &[tip],
+            &[old],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            (prepared.lfs_delta_empty, discovered.is_empty()),
+            (empty, empty),
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
     let source = tempfile::tempdir().expect("source repository");
     git(source.path(), &["init", "--initial-branch=main"]);
@@ -779,6 +868,24 @@ async fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
     let prepared = prepare_git_packs(&git_dir, &remote_refs, &updates, 16 * 1024 * 1024, false)
         .await
         .expect("prepare incremental Git pack");
+    assert!(prepared.lfs_delta_empty);
+    let mut forced = updates.clone();
+    forced[0].force = true;
+    let mut created = updates.clone();
+    created[0].old_sha = None;
+    let multi = [updates[0].clone(), updates[0].clone()];
+    for (scope, full_graph) in [
+        (forced.as_slice(), false),
+        (created.as_slice(), false),
+        (multi.as_slice(), false),
+        (updates.as_slice(), true),
+    ] {
+        let unproven =
+            prepare_git_packs(&git_dir, &remote_refs, scope, 16 * 1024 * 1024, full_graph)
+                .await
+                .unwrap();
+        assert!(!unproven.lfs_delta_empty);
+    }
     let pack_objects = prepared
         .visibility_objects
         .as_deref()
@@ -860,6 +967,7 @@ async fn sibling_ref_objects_are_not_used_as_a_fast_forward_visibility_delta() {
         .await
         .expect("prepare incremental Git pack");
     assert!(prepared.visibility_objects.is_none());
+    assert!(!prepared.lfs_delta_empty);
 
     let edits = [crab_metadata::capsule_protocol::CapsuleRefEdit::new(
         ref_name,

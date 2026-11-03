@@ -29,6 +29,95 @@ SPEC.loader.exec_module(QUALIFICATION)
 
 
 class CapsuleKubernetesQualificationTests(unittest.TestCase):
+    @staticmethod
+    def fetch_events() -> list[dict]:
+        return [
+            {"event": "start", "sid": "fetch", "argv": ["git", "fetch", "origin"]},
+            {"event": "child_start", "sid": "fetch", "child_id": 0,
+             "argv": ["git", "index-pack", "--stdin"]},
+            {"event": "child_exit", "sid": "fetch", "child_id": 0, "code": 0},
+            {"event": "exit", "sid": "fetch", "code": 0},
+        ]
+
+    def test_fetch_pack_contract_accepts_only_native_auto_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            events = self.fetch_events() + [
+                {"event": "start", "sid": "fetch/auto",
+                 "argv": ["git", "maintenance", "run", "--auto", "--detach"]},
+                {"event": "child_start", "sid": "fetch/auto", "child_id": 0,
+                 "argv": ["git", "repack", "-d", "--geometric=2"]},
+                {"event": "child_exit", "sid": "fetch/auto", "child_id": 0, "code": 0},
+                {"event": "atexit", "sid": "fetch/auto", "t_abs": 2.0, "code": 0},
+            ]
+            trace.write_text('\n'.join(map(json.dumps, events)))
+            contract = QUALIFICATION.git_fetch_pack_contract(trace)
+            self.assertEqual(contract, {
+                "received_pack_streams": 1,
+                "native_repack_events": [["git", "repack", "-d", "--geometric=2"]],
+                "native_maintenance_complete": True,
+                "native_maintenance_ms": [2000.0],
+            })
+
+    def test_fetch_pack_contract_rejects_unproven_or_multiple_transfers(self) -> None:
+        cases = [
+            ("missing", [], "expected one received pack stream"),
+            ("two", self.fetch_events() + [
+                {"event": "child_start", "sid": "fetch", "child_id": 1,
+                 "argv": ["git", "unpack-objects"]},
+            ], "expected one received pack stream"),
+            ("unfinished", self.fetch_events()[:2], "pack receiver did not finish"),
+            ("failed", [dict(e, code=1) if e["event"] == "child_exit" else e
+                        for e in self.fetch_events()], "pack receiver did not finish"),
+            ("foreign", [dict(e, sid="other") if e["event"].startswith("child_") else e
+                         for e in self.fetch_events()], "transport provenance is incomplete"),
+            ("fetch-failed", [dict(e, code=1) if e["event"] == "exit" else e
+                              for e in self.fetch_events()], "transport provenance is incomplete"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            for name, events, message in cases:
+                with self.subTest(name=name):
+                    trace.write_text('\n'.join(map(json.dumps, events)))
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        QUALIFICATION.git_fetch_pack_contract(trace)
+
+    def test_fetch_pack_contract_rejects_helper_and_manual_repacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            for sid, command, flags in [
+                ("fetch/auto", "maintenance", []),
+                ("fetch/helper/auto", "maintenance", ["--auto"]),
+                ("fetch/helper", "remote-crab", ["--auto"]),
+            ]:
+                with self.subTest(sid=sid, flags=flags):
+                    events = self.fetch_events() + [
+                        {"event": "start", "sid": sid,
+                         "argv": ["git", command, "run", *flags]},
+                        {"event": "child_start", "sid": sid, "child_id": 0,
+                         "argv": ["git", "repack", "-d"]},
+                    ]
+                    trace.write_text('\n'.join(map(json.dumps, events)))
+                    with self.assertRaisesRegex(RuntimeError, "outside native automatic maintenance"):
+                        QUALIFICATION.git_fetch_pack_contract(trace)
+
+    def test_fetch_pack_contract_retains_background_completion_and_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            events = self.fetch_events() + [
+                {"event": "start", "sid": "fetch/auto",
+                 "argv": ["git", "gc", "--auto"]},
+                {"event": "atexit", "sid": "fetch/auto", "t_abs": 0.001, "code": 0},
+                {"event": "child_start", "sid": "fetch/auto", "child_id": 0,
+                 "argv": ["git", "repack", "-d"]},
+            ]
+            trace.write_text('\n'.join(map(json.dumps, events)))
+            self.assertFalse(QUALIFICATION.git_fetch_pack_contract(trace)["native_maintenance_complete"])
+            events.append({"event": "child_exit", "sid": "fetch/auto", "child_id": 0, "code": 1})
+            trace.write_text('\n'.join(map(json.dumps, events)))
+            with self.assertRaisesRegex(RuntimeError, "native automatic maintenance failed"):
+                QUALIFICATION.git_fetch_pack_contract(trace)
+
     def test_staged_binary_survives_loss_of_candidate_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -209,7 +298,7 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
                 self.assertIn("crab::git::remote_helper=info", options["extra_env"]["CRAB_LOG"])
                 trace = Path(options["extra_env"]["GIT_TRACE2_EVENT"])
                 trace.write_text('\n'.join(json.dumps(event) for event in [
-                    {"event": "start", "sid": "fetch"},
+                    {"event": "start", "sid": "fetch", "argv": ["git", "fetch", "origin"]},
                     {"event": "child_start", "sid": "fetch", "child_id": 0,
                      "argv": ["git", "unpack-objects"]},
                     {"event": "child_exit", "sid": "fetch", "child_id": 0,
@@ -616,6 +705,9 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
             qualification.args = argparse.Namespace(commits=2, interval=2)
             qualification.trace2_root = root / "trace2"
             qualification.trace2_root.mkdir()
+            (qualification.trace2_root / "incremental-fetch-00002.jsonl").write_text(
+                '\n'.join(map(json.dumps, self.fetch_events()))
+            )
             qualification.save = Mock()
             qualification.report = {
                 "provenance": {"crab_sha256": binary_hash},
@@ -684,7 +776,6 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
 
         self.assertEqual(after, {"old", "new"})
         self.assertEqual(QUALIFICATION.new_pack_ids(before, after), ["new"])
-        self.assertEqual(QUALIFICATION.require_at_most_one_new_pack(500, before, after), ["new"])
 
     def test_repack_parser_distinguishes_rewrite_from_noop_auto_check(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -700,14 +791,6 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
             )
 
             self.assertEqual(QUALIFICATION.git_repack_events(trace), [commands[-1]])
-
-    def test_fetch_pack_gate_rejects_multiple_new_packs(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "installed 2 local packs"):
-            QUALIFICATION.require_at_most_one_new_pack(500, set(), {"one", "two"})
-
-    def test_fetch_pack_gate_rejects_replacing_an_installed_pack(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "removed 1 installed local packs"):
-            QUALIFICATION.require_at_most_one_new_pack(500, {"old"}, {"replacement"})
 
     def test_repack_summary_reads_the_structured_payload(self) -> None:
         summary = {

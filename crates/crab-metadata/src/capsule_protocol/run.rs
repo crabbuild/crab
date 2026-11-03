@@ -667,6 +667,7 @@ impl CapsuleRunControl {
     pub(crate) fn materialize_capsules_with_paged_visibility(
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        read_ahead: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<Vec<CapsuleControl>> {
         // One immutable run owns this bounded cache. All of its logical edits
         // share co-located proof blocks; each decoded page still authenticates
@@ -681,7 +682,14 @@ impl CapsuleRunControl {
                     cache.clone(),
                 )
                 .map(|reader| {
-                    reader.map(|reader| ControlVisibility::Paged(std::sync::Arc::new(reader)))
+                    reader.map(|mut reader| {
+                        // A publication leaf has one owner. Compacted members keep
+                        // their shared pool and selected-member read boundaries.
+                        if let Some(headroom) = read_ahead.filter(|_| self.level == 0) {
+                            reader.coalesce_small_edit(headroom);
+                        }
+                        ControlVisibility::Paged(std::sync::Arc::new(reader))
+                    })
                 })
             },
             |_| Ok(None),

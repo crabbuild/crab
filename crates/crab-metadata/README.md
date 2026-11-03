@@ -105,9 +105,18 @@ Current-epoch activation and checkpoint-chain errors still fail closed.
 `capture_ref_heads` and `resolve_referenced_activations` own that stable capture
 for metadata and read orchestration. Transactionless heads must match the
 compacted root; selected-ref capture reuses the same activation validator while
-keeping its targeted ETag probes. Current-state catalog lookups reuse that owner together with the shared
+keeping its targeted ETag probes. Contended full-inventory retries use capped
+Tokio timer backoff, retaining the same attempt bound and complete stability checks.
+Selected-ref reads probe only their target keys, so unrelated branch updates do
+not widen that retry window. Current-state catalog lookups reuse that owner together with the shared
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
+
+Catalog capture fully authenticates individual publication leaves up to 32 KiB
+in one source read. The existing aggregate control-byte bound admits the extra
+body bytes before I/O. Paged visibility readers reuse those verified bytes and
+still validate every selected page and ref transition. Compacted histories keep
+selected-member paging. This changes neither catalog precedence nor GC authority.
 
 Run controls retain each capsule's own pack directory in capsule-relative
 coordinates. The run directory keeps physical transport coordinates separately.
@@ -269,6 +278,14 @@ Protected receive selects from separately authorized source/filtered captures.
 Captured revision, remote-mount and current-state hydration use the shared paged
 lookup. Control capture and selected closure queries are measured separately;
 complete opening and history-amplification qualification remain required.
+
+Current-state catalog capture coalesces small single-ref leaf visibility bodies
+within the remaining control-intake byte budget. Reads exclude Git/file payloads
+and duplicate descriptor bytes; each selected page still authenticates against
+its captured roots. Compacted histories and Git views retain selected paging.
+Selected leaf scalar proofs load in bounded concurrent waves before ordered
+reconciliation, avoiding one serial network round trip per leaf. Compacted
+members retain demand paging rather than speculative cache fills.
 
 Ref deletion removes its live visibility closure even when the capsule has no
 visibility payload. Retained dictionary objects cannot supply a new ref's base;
@@ -569,6 +586,10 @@ no automatic migration is provided.
 
 `load_capsule_run_git_control` preserves
 complete reference controls and verifies counts against the pack directory.
+Publication-leaf control suffixes up to 64 KiB share one read with their small
+admission region. Admission trees remain undecoded; larger regions and compacted
+histories keep paged opening. Git views keep leaf visibility sections cold until
+selected transitions or membership are requested.
 Its paged admission reader returns authenticated misses and preserves request
 order and duplicates; cached and fetched pages share one encoded-work budget.
 
@@ -601,6 +622,13 @@ Git control capture retains explicit
 paged evidence; `visibility_delta` returns an error for unloaded data rather
 than treating it as absence.
 
+Bulk materialization shares encoded run proof blocks with point readers. Each
+section still passes its complete hash, descriptor and canonical-delta checks.
+Large ranges reuse a completely warm span; a cold large range uses one transfer
+without filling or evicting the point cache.
+Read-ahead stays inside the caller's byte ceiling; tight ceilings select exact
+ranges, with the same planning rule for cold and warm caches.
+
 Scalar header reads and actual-set inspection share
 the pager's encoded-work admission. Complete materialization verifies the captured
 section hash and descriptor, checks canonical delta bytes, and retains immutable
@@ -619,7 +647,7 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 
 | Feature | Adds |
 | --- | --- |
-| `storage` | Object-store manifest, segmented-index, and prefilter helpers |
+| `storage` | Object-store manifest, segmented-index, prefilter helpers and timed ref capture |
 | `file-index-reader` | Read-only file-index lookup sessions |
 | `local-index` | SQLite-backed local chunk index |
 | `remote-index` | SlateDB remote index readers and writers |

@@ -75,6 +75,22 @@ It retains the generated workspace and streaming identity instead of installing,
 copying and hashing those bodies again. Native thin-pack repair fetches bases
 outside each source pack; in-pack REF bases remain compressed.
 
+File and thin-pack installation accept a caller-supplied indexer executor when
+the caller needs process cancellation or a deadline. The executor must run the
+prepared command, consume the supplied stdin and reap its child before returning.
+The shared installer retains size, checksum, object-validation flags and sidecar
+checks. Temporary reverse-index cleanup also covers cancellation after Git starts
+writing an optional sidecar. The existing synchronous entry points retain native
+Git execution.
+
+Private generated packs can carry `VerifiedPackIdentity` into supervised indexing.
+The caller retains an immutable source through the worker; shared installation
+reuses its verified checksums and hard-links the body when supported. Native
+object validation and sidecar checks still run. Borrowed sources retain copying
+and checksum verification, so later caller writes cannot mutate installed packs.
+Thin-pack repair canonicalizes the owning object directory into a native-Git
+compatible Windows path before supplying external bases.
+
 Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
 detection. Their IDs include the standard Git loose-object header; a detected
 collision returns the existing Gitoxide collision error and standard digest.

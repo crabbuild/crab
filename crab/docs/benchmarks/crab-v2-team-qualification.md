@@ -1,7 +1,16 @@
 # Crab v2 team and large-file qualification
 
-Status: **10,000-commit cold readback and large-file byte checks pass; team-scale
-performance is not qualified**. The complete object-store audit found three
+Status: **Combined revision under qualification; historical failures retained**.
+Latest combined-build qualification and gate status are tracked in
+[PR #640](https://github.com/crabbuild/crab/pull/640).
+The target branch's `84812774d5a` fetch changes are integrated with the metadata
+and indexing fixes. Warm classic and wire fetches use paged controls and the
+same scalar binding validator; cold installation retains complete member
+admission. A transfer-bound regression fails on the old classic route and passes
+on the corrected route, including the complete selected object set. All 221
+affected read, classic-helper and wire tests pass, as do 85 qualification/report
+tests. Fresh combined-build runtime and capacity proof remains required.
+The original object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
 were independently read back with their original holders preserved.
@@ -42,17 +51,227 @@ survival checks. Both historical payload versions, checkpoint and full no-repair
 audits pass. Real warm fetches under requested protocol versions 0 and 2 pass
 exact-tip/Git integrity checks and a separate cold-cache historical Xet hash
 check, but each fetch still reads 1,044,186,371 bytes in 6,311 requests. Its
-requested-ref transition follow-up remains under validation.
+requested-ref transition follow-up is recorded below.
 Evidence: `frontier-fetch-live-proof.json`, `frontier-fetch-live-read-probe.json`.
+
+The `9aaa4f05821f` private install passes actual warm fetch integrity and cold
+historical Xet bytes. Real Git protocol-v2 now also fetches the configured
+reachable historical want rejected by `a4cd9ae8cf4e`, with exact ordinary-file
+SHA-256 and strict fsck. Warm fetches still consume 6,591 requests and
+1,063,056,488 response bytes each. Tracing selects 12 objects through the
+transition planner, but view setup takes 38.449 seconds before planning.
+The scoped transition regression covered the Git metadata view; fetch setup
+still eagerly loaded unrelated visibility and up to 128 MiB of run bodies.
+Extending that regression to fetch mode reproduces the missing lazy boundary.
+The follow-up uses authenticated paged fetch controls, validates every scalar
+ref binding and leaves complete visibility reads to requested transitions.
+Its live performance remains unqualified until a new private build is measured.
+Evidence: `selected-transition-live-proof.json`,
+`selected-transition-traced-read.json`, `fetch-view-lazy-before.log`.
 
 The same runtime rejects the first mixed push containing a 2 GiB ordinary Git
 blob: its 2,148,138,761-byte pack exceeds Crab's default 2,147,483,648-byte
 per-pack admission limit. No ref publishes. Separate staging verification,
 unchanged staging inventory and a full remote audit without repair pass; this
 does not exercise Xet/LFS publication. The original lifecycle remains failed.
-A separate profile with 256 MiB ordinary Git and 2 GiB each Xet/LFS is running;
-no product limit changes. Evidence: `mixed-history-2g-frontier-fetch/report.json`,
-`frontier-raw-limit-rejection-audit.json`, `frontier-normalized-large-controller.json`.
+A separate profile with 256 MiB ordinary Git and 2 GiB each Xet/LFS passes all
+23 lifecycle checks, including partial edits, rename/delete/merge, native/Git
+push, checkpoint, independent cold historical hashes and full no-repair audit.
+No product limit changes. The subsequent 1,000-commit Kubernetes replay fails
+at bootstrap's 300-second pack-install guard, before any incremental pushes.
+Its trace shows Git still indexing after timeout removes its temporary output
+directory. A separate diagnostic regenerates the same 1,620,211-object seed
+and indexes its 1,235,932,295-byte pack with object validation in 167.587 seconds.
+The stack sample shows decompression and existing-object comparison; shared
+host load differs, and the original qualification remains failed.
+Evidence: `mixed-history-2g-frontier-fetch/report.json`,
+`frontier-raw-limit-rejection-audit.json`, `frontier-normalized-large-controller.json`,
+`frontier-normalized-large-proof.json`, `frontier-normalized-k8s-controller.json`,
+`frontier-k8s-index-timeout-diagnosis.json`, `k8s-index-isolation.json`.
+
+The indexing-lifetime follow-up retains the 300-second deadline and object
+validation. File-backed CLI installers cancel and reap the indexing process tree
+and join its pipes before returning a deadline error. Generated push evidence
+also remains owned by the worker when its awaiting operation is dropped, so
+cleanup cannot remove a live indexer's output directory. Dedicated deadline,
+drop and real full/thin-pack byte checks cover that boundary. Shared Git,
+CLI pack, helper, wire, push and LFS regression groups pass, as do shared Git
+Clippy and architecture checks. Final runtime qualification remains pending.
+The original failed Kubernetes reports remain failed.
+Evidence: `owned-pack-indexer-checks.json`.
+
+The `d47e1cb8c06` private install passes fresh mixed eight/64-client runs
+(120/848 checks), 22 retention checks, real warm/historical Git fetching and
+historical Xet bytes. Kubernetes bootstrap still exceeds the unchanged 300-second
+installation deadline; no incremental pushes run. Generation takes 142.799
+seconds, and installation spends about 33 seconds before starting Git. The owned
+indexer exits before scratch cleanup; the earlier missing-output error is absent.
+The next candidate reuses generation's verified SHA-1/BLAKE3 and private source
+instead of rereading and copying it, retaining native object validation. Its final
+runtime qualification is pending; the failed replay remains failed.
+Evidence: `owned-pack-indexer-verification-controller.json`,
+`owned-pack-indexer-k8s-controller.json`, `private-pack-reuse-before.json`.
+
+Windows protocol CI on the same published head passes deadline and abandonment
+cleanup but fails external thin-base reconstruction with an unresolved delta.
+The candidate uses the existing workspace path-normalization dependency at the
+native Git object-directory boundary. Exact reconstructed-byte assertions remain;
+the fixture also checks the stored base OID. The subsequent `562dd108f78` Windows
+job passes all three pack-install contracts on Git 2.56.0.windows.3, including
+full/external-thin bytes, deadline drain and abandoned workspace ownership.
+Evidence: `windows-owned-indexer-failure.json`, `windows-private-pack-reuse-proof.json`.
+
+The `562dd108f78` private install passes fresh eight/64-client mixed runs
+(120/848 checks), 22 retention checks and real warm/historical Git/Xet reads.
+Kubernetes seed publication now completes: native `index-pack --fsck-objects`
+exits successfully in 217.609 seconds within the unchanged 300-second guard.
+All 1,000 incremental pushes, independent cold/warm tips and sampled blob bytes,
+strict Git checks and the full remote Crab audit pass. Performance qualification
+fails: mean push latency is 1,327.44 ms, p95 is 3,398 ms, and 500-commit fetches
+take 56,294 and 15,926 ms. The request-count gate passes at 7.304 requests/push.
+The original failed reports and unchanged performance gates remain in force.
+Independent cold readback also passes all 22 checks over the existing large
+ordinary-Git and three historical 2 GiB Xet/LFS versions.
+Evidence: `private-pack-reuse-verification-controller.json`,
+`private-pack-reuse-k8s-final-evidence.json`,
+`private-pack-reuse-large-cold-controller.json`.
+
+The `11ce43ed2c1` Xet candidate uses staged xorb identities only as discovery hints.
+Current captured catalog descriptors supply actual chunk positions and lengths;
+reverse-chunk discovery still resolves every remaining outgoing hash. File
+conflict checks, foreign-origin revalidation, visibility reconciliation and GC
+admission remain in place. Its real ingestion/preparation/reconstruction
+regression fails before the change with equal provider reads for local, valid
+and stale-position staging hints. Afterward, that controlled fixture uses nine
+reads without a hint and seven with valid or stale-position hints; every case
+uploads no reused payload and reconstructs exactly. All 274 affected Xet, push,
+helper and capsule tests pass, as do CI Clippy, architecture and formatting checks.
+Its private install passes paired fresh RustFS checks with the same 200 MiB
+payload and 64 KiB edit on an independent branch. The edited Git push reads
+28 capsule ranges instead of 37: total requests fall from 95 to 86 and response
+bytes from 998,632 to 712,336. All other request classes match. It adopts 3,253
+authenticated hinted chunks and uploads 362,818 bytes. Both sides reconstruct
+exact bytes after source-ref deletion and again after repack/repository GC, then
+pass full audits without repair (18 baseline checks, 19 candidate checks).
+Sequential shared-host timings do not establish capacity. Complete ref
+advertisement and catalog capture still scale with repository state.
+Evidence: `staged-catalog-placement-before.json`,
+`staged-catalog-placement-final-checks.json`, `staged-catalog-placement-evidence-map.json`,
+`staged-catalog-200m-paired-proof.json`.
+
+Current-Git protocol CI exposes a separate cold-clone failure: Git deliberately
+leaves `HEAD` pointing at an invalid temporary ref while the helper runs, but
+newer `fsck` also verifies that unfinished ref database. The real-ODB regression
+passes on Apple Git 2.50.1 and reproduces the CI failure on privately built native
+Git 2.56.0. The candidate retains native object connectivity checks in an isolated
+ref database over the actual installed objects, with supervised child lifetime.
+All 15 connectivity tests now pass on native Git 2.56.0. The new scan and clone
+changes pass all 331 affected tests plus Clippy, architecture and formatting
+checks. The `e1c9da0edde` private install passes the actual native Git 2.56
+full/partial-clone lifecycle (92 checks). Its full CI passes all nine jobs and
+protocol qualification passes all 11 jobs, including current Git, Windows and
+macOS. Sustained team performance remains pending at that revision.
+Evidence: `clone-refdb-connectivity-native256-before.json`,
+`clone-refdb-connectivity-evidence-map.json`, `clone-refdb-lfs-final-checks.json`.
+
+Kubernetes traces also identify a duplicate LFS history walk on ordinary pushes.
+The candidate inventories eligible LFS blobs during existing verified pack
+inspection. Only an exact validated ref delta with no nonempty LFS pointer can
+skip that walk; positive and unproven ranges retain path discovery, lock checks
+and payload publication. It uses the same classifier and size cutoff as LFS
+discovery, including legacy versions and extensions. Its real-pack/classifier
+matrix and conservative scope guards pass. A live baseline passes 20 checks:
+missing LFS bytes reject publication without changing refs, positive bytes
+publish, and a cold independent consumer verifies exact ordinary/LFS bytes.
+Trace2 observes one LFS walk per ordinary native push and two per ordinary Git
+push (managed hook plus helper). The `e1c9da0edde` candidate passes the same
+20 live checks with zero ordinary native walks and one Git managed-hook walk.
+Positive and missing-payload paths still discover LFS objects; missing bytes
+preserve remote refs. Cold exact ordinary/LFS bytes and the no-repair audit pass.
+Sustained performance measurements remain pending.
+Evidence: `exact-empty-lfs-delta-evidence-map.json`,
+`exact-delta-lfs-baseline-live-controller.json`.
+
+The next metadata candidate reproduces and reduces repeated control reads.
+One 64-ref capture uses 128 reads instead of 320 for small publication leaves,
+and 256 for leaves containing a 64 KiB opaque payload. These provider-read
+counters exclude listing and write operations; live meters retain every HTTP
+operation. The latter fixture also
+limits fetched bytes to keep those payloads cold. Small leaf suffixes reuse
+prefetched admission pages without decoding OID tables; compacted histories
+retain their original paged opening. Complete small-source reads validate the
+source hash and share the same footer/page decoder. Tight query budgets, ref
+reconciliation, catalog precedence and GC authority remain in place.
+
+Pooled bulk visibility materialization also reuses point-proof blocks: a
+32-control regression falls from 32 cold/warm GETs to one/zero, while cached
+corruption still fails the complete section hash/descriptor/canonical checks.
+Git views retain selected-transition reads rather than prefetching whole leaf
+visibility sections. At the time of those counter checks,
+broader caller checks, the final private install and live performance qualification
+were pending. These counters do not establish team capacity.
+Evidence: `pooled-visibility-before.json`,
+`small-leaf-catalog-before.json`, `metadata-range-coalescing-before.json`,
+`metadata-range-canonical-final.log`.
+
+The later isolated Linux 64-developer comparison rejects that whole-leaf policy:
+capsule GETs decrease 56.47%, but capsule response bodies increase 13.79%.
+The candidate also rejects one of 640 pushes after exhausting eight immediate
+stable-inventory attempts during concurrent publication. The original failed
+report remains evidence; neither observation qualifies the 1,000-developer run.
+
+The follow-up replaces complete leaf reads with metadata-only visibility-body
+read-ahead. A 64-ref capture uses 192 reads for both small and payload-bearing
+leaves; unrelated payload size no longer increases control traffic beyond the
+small authenticated descriptor-size difference. Remaining aggregate byte
+headroom is reserved before read-ahead, while compacted runs and Git views keep
+selected paging. Stable-inventory retries retain eight attempts and both identity
+checks, with capped Tokio timer backoff so finite write bursts can settle.
+Both failures have deterministic before/after regressions. All 776 metadata
+tests pass (three pre-existing ignores); final Linux cost, latency, historical
+byte and no-repair qualification of this follow-up remains pending.
+Evidence: [failed candidate diagnostic](https://github.com/crabbuild/crab/actions/runs/41575183746),
+`metadata-bytes-before.log`, `metadata-coalesced-all.log`, `before.log`.
+
+The metadata-only follow-up also exposed serial first-proof reads after concurrent
+footer capture. With a deterministic 8 ms delay per GET, 64 leaves take 544 ms.
+Selected leaf scalar proofs now load in bounded concurrent waves before the
+unchanged ordered reconciliation; the same regression completes within 128 ms.
+All 777 metadata tests pass (three pre-existing ignores), including unchanged
+read/byte counts and compacted-run paging. This is a simulated round-trip proof,
+not a team latency result; fresh installed/Linux qualification remains required.
+Evidence: `visibility-waves-before.log`, `visibility-leaf-waves-final-all.log`.
+
+The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
+evicting a warmed point proof. Large cold spans now use one exact transfer;
+complete warm spans remain transfer-free. All 775 metadata tests pass, including
+unchanged byte ceilings and proof authentication. Combined caller, installed
+runtime and team qualification remain required for this follow-up.
+Evidence: `cold-bulk-range-before.json`, `cold-bulk-range-after.json`.
+
+Git 2.56 qualification permits the client's native automatic maintenance while
+retaining the 10-second fetch limit and one received pack stream. Trace2 binds
+each allowed repack to a direct native auto-maintenance child of the fetch;
+helper/manual repacks, multiple or unfinished receivers, maintenance failures
+and unfinished background work still fail. Physical pack inventory changes
+remain visible in the report. Earlier no-repack failures retain their original
+verdicts; the revised policy requires a fresh complete replay.
+
+Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
+primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
+replica tip lacks transition history, and a follow-tags fetch omits a missing
+annotated tag. Four later LFS tests acquire the shared mutex poisoned by those
+panics. The private `43dc00d82d8` build was stopped before live verification.
+The follow-up preserves empty advertised-tip deltas, routes follow-tags with
+advertised tags through complete visibility and retains warm connectivity
+markers. Broader tests and a new private install remain required.
+The same parent's gateway soak verifies all 111,459 acknowledged writes and
+their exact listing, but fails its unchanged performance gate: terminal p95
+ratio 1.632235 exceeds 1.5, and throughput ratio 0.781116 is below 0.8.
+Retained diagnostics show increasing checkpoint capture and visibility work;
+they do not yet establish its cause. Neither CI failure is waived.
+Evidence: `a4-parent-ci-failures.json`, `parent-ci-helper-reproduction.json`,
+`fetch-view-lazy-build-stop.json`, `gateway-a4-soak-diagnostic.json`.
 
 Current root-5/checkpoint-9 runtime `4c01b9127c90` passes fresh eight-client
 and 64-client mixed Git/Xet/LFS runs: 120 and 848 checks, 32 and 256 commits,
@@ -60,7 +279,9 @@ explicit checkpoint, both historical payload versions and full no-repair
 audits. A separate source-deletion/repack/repository-GC survival control passes
 22 checks. These receipts do not reuse the older checkpoint-10 namespaces.
 
-Its 1,000-developer/eight-commits-each campaign remains incomplete. The first
+Its 1,000-developer/eight-commits-each campaign now passes all 13,020 checks,
+including independent cold Git history, both historical Xet/LFS payload versions
+for every client and a full final audit without repair. The first
 three 1,000-push batches acknowledge every push: initial mixed native pushes
 take 1,922.175 seconds and 5,022,602 requests; code-only Git pushes take 772.529
 seconds and 2,027,716 requests; code-only native pushes take 133.877 seconds
@@ -70,6 +291,14 @@ but downloads 1,984,426,092 bytes in 9,784 requests. After a reporting-argument
 failure, its separately sealed continuation verifies strict Git fsck and exact
 cold 1 MiB Xet bytes; hydration alone takes 18.051 seconds and 14,670 requests.
 The original failed wrapper is retained. These costs remain too high.
+All eight batches have since acknowledged 8,000 pushes with sixteen parallel
+workers. The mixed Git update batch takes 15,030.170 seconds, with service p95
+364.178 seconds. This closes that pinned campaign's integrity audit, with the
+failed performance observations retained. Sixteen workers and drained batches
+do not establish a 1,000-developer working-day capacity result, or qualify a
+later combined build.
+Evidence: `paged-capture-synced-team-8000-publications.json`,
+`paged-capture-synced-team-8000-complete-integrity.json`.
 Evidence: `paged-capture-synced-live-proof.json`,
 `paged-capture-synced-team-partial-2-batches.json` (three completed batches),
 and `paged-capture-synced-concurrent-read-continuation.json`.
