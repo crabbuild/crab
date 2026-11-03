@@ -57,7 +57,8 @@ if (desktop.version !== version || lock.version !== version || lock.packages['']
 }
 NODE
 
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+IFS='.' read -r MAJOR MINOR PATCH <<< "${CURRENT%%-*}"
+PRERELEASE=""
 
 case "${1:-}" in
     patch)
@@ -77,11 +78,12 @@ case "${1:-}" in
             echo "usage: $0 set <version>" >&2
             exit 1
         fi
-        if [[ ! "$2" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "error: version must be stable SemVer such as 1.2.3" >&2
+        if [[ ! "$2" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "error: version must be SemVer such as 1.2.3 or 2.0.0-alpha.1" >&2
             exit 1
         fi
-        IFS='.' read -r MAJOR MINOR PATCH <<< "$2"
+        IFS='.' read -r MAJOR MINOR PATCH <<< "${2%%-*}"
+        if [[ "$2" == *-* ]]; then PRERELEASE="-${2#*-}"; fi
         ;;
     *)
         echo "usage: $0 {patch|minor|major|set <version>}" >&2
@@ -90,7 +92,7 @@ case "${1:-}" in
         ;;
 esac
 
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}${PRERELEASE}"
 
 # Replace product versions together and let Cargo update the workspace lockfile.
 backup_dir="$(mktemp -d)"

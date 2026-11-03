@@ -61,10 +61,12 @@ build. The PTY daemon and its native dependencies ship together outside ASAR.
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
 unpacked application from the same build. The Crab release workflow calls it
-again for the tagged source, requiring signed and notarized macOS builds and a
-signed Windows installer. Packaging commands never publish on their own.
+again for the tagged source. Alpha builds are unsigned downloads; later release
+channels require signed and notarized macOS builds and a signed Windows
+installer. `scripts/package.mjs` selects the matching update channel for all
+packaging commands. Publication runs only through the release workflow.
 
-Configure these repository Actions secrets before creating a Crab release:
+Configure these repository Actions secrets before creating a signed Crab release:
 
 - `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`: Developer ID Application signing
   certificate (base64-encoded PKCS#12 or an electron-builder supported link)
@@ -74,9 +76,11 @@ Configure these repository Actions secrets before creating a Crab release:
 - `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`: Windows code-signing certificate
   (base64-encoded PKCS#12 or an electron-builder supported link) and its password.
 
-All releases must use the same macOS signing identity and Windows publisher
+Signed releases must use the same macOS signing identity and Windows publisher
 identity as installed builds so their platform updaters accept the replacement.
-If a signing secret is missing, the release fails before publication.
+If a signing secret is missing, a signed release fails before publication.
+Alpha desktop installers do not require these secrets and must be updated
+manually on macOS.
 
 ## Desktop updates
 
@@ -91,7 +95,11 @@ Full installer builds generate `app-update.yml` inside the app and matching
 `latest*.yml` files beside the installers. The release workflow verifies their
 versions and hashes, combines both macOS architectures into `latest-mac.yml`,
 and publishes them with the desktop installers and `SHA256SUMS-desktop.txt` in
-the same release as the CLI. The version-bump script updates the desktop package,
+the same release as the CLI. Prereleases use their own `alpha*.yml`, `beta*.yml`,
+or `rc*.yml` channels;
+alpha releases do not replace stable downloads or update Homebrew. The
+version-bump script accepts versions such as `2.0.0-alpha.1` and updates the
+desktop package,
 lockfile, and agent along with the other shipped products. Public update checks
 do not require a GitHub authentication token. Existing CLI-only releases remain
 unchanged; desktop updates become available from a subsequent Crab release.

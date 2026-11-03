@@ -23,7 +23,7 @@ ARTIFACTS = (
     ("x86_64-pc-windows-msvc", "crab-windows-x86_64.zip"),
     ("x86_64-unknown-linux-gnu", "crab-linux-x86_64.tar.gz"),
 )
-TAG_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+TAG_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?")
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -36,7 +36,7 @@ def sha256(path: pathlib.Path) -> str:
 
 def generate(tag: str, dist: pathlib.Path) -> dict[str, object]:
     if TAG_PATTERN.fullmatch(tag) is None:
-        raise ValueError(f"invalid stable Crab release tag: {tag}")
+        raise ValueError(f"invalid Crab release tag: {tag}")
     artifacts: list[dict[str, object]] = []
     for target, archive_name in ARTIFACTS:
         archive = dist / archive_name
@@ -104,6 +104,18 @@ def self_test() -> None:
             assert artifact["bytes"] == archive.stat().st_size
         assert write_manifest("v1.2.3", dist).read_bytes() == first
 
+        alpha = generate("v2.0.0-alpha.1", dist)
+        assert alpha["version"] == "2.0.0-alpha.1"
+        assert alpha["tag"] == "v2.0.0-alpha.1"
+
+        for tag in ("v2.0.0.alpha-1", "v2.0.0-alpha.01"):
+            try:
+                generate(tag, dist)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"invalid SemVer tag was accepted: {tag}")
+
         (dist / ARTIFACTS[0][1]).unlink()
         try:
             generate("v1.2.3", dist)
@@ -111,13 +123,6 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("missing release archive was accepted")
-
-        try:
-            generate("v1.2.3-beta.1", dist)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("prerelease tag was accepted")
 
 
 def main() -> int:

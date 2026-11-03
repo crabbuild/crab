@@ -32,8 +32,19 @@ function fixture(t) {
   const lock = spawnSync('cargo', ['generate-lockfile', '--offline'], { cwd: root, env, encoding: 'utf8' });
   assert.equal(lock.status, 0, lock.stderr);
   const files = ['Cargo.toml', 'Cargo.lock', ...manifests.map(([dir]) => `${dir}/Cargo.toml`), 'packages/desktop/package.json', 'packages/desktop/package-lock.json'];
-  return { root, env, files, bump: (environment = env) => spawnSync('bash', ['crab/scripts/release/bump-version.sh', 'patch'], { cwd: root, env: environment, encoding: 'utf8' }) };
+  return { root, env, files, bump: (environment = env, args = ['patch']) => spawnSync('bash', ['crab/scripts/release/bump-version.sh', ...args], { cwd: root, env: environment, encoding: 'utf8' }) };
 }
+
+test('keeps Rust and npm versions aligned for an alpha release', { skip: process.platform === 'win32' }, (t) => {
+  const { root, env, files, bump } = fixture(t);
+  const version = '2.0.0-alpha.1';
+  const result = bump(env, ['set', version]);
+  assert.equal(result.status, 0, result.stderr);
+  for (const file of files.slice(2, -2)) assert.ok(readFileSync(path.join(root, file), 'utf8').includes(`version = "${version}"`));
+  const lock = JSON.parse(readFileSync(path.join(root, 'packages/desktop/package-lock.json')));
+  assert.deepEqual([lock.version, lock.packages[''].version], [version, version]);
+  for (const [, name] of manifests) assert.ok(readFileSync(path.join(root, 'Cargo.lock'), 'utf8').includes(`name = "${name}"\nversion = "${version}"`));
+});
 
 test('bumps desktop and core manifests and both lockfiles together', { skip: process.platform === 'win32' }, (t) => {
   const { root, files, bump } = fixture(t);

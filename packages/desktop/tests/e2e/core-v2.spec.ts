@@ -7,8 +7,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
-const [major, minor, patch] = desktopVersion.split(".").map(Number);
-const nextVersion = `${major}.${minor}.${patch + 1}`;
+const [coreVersion, prerelease] = desktopVersion.split("-");
+const [major, minor, patch] = coreVersion.split(".").map(Number);
+const nextVersion = prerelease
+  ? `${coreVersion}-${prerelease.split(".")[0]}.${Number(prerelease.split(".")[1]) + 1}`
+  : `${major}.${minor}.${patch + 1}`;
 
 function packagedExecutable(): string {
   const release = path.resolve(__dirname, "../../release");
