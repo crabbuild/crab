@@ -109,7 +109,12 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         .await
         .unwrap();
     let before = root.record().digest().to_owned();
-    assert_eq!(root.record().root().checkpoint().unwrap().format(), 9);
+    let pointer = root.record().root().checkpoint().unwrap();
+    let checkpoint =
+        crab_metadata::capsule_protocol::load_layered_checkpoint(&layout, pointer, u64::MAX)
+            .await
+            .unwrap();
+    assert!(checkpoint.matches_pointer(pointer).unwrap());
     let diagnosis = diagnose_capsule(&layout, root.clone(), true, &cancel)
         .await
         .unwrap();

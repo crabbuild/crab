@@ -133,7 +133,14 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    assert_eq!(oldest.checkpoint().format(), 9);
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        &layout,
+        oldest.checkpoint(),
+        u64::MAX,
+    )
+    .await
+    .unwrap();
+    assert!(checkpoint.matches_pointer(oldest.checkpoint()).unwrap());
 
     let verified = verify_history(
         &layout,
