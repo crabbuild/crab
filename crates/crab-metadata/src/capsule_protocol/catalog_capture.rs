@@ -135,8 +135,14 @@ impl Capture {
 }
 
 async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result<Capture> {
+    let started = std::time::Instant::now();
     let root = snapshot.record().root();
     let (heads, active) = capture_ref_heads(layout, root).await?;
+    tracing::debug!(
+        ref_heads = heads.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog ref heads captured"
+    );
     let visible = materialize_visible_ref_heads(root, &heads, &active)?;
     let mut intake = root
         .checkpoint()
@@ -172,6 +178,11 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     .buffer_unordered(32)
     .try_collect::<BTreeMap<_, _>>()
     .await?;
+    tracing::debug!(
+        frontier_runs = runs.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog run controls opened"
+    );
     let selected = select_ref_control_frontiers(root, &visible.frontiers, &runs)?;
     let pending = select_ref_journal_controls(root, &selected.required, &runs)?;
     // Reconciliation must check every selected new tip. Fetch those immutable
@@ -199,6 +210,10 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             Ok(())
         })
         .await?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog new tip proofs opened"
+    );
     let initial = match checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.visibility_reader(layout, MAX_CATALOG_BYTES))
@@ -219,6 +234,10 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             root.refs().keys().cloned(),
         ),
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog checkpoint visibility opened"
+    );
     let mut visibility = VisibilityReconciliation::Paged(Box::new(initial));
     let mut controls = selected.root_controls;
     for control in &controls {
@@ -245,6 +264,11 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             "materialized controls differ from the captured ref-head state",
         ));
     }
+    tracing::debug!(
+        logical_capsules = controls.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog visibility reconciled"
+    );
     let sources = runs
         .values()
         .map(|(run, _)| run.catalog_source(layout))
