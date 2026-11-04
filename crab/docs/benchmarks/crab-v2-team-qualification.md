@@ -43,15 +43,36 @@ fsck reports zero errors, repairs or repair failures. Its 8,007 commands and
 the failed latency result and original seals remain unchanged. This proves only
 the first-batch prefix, not the required 10,000-push history.
 
-The next candidate folds the pending catalog suffix after 64 capsules instead
-of 128, retaining two ordinary per-ref tiers between global passes. The existing
-real-Git lifecycle regression fails on the old policy at the new boundary while
-publication itself succeeds. The first 32-capsule tier must still avoid a global
-rewrite. Complete checkpoint validation, generation ownership, GC admission,
-protected staging and replicated-publication boundaries stay unchanged. The
-tighter bound remains a performance hypothesis until a fresh final Linux replay
-and matched request/byte comparison pass; no latency or amplification gap is
-closed by the focused regression alone.
+The `a440daf654f` scheduling experiment folds after 64 pending capsules instead
+of 128. It passes the focused lifecycle test and a fresh 640-push diagnostic,
+including historical bytes, all 43,076 raw Git objects and no-repair fsck.
+Its full 1,000-developer first batch acknowledges all 1,000 pushes but fails
+latency more sharply: p95 **13.539 seconds**, p99 17.651 seconds, maximum
+22.587 seconds and wall time 442.774 seconds. Original closed-client windows
+reconcile 568,056 requests, 6,583,931,064 response bytes and 3,531,088,633 known
+upload bytes. This reduces requests versus the preceding failed candidate but
+worsens p95; tightening checkpoint frequency alone is insufficient. These are
+candidate-only totals, with no matched savings claim.
+
+That prefix separately passes all 1,000 recorded ordinary/Xet/LFS histories,
+strict full Git fsck and all 48,004 raw Git objects compared with original
+seed/writers: 104,385,543 content bytes. No-repair fsck reports zero errors,
+repairs or repair failures. Its 8,007 commands and 209,909 verification requests
+are outside the original push windows. Original seals and failed timings remain
+unchanged; the remaining 9,000 pushes and matched control are not generated.
+
+The next candidate restores the 128-capsule interval and separates advisory
+absence discovery from remote reuse authority. Each file, chunk and xorb query
+uses authenticated catalog indexes that can establish
+absence without replaying unrelated Git visibility; the result exposes no remote
+values or visibility authority. Any hit completes the existing reconciliation
+against the same captured sources before returning reusable metadata. Concurrent
+queries share successful proof; cancellation can retry from immutable inputs.
+Probe and authorized query share one admission state. Payload,
+origin, publication, GC and complete maintenance checks remain mandatory. A
+focused regression reproduces 257 reads for 64 unrelated refs and bounds the
+advisory path to 129. Fresh final Linux runtime, full-team latency and matched
+request/byte proof remain required; this focused bound closes none of those gates.
 
 ### Retained earlier measurements
 

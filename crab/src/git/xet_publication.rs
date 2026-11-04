@@ -62,7 +62,7 @@ pub(crate) async fn prepare_delta(
     // Xet planning needs captured catalog roots, not Git pack intake or
     // physical placement inventory. Keep capture and query budgets with metadata.
     let lookup =
-        crab_metadata::capsule_protocol::load_current_pointer_catalog_lookup(layout, base).await?;
+        crab_metadata::capsule_protocol::load_current_publication_catalog(layout, base).await?;
     let pending_catalog_capsules = lookup.pending_capsule_count();
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
@@ -84,7 +84,7 @@ pub(crate) async fn prepare_delta(
         .keys()
         .map(|hash| hash.hex())
         .collect::<Vec<_>>();
-    let base_files = lookup.files(layout.store(), &file_hashes).await?;
+    let base_files = lookup.files(&file_hashes).await?;
     let unresolved = pointer_sizes
         .iter()
         .filter_map(|(hash, size)| match base_files.files().get(&hash.hex()) {
@@ -240,7 +240,7 @@ pub(crate) async fn prepare_delta(
     // chunk positions and lengths; a staged hint cannot authorize remote bytes.
     // Reusing those recipes avoids rediscovering their chunks across every run.
     if !hinted_xorbs.is_empty() {
-        let hinted = lookup.xorbs(layout.store(), &hinted_xorbs).await?;
+        let hinted = lookup.xorbs(&hinted_xorbs).await?;
         adopt_catalog_xorbs(
             &hinted,
             &mut needed_chunks,
@@ -251,7 +251,7 @@ pub(crate) async fn prepare_delta(
     let hinted_catalog_chunks = placements.len();
     if !needed_chunks.is_empty() {
         let unresolved = needed_chunks.keys().cloned().collect::<Vec<_>>();
-        let discovered = lookup.chunks(layout.store(), &unresolved).await?;
+        let discovered = lookup.chunks(&unresolved).await?;
         adopt_catalog_xorbs(
             &discovered,
             &mut needed_chunks,
@@ -645,7 +645,7 @@ pub(crate) async fn prepare_delta(
         .iter()
         .flat_map(|(_, _, _, hashes)| hashes.iter().map(|hash| hash.hex()))
         .collect::<Vec<_>>();
-    let base_xorbs = lookup.xorbs(layout.store(), &dependency_hashes).await?;
+    let base_xorbs = lookup.xorbs(&dependency_hashes).await?;
     for (hash, entry) in base_xorbs.xorbs() {
         if xorb_entries
             .get(&parse_merkle_hash(hash, "base xorb")?)

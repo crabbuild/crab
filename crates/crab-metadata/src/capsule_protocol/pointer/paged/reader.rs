@@ -98,6 +98,45 @@ impl PointerCatalogLookup {
         PageWork::new(self.maximum, 0)
     }
 
+    pub(in crate::capsule_protocol) async fn has_rows(
+        &self,
+        store: &Store,
+        kind: Kind,
+        hashes: &[String],
+        work: &mut PageWork,
+    ) -> Result<bool> {
+        let hashes = requested(hashes, work)?;
+        if hashes.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .rows(store, kind, &keys(&hashes)?, work)
+            .await?
+            .iter()
+            .any(|rows| !rows.is_empty()))
+    }
+
+    pub(in crate::capsule_protocol) async fn query_with_work(
+        &self,
+        store: &Store,
+        kind: Kind,
+        hashes: &[String],
+        work: &mut PageWork,
+    ) -> Result<PointerCatalog> {
+        match kind {
+            Kind::CatalogFiles => {
+                self.dependencies_with_work(store, hashes, &[], &[], work)
+                    .await
+            }
+            Kind::CatalogChunks => self.chunks_with_work(store, hashes, work).await,
+            Kind::CatalogXorbs => {
+                let hashes = requested(hashes, work)?;
+                self.selected_xorbs(store, &hashes, work).await
+            }
+            _ => Err(corrupt("unsupported publication catalog query")),
+        }
+    }
+
     async fn rows(
         &self,
         store: &Store,
@@ -259,14 +298,26 @@ impl PointerCatalogLookup {
         let mut work = self.work();
         // Cached bindings skip page decoding, not the aggregate input budget.
         work.admit_bytes((cached_files as u64).saturating_mul(QUERY_KEY_BYTES))?;
-        let hashes = requested(files, &mut work)?;
-        let mut shards = requested(shards, &mut work)?;
-        let xorbs = requested(xorbs, &mut work)?;
+        self.dependencies_with_work(store, files, shards, xorbs, &mut work)
+            .await
+    }
+
+    async fn dependencies_with_work(
+        &self,
+        store: &Store,
+        files: &[String],
+        shards: &[String],
+        xorbs: &[String],
+        work: &mut PageWork,
+    ) -> Result<PointerCatalog> {
+        let hashes = requested(files, work)?;
+        let mut shards = requested(shards, work)?;
+        let xorbs = requested(xorbs, work)?;
         if hashes.is_empty() && shards.is_empty() && xorbs.is_empty() {
             return Ok(PointerCatalog::new());
         }
         let rows = self
-            .rows(store, Kind::CatalogFiles, &keys(&hashes)?, &mut work)
+            .rows(store, Kind::CatalogFiles, &keys(&hashes)?, work)
             .await?;
         let mut catalog = PointerCatalog::new();
         for (hash, row) in hashes.iter().zip(rows) {
@@ -297,14 +348,14 @@ impl PointerCatalogLookup {
                 catalog.insert_file(hash.clone(), entry)?;
             }
         }
-        let selected = self.selected_shards(store, &shards, &mut work).await?;
+        let selected = self.selected_shards(store, &shards, work).await?;
         for (hash, entry) in selected.shards {
             catalog.insert_shard(hash, entry)?;
         }
         for (hash, entry) in selected.xorbs {
             catalog.insert_xorb(hash, entry)?;
         }
-        let selected = self.selected_xorbs(store, &xorbs, &mut work).await?;
+        let selected = self.selected_xorbs(store, &xorbs, work).await?;
         for (hash, entry) in selected.xorbs {
             catalog.insert_xorb(hash, entry)?;
         }
@@ -371,9 +422,18 @@ impl PointerCatalogLookup {
     /// The selected xorb's ordered recipe must agree with the reverse index.
     pub async fn chunks(&self, store: &Store, hashes: &[String]) -> Result<PointerCatalog> {
         let mut work = self.work();
-        let hashes = requested(hashes, &mut work)?;
+        self.chunks_with_work(store, hashes, &mut work).await
+    }
+
+    async fn chunks_with_work(
+        &self,
+        store: &Store,
+        hashes: &[String],
+        work: &mut PageWork,
+    ) -> Result<PointerCatalog> {
+        let hashes = requested(hashes, work)?;
         let rows = self
-            .rows(store, Kind::CatalogChunks, &keys(&hashes)?, &mut work)
+            .rows(store, Kind::CatalogChunks, &keys(&hashes)?, work)
             .await?;
         let mut selected = BTreeMap::new();
         for (hash, row) in hashes.iter().zip(rows) {
@@ -406,7 +466,7 @@ impl PointerCatalogLookup {
             }
         }
         let xorbs = selected.values().map(|(xorb, _, _)| xorb.clone()).collect();
-        let catalog = self.selected_xorbs(store, &xorbs, &mut work).await?;
+        let catalog = self.selected_xorbs(store, &xorbs, work).await?;
         for (hash, (xorb, index, size)) in selected {
             let entry = catalog
                 .xorbs

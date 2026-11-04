@@ -54,7 +54,8 @@ pub use captured_visibility::{
 };
 #[cfg(feature = "storage")]
 pub use catalog_capture::{
-    inspect_pointer_catalog_from_root, load_current_pointer_catalog_lookup,
+    PublicationCatalogLookup, inspect_pointer_catalog_from_root,
+    load_current_pointer_catalog_lookup, load_current_publication_catalog,
     load_pointer_catalog_lookup_from_root,
 };
 pub use history::{

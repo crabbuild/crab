@@ -91,6 +91,79 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn advisory_presence_checks_checkpoint_and_run_keys() {
+    for packed in [false, true] {
+        let expected = catalog(100);
+        let (layout, _, mut lookup, _) = fixture(
+            if packed {
+                PointerCatalog::new()
+            } else {
+                expected.clone()
+            },
+            64 * 1024,
+        )
+        .await;
+        if packed {
+            lookup = append_run(&layout, lookup, vec![expected]).await;
+        }
+        for (kind, hash) in [
+            (Kind::CatalogFiles, format!("{:064x}", 42)),
+            (Kind::CatalogChunks, format!("{:064x}", 2_000_042)),
+            (Kind::CatalogXorbs, format!("{:064x}", 1_000_042)),
+        ] {
+            for (hashes, present) in [
+                (vec![hash], true),
+                (vec!["f".repeat(64)], false),
+                (vec![], false),
+            ] {
+                let mut work = PageWork::new(64 * 1024, 0);
+                assert_eq!(
+                    lookup
+                        .has_rows(layout.store(), kind, &hashes, &mut work)
+                        .await
+                        .unwrap(),
+                    present
+                );
+            }
+            let mut work = PageWork::new(64 * 1024, 0);
+            assert!(
+                lookup
+                    .has_rows(layout.store(), kind, &vec!["f".repeat(64); 1000], &mut work)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn advisory_probe_and_authorized_query_share_one_admission() {
+    let (layout, _, lookup, _) = fixture(catalog(100), 64 * 1024).await;
+    let files = [format!("{:064x}", 42)];
+    let mut work = PageWork::new(64 * 1024, 0);
+    assert!(
+        lookup
+            .has_rows(layout.store(), Kind::CatalogFiles, &files, &mut work)
+            .await
+            .unwrap()
+    );
+    let admitted = work.bytes().unwrap();
+    let mut work = PageWork::new(admitted, 0);
+    assert!(
+        lookup
+            .has_rows(layout.store(), Kind::CatalogFiles, &files, &mut work)
+            .await
+            .unwrap()
+    );
+    assert!(
+        lookup
+            .query_with_work(layout.store(), Kind::CatalogFiles, &files, &mut work)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn run_catalog_misses_outside_authenticated_bounds_do_not_read_pages() {
     let (layout, _, lookup, reads) = fixture(PointerCatalog::new(), 256 * 1024).await;
     let expected = catalog(1);
@@ -348,6 +421,14 @@ async fn missing_and_corrupted_pages_are_errors_instead_of_catalog_misses() {
         assert!(
             lookup
                 .files(layout.store(), &[format!("{:064x}", 0)])
+                .await
+                .is_err()
+        );
+        let files = [format!("{:064x}", 0)];
+        let mut work = PageWork::new(1024 * 1024, 0);
+        assert!(
+            lookup
+                .has_rows(layout.store(), Kind::CatalogFiles, &files, &mut work)
                 .await
                 .is_err()
         );

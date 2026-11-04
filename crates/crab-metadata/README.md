@@ -922,7 +922,7 @@ or hold a synchronous lock through an await.
 
 The captured lookup reports its uncheckpointed logical capsule count. Direct
 CLI Xet pushes use that count to elect one foreground checkpoint owner once
-the suffix reaches 64 capsules, amortizing the pass across two ordinary
+the suffix reaches 128 capsules, amortizing the pass across four ordinary
 per-ref tiers. The owner retains GC admission
 and uses the existing exact-root/ref-position checkpoint CAS; losing election or
 failing maintenance cannot revoke the already committed ref. Protected staging
@@ -936,6 +936,24 @@ dependencies under an unchanged root remain errors. CLI planning, add-time chunk
 verification, current file lookup and binding diagnosis share this owner.
 `load_pointer_catalog_lookup_from_root` retains explicit snapshot semantics:
 checkpointed file precedence must not silently replace the supplied replay base.
+
+Publication uses `load_current_publication_catalog`. It captures the same stable
+epoch-filtered heads, fresh activations, checkpoint and authenticated run controls.
+An advisory file/chunk/xorb probe includes every
+physical member, so unselected or checkpointed rows can cause extra hits but
+cannot hide a selected value. Queries share the normal key/page admission;
+missing or corrupt required pages are errors, including under warm caches.
+Absence returns no catalog values or Git visibility authority. The CLI still
+verifies recipes, payloads and independent origin proofs before publication.
+Any hit completes ordinary visibility, ref ordering and closure reconciliation
+against the same captured sources before returning values. This includes the
+final xorb query after residual packing. Probe and authorized query share one
+admission state; warm pages do not reset it. Successful reconciliation is shared
+by concurrent queries. Cancellation/error leaves the immutable capture intact
+and permits another initialization attempt, with no partially admitted authority.
+Ordinary readers, inspection, GC and checkpoint builders
+retain complete capture. Root replacement uses the same identity/epoch checks
+and bounded recapture; this adds no persisted format or compatibility path.
 
 Checkpoint visibility shares heavily overlapping ref memberships before the
 128 MiB format ceiling becomes a concern. More than four memberships per retained
