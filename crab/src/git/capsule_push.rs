@@ -26,9 +26,9 @@ use crate::git::remote_helper::PushSpec;
 mod shared_visibility;
 
 const LOCAL_OBJECT_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
-// A global pass rereads all captured refs. Amortize it across four ordinary
-// per-ref tiers instead of repeating that work at each tier boundary.
-const CATALOG_CHECKPOINT_THRESHOLD: usize = 128;
+// Each pending capsule adds proof reads to every catalog capture. Fold after
+// two ordinary per-ref tiers without repeating the global pass at every tier.
+const CATALOG_CHECKPOINT_THRESHOLD: usize = 64;
 
 /// Publish one remote-helper push batch through per-ref capsule heads.
 ///

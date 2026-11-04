@@ -1508,7 +1508,7 @@ async fn xet_push_amortizes_global_checkpoints_and_releases_admission() {
             .is_none(),
         "one completed per-ref tier must not force a global history rewrite"
     );
-    for index in 33..128 {
+    for index in 33..64 {
         commit(source.path(), &format!("version {index}"));
         let (result, _) = run(
             &config,
@@ -1552,7 +1552,7 @@ async fn xet_push_amortizes_global_checkpoints_and_releases_admission() {
     git(source.path(), &["add", "model.bin"]);
     git(
         source.path(),
-        &["commit", "-m", "managed payload after four tiers"],
+        &["commit", "-m", "managed payload after two tiers"],
     );
     let tip = git(source.path(), &["rev-parse", "HEAD"]);
     staging.close().await.unwrap();
@@ -1574,7 +1574,8 @@ async fn xet_push_amortizes_global_checkpoints_and_releases_admission() {
     let after = crab_metadata::capsule_protocol::load_root(&layout)
         .await
         .unwrap();
-    assert!(result.all_ok() && after.record().root().checkpoint().is_some());
+    assert!(result.all_ok());
+    assert!(after.record().root().checkpoint().is_some());
     let visible = crab_read::capsule_protocol::read_visible_refs(&layout)
         .await
         .unwrap();

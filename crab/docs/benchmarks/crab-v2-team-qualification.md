@@ -18,6 +18,47 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
+Published `7b373a977c9` passes 1,834 dedicated Linux test executions, official
+private installation and a fresh 80-push smoke with historical bytes, all 40,388
+reachable raw Git objects and no-repair fsck verified. Complete metadata decoding
+uses bounded blocking workers; cancellation retains only immutable decode inputs
+and CPU admission until each worker finishes. Native formats use version 1;
+the Crab product remains `2.0.0-alpha.1`.
+
+Its fresh 1,000-developer first batch acknowledges all 1,000 pushes without
+rejection, but p95 is **10.522 seconds**, failing the unchanged ten-second gate.
+The slowest command takes 49.370 seconds. Sixteen workers average 15.907 active
+commands. Independent audits verify the original timings, sealed acknowledgements
+and 1,001 refs. The controller stops before batch two; the remaining 9,000 pushes
+and matched control are not generated. Original push windows contain 892,415
+requests, 7,523,539,059 response bytes and 3,488,683,043 known upload bytes.
+Capsule GETs account for 619,354 requests and 4,444,994,833 response bytes.
+These are candidate totals, not matched savings.
+
+A separate cold audit verifies all 1,000 recorded ordinary/Xet/LFS payload
+histories, strict full Git fsck and all 48,004 raw Git objects against original
+seed/writer bytes: 104,385,547 content bytes, including 11,001 commits. No-repair
+fsck reports zero errors, repairs or repair failures. Its 8,007 commands and
+388,103 reconciled verification requests are outside the original push windows;
+the failed latency result and original seals remain unchanged. This proves only
+the first-batch prefix, not the required 10,000-push history.
+
+The next candidate folds the pending catalog suffix after 64 capsules instead
+of 128, retaining two ordinary per-ref tiers between global passes. The existing
+real-Git lifecycle regression fails on the old policy at the new boundary while
+publication itself succeeds. The first 32-capsule tier must still avoid a global
+rewrite. Complete checkpoint validation, generation ownership, GC admission,
+protected staging and replicated-publication boundaries stay unchanged. The
+tighter bound remains a performance hypothesis until a fresh final Linux replay
+and matched request/byte comparison pass; no latency or amplification gap is
+closed by the focused regression alone.
+
+### Retained earlier measurements
+
+The following entries describe their recorded revisions and experimental
+formats. Inspect old stores with their original binaries; the native format-1
+baseline requires fresh buckets and supplies no old-format fallback reader.
+
 The `46ca69e2871` candidate passes full exact-head CI, 907 dedicated Linux
 checks, official installation, 1,656 old-format readback checks and the 80-push
 smoke with every reachable Git object byte verified. Its matched 640-push

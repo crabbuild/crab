@@ -922,7 +922,7 @@ or hold a synchronous lock through an await.
 
 The captured lookup reports its uncheckpointed logical capsule count. Direct
 CLI Xet pushes use that count to elect one foreground checkpoint owner once
-the suffix reaches 128 capsules, amortizing the pass across four ordinary
+the suffix reaches 64 capsules, amortizing the pass across two ordinary
 per-ref tiers. The owner retains GC admission
 and uses the existing exact-root/ref-position checkpoint CAS; losing election or
 failing maintenance cannot revoke the already committed ref. Protected staging
