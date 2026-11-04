@@ -18,6 +18,33 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
+The `46ca69e2871` candidate passes full exact-head CI, 907 dedicated Linux
+checks, official installation, 1,656 old-format readback checks and the 80-push
+smoke with every reachable Git object byte verified. Its matched 640-push
+diagnostic reduces capsule GETs 51.7%, capsule response bytes 7.65% and
+all-metadata response bytes 5.13%. Foreground maintenance is included; known
+upload bytes increase 14.3%.
+
+That candidate's 1,000-developer replay reached a clean, independently verified
+6,000-push checkpoint. All six recorded batch p95 values are below ten seconds,
+but the worker audit exposes a load-generator limitation: the sixth batch peaks
+at sixteen commands while averaging only 1.21 active commands. Its 44,029-record,
+48 MB report takes 1.145 seconds to write. The old throttle starts before that
+write, so an immediate update writes it again in 1.090 seconds. Repeated
+serialization under the report lock starves push workers as history grows.
+These timings describe the observed load, not final team-scale qualification.
+Original acknowledgements, timings, batch receipts and raw HTTP logs remain
+retained; the old controller was retired at the drained checkpoint.
+
+The driver now appends each completed command to an independent JSONL ledger,
+defers full snapshots while push workers run, and flushes a full snapshot after
+the batch drains or fails. Other periodic writes are timed from completion.
+All 44 recorder/meter/resume tests pass on macOS; Linux passes 43 with one
+existing descriptor-limit test skipped. On the unchanged 48 MB report, an
+immediate periodic update now skips serialization in 0.034 milliseconds.
+Fresh matched replays with the corrected recorder, full historical byte audits
+and the original latency/request/response-byte gates remain required.
+
 Published `0402bb83236` passes 902 dedicated Linux checks, official private
 all-variant installation, 776 old-format readback checks and an 80-push smoke.
 Its matched 64-developer replay completes 640 pushes per build, all ten sealed
@@ -40,7 +67,7 @@ This focused result does not qualify matched traffic, Linux latency or the full
 declared geometry. Readers must be upgraded before version-6 writers.
 
 [Full CI for `0402bb8`](https://github.com/crabbuild/crab/actions/runs/41711621839)
-is pending. The following preceding results remain retained.
+passed. The following preceding results remain retained.
 
 Published `c02e7cb9f34` passes 902 dedicated Linux checks, official private
 all-variant installation, 776 old-format readback checks and an 80-push smoke.
