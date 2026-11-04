@@ -11,7 +11,7 @@ mod reader;
 pub use reader::CapsuleRunAdmissionReader;
 
 const ADMISSION_MAGIC: &[u8; 8] = b"CRBADM01";
-const ADMISSION_VERSION: u32 = 2;
+const ADMISSION_VERSION: u32 = 1;
 const ADMISSION_TRAILER_BYTES: usize = 4;
 const MAX_RUN_ADMISSION_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RUN_ADMISSION_ENTRIES: usize = 8_000_000;

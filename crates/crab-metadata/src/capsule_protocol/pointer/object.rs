@@ -8,7 +8,7 @@ mod reader;
 #[cfg(feature = "storage")]
 pub(in crate::capsule_protocol) use reader::CatalogPages;
 
-const MAGIC: &[u8; 8] = b"CRBCAT02";
+const MAGIC: &[u8; 8] = b"CRBCAT01";
 pub(in crate::capsule_protocol) const MAX_DESCRIPTOR_BYTES: u64 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub(super) struct XorbRow {
 
 impl Descriptor {
     pub(in crate::capsule_protocol) fn validate(&self) -> Result<()> {
-        if self.version != 2 {
+        if self.version != 1 {
             return Err(corrupt("unsupported object catalog version"));
         }
         for (root, kind) in [
@@ -112,7 +112,7 @@ impl Descriptor {
             shards.push((hash(identity)?.to_vec(), json(&row)?));
         }
         let descriptor = Self {
-            version: 2,
+            version: 1,
             files: writer.tree(Kind::CatalogFiles, file_rows(catalog)?)?,
             shards: writer.tree(Kind::CatalogShards, shards)?,
             xorbs: writer.tree(Kind::CatalogXorbs, xorbs)?,

@@ -105,22 +105,10 @@ fn transitions(
 }
 
 pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
-    encode_version(snapshot, None)
-}
-
-fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) -> Result<Bytes> {
     snapshot.validate()?;
-    // Versions 1 and 2 shipped. Validate pages with their declared layout;
-    // changing the writer's size policy must never invalidate immutable history.
-    let use_shared = match version {
-        Some(1) => false,
-        Some(2 | 3) => true,
-        None => shared_encoding(snapshot),
-        _ => return Err(corrupt("checkpoint visibility page version is unsupported")),
-    };
-    let mut writer = if use_shared && matches!(version, None | Some(3)) {
-        // Reconciliation probes scattered tips across the shared history. A
-        // larger capsule-edit leaf repeats that history for every captured ref.
+    let use_shared = shared_encoding(snapshot);
+    let mut writer = if use_shared {
+        // Reconciliation probes scattered tips across the shared history.
         Writer::with_targets(4 * 1024, 32 * 1024)
     } else {
         Writer::default()
@@ -226,19 +214,8 @@ fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) ->
         Kind::CheckpointRefs,
         refs.into_iter().collect(),
     )?;
-    // A split shared leaf benefits from point geometry. Unsplit trees retain
-    // version 2 bytes; declared versions 1/2 always use their original geometry.
-    let version = version.unwrap_or_else(|| {
-        if use_shared && writer.has_branches() {
-            3
-        } else if use_shared {
-            2
-        } else {
-            1
-        }
-    });
     let descriptor = Descriptor {
-        version,
+        version: 1,
         catalog_digest: snapshot.catalog_digest.clone(),
         body_bytes: writer.bytes.len() as u64,
         body_hash: *blake3::hash(&writer.bytes).as_bytes(),
@@ -298,10 +275,8 @@ impl Descriptor {
             "checkpoint visibility catalog digest",
             "layered checkpoint",
         )?;
-        if !matches!(
-            (self.version, self.shared.is_some()),
-            (1, false) | (2 | 3, true)
-        ) || self.body_bytes > length.saturating_sub(12)
+        if self.version != 1
+            || self.body_bytes > length.saturating_sub(12)
             || length > MAX_LAYERED_VISIBILITY_BYTES as u64
             || u64::from(self.object_count) > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
         {
@@ -387,13 +362,13 @@ impl RefRow {
         }
         if let Some(shared) = &descriptor.shared {
             if row.objects.is_some() {
-                return Err(corrupt("shared checkpoint ref contains legacy objects"));
+                return Err(corrupt("shared checkpoint ref contains direct objects"));
             }
             if let Some(root) = &row.shared {
                 root.validate(shared, descriptor.body_bytes)?;
             }
         } else if row.shared.is_some() {
-            return Err(corrupt("legacy checkpoint ref contains shared objects"));
+            return Err(corrupt("direct checkpoint ref contains shared objects"));
         }
         validate_root(
             row.objects.as_ref(),
@@ -586,7 +561,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
         incremental_history: history,
     };
     snapshot.validate()?;
-    if encode_version(&snapshot, Some(descriptor.version))?.as_ref() != bytes {
+    if encode(&snapshot)?.as_ref() != bytes {
         return Err(corrupt("checkpoint visibility pages are not canonical"));
     }
     #[cfg(feature = "storage")]

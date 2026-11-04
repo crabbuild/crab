@@ -55,8 +55,8 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   missing page; unchanged-root absence/corruption remains an error.
   Source: `crates/crab-metadata/src/capsule_protocol/chunk_candidates/store.rs`.
   Packed-run encoding and authenticated filters live in `store/run.rs` and
-  `store/filter.rs`. Development format conversion is explicit, doctor-owned
-  migration in `store/migration.rs`; do not add a runtime fallback reader.
+  `store/filter.rs`. Only the canonical version-1 root is supported; no
+  development-format conversion or runtime fallback reader.
 
 - `PointerCatalogInspection` exposes external descriptors only after complete
   precedence/conflict/dependency proof. Await `finish` on all returned paths;

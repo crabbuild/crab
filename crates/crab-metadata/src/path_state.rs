@@ -41,7 +41,7 @@ pub use storage::{
 
 // Whole-layer predecessors are unreleased derived data. Rebuild them before
 // publishing paged readiness, retaining the exact tree-comparison semantics.
-const DESCRIPTOR_VERSION: u32 = 6;
+const DESCRIPTOR_VERSION: u32 = 1;
 const MAX_DESCRIPTOR_BYTES: u64 = 128 * 1024;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;

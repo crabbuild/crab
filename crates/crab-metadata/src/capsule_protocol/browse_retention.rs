@@ -97,7 +97,7 @@ impl Payload {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 2 {
+        if self.version != 1 {
             return Err(corrupt("unsupported retained browse version"));
         }
         self.indexes.encode()?;
@@ -249,7 +249,7 @@ pub async fn retain_browse_indexes(
         }
     }
     let mut payload = Payload {
-        version: 2,
+        version: 1,
         generation,
         indexes: indexes.clone(),
         previous: previous.as_ref().map(|(head, _)| head.hash.clone()),

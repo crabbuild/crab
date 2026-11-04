@@ -6,7 +6,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 use super::valid_ref_name;
 
-const TRANSACTION_VERSION: u32 = 2;
+const TRANSACTION_VERSION: u32 = 1;
 
 /// One exact ref edit authenticated by a capsule transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

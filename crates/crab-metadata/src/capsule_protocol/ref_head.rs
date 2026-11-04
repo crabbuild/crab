@@ -10,7 +10,7 @@ use super::{CapsulePointer, valid_ref_name};
 pub(in crate::capsule_protocol) mod cache;
 pub use cache::RefHeadCache;
 
-const REF_HEAD_VERSION: u32 = 5;
+const REF_HEAD_VERSION: u32 = 1;
 /// Maximum number of independently mutable ref heads accepted for one repository.
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.

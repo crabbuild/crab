@@ -3047,7 +3047,7 @@ class ProtocolV2PartialCloneSmoke:
         if not json.loads(self.stdout(fetched)).get("ETag"):
             raise SmokeError("mirror root fixture has no object-store identity")
         root = bytearray(original.read_bytes())
-        if len(root) < 12 or root[:8] != b"CRBROOT2":
+        if len(root) < 12 or root[:8] != b"CRBROOT1":
             raise SmokeError("mirror root fixture is not a v2 root envelope")
         root[8:12] = (0xFFFFFFFF).to_bytes(4, "big")
         invalid = self.artifacts / "mirror-root-unsupported.bin"

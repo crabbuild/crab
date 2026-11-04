@@ -141,6 +141,4 @@ pub use chunk_candidates::{
 };
 
 #[cfg(feature = "storage")]
-pub use chunk_candidates::{
-    CapsuleChunkIndex, migrate_capsule_chunk_candidates, write_capsule_chunk_candidates,
-};
+pub use chunk_candidates::{CapsuleChunkIndex, write_capsule_chunk_candidates};

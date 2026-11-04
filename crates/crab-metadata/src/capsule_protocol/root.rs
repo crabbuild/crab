@@ -8,10 +8,8 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
-const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
-// Older collectors do not mark retained readers. A format cutover makes them
-// reject the repository before they can reclaim an active mount's dependencies.
-const ROOT_VERSION: u32 = 5;
+const ROOT_MAGIC: &[u8; 8] = b"CRBROOT1";
+const ROOT_VERSION: u32 = 1;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
 const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
@@ -939,11 +937,6 @@ pub(super) fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result
         return Err(contract_error("checkpoint format is unsupported"));
     }
     if let Some(cache) = &pointer.ref_heads {
-        if pointer.format != super::layered::CHECKPOINT_VERSION {
-            return Err(contract_error(
-                "checkpoint ref-head cache requires format 11",
-            ));
-        }
         cache.validate(pointer.control_offset)?;
     }
     validate_content_hash(
@@ -1368,6 +1361,11 @@ mod tests {
         assert_eq!(payload.matches(&field).count(), 1);
         for replacement in [
             "",
+            "\"format\":0,",
+            "\"format\":2,",
+            "\"format\":9,",
+            "\"format\":10,",
+            "\"format\":11,",
             "\"format\":3,",
             "\"format\":4,",
             "\"format\":5,",

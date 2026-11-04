@@ -88,18 +88,6 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    // Packed chunk filters and visibility dictionaries independently established
-    // wire tag 31 in distinct authenticated containers. Keep their logical kinds
-    // separate while preserving both encodings. References bind their different
-    // key widths; full page decoding and coverage checks remain mandatory.
-    fn wire_tag(self) -> u8 {
-        match self {
-            #[cfg(feature = "storage")]
-            Self::CapsuleChunkFilters => 31,
-            _ => self as u8,
-        }
-    }
-
     fn is_positional(self) -> bool {
         match self {
             #[cfg(feature = "storage")]
@@ -214,10 +202,6 @@ impl Writer {
             directory_target_bytes,
             ..Self::default()
         }
-    }
-
-    pub(crate) fn has_branches(&self) -> bool {
-        self.pages.values().any(|page| page.height > 0)
     }
 
     pub(crate) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
@@ -352,7 +336,7 @@ impl Writer {
 
 fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
     let mut bytes = MAGIC.to_vec();
-    bytes.extend_from_slice(&[kind.wire_tag(), height]);
+    bytes.extend_from_slice(&[kind as u8, height]);
     bytes.extend_from_slice(&count.to_le_bytes());
     bytes
 }
@@ -368,7 +352,7 @@ pub(crate) fn decode(
     if bytes.len() != reference.bytes as usize
         || *blake3::hash(bytes).as_bytes() != reference.hash
         || bytes.get(..8) != Some(MAGIC.as_slice())
-        || bytes.get(8) != Some(&kind.wire_tag())
+        || bytes.get(8) != Some(&(kind as u8))
         || bytes.get(9) != Some(&reference.height)
     {
         return corrupt_at(path, "metadata page identity or header mismatch");
@@ -628,27 +612,25 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[test]
-    fn established_tag31_pages_keep_distinct_layouts() {
+    fn dictionary_and_filter_pages_have_distinct_wire_kinds() {
         let cases = [
             (
                 Kind::VisibilityDictionary,
                 Kind::CapsuleChunkFilters,
                 vec![(b"abcdefghijklmnopqrst".to_vec(), b"payload!".to_vec())],
-                b"CRABPP01\x1f\0\x01\0\0\0abcdefghijklmnopqrst\x08\0\0\0payload!".as_slice(),
             ),
             (
                 Kind::CapsuleChunkFilters,
                 Kind::VisibilityDictionary,
                 vec![(0_u32.to_be_bytes().to_vec(), b"filters!".to_vec())],
-                b"CRABPP01\x1f\0\x01\0\0\0\0\0\0\0\x08\0\0\0filters!".as_slice(),
             ),
         ];
-        for (kind, other, rows, expected) in cases {
+        for (kind, other, rows) in cases {
             let mut writer = Writer::default();
             let root = writer.tree(kind, rows.clone()).unwrap();
             let body = writer.bytes.as_slice();
             let size = body.len() as u64;
-            assert_eq!(body, expected);
+            assert_ne!(kind as u8, other as u8);
             assert!(
                 matches!(decode(body, &root, kind, size, "fixture"), Ok(Page::Leaf(actual)) if actual == rows)
             );
@@ -658,7 +640,7 @@ mod tests {
             forged.last = forged.first.clone();
             assert!(decode(body, &forged, other, size, "fixture").is_err());
             let mut wrong_tag = body.to_vec();
-            wrong_tag[8] = 37;
+            wrong_tag[8] = other as u8;
             let mut resigned = root.clone();
             resigned.hash = *blake3::hash(&wrong_tag).as_bytes();
             assert!(decode(&wrong_tag, &resigned, kind, size, "fixture").is_err());

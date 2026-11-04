@@ -55,9 +55,9 @@ impl CommitGraphIndex {
             () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
             result = async {
                 let descriptor = load_split_commit_graph_descriptor(store, layout, content_hash, max_bytes).await?;
-                // Release-tagged manifest graph v1 needs complete validation. Capsule
-                // graphs use authenticated pages; corruption cannot select the old reader.
-                if descriptor.version == 1 {
+                // Both layouts use schema v1. Descriptor validation rejects mixed
+                // page/identity fields before this choice; native graphs stay lazy.
+                if descriptor.commit_ordinal_digest.is_none() {
                     load_split_commit_graph(store, layout, content_hash, max_bytes).await.map(Graph::Manifest)
                 } else {
                     CommitGraphReader::load(store, layout, content_hash, max_bytes).await.map(Box::new).map(Graph::Capsule)

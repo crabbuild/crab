@@ -112,7 +112,7 @@ fn encode(kind: Kind, node: Node) -> Result<Encoded> {
         }
     };
     let mut bytes = MAGIC.to_vec();
-    bytes.extend_from_slice(&[kind.wire_tag(), height]);
+    bytes.extend_from_slice(&[kind as u8, height]);
     put_u32(&mut bytes, entries)?;
     match node {
         Node::Leaf(rows) => {
@@ -217,7 +217,7 @@ fn decode(bytes: &[u8], reference: &Reference, kind: Kind) -> Result<Node> {
     if bytes.len() != reference.bytes as usize
         || blake3::hash(bytes).as_bytes() != &reference.hash
         || bytes.get(..8) != Some(MAGIC.as_slice())
-        || bytes.get(8) != Some(&kind.wire_tag())
+        || bytes.get(8) != Some(&(kind as u8))
         || bytes.get(9) != Some(&reference.height)
     {
         return Err(corruption("object page identity or header differs"));

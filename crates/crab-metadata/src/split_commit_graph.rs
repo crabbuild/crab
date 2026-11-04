@@ -18,7 +18,25 @@ mod reader;
 #[cfg(feature = "storage")]
 pub use reader::{CommitGraphReader, CommitGraphView};
 
-const PAGED_VERSION: u32 = 3;
+const DESCRIPTOR_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Binary,
+    Paged,
+}
+
+impl Encoding {
+    fn for_descriptor(descriptor: &CommitGraphDescriptor) -> Self {
+        // Released manifest graphs and capsule graphs have distinct required
+        // fields. Their layout is not a schema version or a fallback reader.
+        if descriptor.commit_ordinal_digest.is_some() {
+            Self::Paged
+        } else {
+            Self::Binary
+        }
+    }
+}
 const MAX_PAGED_LAYERS: usize = 32;
 
 const LAYER_MAGIC: &[u8; 8] = b"CRABCG01";
@@ -370,7 +388,7 @@ pub fn append_split_commit_graph(
         roots,
         additions,
         false,
-        LAYER_VERSION,
+        Encoding::Binary,
     )
 }
 
@@ -391,13 +409,14 @@ pub fn append_paged_commit_graph(
         roots,
         additions,
         false,
-        PAGED_VERSION,
+        Encoding::Paged,
     )
 }
 
 /// Geometrically compact adjacent layers without changing commit ordinals.
 pub fn compact_split_commit_graph(graph: SplitCommitGraph) -> Result<Option<CommitGraphWrite>> {
     let descriptor = graph.descriptor.clone();
+    let encoding = Encoding::for_descriptor(&descriptor);
     update_split_commit_graph(
         Some(graph),
         descriptor.generation,
@@ -406,7 +425,7 @@ pub fn compact_split_commit_graph(graph: SplitCommitGraph) -> Result<Option<Comm
         &[],
         Vec::new(),
         true,
-        descriptor.version,
+        encoding,
     )
 }
 
@@ -462,7 +481,7 @@ fn update_split_commit_graph(
     roots: &[[u8; 20]],
     additions: Vec<CommitGraphInput>,
     compact_layers: bool,
-    encoding: u32,
+    encoding: Encoding,
 ) -> Result<Option<CommitGraphWrite>> {
     validate_content_hash(
         &pack_index_hash,
@@ -619,12 +638,12 @@ fn update_split_commit_graph(
     if new_commit_count > 0 {
         changed_layers.push(layers.len() - 1);
     }
-    while (compact_layers || encoding == PAGED_VERSION) && layers.len() >= 2 {
+    while (compact_layers || encoding == Encoding::Paged) && layers.len() >= 2 {
         let newer = layers.last().map_or(0, |layer| layer.records.len());
         let older = layers[layers.len() - 2].records.len();
         // Variable append sizes can leave a long decreasing layer sequence.
         // Carry the smallest layers when needed to keep lazy OID lookup bounded.
-        if newer < older && !(encoding == PAGED_VERSION && layers.len() > MAX_PAGED_LAYERS) {
+        if newer < older && !(encoding == Encoding::Paged && layers.len() > MAX_PAGED_LAYERS) {
             break;
         }
         let newer = layers
@@ -643,7 +662,7 @@ fn update_split_commit_graph(
         return Ok(None);
     }
 
-    let ancestry = if encoding == PAGED_VERSION {
+    let ancestry = if encoding == Encoding::Paged {
         Some(ancestry::Index::build(&layers)?)
     } else {
         None
@@ -653,12 +672,12 @@ fn update_split_commit_graph(
     for (index, layer) in layers.iter().enumerate() {
         if !changed_layers.contains(&index)
             && let Some(existing) = base_layer_ref_at(layer, index, &existing_layer_refs)
-            && existing.pages.is_some() == (encoding == PAGED_VERSION)
+            && existing.pages.is_some() == (encoding == Encoding::Paged)
         {
             layer_refs.push(existing.clone());
             continue;
         }
-        let (bytes, pages) = if encoding == PAGED_VERSION {
+        let (bytes, pages) = if encoding == Encoding::Paged {
             let (bytes, pages) = paged::encode_layer(
                 layer,
                 ancestry.as_ref().ok_or_else(|| {
@@ -682,8 +701,8 @@ fn update_split_commit_graph(
         layer_objects.push(CommitGraphLayerObject { reference, bytes });
     }
     let descriptor = CommitGraphDescriptor {
-        version: encoding,
-        commit_ordinal_digest: (encoding == PAGED_VERSION)
+        version: DESCRIPTOR_VERSION,
+        commit_ordinal_digest: (encoding == Encoding::Paged)
             .then(|| ordinal_digest(&layers, commit_count)),
         generation,
         pack_index_hash,
@@ -878,7 +897,7 @@ pub async fn load_split_commit_graph(
         });
     }
     let graph = SplitCommitGraph::new(descriptor, layers)?;
-    if graph.descriptor.version == PAGED_VERSION {
+    if Encoding::for_descriptor(&graph.descriptor) == Encoding::Paged {
         ancestry::Index::build(&graph.layers)?.validate_layers(&ancestry_roots, &ancestry_nodes)?;
     }
     Ok(graph)
@@ -1008,7 +1027,7 @@ fn validate_graph_records(graph: &SplitCommitGraph) -> Result<()> {
 }
 
 fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> Result<()> {
-    if !matches!(descriptor.version, LAYER_VERSION | PAGED_VERSION) {
+    if descriptor.version != DESCRIPTOR_VERSION {
         return corrupt_at(path, "unsupported commit graph descriptor version");
     }
     validate_content_hash(
@@ -1021,7 +1040,7 @@ fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> 
         "commit graph validation digest",
         path,
     )?;
-    if descriptor.version == PAGED_VERSION {
+    if Encoding::for_descriptor(descriptor) == Encoding::Paged {
         let digest = descriptor.commit_ordinal_digest.as_deref().ok_or_else(|| {
             crate::validation::corrupt_object(path, "paged graph positional identity is absent")
         })?;
@@ -1029,8 +1048,6 @@ fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> 
         if descriptor.layers.len() > MAX_PAGED_LAYERS {
             return corrupt_at(path, "paged graph layer directory exceeds its bound");
         }
-    } else if descriptor.commit_ordinal_digest.is_some() {
-        return corrupt_at(path, "released graph has paged identity fields");
     }
     let mut next = 0u32;
     for layer in &descriptor.layers {
@@ -1042,9 +1059,9 @@ fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> 
         {
             return corrupt_at(path, "invalid commit graph layer reference");
         }
-        match (&layer.pages, descriptor.version) {
-            (Some(pages), PAGED_VERSION) => paged::validate_roots(layer, pages, path)?,
-            (None, LAYER_VERSION) => {}
+        match (&layer.pages, Encoding::for_descriptor(descriptor)) {
+            (Some(pages), Encoding::Paged) => paged::validate_roots(layer, pages, path)?,
+            (None, Encoding::Binary) => {}
             _ => return corrupt_at(path, "graph layer format does not match descriptor"),
         }
         next =

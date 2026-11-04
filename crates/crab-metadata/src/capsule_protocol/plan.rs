@@ -7,7 +7,7 @@ use crate::validation::validate_content_hash;
 
 use super::{CapsuleTransaction, CapsuleTransactionRecord, CapsuleTransactionStatus};
 
-const CAPSULE_PLAN_VERSION: u32 = 2;
+const CAPSULE_PLAN_VERSION: u32 = 1;
 const MAX_CAPSULE_PLAN_BYTES: u64 = 64 * 1024;
 
 /// Immutable binding between one reviewed plan and its capsule commit marker.

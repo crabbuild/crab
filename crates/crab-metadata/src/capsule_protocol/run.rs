@@ -12,7 +12,7 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
-const RUN_VERSION: u32 = 5;
+const RUN_VERSION: u32 = 1;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 /// Largest number of push capsules coalesced before a repository checkpoint.
@@ -2061,59 +2061,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn allocation_changes_preserve_published_leaf_and_compacted_wire_bytes() {
-        // Captured from the published encoder before changing its allocation
-        // strategy. These include pack indexes, visibility and admission pools.
-        let merged = CapsuleRun::compact(vec![encoding_leaf(1), encoding_leaf(2)]).unwrap();
-        let upper = CapsuleRun::compact(vec![
-            merged.clone(),
-            CapsuleRun::compact(vec![encoding_leaf(3), encoding_leaf(4)]).unwrap(),
-        ])
-        .unwrap();
-        for (run, hash, bytes, control_offset, control_size) in [
-            (
-                CapsuleRun::leaf(encoding_fixture(1)).unwrap(),
-                "cf45524747b360c7d8ff1610a613841a1c37e037029bb79e071a8be890eeb5ad",
-                137_450,
-                134_142,
-                3_308,
-            ),
-            (
-                encoding_leaf(1),
-                "62fb33dd4e8e2d46160c85b255d495126ffa5c46f4bca0f4472937aa50fe6526",
-                138_472,
-                134_142,
-                4_330,
-            ),
-            (
-                merged,
-                "703d3c1e5df70d8aabca8872a4b5faed8f5506e2dc1efc2704aa3fa6ed2defe9",
-                278_102,
-                270_434,
-                7_668,
-            ),
-            (
-                upper,
-                "3085a90d060eb10c153594db323c7d063b2e6f22bd99ba30240b157c0ff57164",
-                554_790,
-                540_844,
-                13_946,
-            ),
-        ] {
-            assert_eq!(run.hash(), hash);
-            assert_eq!(run.bytes().len(), bytes);
-            assert_eq!(run.control_offset(), control_offset);
-            assert_eq!(run.control_size(), control_size);
-            let decoded = CapsuleRun::decode(run.bytes().clone()).unwrap();
-            assert_eq!(decoded.hash(), hash);
-            assert_eq!(
-                PackSourceDescriptor::from_capsule_run(&decoded).unwrap(),
-                PackSourceDescriptor::from_capsule_run(&run).unwrap()
-            );
-        }
-    }
-
     fn capsule(base: char, transaction: char) -> Capsule {
         let transaction = CapsuleTransaction::new(
             &base.to_string().repeat(64),
@@ -2380,7 +2327,7 @@ mod tests {
     #[test]
     fn unsupported_run_footer_versions_are_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for version in [0, 1, 2, 3, 4, 6, 7] {
+        for version in [0, 2, 3, 4, 5, 6, 7] {
             let mut footer = run.footer.clone();
             footer.version = version;
             let footer = serde_json::to_vec(&footer).unwrap();

@@ -553,8 +553,8 @@ pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
 ) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
-    // The tuple API is published in v2.0.0-alpha.1. Keep one capture owner;
-    // callers needing checkpoint receipts retain the richer snapshot instead.
+    // Read-only callers need heads and activations without retaining provider
+    // receipts. Both APIs share capture and authority validation.
     let snapshot = capture_ref_head_snapshot(router, root).await?;
     Ok((snapshot.heads, snapshot.active))
 }

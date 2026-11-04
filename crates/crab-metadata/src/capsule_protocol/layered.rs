@@ -25,9 +25,8 @@ mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP11";
-const CHECKPOINT_V9_MAGIC: &[u8; 8] = b"CRBCKP09";
-pub(super) const CHECKPOINT_VERSION: u32 = 11;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP01";
+pub(super) const CHECKPOINT_VERSION: u32 = 1;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
@@ -41,11 +40,7 @@ pub(super) const MAX_CHECKPOINT_BYTES: u64 =
         as u64;
 
 pub(super) fn checkpoint_maximum_bytes(format: u32) -> Option<u64> {
-    match format {
-        9 => Some(MAX_CHECKPOINT_BYTES - MAX_CACHE_BYTES as u64),
-        CHECKPOINT_VERSION => Some(MAX_CHECKPOINT_BYTES),
-        _ => None,
-    }
+    (format == CHECKPOINT_VERSION).then_some(MAX_CHECKPOINT_BYTES)
 }
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
@@ -1774,21 +1769,14 @@ fn decode_layer_footer(bytes: &[u8]) -> Result<(LayerFooter, usize, String)> {
 }
 
 fn decode_checkpoint_footer(bytes: &[u8]) -> Result<(CheckpointFooter, usize, String)> {
-    // v9 is reachable from v2.0.0-alpha.1. Its immutable bytes and pointers
-    // remain readable; writers emit v11 so older collectors reject new roots.
-    let (magic, version) = if bytes.ends_with(CHECKPOINT_V9_MAGIC) {
-        (CHECKPOINT_V9_MAGIC, 9)
-    } else {
-        (CHECKPOINT_MAGIC, CHECKPOINT_VERSION)
-    };
     let (footer_bytes, footer_start, footer_hash) =
-        decode_trailer(bytes, magic, MAX_CHECKPOINT_FOOTER_BYTES)?;
+        decode_trailer(bytes, CHECKPOINT_MAGIC, MAX_CHECKPOINT_FOOTER_BYTES)?;
     let footer: CheckpointFooter = serde_json::from_slice(footer_bytes).map_err(|source| {
         corrupt(format!(
             "layered checkpoint footer is invalid JSON: {source}"
         ))
     })?;
-    if footer.version != version {
+    if footer.version != CHECKPOINT_VERSION {
         return Err(corrupt("checkpoint footer and trailer versions differ"));
     }
     Ok((footer, footer_start, footer_hash))
@@ -1855,7 +1843,6 @@ fn validate_checkpoint_footer(
     object_size: u64,
 ) -> Result<()> {
     if checkpoint_maximum_bytes(footer.version).is_none_or(|maximum| object_size > maximum)
-        || (footer.version == 9 && footer.ref_heads.is_some())
         || footer.sources.is_empty()
         || footer.sources.len() > MAX_PHYSICAL_SOURCES
         || footer.control_offset != 0

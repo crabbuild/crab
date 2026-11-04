@@ -43,12 +43,23 @@ heads and immutable capsule runs. Complete capsule reads share storage's bounded
 immutable transfer policy, including concurrent ranges for large seed capsules.
 Full decoding still materializes the body and validates every pointer commitment.
 
-Root envelope and payload version 5 require collectors to include captured-reader
-claims. Version 4 collectors reject these roots before planning deletions; a new
-namespace alone would not protect mounted captures from those collectors.
-Version-5 roots are reachable from `v2.0.0-alpha.1`. Version 4 roots are rejected,
-with no implicit upgrade or fallback reader. Existing development repositories require a separately
-qualified, quiesced conversion before adopting this format.
+Native capsule storage starts at format **1**. This is a development reset,
+not an upgrade: experimental capsule repositories must be republished into a fresh
+bucket with a matching client. The bucket-global hint namespace must also be
+fresh; a new repository prefix inside an experimental bucket is insufficient. There is no old-format reader, conversion
+command or in-place relabeling. Preserve old experimental stores and use their
+original binaries when inspecting historical evidence. Protocol v2, the `v2/`
+namespace and the Crab product version are independent of this schema baseline.
+Git, Xet and LFS dependency formats retain their own specifications.
+
+Root envelopes (`CRBROOT1`), capsules (`CRBCAPS1`), checkpoints (`CRBCKP01`),
+runs (`CRBRUN01`), transactions, ref heads, history, admission, pointer catalogs
+(`CRBCAT01`), visibility, browse readiness/retention, path-state and paged graphs
+all emit and accept version 1. Unchanged page/receipt formats remain version 1.
+Root and payload versions, footer/trailer identity, canonical re-encoding,
+authenticated page references and aggregate admission remain mandatory. Unknown
+versions and malformed or relabeled layouts fail closed. Collectors must mark
+captured-reader claims before deleting any retained dependency.
 
 `store_read_capture` records a view's checkpoint, exact run pointers and selected
 catalog-member ranks in private immutable pages. It uses the same captured
@@ -81,15 +92,11 @@ Hints still require current source-catalog and canonical-origin proof.
 `CapsuleChunkIndex::objects` verifies every live run, its pages, and its filter
 contents before GC; hints do not become authoritative payload roots.
 
-Hint root version 2 replaces the unreleased paged version 1. Upgrade clients and
-publishers together, then run `crab doctor --migrate-chunk-index` from a repository
-using bucket-administrator credentials. Migration retains every logical record,
-including old exact placement IDs, verifies the packed replacement, and CASes
-the captured old root while holding global GC writer admission. Cancellation or
-a failed conditional write never advertises a partial migration or overwrites a
-concurrent root; old pages remain for ordinary grace-period collection. Normal
-lookup has no legacy-format fallback. Committed
-Git refs, catalogs, xorbs, and shards use their existing formats and paths.
+The version-1 hint root contains packed immutable runs and their publication
+sequence. Prior experimental paged/packed roots are unsupported. There is no
+`doctor --migrate-chunk-index` command or runtime fallback. Fresh repositories
+publish only the canonical packed layout; exact placement identities and source
+anchors retain their integrity checks.
 
 Pointer catalogs keep shard/xorb payloads
 external while authenticating their identities and reconstruction closure.
@@ -112,10 +119,10 @@ not widen that retry window. Current-state catalog lookups reuse that owner toge
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
-Checkpoint format 11 (`CRBCKP11`) adds an optional authenticated ref-head cache
+Checkpoint format 1 (`CRBCKP01`) includes an optional authenticated ref-head cache
 inside the existing checkpoint body. `capture_ref_head_snapshot` retains the
 exact committed/prepared heads and provider tokens for complete-view owners;
-the tagged `capture_ref_heads` tuple API shares the same capture loop. Cache
+the `capture_ref_heads` tuple API shares the same capture loop. Cache
 encoding admits at most 8 MiB and 16,384 heads, and publication omits the cache
 when it would exceed the caller's aggregate metadata budget. Root pointers and
 footers bind the same contiguous range and hash. No separate object namespace
@@ -128,11 +135,9 @@ fresh matching strong ETags or non-null versions, and stable before/after LISTs.
 Scoped read/staging routes without prefix-wide target proof disable reuse.
 Activations are always read afresh, including for unchanged prepared heads.
 Selected missing/corrupt cache bytes remain errors. Restore filters retired
-heads before activation resolution. Upgrade readers and collectors before
-writers: older format-9 clients reject format-11 roots before GC planning.
-Immutable tagged format-9 checkpoints retain their exact bytes and identities;
-the retired shared-base format-10 experiment remains rejected. Full team-scale
-performance and lifecycle qualification of format 11 remain pending.
+heads before activation resolution. All experimental checkpoint formats are
+unsupported. Full team-scale performance and lifecycle qualification of the new
+version-1 baseline remain pending; old-format receipts do not qualify it.
 
 Catalog capture coalesces single-ref visibility bodies up to 16 KiB, excluding
 payloads and duplicate descriptor bytes. Larger edits retain selected-page reads
@@ -145,15 +150,13 @@ members. Ordered reconciliation still validates prior closures, removed objects
 and resulting tip membership. Unselected members and payloads remain cold.
 This changes neither catalog precedence nor GC authority.
 
-Large new capsule visibility sections use descriptor version 5 with an 8 KiB leaf target
-and the existing 32 KiB directory target. This reduces cold tip-membership proof
-bytes without reducing directory fan-out. Page hashes, scalar bindings, set
-membership and complete canonical reconstruction remain required. Versions 3
-and 4 shipped in `v2.0.0-alpha.1`; their exact encodings remain readable and are
-verified with their original geometry. Upgrade all readers before enabling new
-writers: alpha.1 readers reject version 5. Existing immutable history needs no
-rewrite or repair. Sections requiring no leaf split retain their original
-version 3 or 4 encoding and immutable identities.
+Shared and multi-ref capsule visibility uses 8 KiB leaves and 32 KiB
+directories. Non-shared singleton visibility uses 4 KiB leaves/directories and
+at most 4 KiB of authenticated inline routing roots per direction. These are
+canonical layouts of one version-1 schema, selected from the data rather than
+version switches. Full decoding rebuilds that layout and rejects noncanonical
+geometry. Page hashes, scalar bindings, set membership and complete canonical
+reconstruction remain required.
 
 Run controls retain each capsule's own pack directory in capsule-relative
 coordinates. The run directory keeps physical transport coordinates separately.
@@ -163,9 +166,9 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
-Checkpoint formats 9 and 11 commit to a small catalog descriptor and
+Checkpoint format 1 commits to a small catalog descriptor and
 immutable content-addressed pages under `v2/catalogs/<partition>/<hash>`.
-Descriptor version 2 (`CRBCAT02`) authenticates the roots of file bindings,
+Descriptor version 1 (`CRBCAT01`) authenticates the roots of file bindings,
 shards, xorbs and reverse chunk placements. Internal directories and nested
 recipes use independent pages (`CRABOP01`); unchanged subtrees retain their
 identities across checkpoint publication. New pages and the descriptor are
@@ -241,20 +244,13 @@ Protected keys and authenticated closure traversal are tracked separately.
 Complete checkpoint visibility proofs are authenticated once and shared across
 immutable checkpoint clones. Building a checkpoint retains its validated proof;
 control-only readers keep the visibility body cold.
-Checkpoint visibility page descriptor 1 remains readable and keeps its existing
-canonical encoding for ordinary checkpoints. Descriptor 2 handles large repeated
-ref memberships with the shared dictionary, interned bitmap chunks and sparse
-sets used by capsule visibility schema 4. Each ref has its own authenticated set
-root; retained dictionary entries never grant ref access. Its single dictionary
-also retains objects whose last ref was deleted. Source/member bindings use
-fixed-width ordinal chunks, with exact coverage and final-chunk length checks,
-so they do not duplicate the OID dictionary. Descriptor 3 retains those shared
-memberships with 4 KiB leaves and 32 KiB directories for scattered checkpoint
-tip proofs. New readers accept all three descriptors and reject mixed or unknown
-versions. Complete decoding rebuilds each declared version with its original
-geometry; versions 1/2 retain their exact immutable bytes. Upgrade readers before
-writers: older readers reject descriptor 3. The existing
-128 MiB proof ceiling, source/member bindings and checkpoint CAS are unchanged.
+Checkpoint visibility uses one version-1 page descriptor. Ordinary checkpoints
+use direct sets; large repeated memberships use a shared dictionary, interned
+bitmap chunks and sparse sets with 4 KiB leaves and 32 KiB directories. Each
+ref has its own authenticated root; dictionary retention grants no ref access.
+Source/member ordinal chunks require exact coverage and final-chunk length.
+Complete decoding reconstructs the canonical layout, with the same 128 MiB
+proof ceiling, source/member bindings and checkpoint CAS.
 In-memory snapshots retain sparse closures or bitmaps through ordinal remapping
 and restoration, instead of expanding every membership into a separate u32.
 Ordinary in-memory OID lists also share immutable storage when cloned; empty
@@ -269,12 +265,7 @@ transitions remain complete in authenticated visibility pages; missing hints use
 the existing verified Git traversal. Required metadata that cannot fit returns
 `CheckpointFooterSize` so the publication owner can consolidate physical sources.
 
-Retired unshipped checkpoint formats through 8 are rejected without fallback.
-The six published release tags do not contain this capsule codec.
-This format is under qualification; earlier format-7/8 runtime receipts do not
-qualify format 9 or establish hosted-S3 performance.
-
-Retained browse record format 2 carries the complete checkpoint pointer and
+Retained browse record format 1 carries the complete checkpoint pointer and
 catalog identity; loading authenticates the footer and rejects omitted or
 mismatched catalog/source dependencies.
 
@@ -308,10 +299,9 @@ current-state sessions bind once to the first root they open. Catalog and Git
 views share stable ref capture, ref-frontier selection, visibility reconciliation
 and transaction ordering; neither path invents a separate precedence policy.
 
-All six upstream release tags audited for format 8 omit the capsule protocol
-codec. Earlier formats, including unshipped checkpoint format 7 and browse
-retention record format 1, are rejected explicitly. Unreleased fixtures must be
-recreated; no fallback reader or automatic authoritative conversion is provided.
+Experimental fixtures require a fresh bucket; no fallback reader or automatic
+authoritative conversion is provided. Old measurements remain tied to their
+original binaries and do not establish current-format performance.
 
 Checkpoint and selected run catalog roots share one lookup budget and page cache.
 CLI and shared capsule-publication preparation use these captured queries.
@@ -363,15 +353,14 @@ and lifecycle qualification must not be inferred from the page representation.
 ### Browse indexes and retained roots
 
 `v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
-Its version 3 record binds a durable immutable commit graph, optional complete
+Its version 1 record binds a durable immutable commit graph, optional complete
 physical object lookup and optional complete path attribution to the exact
 capsule state, including visible per-ref transactions. Physical lookup readiness
 requires complete verified pack coverage before publication; path completion
 retains that binding. Graph publication does not wait for path construction.
 
-The prior versions were never reachable from a release tag; maintenance rebuilds this derived
-record in place, without a legacy reader. Readers ignore stale
-records; absent indexes remain a readiness state.
+Unsupported experimental readiness records require republishing. Readers ignore
+stale records; absent indexes remain a readiness state.
 
 GC retains dependencies of the currently
 published readiness record even when newer refs make it unusable for new reads.
@@ -401,8 +390,7 @@ readiness and the newest lifetime capture remain rooted. A failed cleanup leaves
 extra retention and is retried even if the history chain already has the requested
 length. Pruning is the boundary that can invalidate captures from discarded
 generations; ordinary rebuilding, checkpointing and GC do not expire readers.
-The new lifetime format is version 1; no release tag contains capsule browse
-readiness, and its existing version 3 encoding remains unchanged.
+Lifetime and readiness records both use the version-1 baseline.
 
 Compaction also retains replaced capsule sources independently of browse
 readiness. Before publishing a replacement frontier, the ref owner CAS-publishes
@@ -434,7 +422,7 @@ and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
 
-Capsule browse construction writes split-graph descriptor version 3, with
+Capsule browse construction writes split-graph descriptor version 1, with
 authenticated ordinal-record and OID-directory pages and a verified positional
 digest. Per-commit ancestor roots and content-addressed interval nodes share
 unchanged subtrees and collapse full ordinal ranges. Maintenance recomputes the
@@ -444,8 +432,9 @@ local page hashes alone cannot certify ancestry.
 Point membership reads preserve
 duplicates, verify the root contains itself and fail on missing required nodes.
 The caller must authorize roots against its captured refs before using membership
-as a visibility proof. Version 2 was an unreleased derived format; its owner
-rebuilds it rather than introducing a retired-format reader.
+as a visibility proof. Experimental descriptors with other versions are rejected. The released manifest
+graph keeps its distinct binary version-1 layout; only paged descriptors with
+positional identity and complete page roots enter the capsule graph reader.
 
 Its carry rule caps the layer directory at 32 entries even for decreasing
 append batch sizes; internal page directories remain bounded.
@@ -484,7 +473,7 @@ cargo build -p crab-metadata --example qualify_graph_build --release --locked
 
 ### Path-state pages
 
-Path-state descriptor version 6 requires exact-name tree comparison semantics
+Path-state descriptor version 1 requires exact-name tree comparison semantics
 and authenticated pages; retired descriptors are rejected.
 Maintenance rebuilds completed indexes and resumable checkpoints through the
 existing conditional publication path. Record, node, component and child pages
@@ -522,9 +511,7 @@ shared-session initialization can retry after that dependency is repaired.
 
 Layered checkpoint visibility uses authenticated dictionary, ref-closure and
 transition pages, shared by readers and recovery. Checkpoint pointers require
-explicit format 9 (`CRBCKP09`, tagged in `v2.0.0-alpha.1`) or current format 11
-(`CRBCKP11`); retired or missing formats are rejected. Writers emit format 11;
-immutable format-9 history is read without rewriting.
+explicit format 1 (`CRBCKP01`); missing and unsupported formats are rejected.
 
 Footer roots bind the visibility section, retained-object count and ordered
 source-catalog digest. `LayeredVisibilityReader` loads only pages needed for
@@ -586,9 +573,8 @@ Mixed-level carries retain canonical capsule bytes and member ordinals without
 encoding discarded intermediate runs; complete capsule verification remains
 mandatory.
 
-The v2 cutover uses CRBRUN01 with footer version 3 and
-root/history/ref-head versions 4/3/5; there is no reader fallback to earlier
-run or pointer semantics.
+The native baseline uses `CRBRUN01` with footer version 1 and version-1
+root/history/ref-head records. There is no reader fallback.
 
 Runs may contain byte-identical packs from different transactions. Their source
 directories retain every physical member and ordinal; identical content is
@@ -615,7 +601,7 @@ reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06`/`CRBRUN07` formats are
 rejected, not read through a compatibility path; readers and writers must cut
 over together.
 
-Run footer version 3 rejects its retired versions 1/2; admission remains version 2.
+Run footers and admission both use version 1; other versions are rejected.
 Exact admission uses authenticated OID-to-member pages and dense per-member
 count pages. Their roots are committed by the footer; complete readers verify
 both directories and canonical body bytes before exposing admission. Page kind
@@ -640,7 +626,7 @@ catalog decoding and source/ref capture remain separate opening costs.
 
 ### Visibility deltas
 
-Visibility delta version 3 replaces flat JSON OID lists with authenticated ref
+Visibility delta version 1 uses authenticated ref
 headers and separate added/removed OID trees. Ref directories and object sets
 page their internal routing. Empty sets have no root; shared immutable sets may
 reuse pages. Complete delta decoding checks body identity, both sets, edit
@@ -656,18 +642,16 @@ missing ref, an unchanged OID and a missing/corrupt page have distinct results.
 Replacement edits must admit their new tip; queried OIDs cannot belong to both
 change sets. These changes alone never authorize a ref or object want.
 
-Split single-ref, non-shared visibility uses version 6 with 4 KiB leaf and
+Single-ref, non-shared visibility uses version 1 with 4 KiB leaf and
 directory targets. The authenticated ref header carries directory-root bytes
 up to 4 KiB per direction. They pass the same page hash, kind, bounds, ancestry
 and coverage decoder before entering the existing bounded cache. Point queries
 still admit every root and child, including warm or inline pages. This pays for
 the smaller directory fan-out without an additional origin request.
 
-Shared and multi-ref split layouts retain version 5's 8 KiB leaves and 32 KiB
-directories. Unsplit layouts retain version 3 or 4. Full validation rebuilds
-each declared geometry, preserving original version-3/4/5 bytes; changing only
-the version is rejected. Upgrade readers before writers: older readers reject
-version 6.
+Shared and multi-ref layouts use 8 KiB leaves and 32 KiB directories in the
+same version-1 schema. Complete validation rebuilds the canonical layout;
+changing the version or geometry cannot reinterpret authenticated bytes.
 
 The capsule delta's retired JSON shape has no reader or serialization alias;
 retired run prefixes require republishing. Released v1 visibility index and
@@ -895,7 +879,7 @@ responsibility.
 
 ### Paged path attribution
 
-Unreleased path-state descriptor version 6 authenticates bounded record, node,
+Path-state descriptor version 1 authenticates bounded record, node,
 component and child pages inside each immutable layer object. Canonical full
 loads validate the complete physical closure; `PathStateReader` resolves selected
 paths through verified ranges and a bounded parsed-page cache. Graph and ordinal
@@ -908,13 +892,11 @@ A reset masks older visible values; it does not mutate prior commit roots.
 A covering reset may nominate a never-existing descendant; raw tree comparison
 must decide whether that candidate actually changed the requested path. Full
 loads, resumable construction, compaction and maintenance scans retain markers.
-The retired unreleased version 5 is rebuilt by existing maintenance, never read
-through an alternate codec.
+Unsupported experimental descriptors have no alternate codec.
 
 ### Paged run catalogs and visibility
 
-Run footer version 5 retains the embedded `CRBRCG01` catalog index introduced in
-version 4. Its four paged
+Run footer version 1 includes the embedded `CRBRCG01` catalog index. Its four paged
 key directories retain exact capsule occurrences and group equal immutable
 values by a semantic commitment that excludes physical page offsets. Full run
 verification rebuilds the index from nested capsules, so re-signed membership

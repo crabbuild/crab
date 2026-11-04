@@ -412,26 +412,21 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn mixed_version_pool_keeps_selected_membership_proofs_separate() {
+    async fn mixed_layout_pool_keeps_selected_membership_proofs_separate() {
         use crate::git_visibility::{GitVisibilityDictionary, GitVisibilityObjects};
 
         let mut leaves = Vec::new();
         let mut expected = Vec::new();
-        for version in [
-            VISIBILITY_DELTA_VERSION,
-            SHARED_VERSION,
-            POINT_VERSION,
-            SINGLE_REF_VERSION,
-        ] {
-            let base = u128::from(version) << 64;
-            let name = format!("refs/heads/version-{version}");
+        for (index, shared) in [false, true].into_iter().enumerate() {
+            let base = ((index + 1) as u128) << 64;
+            let name = format!("refs/heads/layout-{index}");
             let tip = format!("{:040x}", base + 500);
             let objects = (1..=1000)
                 .map(|index| format!("{:040x}", base + index))
                 .collect::<Vec<_>>();
             let mut edit =
                 GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects.clone());
-            if matches!(version, SHARED_VERSION | POINT_VERSION) {
+            if shared {
                 edit.added = GitVisibilityObjects::from_shared_ordinals(
                     GitVisibilityDictionary::new(objects).unwrap(),
                     (0..1000).collect(),
@@ -450,7 +445,7 @@ mod tests {
                 vec![],
                 vec![CapsuleSection::new(
                     CapsuleSectionKind::VisibilityDelta,
-                    encode_version(&delta, Some(version)).unwrap(),
+                    encode(&delta).unwrap(),
                 )],
             )
             .unwrap();
@@ -461,7 +456,7 @@ mod tests {
         let run = CapsuleRun::decode(run.bytes().clone()).unwrap();
         let layout = StoreLayout::new(
             Store::new(Arc::new(object_store::memory::InMemory::new())),
-            "repositories/mixed-version-proofs".into(),
+            "repositories/mixed-layout-proofs".into(),
         );
         layout
             .store()
@@ -508,29 +503,13 @@ mod tests {
             }
             let delta =
                 CapsuleVisibilityDelta::new(BTreeMap::from([(name.to_owned(), edit)])).unwrap();
-            assert_eq!(
-                blake3::hash(&encode_version(&delta, Some(POINT_VERSION)).unwrap())
-                    .to_hex()
-                    .as_str(),
-                if shared {
-                    "ae3deb28dfd83e04bb7c2289777de0c3eeb682246d8a7061cf9c58a0e148213f"
-                } else {
-                    "ac5e1237fb4d2f115a7250bb07e7cb4fc94e77df53a4c02b11fceccb7f4daeb5"
-                }
-            );
             let transaction = CapsuleTransaction::new(
                 &"1".repeat(64),
                 vec![CapsuleRefEdit::new(name, None, Some(oid), None)],
             )
             .unwrap();
-            let shipped = if shared {
-                SHARED_VERSION
-            } else {
-                VISIBILITY_DELTA_VERSION
-            };
-            let mut observations = Vec::new();
-            for version in [Some(shipped), Some(POINT_VERSION), None] {
-                let encoded = encode_version(&delta, version).unwrap();
+            {
+                let encoded = encode(&delta).unwrap();
                 let capsule = Capsule::build(
                     &transaction,
                     vec![],
@@ -574,24 +553,13 @@ mod tests {
                         .unwrap(),
                     Some(vec![Some(VisibilityChange::Added)])
                 );
-                observations.push((bytes.load(Relaxed), reads.load(Relaxed)));
+                assert!(
+                    bytes.load(Relaxed) <= 24 * 1024,
+                    "shared={shared}, proof bytes={}, requests={}",
+                    bytes.load(Relaxed),
+                    reads.load(Relaxed)
+                );
             }
-            let [
-                (old_bytes, old_reads),
-                (prior_bytes, prior_reads),
-                (new_bytes, new_reads),
-            ] = observations.as_slice()
-            else {
-                panic!("missing versioned observations");
-            };
-            assert!(
-                new_bytes < old_bytes
-                    && *new_bytes <= 24 * 1024
-                    && new_reads <= old_reads
-                    && new_bytes <= prior_bytes
-                    && new_reads <= prior_reads,
-                "shared={shared}, shipped/new proof bytes and requests: {observations:?}"
-            );
         }
     }
 

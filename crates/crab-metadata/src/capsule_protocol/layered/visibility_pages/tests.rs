@@ -18,32 +18,15 @@ fn small_overlapping_checkpoints_share_ref_memberships() {
 }
 
 #[test]
-fn declared_checkpoint_layouts_preserve_immutable_history() {
+fn checkpoint_visibility_rejects_non_v1_descriptors() {
     let snapshot = overlapping_snapshot(32_000, 32, 30);
-    let legacy = encode_version(&snapshot, Some(1)).unwrap();
-    // Captured from the shipped encoder before changing the selection policy.
-    assert_eq!(
-        blake3::hash(&legacy).to_hex().as_str(),
-        "100e4536b5f5112a8728b011dae5acab41492201da761db2ef218d0d6b51119d"
-    );
-    let shared = encode_version(&snapshot, Some(2)).unwrap();
-    assert_eq!(
-        blake3::hash(&shared).to_hex().as_str(),
-        "5fc430bd1d557cab198fd53001414249cee8fe1836e85cbb13b83bf357a01234"
-    );
-    for bytes in [legacy, shared, snapshot.encode().unwrap()] {
-        assert_eq!(LayeredVisibilitySnapshot::decode(&bytes).unwrap(), snapshot);
-    }
-}
-
-#[test]
-fn checkpoint_geometry_is_bound_to_its_declared_version() {
-    let snapshot = overlapping_snapshot(32_000, 32, 30);
-    for (encoded_version, declared_version) in [(2, 3), (3, 2)] {
-        let encoded = encode_version(&snapshot, Some(encoded_version)).unwrap();
-        let mut descriptor = Descriptor::decode(&encoded).unwrap();
+    let encoded = snapshot.encode().unwrap();
+    let original = Descriptor::decode(&encoded).unwrap();
+    assert_eq!(original.version, 1);
+    for version in [0, 2, 3, u32::MAX] {
+        let mut descriptor = original.clone();
+        descriptor.version = version;
         let mut relabeled = encoded[..descriptor.body_bytes as usize].to_vec();
-        descriptor.version = declared_version;
         let header = json(&descriptor).unwrap();
         relabeled.extend_from_slice(&header);
         crate::pages::put_u32(&mut relabeled, header.len()).unwrap();
@@ -675,9 +658,9 @@ async fn overlapping_ref_checkpoints_keep_memberships_compact() {
     );
     let encoded = snapshot.encode().unwrap();
     let descriptor = Descriptor::decode(&encoded).unwrap();
-    assert_eq!(descriptor.version, 3);
+    assert_eq!(descriptor.version, 1);
     let mut legacy = descriptor.clone();
-    legacy.version = 1;
+    legacy.version = 2;
     assert!(legacy.validate(encoded.len() as u64).is_err());
     let mut missing = descriptor.clone();
     missing.shared = None;

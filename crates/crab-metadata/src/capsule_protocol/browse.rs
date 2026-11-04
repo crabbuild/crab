@@ -28,7 +28,7 @@ impl BrowseIndexes {
         path_state_hash: Option<String>,
     ) -> Result<Self> {
         let value = Self {
-            version: 3,
+            version: 1,
             state_digest,
             commit_graph_hash,
             path_state_hash,
@@ -92,7 +92,7 @@ impl BrowseIndexes {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 3 {
+        if self.version != 1 {
             return Err(corrupt_object(
                 "browse indexes",
                 "unsupported record version",
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn graph_ready_record_round_trips_without_complete_path_attribution() {
         let encoded = serde_json::json!({
-            "version": 3,
+            "version": 1,
             "state_digest": "1".repeat(64),
             "commit_graph_hash": "2".repeat(64),
         });
@@ -182,7 +182,7 @@ mod tests {
             malformed[field] = serde_json::json!("../invalid");
             assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
         }
-        for version in [1, 2] {
+        for version in [0, 2, 3, u32::MAX] {
             let mut unsupported = valid.clone();
             unsupported["version"] = serde_json::json!(version);
             assert!(BrowseIndexes::decode(&serde_json::to_vec(&unsupported).unwrap()).is_err());

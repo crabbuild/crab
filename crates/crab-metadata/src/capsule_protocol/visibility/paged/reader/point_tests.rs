@@ -18,22 +18,33 @@ fn singleton_delta() -> CapsuleVisibilityDelta {
 }
 
 #[test]
-fn relabeling_singleton_geometry_does_not_reinterpret_immutable_bytes() {
+fn singleton_geometry_rejects_noncanonical_page_sizes() {
     let delta = singleton_delta();
-    for (from, to) in [
-        (POINT_VERSION, SINGLE_REF_VERSION),
-        (SINGLE_REF_VERSION, POINT_VERSION),
-    ] {
-        let bytes = encode_version(&delta, Some(from)).unwrap();
-        assert_eq!(CapsuleVisibilityDelta::decode(&bytes).unwrap(), delta);
-        let descriptor = Descriptor::decode(&bytes).unwrap();
-        let mut writer = Writer::default();
-        writer
-            .bytes
-            .extend_from_slice(&bytes[..descriptor.body_bytes as usize]);
-        let relabeled = finish(writer, descriptor.refs, None, Some(to)).unwrap();
-        assert!(CapsuleVisibilityDelta::decode(&relabeled).is_err());
-    }
+    let mut writer = Writer::default();
+    let (name, edit) = delta.edits.iter().next().unwrap();
+    let added = objects(&mut writer, &edit.added).unwrap();
+    let row = VisibilityEditHeader {
+        name: name.clone(),
+        old_oid: edit.old_oid.clone(),
+        new_oid: edit.new_oid.clone(),
+        replaces: edit.replaces,
+        added,
+        removed: None,
+        shared: None,
+        inline_added_root: None,
+        inline_removed_root: None,
+    };
+    let refs = writer
+        .tree(
+            Kind::VisibilityRefs,
+            vec![(
+                blake3::hash(name.as_bytes()).as_bytes().to_vec(),
+                serde_json::to_vec(&row).unwrap(),
+            )],
+        )
+        .unwrap();
+    let bytes = finish(writer, refs, None).unwrap();
+    assert!(CapsuleVisibilityDelta::decode(&bytes).is_err());
 }
 
 #[tokio::test]
@@ -43,7 +54,7 @@ async fn resigned_inline_roots_cannot_bypass_membership_or_routing_proofs() {
     let delta = singleton_delta();
     let bytes = delta.encode().unwrap();
     let descriptor = Descriptor::decode(&bytes).unwrap();
-    assert_eq!(descriptor.version, SINGLE_REF_VERSION);
+    assert_eq!(descriptor.version, 1);
     let body = &bytes[..descriptor.body_bytes as usize];
     let (key, value) = crate::pages::scan(
         body,
@@ -61,7 +72,7 @@ async fn resigned_inline_roots_cannot_bypass_membership_or_routing_proofs() {
         Store::new(Arc::new(object_store::memory::InMemory::new())),
         "repositories/resigned-inline-roots".into(),
     );
-    for fault in ["hash", "coverage", "bounds", "version"] {
+    for fault in ["hash", "coverage", "bounds"] {
         let mut row = original.clone();
         match fault {
             "hash" => row.inline_added_root.as_mut().unwrap()[0] ^= 1,
@@ -79,12 +90,7 @@ async fn resigned_inline_roots_cannot_bypass_membership_or_routing_proofs() {
                 vec![(key.clone(), serde_json::to_vec(&row).unwrap())],
             )
             .unwrap();
-        let version = if fault == "version" {
-            POINT_VERSION
-        } else {
-            SINGLE_REF_VERSION
-        };
-        let encoded = finish(writer, refs, None, Some(version)).unwrap();
+        let encoded = finish(writer, refs, None).unwrap();
         let descriptor = Descriptor::decode(&encoded).unwrap();
         let hash = blake3::hash(&encoded).to_hex().to_string();
         layout

@@ -590,3 +590,30 @@ async fn full_validation_rejects_a_resigned_set_that_grants_a_non_ancestor() {
             .contains("ancestry coverage differs from the verified DAG")
     );
 }
+
+#[tokio::test]
+async fn graph_v1_rejects_experimental_versions_and_mixed_layout_fields() {
+    let (_, _, write, _) = fixture(8).await;
+    let descriptor = decode_commit_graph_descriptor(&write.descriptor_bytes, "graph").unwrap();
+    assert_eq!(descriptor.version, 1);
+    for version in [0, 2, 3, u32::MAX] {
+        let mut changed = descriptor.clone();
+        changed.version = version;
+        assert!(
+            decode_commit_graph_descriptor(&serde_json::to_vec(&changed).unwrap(), "graph")
+                .is_err()
+        );
+    }
+    let mut missing_identity = descriptor.clone();
+    missing_identity.commit_ordinal_digest = None;
+    assert!(
+        decode_commit_graph_descriptor(&serde_json::to_vec(&missing_identity).unwrap(), "graph")
+            .is_err()
+    );
+    let mut missing_pages = descriptor;
+    missing_pages.layers[0].pages = None;
+    assert!(
+        decode_commit_graph_descriptor(&serde_json::to_vec(&missing_pages).unwrap(), "graph")
+            .is_err()
+    );
+}

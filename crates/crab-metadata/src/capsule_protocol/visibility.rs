@@ -8,7 +8,7 @@ use crate::git_visibility::GitVisibilityEdit;
 
 use super::valid_ref_name;
 
-const VISIBILITY_DELTA_VERSION: u32 = 3;
+const VISIBILITY_DELTA_VERSION: u32 = 1;
 
 mod paged;
 pub(super) use paged::Descriptor as VisibilityPages;

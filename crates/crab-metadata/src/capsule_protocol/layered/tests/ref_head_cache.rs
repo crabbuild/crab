@@ -22,48 +22,6 @@ fn cache() -> RefHeadCache {
 }
 
 #[test]
-fn tagged_v9_checkpoint_retains_exact_pointer_and_bytes() {
-    let checkpoint = LayeredCheckpoint::build(
-        3,
-        &"a".repeat(64),
-        vec![
-            PackLayer::build(&pack())
-                .unwrap()
-                .source_descriptor()
-                .unwrap(),
-        ],
-        PointerCatalog::new(),
-        None,
-    )
-    .unwrap();
-    let mut footer = checkpoint.footer;
-    footer.version = 9;
-    let footer_bytes = serde_json::to_vec(&footer).unwrap();
-    let mut bytes = footer_bytes.clone();
-    bytes.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
-    bytes.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
-    bytes.extend_from_slice(CHECKPOINT_V9_MAGIC);
-    let bytes = Bytes::from(bytes);
-    let old = LayeredCheckpoint::decode(bytes.clone()).unwrap();
-    let control = LayeredCheckpoint::decode_control(
-        bytes.clone(),
-        bytes.len() as u64,
-        0,
-        old.hash(),
-        old.footer_hash(),
-    )
-    .unwrap();
-    assert_eq!(
-        (
-            old.pointer().unwrap().format(),
-            control.pointer().unwrap(),
-            old.bytes()
-        ),
-        (9, old.pointer().unwrap(), &bytes)
-    );
-}
-
-#[test]
 fn checkpoint_rejects_retired_and_relabelled_trailer_versions() {
     let checkpoint = LayeredCheckpoint::build(
         3,
@@ -79,9 +37,13 @@ fn checkpoint_rejects_retired_and_relabelled_trailer_versions() {
     )
     .unwrap();
     for (version, magic) in [
-        (10, b"CRBCKP10"),
+        (0, CHECKPOINT_MAGIC),
         (9, CHECKPOINT_MAGIC),
-        (CHECKPOINT_VERSION, CHECKPOINT_V9_MAGIC),
+        (11, CHECKPOINT_MAGIC),
+        (9, b"CRBCKP09"),
+        (11, b"CRBCKP11"),
+        (CHECKPOINT_VERSION, b"CRBCKP09"),
+        (CHECKPOINT_VERSION, b"CRBCKP11"),
     ] {
         let mut footer = checkpoint.footer.clone();
         footer.version = version;
