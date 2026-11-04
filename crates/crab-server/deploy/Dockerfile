@@ -17,6 +17,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY vendor/nfs3_server/ vendor/nfs3_server/
 COPY crab/ crab/
 COPY crates/ crates/
+COPY packages/desktop/agent/ packages/desktop/agent/
 COPY --from=frontend /build/packages/ui/dist/ packages/ui/dist/
 RUN cargo build --release --locked -p crab-server
 

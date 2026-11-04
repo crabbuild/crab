@@ -7,9 +7,7 @@ use object_store::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod filter;
-mod migration;
 mod run;
-pub use migration::migrate_capsule_chunk_candidates;
 use run::{Run, merge, row_value};
 
 const ROOT_BYTES: u64 = 64 * 1024;
@@ -18,11 +16,6 @@ const READ_ATTEMPTS: usize = 3;
 const WRITE_ATTEMPTS: usize = crab_storage::cas::DEFAULT_MAX_ATTEMPTS as usize;
 const KIND: Kind = Kind::CapsuleChunkHints;
 type Request = (MerkleHash, [u8; 33], Option<[u8; 32]>);
-
-#[derive(Deserialize)]
-struct Version {
-    version: u32,
-}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,16 +43,10 @@ impl RunCache {
 
 impl Root {
     fn decode(body: &[u8]) -> Result<Self> {
-        let version: Version = serde_json::from_slice(body)
-            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
-        if version.version != 2 {
-            return Err(corrupt(
-                "capsule hint index requires crab doctor --migrate-chunk-index",
-            ));
-        }
         let root: Self = serde_json::from_slice(body)
             .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
-        if root.sequence == 0
+        if root.version != 1
+            || root.sequence == 0
             || root.levels.is_empty()
             || root.levels.len() > LEVELS
             || root.levels.last().is_none_or(Option::is_none)
@@ -334,7 +321,7 @@ impl CapsuleChunkIndex {
         work: &mut PageWork,
     ) -> Result<Option<(Root, crab_storage::store::ETag)>> {
         let (body, etag) = match store
-            .get_with_etag_bounded(&self.root, ROOT_BYTES.min(work.maximum))
+            .get_with_etag_bounded(&self.root, ROOT_BYTES.min(work.maximum()))
             .await
         {
             Ok(body) => body,
@@ -469,7 +456,7 @@ impl CapsuleChunkIndex {
                 levels.pop();
             }
             let root = Root {
-                version: 2,
+                version: 1,
                 sequence,
                 levels,
             };

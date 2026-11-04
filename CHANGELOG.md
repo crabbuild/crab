@@ -5,6 +5,14 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+- Reset native Capsule storage schemas to version 1, retaining the latest
+  authenticated layouts and resource bounds. Removed experimental-format readers,
+  version-dependent geometry and `doctor --migrate-chunk-index`. Republish
+  experimental repositories into a fresh bucket with a matching client; a fresh
+  repository prefix alone does not isolate bucket-global hints. Historical
+  qualification remains tied to its original binaries. Git/Xet/LFS dependency
+  formats and the protocol-v2 namespace keep their independent contracts.
+
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop

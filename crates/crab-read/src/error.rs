@@ -61,6 +61,10 @@ pub enum ReadError {
     #[error("replica readiness task failed: {0}")]
     ReadinessTask(#[source] tokio::task::JoinError),
 
+    /// A captured ref-head cache encoder failed before returning its result.
+    #[error("ref-head cache encoding task failed: {0}")]
+    RefHeadCacheTask(#[source] tokio::task::JoinError),
+
     #[cfg(feature = "hydration")]
     #[error("xet runtime error: {0}")]
     Runtime(#[from] xet_runtime::RuntimeError),

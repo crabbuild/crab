@@ -9,7 +9,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::root::{validate_capsule_pointer, validate_checkpoint_pointer};
 use super::{CapsulePointer, CheckpointPointer, valid_ref_name, valid_ref_namespace};
 
-const HISTORY_SEGMENT_VERSION: u32 = 3;
+const HISTORY_SEGMENT_VERSION: u32 = 1;
 /// Maximum encoded history-segment size accepted by readers and writers.
 pub const MAX_HISTORY_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum authenticated segments retained by one repository root.
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn history_rejects_unsupported_checkpoint_formats() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
+        for format in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, u32::MAX] {
             let segment = history_with_unvalidated_pointers(format, 1);
             let built = HistorySegment::build(
                 segment.checkpoint().clone(),
@@ -467,8 +467,9 @@ mod tests {
     fn history_rejects_implicit_checkpoint_format() {
         let segment = HistorySegment::build(checkpoint(), None, state()).unwrap();
         let body = std::str::from_utf8(segment.bytes()).unwrap();
-        assert_eq!(body.matches("\"format\":9,").count(), 1);
-        let bytes = Bytes::from(body.replace("\"format\":9,", ""));
+        let field = format!("\"format\":{},", super::super::layered::CHECKPOINT_VERSION);
+        assert_eq!(body.matches(&field).count(), 1);
+        let bytes = Bytes::from(body.replace(&field, ""));
 
         let error = HistorySegment::decode(bytes)
             .expect_err("an implicit retired checkpoint format must fail");

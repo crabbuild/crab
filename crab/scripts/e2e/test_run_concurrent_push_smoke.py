@@ -27,13 +27,93 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_concurrent_push_smoke import (
     CommandRecord,
     ConcurrentPushSmoke,
+    PushRecord,
     RequestCountingProxy,
     SmokeError,
     locator_requests_per_success,
     parse_stage_counts,
+    parse_args,
     push_failure_stages,
     store_category,
 )
+
+
+class ReportRecordingTest(unittest.TestCase):
+    def smoke(self, root: Path) -> ConcurrentPushSmoke:
+        args = parse_args(["--root", str(root), "--run-id", "recording",
+                           "--bucket", "qualification", "--crab-bin", sys.executable,
+                           "--agents", "8", "--max-parallel-pushes", "4"])
+        return ConcurrentPushSmoke(args)
+
+    def test_slow_report_write_keeps_the_interval_after_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = self.smoke(Path(directory))
+            clock = [100.0]
+            writes = []
+            original = Path.write_text
+
+            def write(path, *args, **kwargs):
+                result = original(path, *args, **kwargs)
+                if path.name == "report.json.tmp":
+                    writes.append(path)
+                    clock[0] += 2
+                return result
+
+            with patch("run_concurrent_push_smoke.time.monotonic", lambda: clock[0]), \
+                    patch.object(Path, "write_text", write):
+                smoke.write_report(force=True)
+                smoke.write_report()
+            self.assertEqual(len(writes), 1)
+
+    def test_push_workers_defer_full_report_serialization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            smoke = self.smoke(root)
+            barrier = threading.Barrier(4)
+            writers = []
+            original = Path.write_text
+
+            def write(path, *args, **kwargs):
+                if path.name == "report.json.tmp":
+                    writers.append(threading.current_thread().name)
+                return original(path, *args, **kwargs)
+
+            def push(agent, branch, repo, refspec):
+                barrier.wait(timeout=5)
+                command = smoke.record_command(agent, ["push", refspec], repo,
+                                               0, 10, "ok", "")
+                return PushRecord(agent, branch, command, "ok")
+
+            smoke.run_push_job = push
+            jobs = [(f"agent-{i}", f"refs/heads/agent-{i}", root, "HEAD") for i in range(8)]
+            with patch.object(Path, "write_text", write):
+                smoke.push_concurrently(jobs)
+            self.assertEqual(writers, [threading.current_thread().name])
+
+    def test_command_ledger_retains_every_result_between_report_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            smoke = self.smoke(root)
+            for index in range(4):
+                smoke.record_command(f"command-{index}", ["push"], root,
+                                     index % 2, 10 + index, "output", "error")
+            path = smoke.artifacts / "commands.jsonl"
+            ledger = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+            self.assertEqual(ledger, smoke.report.commands)
+
+    def test_failed_push_batch_restores_periodic_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            smoke = self.smoke(root)
+            smoke.run_push_job = Mock(side_effect=SmokeError("failed push"))
+            clock = [100.0]
+            with patch("run_concurrent_push_smoke.time.monotonic", lambda: clock[0]):
+                with self.assertRaises(SmokeError):
+                    smoke.push_concurrently([("agent", "refs/heads/main", root, "HEAD")])
+                clock[0] += 2
+                smoke.record_command("after-failure", [], root, 0, 1, "", "")
+            snapshot = json.loads((smoke.artifacts / "report.json").read_text())
+            self.assertEqual([row["name"] for row in snapshot["commands"]], ["after-failure"])
 
 
 class SourceClientTest(unittest.TestCase):

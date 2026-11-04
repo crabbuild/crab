@@ -26,6 +26,7 @@ bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
 crab-storage = { workspace = true, optional = true }
 crab-xet = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true, optional = true }
 gix-validate = { workspace = true }
 object_store = { workspace = true, optional = true }

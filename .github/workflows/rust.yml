@@ -121,9 +121,9 @@ jobs:
   rust:
     name: Rust quality and tests
     runs-on: ubuntu-latest
-    # Full workspace proof can consume 35 minutes before the build cache's
-    # post-job upload; leave cleanup headroom without dropping any checks.
-    timeout-minutes: 45
+    # Full test compilation exhausted the 45-minute job budget. Keep the
+    # complete workspace suite and leave time for execution and cache upload.
+    timeout-minutes: 75
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     env:
@@ -183,12 +183,17 @@ jobs:
 
       - name: Run tests
         env:
+          CRAB_BIN: ${{ github.workspace }}/target/debug/crab
           # The Linux test runner's default worker stack is too small for
           # the largest async protocol fixtures; keep the test harness from
           # converting valid coverage into a stack-overflow false negative.
           RUST_MIN_STACK: "8388608"
         # Report later executable failures too; Cargo still fails the job if any test fails.
-        run: cargo test --workspace --locked --no-fail-fast
+        run: |
+          # Desktop worktree integration tests invoke the real CLI. Cargo's
+          # binary test harness is not the executable required by that contract.
+          cargo build -p crab --locked
+          cargo test --workspace --locked --no-fail-fast
 
       - name: Check managed OpenAPI contract
         run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check

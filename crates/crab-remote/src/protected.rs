@@ -4,7 +4,7 @@ use crab_storage::StagedWrite;
 use serde::{Deserialize, Serialize};
 
 /// Current server-verified capsule publication plan format.
-pub const PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION: u32 = 3;
+pub const PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION: u32 = 1;
 
 /// Manifest-format plan still emitted by the legacy CLI publisher.
 #[derive(Debug, Deserialize, Serialize, Clone)]

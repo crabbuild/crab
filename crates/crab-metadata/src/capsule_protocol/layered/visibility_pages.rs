@@ -106,10 +106,13 @@ fn transitions(
 
 pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
     snapshot.validate()?;
-    let mut writer = Writer::default();
-    // Preserve legacy bytes for ordinary checkpoints. Shared checkpoints bind
-    // OIDs once and encode the member join as compact ordinal chunks.
     let use_shared = shared_encoding(snapshot);
+    let mut writer = if use_shared {
+        // Reconciliation probes scattered tips across the shared history.
+        Writer::with_targets(4 * 1024, 32 * 1024)
+    } else {
+        Writer::default()
+    };
     let objects = if use_shared {
         snapshot
             .member_admission
@@ -162,7 +165,12 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
     let mut refs = BTreeMap::new();
     for (name, positions) in &snapshot.refs {
         let (objects, shared) = if use_shared {
-            (None, roots.next().expect("one shared set per ref"))
+            (
+                None,
+                roots
+                    .next()
+                    .ok_or_else(|| corrupt("shared checkpoint ref set is absent"))?,
+            )
         } else {
             (
                 object_set(&mut writer, &snapshot.objects, &positions.positions())?,
@@ -207,7 +215,7 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
         refs.into_iter().collect(),
     )?;
     let descriptor = Descriptor {
-        version: if use_shared { 2 } else { 1 },
+        version: 1,
         catalog_digest: snapshot.catalog_digest.clone(),
         body_bytes: writer.bytes.len() as u64,
         body_hash: *blake3::hash(&writer.bytes).as_bytes(),
@@ -267,10 +275,8 @@ impl Descriptor {
             "checkpoint visibility catalog digest",
             "layered checkpoint",
         )?;
-        if !matches!(
-            (self.version, self.shared.is_some()),
-            (1, false) | (2, true)
-        ) || self.body_bytes > length.saturating_sub(12)
+        if self.version != 1
+            || self.body_bytes > length.saturating_sub(12)
             || length > MAX_LAYERED_VISIBILITY_BYTES as u64
             || u64::from(self.object_count) > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
         {
@@ -356,13 +362,13 @@ impl RefRow {
         }
         if let Some(shared) = &descriptor.shared {
             if row.objects.is_some() {
-                return Err(corrupt("shared checkpoint ref contains legacy objects"));
+                return Err(corrupt("shared checkpoint ref contains direct objects"));
             }
             if let Some(root) = &row.shared {
                 root.validate(shared, descriptor.body_bytes)?;
             }
         } else if row.shared.is_some() {
-            return Err(corrupt("legacy checkpoint ref contains shared objects"));
+            return Err(corrupt("direct checkpoint ref contains shared objects"));
         }
         validate_root(
             row.objects.as_ref(),
@@ -555,7 +561,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
         incremental_history: history,
     };
     snapshot.validate()?;
-    if snapshot.encode()?.as_ref() != bytes {
+    if encode(&snapshot)?.as_ref() != bytes {
         return Err(corrupt("checkpoint visibility pages are not canonical"));
     }
     #[cfg(feature = "storage")]
@@ -564,9 +570,17 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
 }
 
 fn shared_encoding(snapshot: &LayeredVisibilitySnapshot) -> bool {
-    snapshot.refs.values().fold(0u64, |bytes, closure| {
-        bytes.saturating_add(closure.len().saturating_mul(24))
-    }) > (MAX_LAYERED_VISIBILITY_BYTES / 2) as u64
+    let memberships = snapshot
+        .refs
+        .values()
+        .fold(0u64, |count, closure| count.saturating_add(closure.len()));
+    let bytes = memberships.saturating_mul(24);
+    // Frequent small checkpoints must not repeat a shared repository history
+    // for each ref. Require substantial overlap and at least two page bodies
+    // before paying for a dictionary and its reverse identity index.
+    bytes > (MAX_LAYERED_VISIBILITY_BYTES / 2) as u64
+        || (bytes > 2 * crate::pages::TARGET_BYTES as u64
+            && memberships > (snapshot.objects.len() as u64).saturating_mul(4))
 }
 
 fn shared_sets(

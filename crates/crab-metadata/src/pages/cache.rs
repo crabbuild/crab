@@ -53,27 +53,65 @@ impl State {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PageWork {
-    pub(crate) maximum: u64,
-    pub(crate) bytes: u64,
+    maximum: u64,
+    // Concurrent sources share page identities and counters. Admission must be
+    // atomic with deduplication; no guard survives a storage read or await.
+    state: Arc<Mutex<WorkState>>,
+}
+
+#[derive(Default)]
+struct WorkState {
+    bytes: u64,
     seen: BTreeSet<(usize, u64)>,
     objects: BTreeMap<[u8; 32], u64>,
     materialized: u64,
+}
+
+impl WorkState {
+    fn admit_bytes(&mut self, bytes: u64, maximum: u64) -> Result<()> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= maximum)
+            .ok_or_else(|| corruption("metadata query exceeds its byte limit"))?;
+        Ok(())
+    }
 }
 
 impl PageWork {
     pub(crate) fn new(maximum: u64, bytes: u64) -> Self {
         Self {
             maximum,
-            bytes,
-            seen: BTreeSet::new(),
-            objects: BTreeMap::new(),
-            materialized: 0,
+            state: Arc::new(Mutex::new(WorkState {
+                bytes,
+                ..WorkState::default()
+            })),
         }
     }
 
+    fn state(&self) -> Result<MutexGuard<'_, WorkState>> {
+        self.state
+            .lock()
+            .map_err(|_| MetadataError::Internal("metadata query admission is poisoned".to_owned()))
+    }
+
+    pub(crate) fn bytes(&self) -> Result<u64> {
+        Ok(self.state()?.bytes)
+    }
+
+    pub(crate) fn maximum(&self) -> u64 {
+        self.maximum
+    }
+
+    pub(crate) fn admit_bytes(&mut self, bytes: u64) -> Result<()> {
+        self.state()?.admit_bytes(bytes, self.maximum)
+    }
+
     pub(crate) fn admit_materialized(&mut self, bytes: u64) -> Result<()> {
-        let total = self
+        let mut state = self.state()?;
+        let total = state
             .materialized
             .checked_add(bytes)
             // Encoded admission also pays for vector/string headers, hex keys
@@ -81,41 +119,38 @@ impl PageWork {
             // so aliases cannot grant unlimited copies of one physical page.
             .filter(|total| *total <= self.maximum.saturating_mul(4))
             .ok_or_else(|| corruption("metadata materialization exceeds its byte limit"))?;
-        self.materialized = total;
+        state.materialized = total;
         Ok(())
     }
 
     pub(crate) fn admit_object(&mut self, hash: [u8; 32], bytes: u64) -> Result<()> {
-        if let Some(prior) = self.objects.get(&hash) {
+        let mut state = self.state()?;
+        if let Some(prior) = state.objects.get(&hash) {
             return if *prior == bytes {
                 Ok(())
             } else {
                 Err(corruption("object identity has conflicting byte lengths"))
             };
         }
-        let total = self
-            .bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= self.maximum)
-            .ok_or_else(|| corruption("metadata query exceeds its byte limit"))?;
-        self.bytes = total;
-        self.objects.insert(hash, bytes);
+        state.admit_bytes(bytes, self.maximum)?;
+        state.objects.insert(hash, bytes);
         Ok(())
     }
 
-    pub(crate) fn object_dependencies(&self) -> impl Iterator<Item = (&[u8; 32], u64)> {
-        self.objects.iter().map(|(hash, bytes)| (hash, *bytes))
+    pub(crate) fn object_dependencies(&self) -> Result<Vec<([u8; 32], u64)>> {
+        Ok(self
+            .state()?
+            .objects
+            .iter()
+            .map(|(hash, bytes)| (*hash, *bytes))
+            .collect())
     }
 
     fn admit(&mut self, layer: usize, offset: u64, bytes: u64) -> Result<()> {
-        if self.seen.insert((layer, offset)) {
-            self.bytes = self
-                .bytes
-                .checked_add(bytes)
-                .ok_or_else(|| corruption("query byte count overflows"))?;
-            if self.bytes > self.maximum {
-                return Err(corruption("metadata query exceeds its byte limit"));
-            }
+        let mut state = self.state()?;
+        if !state.seen.contains(&(layer, offset)) {
+            state.admit_bytes(bytes, self.maximum)?;
+            state.seen.insert((layer, offset));
         }
         Ok(())
     }
@@ -408,12 +443,46 @@ impl PageCache {
             source_bytes,
             path.as_ref(),
         )?);
+        self.remember_page(key, reference, kind, page)
+    }
+
+    pub(crate) fn prime(
+        &self,
+        path: &object_store::path::Path,
+        layer: usize,
+        source: std::ops::Range<u64>,
+        reference: &PageRef,
+        kind: Kind,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
+        let offset = source
+            .start
+            .checked_add(reference.offset)
+            .ok_or_else(|| corruption("page source offset overflows"))?;
+        // Inline routing pages use the same hash, bounds and coverage decoder
+        // as origin reads. Query admission still charges every referenced page.
+        let page = Arc::new(decode(bytes, reference, kind, source_bytes, path.as_ref())?);
+        self.remember_page((layer, offset), reference, kind, page)?;
+        Ok(())
+    }
+
+    fn remember_page(
+        &self,
+        key: (usize, u64),
+        reference: &PageRef,
+        kind: Kind,
+        page: Arc<Page>,
+    ) -> Result<Arc<Page>> {
         let weight = page_weight(reference, &page);
         if weight <= CACHE_BYTES {
             let mut cache = self.state()?;
             if let Some((previous_kind, previous, existing)) = cache.pages.get(&key) {
                 if *previous_kind != kind || previous != reference {
-                    return Err(corruption("concurrent page routing metadata changed"));
+                    return Err(corruption("cached page routing metadata changed"));
                 }
                 return Ok(existing.clone());
             }

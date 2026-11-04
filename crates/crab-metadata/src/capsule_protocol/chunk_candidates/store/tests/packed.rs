@@ -1,5 +1,4 @@
 use super::*;
-use crate::pages::object::ObjectPages;
 
 #[tokio::test]
 async fn incremental_publications_do_not_rewrite_unchanged_catalog_rows() {
@@ -71,112 +70,27 @@ async fn mixed_size_compaction_preserves_newer_heads_in_unmerged_runs() {
     );
 }
 
-async fn seed_paged(layout: &StoreLayout<Store>) -> Rows {
-    let (catalog, origins, _) = fixture(3000, 3);
-    let hash = MerkleHash::from([3; 4]);
-    let rows = capsule_chunk_candidate_rows(
-        layout.repo_prefix(),
-        &"2".repeat(64),
-        hash,
-        &catalog.xorbs()[&hash.hex()],
-        &origins[&hash],
-    )
-    .unwrap();
-    let rows = rows
-        .into_iter()
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect::<Rows>();
-    let pages = ObjectPages::new(layout.capsule_chunk_pages_prefix());
-    let root = pages
-        .edit(
-            layout.store(),
-            None,
-            KIND,
-            rows.clone(),
-            &mut PageWork::new(16 * 1024 * 1024, 0),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let body = serde_json::to_vec(&serde_json::json!({"version":1,"records":root})).unwrap();
-    layout
-        .store()
-        .create_strict(&layout.capsule_chunk_index_path(), Bytes::from(body))
-        .await
-        .unwrap();
-    rows
-}
-
 #[tokio::test]
-async fn explicit_migration_preserves_every_record_and_is_idempotent() {
+async fn hint_root_rejects_retired_shape_and_unsupported_versions() {
     let layout = layout();
-    let expected = seed_paged(&layout).await;
-    let index = CapsuleChunkIndex::new(&layout);
-    assert!(index.available(layout.store(), 1024 * 1024).await.is_err());
-    assert!(
-        migrate_capsule_chunk_candidates(&layout, &|| false)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !migrate_capsule_chunk_candidates(&layout, &|| false)
-            .await
-            .unwrap()
-    );
-    let (root, _) = index
-        .load(layout.store(), &mut PageWork::new(1024 * 1024, 0))
+    let (catalog, origins, _) = fixture(1, 3);
+    write_capsule_chunk_candidates(&layout, &catalog, &origins, &|| false)
+        .await
+        .unwrap();
+    let body = layout
+        .store()
+        .get_with_etag(&layout.capsule_chunk_index_path())
         .await
         .unwrap()
-        .unwrap();
-    let mut caches = Vec::new();
-    let keys = expected
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let actual = index
-        .lookup(
-            layout.store(),
-            &root,
-            &keys,
-            &mut caches,
-            &mut PageWork::new(16 * 1024 * 1024, 0),
-            0,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        actual,
-        expected
-            .into_iter()
-            .map(|(_, value)| Some(value))
-            .collect::<Vec<_>>()
-    );
-}
-
-#[tokio::test]
-async fn cancelled_migration_retains_the_exact_old_root() {
-    let observations = Arc::new(Observations::default());
-    let layout = StoreLayout::new(
-        Store::new(Arc::new(object_store::memory::InMemory::new()))
-            .with_storage_observer(observations.clone()),
-        "source".to_owned(),
-    );
-    seed_paged(&layout).await;
-    let path = layout.capsule_chunk_index_path();
-    let before = layout.store().get_with_etag(&path).await.unwrap().0;
-    observations.0.lock().unwrap().clear();
-    let result = migrate_capsule_chunk_candidates(&layout, &|| {
-        observations
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|o| o.operation == StorageOperation::Put)
-    })
-    .await;
-    assert!(matches!(result, Err(MetadataError::CapsuleHintCancelled)));
-    assert_eq!(layout.store().get_with_etag(&path).await.unwrap().0, before);
+        .0;
+    let root = Root::decode(&body).unwrap();
+    assert_eq!(root.version, 1);
+    assert!(Root::decode(br#"{"version":1,"records":null}"#).is_err());
+    for version in [0, 2, u32::MAX] {
+        let mut changed = root.clone();
+        changed.version = version;
+        assert!(Root::decode(&changed.encode().unwrap()).is_err());
+    }
 }
 
 #[tokio::test]

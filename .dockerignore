@@ -34,9 +34,10 @@ packages/web/*
 !deploy/crab-service/
 !deploy/crab-service/compose/
 !deploy/crab-service/compose/managed-read-e2e.sh
-!beyond-desktop/
-!beyond-desktop/agent/
-!beyond-desktop/agent/**
+!packages/desktop/
+packages/desktop/*
+!packages/desktop/agent/
+!packages/desktop/agent/**
 !gitoxide/
 !gitoxide/**
 

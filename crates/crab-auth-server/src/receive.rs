@@ -469,11 +469,11 @@ pub fn build_capsule_prepare_record(
     }
     let source_ref_updates = source_ref_updates_for_refs(source_refs, &view_ref_updates)?;
     Ok(PushPrepareRecord {
-        schema_version: 2,
+        schema_version: 1,
         repo_prefix: repo_prefix.to_owned(),
         push_id: push_id.to_owned(),
-        // Keep the shipped response field stable while schema v2 identifies
-        // this value as a capsule-root generation, not a v1 manifest.
+        // Preserve the published response field; the required root digest
+        // distinguishes native authority from manifest prepare records.
         source_manifest_generation: source_generation,
         source_manifest_etag: String::new(),
         source_root_digest: Some(source_root_digest.to_owned()),
@@ -489,7 +489,7 @@ pub fn validate_prepare_record_shape(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    if record.schema_version != 2 {
+    if record.schema_version != 1 {
         return Err(invalid("unsupported prepare record schema_version"));
     }
     if !record.source_manifest_etag.is_empty() {

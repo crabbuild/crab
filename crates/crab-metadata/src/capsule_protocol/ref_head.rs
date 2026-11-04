@@ -7,12 +7,15 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::root::validate_capsule_pointer;
 use super::{CapsulePointer, valid_ref_name};
 
-const REF_HEAD_VERSION: u32 = 5;
+pub(in crate::capsule_protocol) mod cache;
+pub use cache::RefHeadCache;
+
+const REF_HEAD_VERSION: u32 = 1;
 /// Maximum number of independently mutable ref heads accepted for one repository.
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
 pub const MAX_CAPSULE_REF_FRONTIER: usize = 64;
-/// Equal-level suffix runs folded in one bounded compaction wave.
+/// Normal equal-level fan-in outside the writer's bounded small-input tier.
 pub const CAPSULE_REF_COMPACTION_FAN_IN: usize = 32;
 /// Capsules coalesced into one recent per-ref run for bounded incremental reads.
 pub const CAPSULE_REF_ROLLUP_WINDOW: usize = 500;

@@ -189,7 +189,7 @@ async fn walk_prefix(
 
         progress
             .objects_listed
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| {
@@ -197,7 +197,7 @@ async fn walk_prefix(
             })?;
         progress
             .bytes_observed
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(size)
             })
             .map_err(|_| {

@@ -8,10 +8,8 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
-const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
-// Older collectors do not mark retained readers. A format cutover makes them
-// reject the repository before they can reclaim an active mount's dependencies.
-const ROOT_VERSION: u32 = 5;
+const ROOT_MAGIC: &[u8; 8] = b"CRBROOT1";
+const ROOT_VERSION: u32 = 1;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
 const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
@@ -159,7 +157,7 @@ impl CapsulePointer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointPointer {
-    format: u32,
+    pub(super) format: u32,
     hash: String,
     size: u64,
     control_offset: u64,
@@ -169,6 +167,12 @@ pub struct CheckpointPointer {
     covered_root_digest: String,
     pack_count: u32,
     object_count: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::ref_head::cache::RefHeadCachePointer::deserialize_optional"
+    )]
+    pub(super) ref_heads: Option<super::ref_head::cache::RefHeadCachePointer>,
 }
 
 impl CheckpointPointer {
@@ -199,6 +203,7 @@ impl CheckpointPointer {
             covered_root_digest: covered_root_digest.into(),
             pack_count,
             object_count,
+            ref_heads: None,
         };
         validate_checkpoint_pointer(&pointer)?;
         Ok(pointer)
@@ -928,8 +933,11 @@ pub(super) fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
 }
 
 pub(super) fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
-    if pointer.format != super::layered::CHECKPOINT_VERSION {
+    if super::layered::checkpoint_maximum_bytes(pointer.format).is_none() {
         return Err(contract_error("checkpoint format is unsupported"));
+    }
+    if let Some(cache) = &pointer.ref_heads {
+        cache.validate(pointer.control_offset)?;
     }
     validate_content_hash(
         &pointer.hash,
@@ -1349,9 +1357,15 @@ mod tests {
     fn root_rejects_retired_or_implicit_checkpoint_formats() {
         let record = checkpointed_record();
         let payload = serde_json::to_string(record.root()).unwrap();
-        assert_eq!(payload.matches("\"format\":9,").count(), 1);
+        let field = format!("\"format\":{},", super::super::layered::CHECKPOINT_VERSION);
+        assert_eq!(payload.matches(&field).count(), 1);
         for replacement in [
             "",
+            "\"format\":0,",
+            "\"format\":2,",
+            "\"format\":9,",
+            "\"format\":10,",
+            "\"format\":11,",
             "\"format\":3,",
             "\"format\":4,",
             "\"format\":5,",
@@ -1359,7 +1373,7 @@ mod tests {
             "\"format\":7,",
             "\"format\":8,",
         ] {
-            let payload = payload.replace("\"format\":9,", replacement);
+            let payload = payload.replace(&field, replacement);
             // Recompute the envelope digest so only format admission can fail.
             let mut bytes = ROOT_MAGIC.to_vec();
             bytes.extend_from_slice(&ROOT_VERSION.to_be_bytes());

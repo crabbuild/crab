@@ -26,6 +26,9 @@ use crate::git::remote_helper::PushSpec;
 mod shared_visibility;
 
 const LOCAL_OBJECT_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+// A global pass rereads all captured refs. Amortize it across four ordinary
+// per-ref tiers instead of repeating that work at each tier boundary.
+const CATALOG_CHECKPOINT_THRESHOLD: usize = 128;
 
 /// Publish one remote-helper push batch through per-ref capsule heads.
 ///
@@ -669,6 +672,37 @@ async fn run_inner(
     } else {
         false
     };
+    // Fold the complete captured catalog before its per-ref suffix grows without
+    // bound. Direct writers already retain GC admission; protected/replicated
+    // publication cannot advertise new checkpoint objects through this root CAS.
+    if publication.as_ref().is_ok_and(Option::is_some)
+        && gc_writer.is_some()
+        && config.active_active_replication.is_none()
+        && layout.store().staging_write_prefix().is_none()
+        && xet_stats.pending_catalog_capsules >= CATALOG_CHECKPOINT_THRESHOLD
+    {
+        let maintenance = crab_write::generation::with_generation_owner::<_, CrabError>(
+            layout.store(),
+            &layout,
+            config.lock_ttl,
+            cancel,
+            async {
+                crab_remote::checkpoint::publish_capsule_checkpoint(
+                    &layout,
+                    CATALOG_CHECKPOINT_THRESHOLD as u32,
+                    crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                    cancel,
+                )
+                .await?;
+                Ok(())
+            },
+        );
+        // This ref is already committed. Failed maintenance leaves its previous
+        // exact root intact and must not turn that acknowledgement into rejection.
+        if let Err(error) = Box::pin(maintenance).await {
+            tracing::warn!(%error, "capsule committed; catalog checkpoint maintenance failed");
+        }
+    }
     let release = match gc_writer {
         Some(writer) => writer.release().await,
         None => Ok(()),

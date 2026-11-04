@@ -427,6 +427,7 @@ pub crab_sdk::remote::TreeEntry::path: crab_sdk::GitPath
 pub mod crab_sdk::storage
 pub struct crab_sdk::storage::AzureOptions
 impl crab_sdk::storage::AzureOptions
+pub fn crab_sdk::storage::AzureOptions::access_key(&str, &str, &str) -> crab_sdk::Result<Self>
 pub fn crab_sdk::storage::AzureOptions::bearer(&str, &str, &str) -> crab_sdk::Result<Self>
 pub fn crab_sdk::storage::AzureOptions::sas(&str, &str, &str) -> crab_sdk::Result<Self>
 pub fn crab_sdk::storage::AzureOptions::with_endpoint(self, &str) -> Self
@@ -439,6 +440,7 @@ pub struct crab_sdk::storage::DirectStoreOptions
 impl crab_sdk::storage::DirectStoreOptions
 pub fn crab_sdk::storage::DirectStoreOptions::azure(crab_sdk::storage::AzureOptions) -> Self
 pub fn crab_sdk::storage::DirectStoreOptions::azure_from_env(&str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::storage::DirectStoreOptions::configure_command(&self, &mut std::process::Command) -> crab_sdk::Result<()>
 pub fn crab_sdk::storage::DirectStoreOptions::filesystem(&std::path::Path) -> crab_sdk::Result<Self>
 pub fn crab_sdk::storage::DirectStoreOptions::gcs(crab_sdk::storage::GcsOptions) -> Self
 pub fn crab_sdk::storage::DirectStoreOptions::gcs_from_env(&str) -> crab_sdk::Result<Self>
@@ -447,6 +449,7 @@ pub fn crab_sdk::storage::DirectStoreOptions::s3_from_env(&str) -> crab_sdk::Res
 pub struct crab_sdk::storage::GcsOptions
 impl crab_sdk::storage::GcsOptions
 pub fn crab_sdk::storage::GcsOptions::new(&str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::storage::GcsOptions::service_account(&str, &str) -> crab_sdk::Result<Self>
 impl core::fmt::Debug for crab_sdk::storage::GcsOptions
 pub fn crab_sdk::storage::GcsOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct crab_sdk::storage::S3Options

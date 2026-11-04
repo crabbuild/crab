@@ -1,8 +1,9 @@
 # Crab v2 team and large-file qualification
 
 Status: **Combined revision under qualification; historical failures retained**.
-Latest combined-build qualification and gate status are tracked in
-[PR #640](https://github.com/crabbuild/crab/pull/640).
+PR #640 is merged. The subsequent contention, small-run compaction and
+qualification follow-up is tracked in [PR #645](https://github.com/crabbuild/crab/pull/645).
+That follow-up is not yet team-scale qualified.
 The target branch's `84812774d5a` fetch changes are integrated with the metadata
 and indexing fixes. Warm classic and wire fetches use paged controls and the
 same scalar binding validator; cold installation retains complete member
@@ -14,6 +15,308 @@ The original object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
 were independently read back with their original holders preserved.
+
+## Latest team-scale diagnostic
+
+Published `7b373a977c9` passes 1,834 dedicated Linux test executions, official
+private installation and a fresh 80-push smoke with historical bytes, all 40,388
+reachable raw Git objects and no-repair fsck verified. Complete metadata decoding
+uses bounded blocking workers; cancellation retains only immutable decode inputs
+and CPU admission until each worker finishes. Native formats use version 1;
+the Crab product remains `2.0.0-alpha.1`.
+
+Its fresh 1,000-developer first batch acknowledges all 1,000 pushes without
+rejection, but p95 is **10.522 seconds**, failing the unchanged ten-second gate.
+The slowest command takes 49.370 seconds. Sixteen workers average 15.907 active
+commands. Independent audits verify the original timings, sealed acknowledgements
+and 1,001 refs. The controller stops before batch two; the remaining 9,000 pushes
+and matched control are not generated. Original push windows contain 892,415
+requests, 7,523,539,059 response bytes and 3,488,683,043 known upload bytes.
+Capsule GETs account for 619,354 requests and 4,444,994,833 response bytes.
+These are candidate totals, not matched savings.
+
+A separate cold audit verifies all 1,000 recorded ordinary/Xet/LFS payload
+histories, strict full Git fsck and all 48,004 raw Git objects against original
+seed/writer bytes: 104,385,547 content bytes, including 11,001 commits. No-repair
+fsck reports zero errors, repairs or repair failures. Its 8,007 commands and
+388,103 reconciled verification requests are outside the original push windows;
+the failed latency result and original seals remain unchanged. This proves only
+the first-batch prefix, not the required 10,000-push history.
+
+The `a440daf654f` scheduling experiment folds after 64 pending capsules instead
+of 128. It passes the focused lifecycle test and a fresh 640-push diagnostic,
+including historical bytes, all 43,076 raw Git objects and no-repair fsck.
+Its full 1,000-developer first batch acknowledges all 1,000 pushes but fails
+latency more sharply: p95 **13.539 seconds**, p99 17.651 seconds, maximum
+22.587 seconds and wall time 442.774 seconds. Original closed-client windows
+reconcile 568,056 requests, 6,583,931,064 response bytes and 3,531,088,633 known
+upload bytes. This reduces requests versus the preceding failed candidate but
+worsens p95; tightening checkpoint frequency alone is insufficient. These are
+candidate-only totals, with no matched savings claim.
+
+That prefix separately passes all 1,000 recorded ordinary/Xet/LFS histories,
+strict full Git fsck and all 48,004 raw Git objects compared with original
+seed/writers: 104,385,543 content bytes. No-repair fsck reports zero errors,
+repairs or repair failures. Its 8,007 commands and 209,909 verification requests
+are outside the original push windows. Original seals and failed timings remain
+unchanged; the remaining 9,000 pushes and matched control are not generated.
+
+The next candidate restores the 128-capsule interval and separates advisory
+absence discovery from remote reuse authority. Each file, chunk and xorb query
+uses authenticated catalog indexes that can establish
+absence without replaying unrelated Git visibility; the result exposes no remote
+values or visibility authority. Any hit completes the existing reconciliation
+against the same captured sources before returning reusable metadata. Concurrent
+queries share successful proof; cancellation can retry from immutable inputs.
+Probe and authorized query share one admission state. Payload,
+origin, publication, GC and complete maintenance checks remain mandatory. A
+focused regression reproduces 257 reads for 64 unrelated refs and bounds the
+advisory path to 129. Fresh final Linux runtime, full-team latency and matched
+request/byte proof remain required; this focused bound closes none of those gates.
+
+### Retained earlier measurements
+
+The following entries describe their recorded revisions and experimental
+formats. Inspect old stores with their original binaries; the native format-1
+baseline requires fresh buckets and supplies no old-format fallback reader.
+
+The `46ca69e2871` candidate passes full exact-head CI, 907 dedicated Linux
+checks, official installation, 1,656 old-format readback checks and the 80-push
+smoke with every reachable Git object byte verified. Its matched 640-push
+diagnostic reduces capsule GETs 51.7%, capsule response bytes 7.65% and
+all-metadata response bytes 5.13%. Foreground maintenance is included; known
+upload bytes increase 14.3%.
+
+That candidate's 1,000-developer replay reached a clean, independently verified
+6,000-push checkpoint. All six recorded batch p95 values are below ten seconds,
+but the worker audit exposes a load-generator limitation: the sixth batch peaks
+at sixteen commands while averaging only 1.21 active commands. Its 44,029-record,
+48 MB report takes 1.145 seconds to write. The old throttle starts before that
+write, so an immediate update writes it again in 1.090 seconds. Repeated
+serialization under the report lock starves push workers as history grows.
+These timings describe the observed load, not final team-scale qualification.
+Original acknowledgements, timings, batch receipts and raw HTTP logs remain
+retained; the old controller was retired at the drained checkpoint.
+
+The driver now appends each completed command to an independent JSONL ledger,
+defers full snapshots while push workers run, and flushes a full snapshot after
+the batch drains or fails. Other periodic writes are timed from completion.
+All 44 recorder/meter/resume tests pass on macOS; Linux passes 43 with one
+existing descriptor-limit test skipped. On the unchanged 48 MB report, an
+immediate periodic update now skips serialization in 0.034 milliseconds.
+Fresh matched replays with the corrected recorder, full historical byte audits
+and the original latency/request/response-byte gates remain required.
+
+Published `0402bb83236` passes 902 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks and an 80-push smoke.
+Its matched 64-developer replay completes 640 pushes per build, all ten sealed
+batches, 918 history/no-repair checks per build and byte comparison of all
+43,076 reachable Git objects. Latency passes at 3.885 seconds overall and
+4.787 seconds worst-batch p95. Capsule GETs fall 51.0% (112,547 to 55,182), but
+capsule response bytes increase 6.08% (403,263,244 to 427,771,839) and conservative
+all-metadata response bytes increase 6.73% (492,799,891 to 525,945,500). Both
+byte gates fail. Known request-body bytes increase 14.0%, with zero unknown
+lengths; foreground checkpoint/compaction work remains included. The controller
+stops before generating the 1,000-developer cohort.
+
+Raw recount finds 6,024 repeated 10,516-byte directory / 8,174-byte leaf pairs:
+112,588,560 response bytes. The next singleton-layout regression reproduces
+1,226,644 bytes for 64 cold, scattered tips in 40,000-object closures. Version 6
+uses 4 KiB leaves/directories and authenticated inline routing roots; it passes
+the unchanged 768 KiB bound at 661,896 bytes, retaining exactly 192 requests.
+This focused result does not qualify matched traffic, Linux latency or the full
+10,000-push replay. Original version-3/4/5 data remains readable through its
+declared geometry. Readers must be upgraded before version-6 writers.
+
+[Full CI for `0402bb8`](https://github.com/crabbuild/crab/actions/runs/41711621839)
+passed. The following preceding results remain retained.
+
+Published `c02e7cb9f34` passes 902 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks and an 80-push smoke.
+The smoke verifies all 40,388 reachable Git objects against original bytes;
+overall / worst-batch p95 is 2.149 / 2.852 seconds. Its actual Linux ARM64 server
+image also builds successfully from the frozen source archive.
+
+Its matched 64-developer replay completes 640 pushes per build, all ten sealed
+batches, 918 history/no-repair checks per build and every reachable Git object
+byte. Capsule GETs fall 67.5% (112,249 to 36,458), and capsule response bytes
+fall 14.5% (404,087,281 to 345,620,973). Conservative all-metadata response bytes
+increase from 493,743,678 to 503,507,691: **1.98% more, failing the byte budget**.
+Overall p95 passes at 7.553 seconds, but first-batch p95 is **11.373 seconds**,
+failing the per-batch gate. Known request-body bytes increase 13.2%, with zero
+unknown lengths. All foreground checkpoint/compaction work is included.
+
+The controller stops before generating the 1,000-developer cohort. Raw recount
+finds 56,850,361 checkpoint response bytes and 20,097,246 pack-layer response
+bytes; the first batch reads 43,868,067 more response bytes than control and
+publishes one checkpoint. These measurements motivate testing a 128-capsule
+global threshold, amortizing the full captured-ref pass across four ordinary
+per-ref tiers. Its complete Linux replay and matched team-scale budgets remain
+unproven. [CI for `c02e7cb`](https://github.com/crabbuild/crab/actions/runs/41702955192)
+was superseded and cancelled.
+
+The real-Git lifecycle regression rejects an early global rewrite after one
+32-capsule tier on the previous policy. With a 128-capsule global threshold it
+passes both deferred and eventual publication, same-epoch catalog recapture
+after head rebase, and subsequent global/repository GC sweep admission. This
+focused host result is not Linux or team-scale qualification.
+
+Published `8cdf15d1949` passes 899 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks, and an 80-push smoke
+with 134 history/no-repair checks. Its matched 64-developer replay completes
+640 pushes per build and 918 independent history/no-repair checks each. All
+43,076 reachable Git objects also match the original seed/writer bytes.
+Candidate p95 passes at 5.445 seconds overall and 6.816 seconds worst batch.
+Capsule GETs fall 62.1% (112,403 to 42,630) and capsule response bytes fall 5.2%,
+but conservative all-metadata response bytes increase from 499,072,312 to
+609,527,236: **22.1% more, failing the byte budget**. Known request-body bytes
+increase 13.6%; all foreground compaction is included, with zero unknown lengths.
+The controller stops before generating its 1,000-developer cohort. Its
+[exact-head CI](https://github.com/crabbuild/crab/actions/runs/41689953288) was
+superseded and cancelled; it does not establish full CI qualification.
+
+Raw request recount attributes 126,406,083 response bytes to checkpoint GETs and
+20,097,372 to a pack-layer GET. The next change uses 4 KiB leaves for shared
+checkpoint proofs while retaining declared version-1/2 bytes; capsule visibility
+read-ahead stops at 16 KiB. Focused regressions reproduce 2,128,338 bytes for
+64 scattered ref proofs and 24,785 bytes for one selected capsule tip. They pass
+at 808,020 and 8,437 bytes respectively. All 130 focused visibility checks pass,
+with two existing ignores. These local proof-byte results do not qualify Linux
+push latency, the matched byte budget or a complete 10,000-push replay.
+
+The rebased desktop member also exposes a separate image-build failure: the
+service Docker stages omit `packages/desktop/agent`, so Cargo cannot load the
+workspace. The follow-up includes that member in all five service builders and
+the Docker context allowlist. A real Docker context export resolves all 26
+members with locked offline Cargo metadata; the actual server image build
+subsequently passes on `c02e7cb`, as recorded above.
+
+The preceding `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
+and all matched 64-developer gates: 51.8% fewer capsule GETs, 15.3% fewer capsule
+response bytes, 16.3% fewer conservative all-metadata response bytes, and
+2.947-second overall / 3.477-second worst-batch p95. Both independent audits pass
+918 checks. Its first 1,000-developer batch still fails at 33.961-second p95.
+All 1,000 actual acknowledgements and 1,001 refs are independently verified;
+generation stops at its planned round-zero checkpoint. Historical bytes,
+no-repair fsck and the remaining 9,000 pushes are pending for that cohort.
+
+A native Linux release probe on that frozen dataset opens one catalog session
+with 5,010 requests and 26,366,593 response bytes before selected file lookup.
+The selected lookup then uses five reads / 1,994 bytes and 14.265 ms. These are
+isolated diagnostic timings, not team push qualification. A task-owned copied
+33-ref subset demonstrates that existing checkpoint publication reduces later
+capture requests from 170 to 38 and bytes from 868,524 to 77,543. Publication
+takes 2.426 seconds, reads 47,937,722 bytes and writes 14,099,935 bytes; maintenance
+cost is retained rather than excluded from the comparison.
+
+The next combined change elects one foreground checkpoint owner after a direct
+Xet push observes the existing 32-capsule threshold. It also selects the existing
+shared checkpoint representation earlier for heavily overlapping refs. The
+regression first produces 22,779,612 bytes, then 2,097,992 bytes with identical
+memberships. Fourteen focused checkpoint tests pass, including the original
+version-1 byte hash and declared-layout decoding. A live RustFS codec diagnostic
+reads the original checkpoint, publishes the shared replacement (14.0 MB becomes
+2.51 MB), and verifies old/new selected results against the complete catalog.
+That diagnostic uses a macOS debug example and establishes no Linux push latency.
+The real-Git lifecycle test reproduces the missing foreground checkpoint with
+the hook removed and passes with it restored, including GC sweep admission after
+cleanup. Extending the test reproduces a stale-base failure after a checkpoint
+and subsequent head rebase. Current catalog capture now retries verified
+same-repository/epoch root replacements; explicitly pinned snapshot lookup keeps
+its original replay precedence. The lifecycle regression, eight capture tests,
+three ordering tests, strict metadata Clippy and payload-only compilation pass.
+Its subsequent `8cdf15d1949` installation, readback and 64-developer proofs are
+recorded above. The combined branch remains unqualified end to end; neither its
+failed byte comparison nor the new focused page tests close the team-scale gates.
+
+The following earlier results remain retained:
+
+The private ARM64 Linux build at `cbdc300ed806` passes fresh matched
+64-developer/640-push gates: capsule GETs fall from 112,484 to 54,123 (51.9%),
+capsule response bytes fall 15.8% and conservative all-metadata response bytes
+fall 17.2%. Candidate p95 is 3.412 seconds overall and 4.430 seconds in the
+slowest batch. Both independent historical audits pass 918 checks and fsck
+without repair. Foreground compaction is included; declared request-body bytes
+increase 5.8%, with zero unknown body lengths, and remain separately reported.
+Both builds use the same isolated RustFS instance and Workspace-backed test disk.
+
+That exact build still fails the first 1,000-developer batch: all 1,000 pushes
+succeed, but p95 is 19.499 seconds and maximum latency is 25.277 seconds. The
+planned round-zero pause seals the original timings before stopping generation;
+the batch makes 3,043,750 HTTP requests. An independent audit verifies every
+acknowledgement, clean writer tip and all 1,001 remote refs. Historical bytes,
+fsck and the remaining 9,000 pushes are not yet verified for this paused cohort.
+The matched 1,000-developer request/byte comparison remains pending.
+
+The previous `5bb744cd2bd` run remains a failed diagnostic: its first batch has
+21.968-second p95, 2,468,385 capsule GETs and 14,689,102,104 capsule response
+bytes. Its sealed five-batch prefix retains 5,000 acknowledgements. Later
+diagnostic work never replaces the original timings or establishes full history.
+
+`cbdc300ed806` includes bounded new-tip proof prefetch and ordinary compaction
+tier completion; 881 dedicated Linux checks and private all-variant installation
+pass. Complete catalog capture and subsequent selected-source queries still
+grow with ref state. The next reader change overlaps independent run queries
+without changing source order or resetting their shared admission budget. A
+deterministic 64-source regression reproduces 640 ms of serial provider waits;
+the bounded implementation passes its 40 ms limit. This simulated I/O result
+does not establish the required 10,000-push latency, byte or integrity gates.
+
+Full CI on `cbdc300ed806` completes the workspace tests but fails an obsolete
+version-guard fixture: `>=0.1.0` does not accept the declared
+`2.0.0-alpha.1` prerelease. The CLI library reports 4,182 passed, one failed and
+eight ignored tests. The follow-up derives the positive fixture from the actual
+declared version and checks stable-only range exclusion explicitly. Production
+guard behavior remains byte-identical to the merged base and follows the
+[SemVer requirement contract](https://docs.rs/semver/1.0.28/semver/struct.VersionReq.html).
+Its corrected `f8c3961` successor passes full CI above. Further source changes
+still require green full CI and a fresh replay.
+
+## Resuming a qualification audit
+
+`run_mixed_team_rustfs.py` accepts `--phase push`, `--phase verify` and the
+combined default `--phase all`. A push-only run reports `pushes-complete`, not
+verified integrity. Every drained batch retains an immutable
+`artifacts/push-batch-NN.json`, including rejected commands and its original
+latency distribution. After every requested push is acknowledged exactly once
+per branch and round, `artifacts/push-checkpoint.json` seals the report, expected
+writer tips, driver and binary identities.
+
+Run the same command with `--phase verify` and the original `--run-id` to perform
+historical Git/Xet/LFS readback and the no-repair fsck in a fresh `verification-*`
+child directory. Keep the same persistent RustFS backend, filesystem, source,
+Git/Crab binaries and drivers. Mismatched identities fail before modifying any
+push evidence. Failed audit attempts remain available; a subsequent attempt
+uses new consumers and caches. This resumes verification of a complete push
+cohort.
+
+For a planned pause, keep the full `--branch-update-rounds` workload and add
+`--stop-after-round N` (zero includes the initial fanout). After that drained
+batch, `pushes-paused` and an immutable `pause-through-NN.json` retain all
+acknowledgements, timings, request totals and expected refs. Continue with the
+same arguments, `--resume` and a later stop round, or omit the stop round to
+finish. Resumption checks the source, clean writer tips, all remote refs and
+driver/binary identities before changing the report. A controller lock prevents
+two generation processes from owning a run. Interrupted or rejected batches
+remain non-qualifying; the driver never infers their acknowledgements or
+replaces their timings. A stale lock after a killed controller requires manual
+investigation; resumption does not steal it.
+
+The dedicated Linux/RustFS smoke completed 80 pushes from eight developers in
+three generation processes, pausing after rounds 3 and 5 before finishing round
+9. An independent verification process checked both historical Git/Xet/LFS
+payload versions and fsck without repair. An additional audit compared the
+sealed pause reports and all ten batch receipts against the final report:
+original acknowledgement records and latency distributions were preserved.
+Nine checkpoint tests and 31 existing concurrent-driver tests pass. This proves
+the pause/resume lifecycle at smoke scale; 10,000-push qualification is pending.
+
+The merged stable-capture implementation reproduces its exhausted-retry failure
+with a deterministic 900 ms write burst. The follow-up permits 32 bounded
+attempts, reusing each final listing as the next starting inventory. Identical
+provider identities, active-epoch filtering and fresh activation resolution
+remain required. Fifteen store/capture tests and strict metadata/writer Clippy
+pass locally. The longer burst proof is not a 64- or 1,000-developer live result.
 
 ## Scope and provenance
 
@@ -241,6 +544,25 @@ All 777 metadata tests pass (three pre-existing ignores), including unchanged
 read/byte counts and compacted-run paging. This is a simulated round-trip proof,
 not a team latency result; fresh installed/Linux qualification remains required.
 Evidence: `visibility-waves-before.log`, `visibility-leaf-waves-final-all.log`.
+
+The corrected matched 64-developer Linux diagnostic passes all 854 correctness
+checks on both builds, but `9dac0cdd815` still fails the accepted cost gates.
+Independent raw-log recount finds 59,823 versus 113,439 capsule GETs (47.264%
+fewer), and 415,349,972 versus 406,453,516 capsule response bytes (2.189% more).
+All-metadata response bytes also increase. Candidate service p95 is 7.413 seconds,
+with every batch below ten seconds. This remains a failed cost result, not
+1,000-developer qualification.
+
+The next writer follow-up folds four small equal-level tail sources only when
+all input, including older carries, fits 1 MiB. Larger histories retain the
+existing batching and byte-pressure rules. A current-catalog regression first
+needs 27 reads for three refs with four versions each; the new bound is at most
+12 reads for three refs at four, eight and sixteen versions. Capsule bytes,
+source retention, large-source preservation and publication boundaries remain
+checked. Foreground compaction traffic must be included in live request/byte
+qualification; the capture-only regression does not establish its total cost.
+Evidence: `metadata-only-64-independent-comparison.json`,
+`tiny-history-before.log`, `tiny-history-final-write.log`.
 
 The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
 evicting a warmed point proof. Large cold spans now use one exact transfer;

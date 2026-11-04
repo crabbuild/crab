@@ -1,13 +1,12 @@
 # Capsule Publication Protocol
 
-Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
-ref closures and transitions use authenticated pages rooted in the footer.
-Git views load those pages lazily; explicit catalog access remains a complete
-async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
-for proof and remaining gates. `CRBCKP05` records below describe the preceding
-format and its historical qualification; they do not qualify v6. Readers reject
-retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
-
+The current native storage baseline is version 1 (`CRBCKP01`), including
+bounded authenticated ref-head receipts, paged catalogs and visibility. See the
+[canonical codec contract](../../../crates/crab-metadata/README.md#capsule-roots-and-catalogs).
+Experimental formats have no compatibility reader or converter; republish into
+fresh storage with a matching client. Measurements below describe their original
+source revisions and do not qualify this reset. Git's wire protocol and Xet/LFS
+payload formats remain independently specified.
 
 ## Document metadata
 
@@ -22,7 +21,7 @@ retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
 
 ### Implementation status
 
-The implemented checkpoint is metadata-only `CRBCKP06`. Its ordered source
+The implemented checkpoint is metadata-only `CRBCKP01`. Its ordered source
 directory binds immutable `CRBRUN01` capsule runs and `CRBPKL01` pack layers;
 canonical xorbs and shards remain external. The [stable layered-pack
 design](capsule-layered-packs.md) is the detailed read, maintenance, and
@@ -73,7 +72,7 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   or ref-head CAS according to the authority being changed;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
-- checkpoint format `CRBCKP06` binds the immutable source directory, pointer
+- checkpoint format `CRBCKP01` binds the immutable source directory, pointer
   catalog, paged visibility closures, and bounded transition evidence.
   Ordinary incremental reads authenticate its footer range without transferring
   the complete visibility body or stable pack bodies. Selected source ranges
@@ -363,7 +362,7 @@ The root's object-store ETag and version are CAS tokens, not content hashes.
 The encoded `root_digest` detects body corruption independently of provider
 version metadata.
 
-The development codec uses an eight-byte `CRBROOT2` magic, a big-endian format
+The development codec uses an eight-byte `CRBROOT1` magic, a big-endian format
 version and payload length, a deterministic JSON payload containing only
 ordered maps and integer/string fields, and a trailing BLAKE3 digest over the
 envelope and payload. Readers reject oversized, non-canonical, truncated,
@@ -396,7 +395,7 @@ remain independent content-addressed objects. Readers validate capsule sections
 and every external object through its bound content identity.
 
 The development capsule codec concatenates non-empty sections, followed by a
-bounded deterministic footer, footer length, footer BLAKE3, and `CRBCAPS2`
+bounded deterministic footer, footer length, footer BLAKE3, and `CRBCAPS1`
 magic. The first section is always the canonical ref transaction. Its BLAKE3
 must equal the footer transaction identity, and its base-root digest must equal
 the footer base. Every section has a contiguous offset, length, kind, and

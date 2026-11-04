@@ -15,6 +15,7 @@ from pathlib import Path
 
 OBJECT_STORE_IMPLEMENTATION_FEATURES = {
     "crab": {"aws", "gcp", "azure", "fs"},
+    "crab-desktop-agent": {"fs"},
     "crab-storage": {"aws", "gcp", "azure", "fs"},
     "crab-workflow": {"aws", "gcp", "azure", "fs", "http"},
 }
@@ -1789,6 +1790,7 @@ SHIPPED_BINARY_PACKAGES = {
     "crab": {"crab"},
     "crab-auth-server": {"crab-auth-receive", "crab-auth-view"},
     "crab-cache-server": {"crab-cache-server"},
+    "crab-desktop-agent": {"crab-desktop-agent"},
 }
 SERVER_PACKAGES = {
     "crab-auth-server",
@@ -1830,6 +1832,18 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
     }
 )
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-desktop-agent": {
+        "normal": {
+            "crab-auth",
+            "crab-auth-store",
+            "crab-cache",
+            "crab-git",
+            "crab-sdk",
+            "crab-storage",
+            "crab-workflow",
+        },
+        "dev": {"crab-sdk"},
+    },
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
         # Checkpoint cancellation fixtures need storage's test-only fault hooks.
@@ -3575,6 +3589,7 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
                 "dep:crab-storage",
                 "dep:futures-util",
                 "dep:object_store",
+                "dep:tokio",
             ],
         },
     )

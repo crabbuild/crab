@@ -354,12 +354,17 @@ impl CachingStore {
 
     /// Build a cache-aware storage facade for read-only metadata consumers.
     ///
-    /// The returned facade preserves the origin store's bucket identity and
+    /// The returned facade preserves the origin store's bucket/transport identity and
     /// storage scope so scoped readers keep their no-checkpoint-write mode
     /// while immutable metadata reads still use the cache service.
     pub fn cache_aware_storage(&self) -> Store {
         let mut storage =
             Store::new(self.object_store()).with_bucket_identity(self.origin.bucket_identity());
+        // Mutable reads preserve actual origin tokens. Scoped routes carry no
+        // prefix-wide transport proof; do not broaden their cache authority.
+        if let Some(identity) = self.origin.read_prefix_target_identity(&Path::from("")) {
+            storage = storage.with_target_identity(*identity);
+        }
         if let Some(scope) = self.origin.storage_scope().cloned() {
             storage = storage.with_storage_scope(scope);
         }
@@ -2663,6 +2668,54 @@ mod tests {
         let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (got, _etag) = cs.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn cache_aware_storage_preserves_only_unrouted_target_proof() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        for routed in [false, true] {
+            let mut origin = origin_store().with_target_identity([1; 32]);
+            if routed {
+                origin = origin.with_read_routes(vec![(
+                    "repo/payloads".to_owned(),
+                    Arc::new(InMemory::new()),
+                )]);
+            }
+            let cache =
+                CachingStore::new_with_local_cache(origin, no_cache_config(), local.clone())
+                    .unwrap();
+            let storage = cache.cache_aware_storage();
+            assert_eq!(
+                storage.read_prefix_target_identity(&Path::from("repo/v2/refs")),
+                (!routed).then_some(&[1; 32])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_aware_storage_retains_fresh_native_ref_body_tokens() {
+        let origin = origin_store().with_target_identity([1; 32]);
+        let tempdir = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let cache =
+            CachingStore::new_with_local_cache(origin.clone(), no_cache_config(), local).unwrap();
+        let storage = cache.cache_aware_storage();
+        let path = Path::from("repo/v2/refs/726566732f68656164732f6d61696e");
+        origin
+            .put_overwrite(&path, Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+        let first = storage.get_with_etag(&path).await.unwrap();
+        origin
+            .put_overwrite(&path, Bytes::from_static(b"second"))
+            .await
+            .unwrap();
+        let second = storage.get_with_etag(&path).await.unwrap();
+        assert_eq!(
+            (first.0.as_ref(), second.0.as_ref(), first.1 != second.1),
+            (b"first".as_slice(), b"second".as_slice(), true)
+        );
     }
 
     #[tokio::test]

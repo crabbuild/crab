@@ -190,7 +190,7 @@ impl CatalogPages {
         deltas: &[PointerCatalog],
         work: &mut PageWork,
     ) -> Result<Descriptor> {
-        admit_catalog_rows(deltas, work.maximum.saturating_sub(work.bytes))?;
+        admit_catalog_rows(deltas, work.maximum().saturating_sub(work.bytes()?))?;
         self.open(store, work).await?;
         let mut delta = PointerCatalog::new();
         for piece in deltas {

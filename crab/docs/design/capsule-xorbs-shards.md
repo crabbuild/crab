@@ -1,12 +1,12 @@
 # Protocol v2 Xorb and Shard Integration
 
-Current development checkpoint format is `CRBCKP09` (format 9), with a
-copy-on-write paged catalog and authenticated visibility. See
-[indexed remote reads](../architecture/indexed-remote-reads.md#copy-on-write-checkpoint-catalog-format-9-under-qualification)
-for its implementation and qualification gates. Earlier checkpoint-format records
-below describe historical sources; they do not qualify format 9. Readers reject
-retired checkpoint formats. Complete current-format production qualification
-remains open.
+The current native storage baseline is version 1 (`CRBCKP01`), with a bounded
+authenticated ref-head cache, a copy-on-write paged catalog and authenticated
+visibility. Experimental formats have no compatibility reader or conversion;
+republish development repositories into fresh storage. See the
+[canonical native format contract](../../../crates/crab-metadata/README.md#capsule-roots-and-catalogs).
+Measurements and format records below describe their original revisions and do
+not qualify this reset. Exact-build lifecycle and performance gates remain open.
 
 ## Document metadata
 

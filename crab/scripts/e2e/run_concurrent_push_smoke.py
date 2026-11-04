@@ -22,6 +22,11 @@ per-phase S3 HTTP attempts plus RustFS object-count and stored-byte deltas for
 cost analysis. Each push record also retains stable failure-stage counts from
 the command's local audit slice, including failed attempts hidden by a later
 successful integration retry.
+
+Command metadata is appended to ``artifacts/commands.jsonl`` as each command
+finishes. Push workers defer full report snapshots until the batch drains,
+including failure exits; periodic snapshots outside pushes are timed from the
+completion of the preceding write.
 """
 
 from __future__ import annotations
@@ -834,6 +839,7 @@ class ConcurrentPushSmoke:
         self.command_index = 0
         self.command_lock = threading.Lock()
         self.report_lock = threading.RLock()
+        self.push_batch_active = False
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
@@ -890,12 +896,13 @@ class ConcurrentPushSmoke:
 
     def write_report(self, *, force: bool = False) -> None:
         with self.report_lock:
-            # Large team runs retain every command, but serializing the growing
-            # report per command would make the driver dominate push latency.
+            # Command records remain in the append-only ledger while workers
+            # run. Full snapshots must not serialize or starve those workers.
+            if self.push_batch_active and not force:
+                return
             now = time.monotonic()
             if not force and now - getattr(self, "last_report_write", 0) < 1:
                 return
-            self.last_report_write = now
             self.artifacts.mkdir(parents=True, exist_ok=True)
             self.report.updated_at = utc_now()
             path = self.artifacts / "report.json"
@@ -906,6 +913,7 @@ class ConcurrentPushSmoke:
                 json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             os.replace(temp_path, path)
+            self.last_report_write = time.monotonic()
 
     def check(self, name: str, ok: bool, detail: dict[str, Any] | None = None) -> None:
         with self.report_lock:
@@ -952,8 +960,14 @@ class ConcurrentPushSmoke:
             stdout_log=str(stdout_log),
             stderr_log=str(stderr_log),
         )
+        row = asdict(record)
         with self.report_lock:
-            self.report.commands.append(asdict(record))
+            self.artifacts.mkdir(parents=True, exist_ok=True)
+            ledger = self.artifacts / "commands.jsonl"
+            with ledger.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(row, sort_keys=True) + "\n")
+            self.report.artifacts["command_ledger"] = str(ledger)
+            self.report.commands.append(row)
             self.write_report()
         return record
 
@@ -2224,27 +2238,34 @@ class ConcurrentPushSmoke:
             result.queue_ms = queue_ms
             return result
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(push, job) for job in jobs]
-            try:
-                results = [future.result() for future in concurrent.futures.as_completed(futures)]
-            except BaseException:
-                for future in futures:
-                    future.cancel()
-                raise
+        with self.report_lock:
+            self.push_batch_active = True
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(push, job) for job in jobs]
+                try:
+                    results = [future.result() for future in concurrent.futures.as_completed(futures)]
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
 
-        def distribution(values: list[int]) -> dict[str, int]:
-            ordered = sorted(values)
-            return {f"p{percent}": ordered[max(0, math.ceil(len(ordered) * percent / 100) - 1)]
-                    for percent in (50, 95, 99)} | {"max": max(ordered)}
+            def distribution(values: list[int]) -> dict[str, int]:
+                ordered = sorted(values)
+                return {f"p{percent}": ordered[max(0, math.ceil(len(ordered) * percent / 100) - 1)]
+                        for percent in (50, 95, 99)} | {"max": max(ordered)}
 
-        self.report.push_batches.append({"jobs": len(jobs), "workers": max_workers,
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "service_ms": distribution([r.command.duration_ms for r in results]),
-            "queue_ms": distribution([r.queue_ms for r in results]),
-            "queue_plus_service_ms": distribution([r.queue_ms + r.command.duration_ms for r in results]),
-            "successful": sum(r.status == "ok" and r.command.exit_code == 0 for r in results)})
-        return results
+            self.report.push_batches.append({"jobs": len(jobs), "workers": max_workers,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "service_ms": distribution([r.command.duration_ms for r in results]),
+                "queue_ms": distribution([r.queue_ms for r in results]),
+                "queue_plus_service_ms": distribution([r.queue_ms + r.command.duration_ms for r in results]),
+                "successful": sum(r.status == "ok" and r.command.exit_code == 0 for r in results)})
+            return results
+        finally:
+            with self.report_lock:
+                self.push_batch_active = False
+                self.write_report(force=True)
 
     def run_branch_fanout(self) -> None:
         started = time.monotonic()
@@ -2612,7 +2633,7 @@ class ConcurrentPushSmoke:
                     self.request_proxy.close()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
@@ -2648,7 +2669,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-fsck", action="store_true")
     parser.add_argument("--no-request-capture", action="store_true")
     parser.add_argument("--max-locator-requests-per-success", type=float)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.agents < 1 or args.same_branch_agents < 1 or args.max_parallel_pushes < 1:
         parser.error("agent and push worker counts must be positive")
     if args.push_client == "git" and (args.rebase_on_non_fast_forward or not args.skip_same_branch):

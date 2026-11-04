@@ -5,15 +5,13 @@ revisions. Current server ownership and release gates live in the
 [native Cellar contract](../../../crates/crab-server/CELLAR.md); retired
 framework APIs and qualification scripts are no longer available.
 
-Current development checkpoint format is `CRBCKP09`: visibility dictionaries,
-ref closures, transitions and the copy-on-write pointer catalog use authenticated
-pages rooted in the footer.
-Git views load those pages lazily; explicit catalog access remains a complete
-async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#copy-on-write-checkpoint-catalog-format-9-under-qualification)
-for proof and remaining gates. Historical records below describe their recorded
-formats and do not qualify the current format. Readers reject retired formats;
-current all-mode live qualification remains incomplete.
-
+The current native storage baseline is version 1 (`CRBCKP01`), with a bounded
+authenticated ref-head cache, a copy-on-write paged catalog and authenticated
+visibility. Experimental formats have no compatibility reader or conversion;
+republish development repositories into fresh storage. See the
+[canonical native format contract](../../../crates/crab-metadata/README.md#capsule-roots-and-catalogs).
+Measurements and format records below describe their original revisions and do
+not qualify this reset. Exact-build lifecycle and performance gates remain open.
 
 ## Document metadata
 

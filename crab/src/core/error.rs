@@ -1142,6 +1142,7 @@ impl From<crab_read::ReadError> for CrabError {
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
             | crab_read::ReadError::ReadinessTask(_)
+            | crab_read::ReadError::RefHeadCacheTask(_)
             | crab_read::ReadError::Reconstruction { .. }
             | crab_read::ReadError::IncompleteCatalogView) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
@@ -2081,6 +2082,8 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeAdmission { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::CapsulePlanSize { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
@@ -2091,6 +2094,8 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
             | crab_metadata::error::MetadataError::CapsuleVisibilityRecord { .. }
             | crab_metadata::error::MetadataError::PointerCatalogRecord { .. }
+            | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
+            | crab_metadata::error::MetadataError::RefHeadCacheCodec { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -4176,6 +4181,9 @@ mod tests {
             CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord {
                 source: source(),
             }),
+            CrabError::from(crab_metadata::error::MetadataError::RefHeadCacheRecord {
+                source: source(),
+            }),
             CrabError::from(
                 crab_remote::checkpoint::CheckpointError::SourceInventoryRecord(source()),
             ),
@@ -4185,6 +4193,42 @@ mod tests {
                     .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
             );
         }
+    }
+
+    #[test]
+    fn checkpoint_cache_codec_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let error = CrabError::from(crab_metadata::error::MetadataError::RefHeadCacheCodec {
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "cache gzip fixture"),
+        });
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source()).any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|source| {
+                        source.kind() == std::io::ErrorKind::InvalidData
+                            && source.to_string() == "cache gzip fixture"
+                    })
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cache_task_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let worker = tokio::task::spawn_blocking(|| panic!("cache encoder fixture"));
+        let error = CrabError::from(crab_read::ReadError::RefHeadCacheTask(
+            worker.await.unwrap_err(),
+        ));
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source()).any(|source| {
+                source
+                    .downcast_ref::<tokio::task::JoinError>()
+                    .is_some_and(tokio::task::JoinError::is_panic)
+            })
+        );
     }
 
     #[test]
@@ -4348,27 +4392,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_lookup_worker_errors_retain_their_sources() {
-        let gate = tokio::sync::Semaphore::new(0);
-        gate.close();
-        let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
-            source: gate.acquire().await.unwrap_err(),
-        };
-        let task = tokio::spawn(std::future::pending::<()>());
-        task.abort();
-        let worker = crab_metadata::error::MetadataError::FileLookupWorker {
-            source: task.await.unwrap_err(),
-        };
-        for source in [admission, worker] {
-            let CrabError::Io(error) = CrabError::from(source) else {
-                panic!("expected read I/O failure");
+    async fn metadata_worker_errors_retain_their_sources() {
+        for through_read in [false, true] {
+            let gate = tokio::sync::Semaphore::new(0);
+            gate.close();
+            let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
+                source: gate.acquire().await.unwrap_err(),
             };
-            assert!(
-                error
-                    .get_ref()
-                    .and_then(|error| error.downcast_ref::<crab_metadata::error::MetadataError>())
-                    .is_some()
-            );
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let worker = crab_metadata::error::MetadataError::FileLookupWorker {
+                source: task.await.unwrap_err(),
+            };
+            let decode_admission = crab_metadata::error::MetadataError::CapsuleDecodeAdmission {
+                source: gate.acquire().await.unwrap_err(),
+            };
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let decode_worker = crab_metadata::error::MetadataError::CapsuleDecodeWorker {
+                source: task.await.unwrap_err(),
+            };
+            for source in [admission, worker, decode_admission, decode_worker] {
+                let error = if through_read {
+                    CrabError::from(crab_read::ReadError::Metadata(source))
+                } else {
+                    CrabError::from(source)
+                };
+                let CrabError::Io(error) = error else {
+                    panic!("expected read I/O failure");
+                };
+                assert!(error.get_ref().is_some_and(|error| {
+                    error
+                        .downcast_ref::<crab_metadata::error::MetadataError>()
+                        .is_some()
+                }));
+            }
         }
     }
 

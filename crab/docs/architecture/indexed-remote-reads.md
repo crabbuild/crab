@@ -1,5 +1,14 @@
 # Indexed remote reads: implementation and qualification
 
+Current native capsule formats use version **1**. See the
+[canonical codec contract](../../../crates/crab-metadata/README.md#capsule-roots-and-catalogs).
+This resets experimental schema numbers and removes their compatibility readers
+and conversion command. Existing experimental data requires its original binary
+or republishing into fresh storage; do not relabel stored bytes. Numbered format
+and measurement records below are historical, not the current reader contract.
+Git/Xet/LFS dependency formats and the protocol-v2 namespace are unchanged.
+Fresh final-build qualification remains required.
+
 Status: implementation in progress. This document tracks the entire initiative;
 passing one delivery gate does not establish completion of the later gates.
 Baseline: `bb590b78f58` on `crab-v2`, including the large-file push audit.
@@ -2625,6 +2634,30 @@ format-10 measurements in the team qualification record describe that experiment
 only; they do not qualify the integrated source or replace fresh lifecycle and
 performance evidence.
 
+### Checkpoint ref-head cache: format 11 under qualification
+
+Current writers emit `CRBCKP11`. A checkpoint may include at most 8 MiB and
+16,384 captured native ref-head bodies with their observed ETags/versions. The
+root pointer and footer authenticate the same range, hash and physical-origin
+binding. Committed and prepared states are retained exactly; activation outcomes
+are never cached. The cache is omitted if it would exceed publication's aggregate
+metadata budget. It remains inside the ordinary checkpoint object, so existing
+history, reader retention, replication and GC ownership protect its lifetime.
+
+Every capture still performs before/after ref inventories. A body is reused only
+when a fresh inventory carries its matching strong ETag or non-null version,
+under the same transport target, ref prefix, repository and authority epoch.
+Scoped routes without prefix-wide physical target proof disable reuse. Changed,
+new or unidentified heads are downloaded; activations are always resolved afresh.
+Missing or corrupt selected cache bytes fail closed. Restore rejects the old
+epoch before demanding its activation dependencies. Physical maintenance retains
+the old receipt without changing its ref snapshot.
+
+The current schema baseline is checkpoint version 1 (`CRBCKP01`), with no
+compatibility decoder. Focused cache and capture regressions do not establish
+final 10,000-push latency, byte budgets, complete historical integrity or
+Kubernetes qualification; all must pass on the final combined revision.
+
 ## Capsule chunk discovery without the retired receipt database
 
 Capsule add and push use `CapsuleChunkIndex`, owned by `crab-metadata`.
@@ -2674,12 +2707,10 @@ policy. Missing current runs abort planning before any sweep. Global bucket
 sweep covers the canonical `.crab` namespace; qualification of lifecycle cleanup
 for managed view-local global scopes remains a release gate.
 
-The paged version-1 hint format is unreleased. Upgrade all clients and publishers,
-then run `crab doctor --migrate-chunk-index` using bucket-administrator credentials.
-Migration preserves every logical row and exact placement ID, verifies the new
-packed run and conditionally replaces the captured root under global GC writer
-admission. Old pages remain for grace-period GC. There is no legacy hint reader
-in normal discovery; committed Git, shard, xorb and catalog formats are unchanged.
+The native version-1 hint root contains packed runs. Experimental hint shapes
+are unsupported and the development migration command has been removed. Fresh
+repositories publish the canonical layout directly; no legacy hint reader is
+available in normal discovery.
 
 The released v1.2.4 tag contains version-1 staged plans with opaque placement and
 origin IDs. A target explicitly advertising the v1 layout therefore retains its

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
-const TRANSACTION_RECORD_VERSION: u32 = 2;
+const TRANSACTION_RECORD_VERSION: u32 = 1;
 /// Largest canonical multi-ref transaction record accepted from storage.
 pub const MAX_CAPSULE_TRANSACTION_RECORD_BYTES: u64 = 16 * 1024;
 

@@ -210,7 +210,7 @@ impl CommitGraphReader {
         let (descriptor, descriptor_bytes) =
             read_split_commit_graph_descriptor(store, layout, hash, max_bytes.min(128 * 1024))
                 .await?;
-        if descriptor.version != PAGED_VERSION {
+        if Encoding::for_descriptor(&descriptor) != Encoding::Paged {
             return corrupt("graph is not the capsule paged format");
         }
         let paths = descriptor

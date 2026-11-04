@@ -980,8 +980,7 @@ async fn verify_capsule_file_index(
     // Recovery verifies selected mappings, not global payload health. Capture
     // once so every batch sees the same file-binding precedence during pushes.
     let lookup =
-        crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(layout, &root)
-            .await?;
+        crab_metadata::capsule_protocol::load_current_pointer_catalog_lookup(layout, &root).await?;
     let mut verified = Vec::with_capacity(entries.len());
     for batch in entries.chunks(64) {
         let hashes = batch.iter().map(|(file, _)| file.hex()).collect::<Vec<_>>();

@@ -16,8 +16,9 @@ impl CatalogPages {
         let mut work = PageWork::new(maximum, 0);
         self.verify(store, &mut work).await?;
         Ok(work
-            .object_dependencies()
-            .map(|(hash, bytes)| (self.pages.path(hash), bytes))
+            .object_dependencies()?
+            .into_iter()
+            .map(|(hash, bytes)| (self.pages.path(&hash), bytes))
             .collect())
     }
 
@@ -30,7 +31,8 @@ impl CatalogPages {
     ) -> Result<()> {
         self.open(store, work).await?;
         let space =
-            crab_storage::scratch::ScratchSpace::temporary(work.maximum.saturating_mul(4)).await?;
+            crab_storage::scratch::ScratchSpace::temporary(work.maximum().saturating_mul(4))
+                .await?;
         let mut join = Join::new(space);
         let checked = self.inspect(store, work, &mut join).await;
         join.finish(checked).await

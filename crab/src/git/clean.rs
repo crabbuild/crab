@@ -237,8 +237,8 @@ impl FileIndexChecker for StoreFileIndexChecker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if session.is_none() {
             *session = Some(self.handle.block_on(
-                crab_metadata::file_index_lookup::FileIndexLookupSession::open(
-                    Arc::clone(self.router.store().inner()),
+                crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
+                    self.router.store().as_storage(),
                     self.router.repo_prefix(),
                 ),
             )?);

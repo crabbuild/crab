@@ -16,12 +16,8 @@ fn lose_responses(remaining: Arc<AtomicUsize>) -> Arc<dyn cellar::sdk::Applicati
             // Lose the reply after the actual Cell and its output durability gate
             // succeed. A retry must recover the receipt, not apply another write.
             let output = application.invoke(context.clone(), invocation).await?;
-            #[allow(
-                deprecated,
-                reason = "Retain the atomic update API supported by Rust 1.97"
-            )]
             let lose_response = remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     value.checked_sub(1)
                 })
                 .is_ok();

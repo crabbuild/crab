@@ -37,6 +37,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
       - "crab/scripts/e2e/run_mixed_history_rustfs.py"
       - "crab/scripts/e2e/test_run_lfs_qualification.py"
@@ -97,6 +99,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
       - "crab/scripts/e2e/run_mixed_history_rustfs.py"
       - "crab/scripts/e2e/test_run_lfs_qualification.py"
@@ -227,6 +231,7 @@ jobs:
       - name: Verify executable compatibility matrix
         run: |
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_concurrent_push_smoke.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_mixed_team_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_lfs_qualification.py
           python3 crab/scripts/verify_git_capability_matrix.py
           python3 crab/scripts/tests/test_verify_git_capability_matrix.py

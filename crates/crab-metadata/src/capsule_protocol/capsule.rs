@@ -5,8 +5,8 @@ use crate::capsule_protocol::{CapsuleTransaction, CapsuleVisibilityDelta, Pointe
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
-const CAPSULE_MAGIC: &[u8; 8] = b"CRBCAPS2";
-const CAPSULE_VERSION: u32 = 2;
+const CAPSULE_MAGIC: &[u8; 8] = b"CRBCAPS1";
+const CAPSULE_VERSION: u32 = 1;
 const CAPSULE_TRAILER_BYTES: usize = 8 + 32 + CAPSULE_MAGIC.len();
 const MAX_CAPSULE_SECTIONS: usize = 65_535;
 const MAX_CAPSULE_FOOTER_BYTES: usize = 8 * 1024 * 1024;

@@ -28,7 +28,7 @@ COPY vendor/nfs3_server/ vendor/nfs3_server/
 # Copy the crates the workspace needs.
 COPY crates/ crates/
 COPY crab/ crab/
-COPY beyond-desktop/agent/ beyond-desktop/agent/
+COPY packages/desktop/agent/ packages/desktop/agent/
 
 RUN cargo build --release --manifest-path Cargo.toml -p crab-cache-server --bin crab-cache-server
 

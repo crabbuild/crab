@@ -70,6 +70,12 @@ body reads and pending listings without retrying the cancellation.
 
 ### Read transport and admission
 
+`read_prefix_target_identity` supplies resolved target proof only when every
+read under the requested prefix uses the bound transport. Overlapping scoped
+read or staging routes disable that proof: a routed child can otherwise make
+LIST and GET observe different stores with coincident ETags. Disjoint payload
+routes and admission/observation wrappers preserve the prefix's proof.
+
 Signed-range acceleration is used only when no object-store read wrapper is
 required. Routed reads, caller admission/cancellation, and lifecycle observers
 keep the canonical transport path; direct HTTP must not bypass their policy or

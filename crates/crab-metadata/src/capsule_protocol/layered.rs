@@ -13,8 +13,11 @@ use crate::git_visibility::{
 use crate::validation::{validate_content_hash, validate_sha1};
 
 mod catalog;
+use super::RefHeadCache;
+use super::ref_head::cache::{MAX_CACHE_BYTES, RefHeadCachePointer};
+pub use catalog::CatalogInput;
 pub use catalog::CheckpointCatalog;
-use catalog::{CatalogInput, PreparedCatalog};
+use catalog::PreparedCatalog;
 #[cfg(feature = "storage")]
 pub use catalog::{fold_checkpoint_catalog, merge_checkpoint_catalogs};
 
@@ -22,8 +25,8 @@ mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP09";
-pub(super) const CHECKPOINT_VERSION: u32 = 9;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP01";
+pub(super) const CHECKPOINT_VERSION: u32 = 1;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
@@ -33,7 +36,12 @@ const MAX_PHYSICAL_SOURCES: usize = 64;
 const MAX_SOURCE_MEMBERS: usize = 512;
 const MAX_LAYERED_VISIBILITY_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const MAX_CHECKPOINT_BYTES: u64 =
-    (MAX_LAYERED_VISIBILITY_BYTES + MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES) as u64;
+    (MAX_LAYERED_VISIBILITY_BYTES + MAX_CACHE_BYTES + MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES)
+        as u64;
+
+pub(super) fn checkpoint_maximum_bytes(format: u32) -> Option<u64> {
+    (format == CHECKPOINT_VERSION).then_some(MAX_CHECKPOINT_BYTES)
+}
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
 const VISIBILITY_OBJECT_SET_DIGEST_DOMAIN: &[u8] = b"crab layered visibility object set\0";
@@ -1047,6 +1055,12 @@ struct CheckpointFooter {
     visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
     visibility_pages: Option<visibility_pages::Descriptor>,
     catalog: Option<CheckpointCatalog>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "RefHeadCachePointer::deserialize_optional"
+    )]
+    ref_heads: Option<RefHeadCachePointer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1090,6 +1104,24 @@ impl PartialEq for LayeredCheckpoint {
 impl Eq for LayeredCheckpoint {}
 
 impl LayeredCheckpoint {
+    /// Retain authenticated ref-head receipts across physical-only checkpoint replacement.
+    pub fn ref_head_cache(&self) -> Result<Option<RefHeadCache>> {
+        let Some(pointer) = &self.footer.ref_heads else {
+            return Ok(None);
+        };
+        if self.control_only {
+            return Err(contract_error(
+                "ref-head cache requires the complete checkpoint body",
+            ));
+        }
+        pointer
+            .verify(
+                self.bytes
+                    .slice(pointer.range.offset() as usize..self.control_offset as usize),
+            )
+            .map(Some)
+    }
+
     /// Build a metadata-only checkpoint with the compact ordinal proof.
     pub fn build(
         covered_generation: u64,
@@ -1104,6 +1136,8 @@ impl LayeredCheckpoint {
             sources,
             CatalogInput::New(pointer_catalog),
             visibility,
+            None,
+            MAX_CHECKPOINT_BYTES,
         )
     }
 
@@ -1124,15 +1158,20 @@ impl LayeredCheckpoint {
             sources,
             CatalogInput::Durable(catalog.map(Box::new)),
             visibility,
+            None,
+            MAX_CHECKPOINT_BYTES,
         )
     }
 
-    fn build_with_catalog(
+    /// Build complete metadata, admitting captured ref heads only within the publication budget.
+    pub fn build_with_catalog(
         covered_generation: u64,
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
         catalog: CatalogInput,
         visibility: Option<LayeredVisibilitySnapshot>,
+        ref_heads: Option<&RefHeadCache>,
+        maximum_bytes: u64,
     ) -> Result<Self> {
         if let Some(snapshot) = &visibility {
             for member in snapshot.member_admission().unwrap_or_default() {
@@ -1156,34 +1195,6 @@ impl LayeredCheckpoint {
             )),
             None => None,
         };
-        let checkpoint = Self::build_inner(
-            covered_generation,
-            covered_root_digest,
-            sources,
-            catalog,
-            encoded_visibility,
-            cold_clone_object_set_digest,
-            cold_clone_object_count,
-            visibility.as_ref(),
-        )?;
-        if let Some(snapshot) = visibility {
-            // Source bindings and canonical encoding were validated above.
-            // Reuse that proof rather than decoding our freshly encoded pages.
-            checkpoint.visibility.get_or_init(|| snapshot);
-        }
-        Ok(checkpoint)
-    }
-
-    fn build_inner(
-        covered_generation: u64,
-        covered_root_digest: &str,
-        sources: Vec<PackSourceDescriptor>,
-        catalog: CatalogInput,
-        visibility: Option<(CapsuleSectionKind, Bytes)>,
-        cold_clone_object_set_digest: Option<String>,
-        cold_clone_object_count: Option<u64>,
-        visibility_snapshot: Option<&LayeredVisibilitySnapshot>,
-    ) -> Result<Self> {
         validate_content_hash(
             covered_root_digest,
             "layered checkpoint covered root digest",
@@ -1200,7 +1211,7 @@ impl LayeredCheckpoint {
             source: catalog,
             objects: catalog_objects,
         } = catalog.prepare()?;
-        if let Some((kind, visibility)) = visibility {
+        if let Some((kind, visibility)) = encoded_visibility {
             append_section(&mut body, &mut sections, kind, visibility)?;
         }
         let visibility_pages = sections
@@ -1225,6 +1236,7 @@ impl LayeredCheckpoint {
             visibility_transitions: BTreeMap::new(),
             visibility_pages,
             catalog,
+            ref_heads: None,
         };
         validate_source_inventory(&footer.sources)?;
         for source in &footer.sources {
@@ -1241,15 +1253,55 @@ impl LayeredCheckpoint {
                 maximum: MAX_CHECKPOINT_FOOTER_BYTES,
             });
         }
-        if let Some(snapshot) = visibility_snapshot {
+        if let Some(snapshot) = visibility.as_ref() {
             footer.visibility_transitions = snapshot
                 .recent_transitions(MAX_CHECKPOINT_FOOTER_BYTES - footer_bytes.len() + 2)?;
             footer_bytes = serde_json::to_vec(&footer)
                 .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
         }
+        // The cache is read-ahead, never authority. Do not turn a previously
+        // admissible checkpoint into an output-limit failure to retain it.
+        let mut cache_bytes = None;
+        if let Some(cache) = ref_heads {
+            let pointer = RefHeadCachePointer {
+                origin: cache.origin.clone(),
+                range: PackRange::new(body.len() as u64, &cache.bytes)?,
+            };
+            footer.ref_heads = Some(pointer);
+            let candidate = serde_json::to_vec(&footer)
+                .map_err(|source| MetadataError::RefHeadCacheRecord { source })?;
+            let size = body.len() as u64
+                + cache.bytes.len() as u64
+                + candidate.len() as u64
+                + TRAILER_BYTES as u64;
+            let catalog_bytes = if catalog_objects.is_empty() {
+                footer
+                    .catalog
+                    .as_ref()
+                    .map_or(0, CheckpointCatalog::encoded_bytes)
+            } else {
+                catalog_objects.values().map(|body| body.len() as u64).sum()
+            };
+            if candidate.len() <= MAX_CHECKPOINT_FOOTER_BYTES
+                && size <= MAX_CHECKPOINT_BYTES
+                && size
+                    .checked_add(catalog_bytes)
+                    .is_some_and(|size| size <= maximum_bytes)
+            {
+                cache_bytes = Some(&cache.bytes);
+                footer_bytes = candidate;
+            } else {
+                footer.ref_heads = None;
+            }
+        }
         // Appending the footer to a full visibility buffer must not double its
         // retained capacity and unnecessarily exclude it from the bounded pool.
-        body.reserve_exact(footer_bytes.len() + TRAILER_BYTES);
+        body.reserve_exact(
+            cache_bytes.map_or(0, |bytes| bytes.len()) + footer_bytes.len() + TRAILER_BYTES,
+        );
+        if let Some(bytes) = cache_bytes {
+            body.extend_from_slice(bytes);
+        }
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
@@ -1258,6 +1310,11 @@ impl LayeredCheckpoint {
         let mut checkpoint = Self::decode(Bytes::from(body))?;
         checkpoint.owned_buffer_bytes = Some(owned_buffer_bytes);
         checkpoint.catalog_objects = catalog_objects;
+        if let Some(snapshot) = visibility {
+            // Source bindings and canonical encoding were validated above.
+            // Reuse that proof rather than decoding freshly encoded pages.
+            checkpoint.visibility.get_or_init(|| snapshot);
+        }
         Ok(checkpoint)
     }
 
@@ -1268,6 +1325,11 @@ impl LayeredCheckpoint {
         }
         let (footer, footer_start, footer_hash) = decode_checkpoint_footer(&bytes)?;
         validate_checkpoint_footer(&footer, footer_start as u64, bytes.len() as u64)?;
+        if let Some(pointer) = &footer.ref_heads {
+            pointer
+                .verify(bytes.slice(pointer.range.offset() as usize..footer_start))?
+                .validate()?;
+        }
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let object_size = u64::try_from(bytes.len())
             .map_err(|_| corrupt("layered checkpoint size cannot be represented"))?;
@@ -1468,12 +1530,13 @@ impl LayeredCheckpoint {
 
     /// Verify every identity field of the root's authenticated checkpoint pointer.
     pub fn matches_pointer(&self, pointer: &super::CheckpointPointer) -> Result<bool> {
-        Ok(pointer.format() == CHECKPOINT_VERSION
+        Ok(pointer.format() == self.footer.version
             && self.hash() == pointer.hash()
             && self.object_size == pointer.size()
             && self.control_offset() == pointer.control_offset()
             && self.control_size() == pointer.control_size()
             && self.footer_hash() == pointer.footer_hash()
+            && self.footer.ref_heads.as_ref() == pointer.ref_heads.as_ref()
             && self.covered_generation() == pointer.covered_generation()
             && self.covered_root_digest() == pointer.covered_root_digest()
             && self.pack_count()? == pointer.pack_count()
@@ -1713,6 +1776,9 @@ fn decode_checkpoint_footer(bytes: &[u8]) -> Result<(CheckpointFooter, usize, St
             "layered checkpoint footer is invalid JSON: {source}"
         ))
     })?;
+    if footer.version != CHECKPOINT_VERSION {
+        return Err(corrupt("checkpoint footer and trailer versions differ"));
+    }
     Ok((footer, footer_start, footer_hash))
 }
 
@@ -1776,7 +1842,7 @@ fn validate_checkpoint_footer(
     footer_start: u64,
     object_size: u64,
 ) -> Result<()> {
-    if footer.version != CHECKPOINT_VERSION
+    if checkpoint_maximum_bytes(footer.version).is_none_or(|maximum| object_size > maximum)
         || footer.sources.is_empty()
         || footer.sources.len() > MAX_PHYSICAL_SOURCES
         || footer.control_offset != 0
@@ -1851,6 +1917,15 @@ fn validate_checkpoint_footer(
         }
         expected_offset = end;
     }
+    if let Some(pointer) = &footer.ref_heads {
+        pointer.validate(footer_start)?;
+        if expected_offset != pointer.range.offset() {
+            return Err(corrupt(
+                "checkpoint ref-head cache is not contiguous with its sections",
+            ));
+        }
+        expected_offset = footer_start;
+    }
     if expected_offset != footer_start {
         return Err(corrupt("layered checkpoint sections do not cover its body"));
     }
@@ -1900,6 +1975,8 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 
 #[cfg(test)]
 mod tests {
+    mod ref_head_cache;
+
     use std::collections::BTreeMap;
 
     use super::*;

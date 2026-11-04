@@ -126,7 +126,7 @@ async fn write_verified_capsule_receive_evidence(
     .to_hex()
     .to_string();
     let evidence = VerifiedCapsuleReceiveEvidence {
-        schema_version: 2,
+        schema_version: 1,
         repo_prefix: ctx.repo_prefix().to_owned(),
         push_id: ctx.push_id().to_owned(),
         source_plan_digest,
@@ -172,7 +172,7 @@ async fn read_verified_capsule_receive_evidence(
     )
     .to_hex()
     .to_string();
-    if evidence.schema_version != 2
+    if evidence.schema_version != 1
         || evidence.repo_prefix != ctx.repo_prefix()
         || evidence.push_id != ctx.push_id()
         || evidence.source_plan_digest != source_plan_digest

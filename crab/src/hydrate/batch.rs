@@ -380,8 +380,8 @@ async fn resolve_file_index_batch(
     router: &StoreLayout,
     file_hashes: &[MerkleHash],
 ) -> Result<Vec<Option<MerkleHash>>> {
-    let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open(
-        Arc::clone(store.origin().inner()),
+    let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
+        store.origin(),
         router.repo_prefix(),
     )
     .await?;

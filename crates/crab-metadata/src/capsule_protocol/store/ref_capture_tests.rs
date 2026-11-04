@@ -2,6 +2,8 @@
 
 use super::*;
 use bytes::Bytes;
+
+mod checkpoint_cache;
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectStore, ObjectStoreExt,
@@ -15,6 +17,8 @@ use std::sync::{
 #[derive(Clone, Copy, Debug)]
 enum Identity {
     ETag,
+    WeakETag,
+    FixedETag,
     Version,
     NullVersion,
     EmptyVersion,
@@ -77,6 +81,12 @@ impl ObjectStore for ChangingHeads {
             .entry(path.to_string())
             .or_default() += 1;
         let mut result = self.inner.get_opts(path, options).await?;
+        if matches!(self.identity, Identity::WeakETag) {
+            result.meta.e_tag = result.meta.e_tag.map(|tag| format!("W/{tag}"));
+        }
+        if matches!(self.identity, Identity::FixedETag) {
+            result.meta.e_tag = Some("opaque".to_owned());
+        }
         if matches!(self.identity, Identity::Version) {
             result.meta.version = result.meta.e_tag.take();
         }
@@ -141,6 +151,12 @@ impl ObjectStore for ChangingHeads {
                 item.map(|mut meta| {
                     match identity {
                         Identity::ETag => {}
+                        Identity::WeakETag => {
+                            meta.e_tag = meta.e_tag.map(|tag| format!("W/{tag}"));
+                        }
+                        Identity::FixedETag => {
+                            meta.e_tag = Some("opaque".to_owned());
+                        }
                         Identity::Version => {
                             meta.version = meta.e_tag.take();
                         }
@@ -239,6 +255,7 @@ async fn fixture(
 async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
     for identity in [
         Identity::ETag,
+        Identity::WeakETag,
         Identity::Version,
         Identity::NullVersion,
         Identity::EmptyVersion,
@@ -250,7 +267,7 @@ async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
             assert!(active.is_empty());
             assert_eq!(heads.len(), 1);
             assert_eq!(heads[0].ref_name(), "refs/heads/unchanged");
-            assert_eq!(store.lists.load(Ordering::SeqCst), 4);
+            assert_eq!(store.lists.load(Ordering::SeqCst), 3);
             let reads = store.reads.lock().unwrap();
             let unchanged =
                 layout.capsule_ref_head_path(&capsule_ref_name_key("refs/heads/unchanged"));
@@ -258,7 +275,10 @@ async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
                 reads[&unchanged.to_string()],
                 if matches!(
                     identity,
-                    Identity::Absent | Identity::NullVersion | Identity::EmptyVersion
+                    Identity::Absent
+                        | Identity::NullVersion
+                        | Identity::EmptyVersion
+                        | Identity::WeakETag
                 ) {
                     2
                 } else {
@@ -272,49 +292,56 @@ async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ref_capture_reuse_preserves_the_bounded_stability_check() {
     let (layout, root, store) = fixture(Identity::ETag, false, true).await;
     assert!(capture_ref_heads(&layout, &root).await.is_err());
-    assert_eq!(store.lists.load(Ordering::SeqCst), 16);
+    assert_eq!(store.lists.load(Ordering::SeqCst), 33);
 }
 
 #[tokio::test(start_paused = true)]
 async fn ref_capture_waits_for_a_finite_write_burst() {
-    let (layout, root, store) = fixture(Identity::ETag, false, false).await;
-    store.replacements.lock().unwrap().clear();
-    let name = "refs/heads/changed";
-    let path = layout.capsule_ref_head_path(&capsule_ref_name_key(name));
-    let current = CapsuleRefHead::from_root(name, root.ref_epoch().to_owned(), None, None)
-        .unwrap()
-        .encode()
-        .unwrap();
-    let retired = CapsuleRefHead::from_root(name, "2".repeat(64), None, None)
-        .unwrap()
-        .encode()
-        .unwrap();
-    *store.burst.lock().unwrap() = Some(WriteBurst {
-        path: path.clone(),
-        until: tokio::time::Instant::now() + std::time::Duration::from_millis(40),
-        bodies: [retired, current],
-        next: 0,
-    });
-
-    let captured = capture_ref_heads(&layout, &root).await.unwrap();
-    let mut expected = Vec::new();
-    for name in ["refs/heads/changed", "refs/heads/unchanged"] {
+    for burst_ms in [40, 900] {
+        let (layout, root, store) = fixture(Identity::ETag, false, false).await;
+        store.replacements.lock().unwrap().clear();
+        let name = "refs/heads/changed";
         let path = layout.capsule_ref_head_path(&capsule_ref_name_key(name));
-        let body = store.inner.get(&path).await.unwrap().bytes().await.unwrap();
-        let head = CapsuleRefHead::decode(&body).unwrap();
-        if head.ref_epoch() == root.ref_epoch() {
-            expected.push(head);
+        let current = CapsuleRefHead::from_root(name, root.ref_epoch().to_owned(), None, None)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let retired = CapsuleRefHead::from_root(name, "2".repeat(64), None, None)
+            .unwrap()
+            .encode()
+            .unwrap();
+        *store.burst.lock().unwrap() = Some(WriteBurst {
+            path: path.clone(),
+            until: tokio::time::Instant::now() + std::time::Duration::from_millis(burst_ms),
+            bodies: [retired, current],
+            next: 0,
+        });
+
+        let captured = capture_ref_heads(&layout, &root).await.unwrap();
+        let mut expected = Vec::new();
+        for name in ["refs/heads/changed", "refs/heads/unchanged"] {
+            let path = layout.capsule_ref_head_path(&capsule_ref_name_key(name));
+            let body = store.inner.get(&path).await.unwrap().bytes().await.unwrap();
+            let head = CapsuleRefHead::decode(&body).unwrap();
+            if head.ref_epoch() == root.ref_epoch() {
+                expected.push(head);
+            }
         }
+        assert_eq!(captured, (expected, BTreeSet::new()));
     }
-    assert_eq!(captured, (expected, BTreeSet::new()));
 }
 
-#[tokio::test]
-async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
+async fn prepared_head_fixture() -> (
+    StoreLayout<Store>,
+    super::super::RepositoryRoot,
+    Arc<ChangingHeads>,
+    super::super::CapsuleTransactionRecord,
+    String,
+) {
     use super::super::{
         Capsule, CapsulePointer, CapsuleRefEdit, CapsuleTransaction, CapsuleTransactionRecord,
     };
@@ -366,6 +393,15 @@ async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
         .create_strict(&record_path, preparing.encode().unwrap())
         .await
         .unwrap();
+    (layout, root, store, preparing, oid)
+}
+
+#[tokio::test]
+async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
+    let (layout, root, store, preparing, oid) = prepared_head_fixture().await;
+    let activation = preparing.activation_id().to_owned();
+    let record_path = layout.capsule_transaction_path(&activation);
+    let head_path = layout.capsule_ref_head_path(&capsule_ref_name_key("refs/heads/unchanged"));
     store.replacements.lock().unwrap().insert(
         record_path.clone(),
         Some(preparing.commit().unwrap().encode().unwrap()),

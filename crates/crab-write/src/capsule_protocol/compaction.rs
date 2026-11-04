@@ -13,6 +13,10 @@ use crate::{Result, WriteError};
 // A large historical run remains a stable source. Rewriting it to append small
 // commits amplifies both network traffic and peak memory with repository size.
 const COMPACTION_INPUT_BYTES: u128 = 64 * 1024 * 1024;
+// Global catalog capture pays once per physical run. Fold tiny histories early,
+// but cap every carry so a small append cannot repeatedly copy large sources.
+const SMALL_RUN_INPUT_BYTES: u128 = 1024 * 1024;
+const SMALL_RUN_FAN_IN: usize = 4;
 
 fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
     if frontier.len() > MAX_CAPSULE_REF_FRONTIER {
@@ -74,22 +78,49 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
         }
         return Ok(Some(first..end));
     }
-    if !CAPSULE_REF_COMPACTION_FAN_IN.is_power_of_two() {
+    if CAPSULE_REF_COMPACTION_FAN_IN < 2 || !CAPSULE_REF_COMPACTION_FAN_IN.is_power_of_two() {
         return Err(WriteError::Internal(
-            "capsule compaction fan-in is not a power of two".to_owned(),
+            "capsule compaction fan-in must be a power of two greater than one".to_owned(),
         ));
     }
     let level = suffix[suffix.len() - 1].level();
-    if suffix
+    // Early runs already contain several leaves. Complete the first ordinary
+    // tier at 32 capsules; already completed tiers stay outside that suffix.
+    let ordinary_start = suffix
         .iter()
-        .rev()
-        .take_while(|p| p.level() == level)
-        .count()
-        < CAPSULE_REF_COMPACTION_FAN_IN
-    {
-        return Ok(None);
-    }
-    let mut first = frontier.len() - CAPSULE_REF_COMPACTION_FAN_IN;
+        .rposition(|pointer| pointer.capsule_count() as usize >= CAPSULE_REF_COMPACTION_FAN_IN)
+        .map_or(start, |index| start + index + 1);
+    let ordinary_count: usize = frontier[ordinary_start..]
+        .iter()
+        .map(|pointer| pointer.capsule_count() as usize)
+        .sum();
+    let recent = &suffix[suffix.len().saturating_sub(SMALL_RUN_FAN_IN)..];
+    let small = recent.len() == SMALL_RUN_FAN_IN
+        && recent.iter().all(|pointer| pointer.level() == level)
+        && recent
+            .iter()
+            .map(|pointer| u128::from(pointer.size()))
+            .sum::<u128>()
+            <= SMALL_RUN_INPUT_BYTES;
+    let fan_in = if small {
+        SMALL_RUN_FAN_IN
+    } else {
+        CAPSULE_REF_COMPACTION_FAN_IN
+    };
+    let mut first = if ordinary_count >= CAPSULE_REF_COMPACTION_FAN_IN {
+        ordinary_start
+    } else {
+        if suffix
+            .iter()
+            .rev()
+            .take_while(|p| p.level() == level)
+            .count()
+            < fan_in
+        {
+            return Ok(None);
+        }
+        frontier.len() - fan_in
+    };
     let mut count: usize = frontier[first..]
         .iter()
         .map(|p| p.capsule_count() as usize)
@@ -97,13 +128,24 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
     if count > MAX_CAPSULES_PER_RUN {
         return Ok(None);
     }
-    let mut next_level = level + CAPSULE_REF_COMPACTION_FAN_IN.ilog2() as u8;
+    let mut bytes: u128 = frontier[first..]
+        .iter()
+        .map(|pointer| u128::from(pointer.size()))
+        .sum();
+    let byte_budget = if bytes <= SMALL_RUN_INPUT_BYTES {
+        SMALL_RUN_INPUT_BYTES
+    } else {
+        COMPACTION_INPUT_BYTES
+    };
+    let mut next_level = count.next_power_of_two().ilog2() as u8;
     while first > start
         && frontier[first - 1].level() == next_level
         && count + frontier[first - 1].capsule_count() as usize <= MAX_CAPSULES_PER_RUN
+        && bytes + u128::from(frontier[first - 1].size()) <= byte_budget
     {
         first -= 1;
         count += frontier[first].capsule_count() as usize;
+        bytes += u128::from(frontier[first].size());
         next_level += 1;
     }
     Ok(Some(first..frontier.len()))
@@ -153,6 +195,124 @@ mod tests {
     use object_store::memory::InMemory;
     use std::sync::Arc;
 
+    async fn publish_small_history(
+        router: &StoreLayout<Store>,
+        name: &str,
+        versions: usize,
+    ) -> Vec<bytes::Bytes> {
+        use crate::capsule_protocol::{open_root, publish};
+        use crab_metadata::capsule_protocol::{
+            CapsuleSection, CapsuleSectionKind, CapsuleVisibilityDelta,
+        };
+        use crab_metadata::git_visibility::GitVisibilityEdit;
+
+        let mut original = Vec::new();
+        for version in 1..=versions {
+            let base = open_root(router).await.unwrap();
+            let old = (version > 1).then(|| format!("{:040x}", version - 1));
+            let new = format!("{version:040x}");
+            let transaction = CapsuleTransaction::new(
+                base.record().digest(),
+                vec![CapsuleRefEdit::new(
+                    name,
+                    old.clone(),
+                    Some(new.clone()),
+                    None,
+                )],
+            )
+            .unwrap();
+            let edit = if old.is_none() {
+                GitVisibilityEdit::from_replacement_objects(None, new.clone(), vec![new])
+            } else {
+                GitVisibilityEdit::from_delta_objects(old, new.clone(), vec![new], Vec::new())
+            };
+            let visibility = CapsuleVisibilityDelta::new(std::collections::BTreeMap::from([(
+                name.to_owned(),
+                edit,
+            )]))
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![
+                    CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        visibility.encode().unwrap(),
+                    ),
+                    CapsuleSection::new(
+                        CapsuleSectionKind::FileData,
+                        bytes::Bytes::from(vec![version as u8; 16 * 1024]),
+                    ),
+                ],
+            )
+            .unwrap();
+            original.push(capsule.bytes().clone());
+            publish(router, base, &transaction, capsule).await.unwrap();
+        }
+        original
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tiny_histories_bound_current_catalog_capture_reads() {
+        use crate::capsule_protocol::{initialize, open_root};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for versions in [4, 8, 16] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            let store = Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(
+                move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                },
+            ));
+            let router = StoreLayout::new(store, "repositories/tiny-histories".to_owned());
+            initialize(&router, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+            let refs = 3;
+            for index in 0..refs {
+                publish_small_history(&router, &format!("refs/heads/branch-{index}"), versions)
+                    .await;
+            }
+            let root = open_root(&router).await.unwrap();
+            reads.store(0, Ordering::SeqCst);
+            crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
+                .await
+                .unwrap();
+            let actual = reads.load(Ordering::SeqCst);
+            assert!(
+                actual <= 4 * refs,
+                "{versions} versions needed {actual} reads for {refs} refs"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_history_compaction_preserves_every_capsule_byte() {
+        use crate::capsule_protocol::{initialize, open_root, read_ref_head};
+
+        let router = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/small-byte-history".to_owned(),
+        );
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let original = publish_small_history(&router, "refs/heads/main", 16).await;
+        let root = open_root(&router).await.unwrap();
+        let head = read_ref_head(&router, root.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut actual = Vec::new();
+        for pointer in head.visible.frontier() {
+            let run = crab_metadata::capsule_protocol::load_capsule_run(&router, pointer)
+                .await
+                .unwrap();
+            actual.extend(run.capsules().iter().map(|capsule| capsule.bytes().clone()));
+        }
+        assert_eq!(actual, original);
+    }
+
     fn pointer(index: usize, size: u64, count: usize) -> CapsulePointer {
         CapsulePointer::new(
             format!("{:064x}", index + 1),
@@ -170,10 +330,43 @@ mod tests {
     }
 
     #[test]
+    fn tiny_carries_preserve_larger_historical_runs() {
+        let mut frontier = vec![pointer(0, 2 * 1024 * 1024, 4)];
+        frontier.extend((1..=4).map(|index| pointer(index, 16 * 1024, 1)));
+        assert_eq!(window(&frontier).unwrap(), Some(1..5));
+    }
+
+    #[test]
+    fn ordinary_compaction_keeps_original_tier_boundaries() {
+        for level in 0..5 {
+            let members = 1 << level;
+            let segments = CAPSULE_REF_COMPACTION_FAN_IN / members;
+            let frontier = (0..segments)
+                .map(|index| pointer(index, 512 * 1024, members))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                window(&frontier).unwrap(),
+                Some(0..segments),
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn small_tier_completion_cannot_carry_a_larger_historical_run() {
+        let frontier = vec![
+            pointer(0, 2 * 1024 * 1024, 32),
+            pointer(1, 300 * 1024, 16),
+            pointer(2, 300 * 1024, 16),
+        ];
+        assert_eq!(window(&frontier).unwrap(), Some(1..3));
+    }
+
+    #[test]
     fn large_seed_stays_outside_small_suffix_compaction() {
         let mut frontier = vec![pointer(0, 1024 * 1024 * 1024, 1)];
-        frontier.extend((1..=32).map(|index| pointer(index, 1024, 1)));
-        assert_eq!(window(&frontier).unwrap(), Some(1..33));
+        frontier.extend((1..=4).map(|index| pointer(index, 1024, 1)));
+        assert_eq!(window(&frontier).unwrap(), Some(1..5));
     }
 
     #[test]
@@ -217,7 +410,7 @@ mod tests {
         let large = pointer(1000, 1024 * 1024 * 1024, 1);
         let mut frontier = vec![large.clone()];
         let mut leaf = None;
-        for sequence in 1..=32 {
+        for sequence in 1..=4 {
             let transaction = CapsuleTransaction::new(
                 &"0".repeat(64),
                 vec![CapsuleRefEdit::new(
@@ -243,7 +436,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-            if sequence != 32 {
+            if sequence != 4 {
                 router
                     .store()
                     .put(&router.capsule_path(run.hash()), run.bytes().clone())
@@ -259,7 +452,7 @@ mod tests {
             .unwrap();
         assert_eq!(frontier[0], large);
         assert_eq!(frontier.len(), 2);
-        assert_eq!(compacted.capsules().len(), 32);
+        assert_eq!(compacted.capsules().len(), 4);
     }
 
     #[tokio::test]

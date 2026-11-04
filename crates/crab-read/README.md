@@ -60,6 +60,14 @@ captured catalog before selecting the replica.
 
 ### Captured Git views
 
+`CapsuleRepositoryCapture` retains metadata's ref-head snapshot when changing
+read detail. Complete metadata views carry bounded provider receipts into
+checkpoint publication. Serialization and gzip compression run on a blocking
+worker retaining only immutable snapshot data, so cancellation cannot invalidate
+its input. Fetch-only views do not encode a new cache. Physical
+checkpoint maintenance retains existing receipts without recapturing mutable
+refs. Later discovery always performs fresh inventory and activation checks.
+
 Complete and control-only views load at most 32 frontier runs concurrently.
 Paged transition materialization uses the same bound and preserves input order.
 Fetch callers expand transitions only for the planner's requested visible refs;
@@ -120,6 +128,12 @@ Selected-ref control reads retain only their bounded in-flight names and return
 Complete metadata and full-capsule views retain the visibility proof produced
 by transaction ordering. Checkpoint publication reuses that reconciled proof;
 returned indexes remain independent and bound to the captured Git identity.
+
+Maintenance thresholds and activity counts use distinct uncheckpointed
+transactions from the captured ref-head positions. Physical runs can retain a
+covered prefix; their complete source admission stays unchanged. Foreground
+checkpointing checks this logical count before opening bulk metadata and reuses
+the same captured authority when the threshold is met.
 
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row

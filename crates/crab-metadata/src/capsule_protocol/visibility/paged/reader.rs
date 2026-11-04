@@ -58,13 +58,14 @@ impl CapsuleVisibilityReader {
         use std::sync::atomic::Ordering::Relaxed;
 
         let bytes = self.descriptor.body_bytes;
-        // Coalesce a bounded single-ref proof region, excluding payloads and
-        // duplicate descriptor bytes. Reserve aggregate headroom before I/O
-        // and retain each query's normal page admission and authentication.
+        // Coalesce at most two 8 KiB point leaves. Larger edits keep selected
+        // paging instead of charging unrelated changes to every captured tip.
+        // Reserve headroom before I/O; page admission and hashes still apply.
         if self.ref_count() == 1
-            && bytes <= crate::pages::READ_AHEAD_BYTES.min(self.maximum)
+            && bytes <= (crate::pages::TARGET_BYTES / 2) as u64
+            && bytes <= self.maximum
             && headroom
-                .fetch_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
+                .try_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
                 .is_ok()
         {
             self.cache =
@@ -115,6 +116,9 @@ impl CapsuleVisibilityReader {
                 .transpose()?;
             if row.as_ref().is_some_and(|row| row.name != *name) {
                 return Err(corrupt("visibility lookup ref hash collides"));
+            }
+            if let Some(header) = &row {
+                self.prime_roots(header)?;
             }
             Ok(row)
         })
@@ -212,14 +216,19 @@ impl CapsuleVisibilityReader {
             .cache
             .read_range(store, &self.path, self.offset..end, self.maximum)
             .await?;
-        if blake3::hash(&bytes).to_hex().as_str() != self.hash
-            || Descriptor::decode(&bytes)? != self.descriptor
-        {
-            return Err(corrupt(
-                "visibility section differs from its captured descriptor",
-            ));
-        }
-        let delta = std::sync::Arc::new(CapsuleVisibilityDelta::decode(&bytes)?);
+        let hash = self.hash.clone();
+        let descriptor = self.descriptor.clone();
+        let delta = crate::capsule_protocol::decode::run(move || {
+            if blake3::hash(&bytes).to_hex().as_str() != hash
+                || Descriptor::decode(&bytes)? != descriptor
+            {
+                return Err(corrupt(
+                    "visibility section differs from its captured descriptor",
+                ));
+            }
+            CapsuleVisibilityDelta::decode(&bytes).map(std::sync::Arc::new)
+        })
+        .await?;
         Ok(self.complete.get_or_init(|| delta).clone())
     }
 
@@ -254,6 +263,7 @@ impl CapsuleVisibilityReader {
         if row.name != ref_name {
             return Err(corrupt("visibility lookup ref hash collides"));
         }
+        self.prime_roots(&row)?;
         // Page-key deduplication cannot account for duplicate output rows.
         // Admit logical query work before either encoding allocates its results.
         let bytes = (oids.len() as u64)
@@ -332,6 +342,31 @@ impl CapsuleVisibilityReader {
         Ok(Some(changes.into_iter().take(oids.len()).collect()))
     }
 
+    fn prime_roots(&self, row: &VisibilityEditHeader) -> Result<()> {
+        // Authenticated header bytes seed the existing page cache. Lookups still
+        // traverse and admit every root and child through the canonical reader.
+        let end = self
+            .offset
+            .checked_add(self.descriptor.body_bytes)
+            .ok_or_else(|| corrupt("visibility body span overflows"))?;
+        for (root, bytes) in [
+            (&row.added, &row.inline_added_root),
+            (&row.removed, &row.inline_removed_root),
+        ] {
+            if let (Some(root), Some(bytes)) = (root, bytes) {
+                self.cache.prime(
+                    &self.path,
+                    0,
+                    self.offset..end,
+                    root,
+                    Kind::VisibilityChanges,
+                    bytes,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     async fn rows(
         &self,
         store: &Store,
@@ -371,12 +406,230 @@ impl PartialEq for CapsuleVisibilityReader {
 impl Eq for CapsuleVisibilityReader {}
 
 #[cfg(test)]
+mod point_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::capsule_protocol::{
         Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn mixed_layout_pool_keeps_selected_membership_proofs_separate() {
+        use crate::git_visibility::{GitVisibilityDictionary, GitVisibilityObjects};
+
+        let mut leaves = Vec::new();
+        let mut expected = Vec::new();
+        for (index, shared) in [false, true].into_iter().enumerate() {
+            let base = ((index + 1) as u128) << 64;
+            let name = format!("refs/heads/layout-{index}");
+            let tip = format!("{:040x}", base + 500);
+            let objects = (1..=1000)
+                .map(|index| format!("{:040x}", base + index))
+                .collect::<Vec<_>>();
+            let mut edit =
+                GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects.clone());
+            if shared {
+                edit.added = GitVisibilityObjects::from_shared_ordinals(
+                    GitVisibilityDictionary::new(objects).unwrap(),
+                    (0..1000).collect(),
+                )
+                .unwrap();
+            }
+            let delta =
+                CapsuleVisibilityDelta::new(BTreeMap::from([(name.clone(), edit)])).unwrap();
+            let transaction = CapsuleTransaction::new(
+                &"1".repeat(64),
+                vec![CapsuleRefEdit::new(&name, None, Some(tip.clone()), None)],
+            )
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                vec![],
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    encode(&delta).unwrap(),
+                )],
+            )
+            .unwrap();
+            leaves.push(CapsuleRun::leaf(capsule).unwrap());
+            expected.push((name, decode_oid(&tip).unwrap()));
+        }
+        let run = CapsuleRun::compact(leaves).unwrap();
+        let run = CapsuleRun::decode(run.bytes().clone()).unwrap();
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "repositories/mixed-layout-proofs".into(),
+        );
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let (control, _) = run.verified_controls().unwrap();
+        let controls = control
+            .materialize_capsules_with_paged_visibility(&layout, None)
+            .unwrap();
+        for (index, control) in controls.iter().enumerate() {
+            let (name, tip) = &expected[index];
+            let other = expected[(index + 1) % expected.len()].1;
+            assert_eq!(
+                control
+                    .paged_visibility()
+                    .unwrap()
+                    .lookup(layout.store(), name, &[*tip, other])
+                    .await
+                    .unwrap(),
+                Some(vec![Some(VisibilityChange::Added), None])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_tip_membership_keeps_large_closures_on_small_proof_pages() {
+        use crate::git_visibility::{GitVisibilityDictionary, GitVisibilityObjects};
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        for shared in [false, true] {
+            let name = "refs/heads/main";
+            let oid = format!("{:040x}", 5000);
+            let objects = (1..=10_000)
+                .map(|index| format!("{index:040x}"))
+                .collect::<Vec<_>>();
+            let mut edit =
+                GitVisibilityEdit::from_replacement_objects(None, oid.clone(), objects.clone());
+            if shared {
+                let dictionary = GitVisibilityDictionary::new(objects).unwrap();
+                edit.added =
+                    GitVisibilityObjects::from_shared_ordinals(dictionary, (0..10_000).collect())
+                        .unwrap();
+            }
+            let delta =
+                CapsuleVisibilityDelta::new(BTreeMap::from([(name.to_owned(), edit)])).unwrap();
+            let transaction = CapsuleTransaction::new(
+                &"1".repeat(64),
+                vec![CapsuleRefEdit::new(name, None, Some(oid), None)],
+            )
+            .unwrap();
+            {
+                let encoded = encode(&delta).unwrap();
+                let capsule = Capsule::build(
+                    &transaction,
+                    vec![],
+                    vec![CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        encoded,
+                    )],
+                )
+                .unwrap();
+                let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+                let bytes = Arc::new(AtomicU64::new(0));
+                let reads = Arc::new(AtomicU64::new(0));
+                let observed_bytes = bytes.clone();
+                let observed_reads = reads.clone();
+                let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+                    .with_read_byte_observer(Arc::new(move |size| {
+                        observed_bytes.fetch_add(size, Relaxed);
+                    }))
+                    .with_read_request_observer(Arc::new(move |_| {
+                        observed_reads.fetch_add(1, Relaxed);
+                    }));
+                let layout = StoreLayout::new(store, "repositories/cold-tip-proof".into());
+                layout
+                    .store()
+                    .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+                    .await
+                    .unwrap();
+                let (control, _) = run.verified_controls().unwrap();
+                let reader = control
+                    .visibility_reader(&layout, capsule.hash(), 1024 * 1024)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    reader
+                        .lookup(
+                            layout.store(),
+                            name,
+                            &[decode_oid(&format!("{:040x}", 5000)).unwrap()]
+                        )
+                        .await
+                        .unwrap(),
+                    Some(vec![Some(VisibilityChange::Added)])
+                );
+                assert!(
+                    bytes.load(Relaxed) <= 24 * 1024,
+                    "shared={shared}, proof bytes={}, requests={}",
+                    bytes.load(Relaxed),
+                    reads.load(Relaxed)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn larger_leaf_edits_keep_selected_membership_reads() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        let name = "refs/heads/main";
+        let oid = format!("{:040x}", 1_000);
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_replacement_objects(
+                None,
+                oid.clone(),
+                (1..=1_000).map(|value| format!("{value:040x}")).collect(),
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                delta.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+        let received = Arc::new(AtomicU64::new(0));
+        let observed = received.clone();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |bytes| {
+                observed.fetch_add(bytes, Relaxed);
+            }));
+        let layout = StoreLayout::new(store, "repositories/selected-leaf".into());
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let (control, _) = run.verified_controls().unwrap();
+        let mut reader = control
+            .visibility_reader(&layout, capsule.hash(), crate::pages::READ_AHEAD_BYTES)
+            .unwrap()
+            .unwrap();
+        let body_bytes = reader.descriptor.body_bytes;
+        reader.coalesce_small_edit(&AtomicU64::new(crate::pages::READ_AHEAD_BYTES));
+        assert_eq!(
+            reader
+                .lookup(layout.store(), name, &[decode_oid(&oid).unwrap()])
+                .await
+                .unwrap(),
+            Some(vec![Some(VisibilityChange::Added)]),
+        );
+        let bytes = received.load(Relaxed);
+        assert!(
+            bytes < body_bytes,
+            "{bytes} bytes fetched for a selected tip"
+        );
+    }
 
     #[tokio::test]
     async fn leaf_read_ahead_shares_headroom_without_overdrawing_it() {

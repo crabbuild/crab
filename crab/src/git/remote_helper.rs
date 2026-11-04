@@ -6603,7 +6603,7 @@ mod tests {
                 .checkpoint()
                 .unwrap()
                 .format(),
-            9
+            1
         );
         let repeated = crate::cmd::repack::run_repack_from_root(
             &store,

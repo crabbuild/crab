@@ -126,7 +126,7 @@ async fn repack_compacted_view_with_scratch_limit(
         view,
         consolidation.sources,
         consolidation.member_oids,
-        CatalogWrite::Durable(checkpoint.catalog().cloned().map(Box::new)),
+        CatalogInput::Durable(checkpoint.catalog().cloned().map(Box::new)),
         PublicationPolicy {
             maximum_bytes,
             cancel,

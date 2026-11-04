@@ -1,21 +1,23 @@
 //! One shared authenticated control capture for current-state catalog queries.
 use super::pointer::paged::MAX_CATALOG_BYTES;
 use super::{
-    CapsuleControl, CapturedVisibility, LayeredCheckpoint, PointerCatalog, PointerCatalogAssembly,
-    PointerCatalogInspection, PointerCatalogLookup, RootSnapshot, RunCatalogSource,
-    VisibilityReconciliation, apply_control_refs, capture_ref_heads, load_layered_checkpoint,
-    load_layered_checkpoint_control, materialize_visible_ref_heads, order_ref_controls,
-    select_ref_control_frontiers, select_ref_journal_controls,
+    CapsuleControl, CapsuleRunControl, CapturedVisibility, LayeredCheckpoint, PointerCatalog,
+    PointerCatalogAssembly, PointerCatalogInspection, PointerCatalogLookup, RootSnapshot,
+    RunCatalogSource, VisibilityReconciliation, VisibleRefHeads, apply_control_refs,
+    capture_ref_heads, load_layered_checkpoint, load_layered_checkpoint_control,
+    materialize_visible_ref_heads, order_ref_controls, select_ref_control_frontiers,
+    select_ref_journal_controls,
 };
 use crate::error::{MetadataError, Result};
-use crate::git_visibility::GitVisibilityIndex;
+use crate::git_visibility::{GitVisibilityIndex, decode_oid};
+use crate::pages::{Kind, PageWork};
 use crab_storage::{Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-/// Capture current-state catalog roots with bounded metadata-only reads.
+/// Capture catalog roots against the supplied checkpoint replay base.
 ///
 /// The caller retains the captured roots against GC. Missing dependencies remain
 /// errors. Control intake and each selected catalog query use the format byte bound.
@@ -24,6 +26,162 @@ pub async fn load_pointer_catalog_lookup_from_root(
     root: &RootSnapshot,
 ) -> Result<PointerCatalogLookup> {
     capture(layout, root).await?.lookup(layout)
+}
+
+/// Capture current catalog authority across same-epoch checkpoint replacement.
+///
+/// The caller retains GC admission. The initial root anchors repository identity
+/// and epoch; explicit snapshot lookup remains bound to its supplied checkpoint.
+pub async fn load_current_pointer_catalog_lookup(
+    layout: &StoreLayout<Store>,
+    initial: &RootSnapshot,
+) -> Result<PointerCatalogLookup> {
+    with_current_root(layout, initial, |root| async move {
+        load_pointer_catalog_lookup_from_root(layout, &root).await
+    })
+    .await
+}
+
+/// Snapshot-bound publication discovery with complete proof before remote reuse.
+///
+/// The caller retains GC admission. Misses return no values or visibility
+/// authority; every hit completes the same reconciliation as ordinary readers.
+pub struct PublicationCatalogLookup {
+    layout: StoreLayout<Store>,
+    root: Arc<RootSnapshot>,
+    captured: SourceCapture,
+    probe: PointerCatalogLookup,
+    authority: tokio::sync::OnceCell<PointerCatalogLookup>,
+    pending_capsules: usize,
+}
+
+impl PublicationCatalogLookup {
+    /// Return the distinct uncheckpointed transactions in this stable capture.
+    #[must_use]
+    pub fn pending_capsule_count(&self) -> usize {
+        self.pending_capsules
+    }
+
+    /// Select files with their complete dependency closure after authority validation.
+    pub async fn files(&self, hashes: &[String]) -> Result<PointerCatalog> {
+        self.query(Kind::CatalogFiles, hashes).await
+    }
+
+    /// Select chunk placements with their verified xorb closure.
+    pub async fn chunks(&self, hashes: &[String]) -> Result<PointerCatalog> {
+        self.query(Kind::CatalogChunks, hashes).await
+    }
+
+    /// Select xorb descriptors after validating the captured publication authority.
+    pub async fn xorbs(&self, hashes: &[String]) -> Result<PointerCatalog> {
+        self.query(Kind::CatalogXorbs, hashes).await
+    }
+
+    async fn query(&self, kind: Kind, hashes: &[String]) -> Result<PointerCatalog> {
+        let mut work = PageWork::new(MAX_CATALOG_BYTES, 0);
+        if self.authority.get().is_none()
+            && !self
+                .probe
+                .has_rows(self.layout.store(), kind, hashes, &mut work)
+                .await?
+        {
+            return Ok(PointerCatalog::new());
+        }
+        // Cancellation leaves the immutable capture intact. OnceCell retries
+        // failed/cancelled initialization; no partial proof becomes query authority.
+        let authority = self
+            .authority
+            .get_or_try_init(|| async {
+                reconcile(&self.layout, &self.root, &self.captured)
+                    .await?
+                    .lookup(&self.layout)
+            })
+            .await?;
+        authority
+            .query_with_work(self.layout.store(), kind, hashes, &mut work)
+            .await
+    }
+}
+
+/// Capture publication sources before admitting remote catalog reuse.
+///
+/// The caller retains GC admission and must independently verify every published
+/// payload. Each query probes authenticated physical-source indexes; extra rows
+/// can cause hits but cannot hide a selected value. Any hit completes ordinary
+/// reconciliation against these same immutable sources before returning values.
+pub async fn load_current_publication_catalog(
+    layout: &StoreLayout<Store>,
+    initial: &RootSnapshot,
+) -> Result<PublicationCatalogLookup> {
+    with_current_root(layout, initial, |root| async move {
+        let captured = open_sources(layout, &root).await?;
+        // Physical sources are a superset of selected logical members.
+        // Extra rows can only prevent a miss; no row or precedence escapes
+        // this probe without the complete reconciliation used by readers.
+        let order = captured
+            .runs
+            .values()
+            .flat_map(|(_, capsules)| capsules.iter().map(|capsule| capsule.hash().to_owned()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let probe = captured
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.pointer_catalog_lookup(layout, MAX_CATALOG_BYTES))
+            .transpose()?
+            .unwrap_or_else(|| PointerCatalogLookup::empty(MAX_CATALOG_BYTES))
+            .with_run_sources(captured.sources(layout)?, &order)?;
+        let count = usize::try_from(captured.visible.capsule_count)
+            .map_err(|_| corrupt("pending capsule count cannot be represented"))?;
+        Ok(PublicationCatalogLookup {
+            layout: layout.clone(),
+            root,
+            captured,
+            probe,
+            authority: tokio::sync::OnceCell::new(),
+            pending_capsules: count,
+        })
+    })
+    .await
+}
+
+async fn with_current_root<T, Read, ReadFuture>(
+    layout: &StoreLayout<Store>,
+    initial: &RootSnapshot,
+    read: Read,
+) -> Result<T>
+where
+    Read: Fn(Arc<RootSnapshot>) -> ReadFuture,
+    ReadFuture: std::future::Future<Output = Result<T>>,
+{
+    let mut root = Arc::new(initial.clone());
+    for attempt in 0_u32..32 {
+        let result = read(root.clone()).await;
+        let current = super::load_root(layout).await?;
+        if current.record().root().repository_id() != initial.record().root().repository_id()
+            || current.record().root().ref_epoch() != initial.record().root().ref_epoch()
+        {
+            return Err(MetadataError::CapsuleContract {
+                record: "current catalog",
+                reason: "repository authority changed during catalog capture".to_owned(),
+            });
+        }
+        if current.record().digest() == root.record().digest() {
+            return result;
+        }
+        // Checkpoint replacement can retire the old ref prefix. Retry only
+        // after proving replacement; unchanged-root corruption remains an error.
+        drop(result);
+        root = Arc::new(current);
+        if attempt < 31 {
+            tokio::time::sleep(std::time::Duration::from_millis(10_u64 << attempt.min(4))).await;
+        }
+    }
+    Err(MetadataError::CapsuleContract {
+        record: "current catalog",
+        reason: "repository root changed during every bounded catalog capture".to_owned(),
+    })
 }
 
 /// Inspect the complete catalog from one authenticated current-state control capture.
@@ -96,9 +254,34 @@ impl Capture {
     }
 }
 
-async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result<Capture> {
+struct SourceCapture {
+    checkpoint: Option<LayeredCheckpoint>,
+    visible: VisibleRefHeads,
+    runs: BTreeMap<String, (CapsuleRunControl, Vec<CapsuleControl>)>,
+}
+
+impl SourceCapture {
+    fn sources(&self, layout: &StoreLayout<Store>) -> Result<Vec<RunCatalogSource>> {
+        self.runs
+            .values()
+            .map(|(run, _)| run.catalog_source(layout))
+            .collect::<Result<Vec<_>>>()
+            .map(|sources| sources.into_iter().flatten().collect())
+    }
+}
+
+async fn open_sources(
+    layout: &StoreLayout<Store>,
+    snapshot: &RootSnapshot,
+) -> Result<SourceCapture> {
+    let started = std::time::Instant::now();
     let root = snapshot.record().root();
     let (heads, active) = capture_ref_heads(layout, root).await?;
+    tracing::debug!(
+        ref_heads = heads.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog ref heads captured"
+    );
     let visible = materialize_visible_ref_heads(root, &heads, &active)?;
     let mut intake = root
         .checkpoint()
@@ -120,7 +303,7 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     };
     let run_layout = layout.clone();
     let headroom = &read_ahead;
-    let runs = futures_util::stream::iter(visible.pointers.into_iter().map(move |pointer| {
+    let runs = futures_util::stream::iter(visible.pointers.iter().cloned().map(move |pointer| {
         let layout = run_layout.clone();
         async move {
             let (control, capsules) =
@@ -134,31 +317,67 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     .buffer_unordered(32)
     .try_collect::<BTreeMap<_, _>>()
     .await?;
+    tracing::debug!(
+        frontier_runs = runs.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog run controls opened"
+    );
+    Ok(SourceCapture {
+        checkpoint,
+        visible,
+        runs,
+    })
+}
+
+async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result<Capture> {
+    let captured = open_sources(layout, snapshot).await?;
+    reconcile(layout, snapshot, &captured).await
+}
+
+async fn reconcile(
+    layout: &StoreLayout<Store>,
+    snapshot: &RootSnapshot,
+    captured: &SourceCapture,
+) -> Result<Capture> {
+    let started = std::time::Instant::now();
+    let root = snapshot.record().root();
+    let sources = captured.sources(layout)?;
+    let SourceCapture {
+        checkpoint,
+        visible,
+        runs,
+    } = captured;
     let selected = select_ref_control_frontiers(root, &visible.frontiers, &runs)?;
     let pending = select_ref_journal_controls(root, &selected.required, &runs)?;
-    // Validated single-member runs are leaves; pooled members keep demand paging.
-    let leaf_transactions = runs
-        .values()
-        .filter_map(|(_, capsules)| match capsules.as_slice() {
-            [capsule] => Some(capsule.transaction_id()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    // Fetch selected scalar proofs before serial history reconciliation. Small
-    // leaves then fill their admitted metadata blocks concurrently; unselected
-    // compacted members and payloads remain cold.
-    let leaves = selected
-        .root_controls
-        .iter()
-        .chain(pending.values())
-        .filter(|control| leaf_transactions.contains(control.transaction_id()));
-    futures_util::stream::iter(leaves)
+    // Reconciliation must check every selected new tip. Fetch those immutable
+    // point proofs in bounded waves; serial closure ordering still validates
+    // prior tips, removals and final membership before accepting the catalog.
+    let controls = selected.root_controls.iter().chain(pending.values());
+    futures_util::stream::iter(controls)
         .map(Ok::<_, MetadataError>)
         .try_for_each_concurrent(32, |control| async move {
-            control.paged_visibility_headers(layout.store()).await?;
+            if let Some((reader, headers)) =
+                control.paged_visibility_headers(layout.store()).await?
+            {
+                for (edit, header) in control.transaction().edits().iter().zip(headers) {
+                    if let Some(header) = header {
+                        let _ = reader
+                            .lookup(
+                                layout.store(),
+                                edit.ref_name(),
+                                &[decode_oid(header.new_oid())?],
+                            )
+                            .await?;
+                    }
+                }
+            }
             Ok(())
         })
         .await?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog new tip proofs opened"
+    );
     let initial = match checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.visibility_reader(layout, MAX_CATALOG_BYTES))
@@ -179,6 +398,10 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             root.refs().keys().cloned(),
         ),
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog checkpoint visibility opened"
+    );
     let mut visibility = VisibilityReconciliation::Paged(Box::new(initial));
     let mut controls = selected.root_controls;
     for control in &controls {
@@ -205,15 +428,13 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
             "materialized controls differ from the captured ref-head state",
         ));
     }
-    let sources = runs
-        .values()
-        .map(|(run, _)| run.catalog_source(layout))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    tracing::debug!(
+        logical_capsules = controls.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "catalog visibility reconciled"
+    );
     Ok(Capture {
-        checkpoint,
+        checkpoint: checkpoint.clone(),
         controls,
         sources,
     })
@@ -228,294 +449,4 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions")]
-mod tests {
-    use super::*;
-    use crate::capsule_protocol::{
-        Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRefHead, CapsuleRun, CapsuleSection,
-        CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta, RepositoryRoot, RootRecord,
-        capsule_ref_name_key, create_root,
-    };
-    #[cfg(feature = "file-index-reader")]
-    use crate::file_index_lookup::FileIndexLookupSession;
-    use crate::git_visibility::GitVisibilityEdit;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    async fn leaf_capture_reads(
-        file_data_bytes: usize,
-        delay: std::time::Duration,
-    ) -> (usize, usize, u64, std::time::Duration) {
-        let reads = Arc::new(AtomicUsize::new(0));
-        let bytes = Arc::new(AtomicU64::new(0));
-        let observed = reads.clone();
-        let observed_bytes = bytes.clone();
-        let origin = Arc::new(object_store::throttle::ThrottledStore::new(
-            object_store::memory::InMemory::new(),
-            object_store::throttle::ThrottleConfig::default(),
-        ));
-        let store = Store::new(origin.clone())
-            .with_read_request_observer(Arc::new(move |_| {
-                observed.fetch_add(1, Ordering::SeqCst);
-            }))
-            .with_read_byte_observer(Arc::new(move |count| {
-                observed_bytes.fetch_add(count, Ordering::SeqCst);
-            }));
-        let layout = StoreLayout::new(store, "catalog-leaf-opening".to_owned());
-        let root = create_root(
-            &layout,
-            RootRecord::encode(
-                RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-        let count = 64;
-        for index in 1..=count {
-            let name = format!("refs/heads/agent-{index:04}");
-            let oid = format!("{index:040x}");
-            let transaction = CapsuleTransaction::new(
-                root.record().digest(),
-                vec![CapsuleRefEdit::new(&name, None, Some(oid.clone()), None)],
-            )
-            .unwrap();
-            let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
-                name.clone(),
-                GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
-            )]))
-            .unwrap();
-            let mut sections = vec![CapsuleSection::new(
-                CapsuleSectionKind::VisibilityDelta,
-                visibility.encode().unwrap(),
-            )];
-            if file_data_bytes > 0 {
-                sections.push(CapsuleSection::new(
-                    CapsuleSectionKind::FileData,
-                    bytes::Bytes::from(vec![17; file_data_bytes]),
-                ));
-            }
-            let run = CapsuleRun::leaf(Capsule::build(&transaction, Vec::new(), sections).unwrap())
-                .unwrap();
-            layout
-                .store()
-                .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
-                .await
-                .unwrap();
-            let pointer = CapsulePointer::new(
-                run.hash(),
-                run.bytes().len() as u64,
-                run.control_offset(),
-                run.control_size(),
-                run.footer_hash(),
-                run.level(),
-                run.transaction_ids(),
-                run.newest_base_root_digest(),
-            )
-            .unwrap();
-            let head = CapsuleRefHead::from_root(
-                &name,
-                root.record().root().ref_epoch().to_owned(),
-                None,
-                None,
-            )
-            .unwrap();
-            let state = head
-                .successor_state(
-                    &BTreeSet::new(),
-                    Some(oid),
-                    None,
-                    transaction.id().unwrap(),
-                    vec![pointer],
-                )
-                .unwrap();
-            layout
-                .store()
-                .create_strict(
-                    &layout.capsule_ref_head_path(&capsule_ref_name_key(&name)),
-                    head.commit(state).unwrap().encode().unwrap(),
-                )
-                .await
-                .unwrap();
-        }
-        reads.store(0, Ordering::SeqCst);
-        bytes.store(0, Ordering::SeqCst);
-        origin.config_mut(|config| config.wait_get_per_call = delay);
-        let started = tokio::time::Instant::now();
-        fn send<F: std::future::Future + Send>(future: F) -> F {
-            future
-        }
-        let lookup = send(load_pointer_catalog_lookup_from_root(&layout, &root))
-            .await
-            .unwrap();
-        assert!(
-            lookup
-                .files(layout.store(), &[])
-                .await
-                .unwrap()
-                .files()
-                .is_empty()
-        );
-        let observed = reads.load(Ordering::SeqCst);
-        assert!(bytes.load(Ordering::SeqCst) <= (count * 16 * 1024) as u64);
-        (
-            count,
-            observed,
-            bytes.load(Ordering::SeqCst),
-            started.elapsed(),
-        )
-    }
-
-    #[tokio::test]
-    async fn small_ref_leaf_capture_coalesces_metadata_only() {
-        let (count, observed, _, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
-        assert_eq!(
-            observed,
-            3 * count,
-            "one head and two metadata reads per ref"
-        );
-    }
-
-    #[tokio::test]
-    async fn large_ref_leaves_keep_payloads_cold_and_coalesce_metadata() {
-        let (count, observed, _, _) =
-            leaf_capture_reads(64 * 1024, std::time::Duration::ZERO).await;
-        assert_eq!(
-            observed,
-            3 * count,
-            "one head and two metadata reads per ref"
-        );
-    }
-
-    #[tokio::test]
-    async fn catalog_capture_keeps_small_leaf_payloads_cold() {
-        let (count, _, baseline, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
-        let (_, _, with_payload, _) = leaf_capture_reads(8 * 1024, std::time::Duration::ZERO).await;
-        assert!(
-            with_payload <= baseline + (count * 256) as u64,
-            "payload changed control traffic from {baseline} to {with_payload} bytes"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn leaf_proof_latency_is_bounded_by_concurrent_waves() {
-        let delay = std::time::Duration::from_millis(8);
-        let (_, _, _, elapsed) = leaf_capture_reads(0, delay).await;
-        assert!(
-            elapsed <= delay * 16,
-            "capture serialized proof reads: {elapsed:?}"
-        );
-    }
-
-    #[cfg(feature = "file-index-reader")]
-    #[tokio::test]
-    async fn current_catalog_opening_reads_follow_compacted_runs() {
-        let mut observations = Vec::new();
-        // Metadata-only history keeps the catalog empty. One physical run
-        // isolates visibility replay from run fan-out and payload lookup.
-        for count in [2, 8, 32] {
-            let reads = Arc::new(AtomicUsize::new(0));
-            let observed = reads.clone();
-            let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
-                .with_read_request_observer(Arc::new(move |_| {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                }));
-            let layout = StoreLayout::new(store, "catalog-opening".to_owned());
-            let root = create_root(
-                &layout,
-                RootRecord::encode(
-                    RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-            let mut leaves = Vec::new();
-            let mut previous = None;
-            for version in 1..=count {
-                let oid = format!("{version:040x}");
-                let transaction = CapsuleTransaction::new(
-                    root.record().digest(),
-                    vec![CapsuleRefEdit::new(
-                        "refs/heads/main",
-                        previous.clone(),
-                        Some(oid.clone()),
-                        None,
-                    )],
-                )
-                .unwrap();
-                let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
-                    "refs/heads/main".to_owned(),
-                    GitVisibilityEdit::from_delta_objects(
-                        previous,
-                        oid.clone(),
-                        vec![oid.clone()],
-                        Vec::new(),
-                    ),
-                )]))
-                .unwrap();
-                let capsule = Capsule::build(
-                    &transaction,
-                    Vec::new(),
-                    vec![CapsuleSection::new(
-                        CapsuleSectionKind::VisibilityDelta,
-                        visibility.encode().unwrap(),
-                    )],
-                )
-                .unwrap();
-                leaves.push(CapsuleRun::leaf(capsule).unwrap());
-                previous = Some(oid);
-            }
-            let run = CapsuleRun::compact(leaves).unwrap();
-            layout
-                .store()
-                .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
-                .await
-                .unwrap();
-            let pointer = CapsulePointer::new(
-                run.hash(),
-                run.bytes().len() as u64,
-                run.control_offset(),
-                run.control_size(),
-                run.footer_hash(),
-                run.level(),
-                run.transaction_ids(),
-                run.newest_base_root_digest(),
-            )
-            .unwrap();
-            let head = CapsuleRefHead::from_root(
-                "refs/heads/main",
-                root.record().root().ref_epoch().to_owned(),
-                None,
-                None,
-            )
-            .unwrap();
-            let state = head
-                .successor_state(
-                    &BTreeSet::new(),
-                    previous,
-                    None,
-                    run.transaction_ids().last().unwrap().clone(),
-                    vec![pointer],
-                )
-                .unwrap();
-            layout
-                .store()
-                .create_strict(
-                    &layout.capsule_ref_head_path(&capsule_ref_name_key("refs/heads/main")),
-                    head.commit(state).unwrap().encode().unwrap(),
-                )
-                .await
-                .unwrap();
-            reads.store(0, Ordering::SeqCst);
-            let session =
-                FileIndexLookupSession::open_for_storage(layout.store(), "catalog-opening")
-                    .await
-                    .unwrap();
-            observations.push((count, reads.load(Ordering::SeqCst)));
-            session.close().await.unwrap();
-        }
-        assert!(
-            observations.windows(2).all(|pair| pair[0].1 == pair[1].1),
-            "provider reads should follow compacted proof blocks rather than logical edits: {observations:?}"
-        );
-    }
-}
+mod tests;
