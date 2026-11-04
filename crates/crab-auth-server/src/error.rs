@@ -157,6 +157,7 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
             | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
+            | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
             | crab_metadata::error::MetadataError::FileLookupLimit { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
@@ -229,6 +230,7 @@ impl From<crab_read::ReadError> for AuthServerError {
                 | crab_metadata::error::MetadataError::FileLookupWorker { .. }
                 | crab_metadata::error::MetadataError::CheckpointSize { .. }
                 | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
+                | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
                 | crab_metadata::error::MetadataError::FileLookupLimit { .. }
                 | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }),
             ) => Self::from(source),
@@ -318,6 +320,25 @@ impl From<io::Error> for AuthServerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_cache_json_source_survives_direct_and_read_boundaries() {
+        use std::error::Error;
+        for through_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefHeadCacheRecord {
+                source: serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err(),
+            };
+            let error = if through_read {
+                AuthServerError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                AuthServerError::from(source)
+            };
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source())
+                    .any(|source| source.is::<serde_json::Error>())
+            );
+        }
+    }
 
     #[test]
     fn shared_availability_failure_retains_nested_source() {

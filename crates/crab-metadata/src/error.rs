@@ -24,6 +24,11 @@ pub enum MetadataError {
         record: &'static str,
         reason: String,
     },
+    #[error("checkpoint ref-head cache encoding is invalid")]
+    RefHeadCacheRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     /// The derived capsule browse-index record could not be encoded or decoded.
     #[error("invalid capsule browse-index JSON")]
     BrowseIndexRecord {

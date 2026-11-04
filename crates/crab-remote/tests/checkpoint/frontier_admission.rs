@@ -1,6 +1,43 @@
 use super::*;
 use object_store::ObjectStoreExt;
 
+#[tokio::test]
+async fn checkpointed_ref_heads_do_not_repeat_body_gets() {
+    let (layout, observations) = empty_fixture().await;
+    let layout = StoreLayout::with_global_prefix(
+        layout.store().clone().with_target_identity([1; 32]),
+        layout.repo_prefix().to_owned(),
+        layout.global_prefix().to_owned(),
+    );
+    let names = (0..64)
+        .map(|index| format!("stable-{index}"))
+        .collect::<Vec<_>>();
+    let blobs = names
+        .iter()
+        .map(|name| (name.as_str(), name.as_bytes()))
+        .collect::<Vec<_>>();
+    publish_blobs(&layout, &blobs).await;
+    let checkpointed = checkpoint(&layout).await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    observations.2.reset();
+    let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(layout, root)
+        .await
+        .unwrap();
+    let ref_body_gets = observations
+        .2
+        .requests()
+        .iter()
+        .filter(|request| request.location.contains("/v2/refs/"))
+        .count();
+    assert_eq!(
+        (capture.ref_view().unwrap().refs().clone(), ref_body_gets),
+        (checkpointed.refs().clone(), 0),
+        "stable checkpointed refs must retain their values without one body GET per head"
+    );
+}
+
 async fn straddling_frontier() -> (StoreLayout<Store>, Arc<Observations>) {
     let (layout, observations) = empty_fixture().await;
     let name = "refs/tags/changing";

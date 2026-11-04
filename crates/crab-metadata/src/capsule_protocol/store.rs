@@ -308,18 +308,14 @@ pub async fn load_layered_checkpoint(
     pointer: &super::CheckpointPointer,
     maximum_bytes: u64,
 ) -> Result<LayeredCheckpoint> {
-    let checkpoint_limit = maximum_bytes.min(super::layered::MAX_CHECKPOINT_BYTES);
+    let format_limit = super::layered::checkpoint_maximum_bytes(pointer.format())
+        .ok_or_else(|| contract_error("checkpoint pointer format is unsupported"))?;
+    let checkpoint_limit = maximum_bytes.min(format_limit);
     if pointer.size() > checkpoint_limit {
         return Err(MetadataError::CheckpointSize {
             bytes: pointer.size(),
             maximum: checkpoint_limit,
         });
-    }
-    if pointer.format() != super::layered::CHECKPOINT_VERSION {
-        return Err(corrupt(
-            &router.capsule_checkpoint_path(pointer.hash()),
-            "checkpoint pointer does not name the layered checkpoint format",
-        ));
     }
     let path = router.capsule_checkpoint_path(pointer.hash());
     let (bytes, _) = router
@@ -348,14 +344,10 @@ pub async fn load_layered_checkpoint_control(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
 ) -> Result<LayeredCheckpoint> {
-    if pointer.format() != super::layered::CHECKPOINT_VERSION {
-        return Err(corrupt(
-            &router.capsule_checkpoint_path(pointer.hash()),
-            "checkpoint pointer does not name the layered checkpoint format",
-        ));
-    }
+    let format_limit = super::layered::checkpoint_maximum_bytes(pointer.format())
+        .ok_or_else(|| contract_error("checkpoint pointer format is unsupported"))?;
     super::root::validate_checkpoint_pointer(pointer)?;
-    if pointer.size() > super::layered::MAX_CHECKPOINT_BYTES
+    if pointer.size() > format_limit
         || pointer.control_size() > super::layered::MAX_CHECKPOINT_FOOTER_BYTES as u64 + 48
     {
         return Err(corrupt(
@@ -561,11 +553,86 @@ pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
 ) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
+    // The tuple API is published in v2.0.0-alpha.1. Keep one capture owner;
+    // callers needing checkpoint receipts retain the richer snapshot instead.
+    let snapshot = capture_ref_head_snapshot(router, root).await?;
+    Ok((snapshot.heads, snapshot.active))
+}
+
+/// Stable ref-head bodies and provider tokens; activation outcomes are never persisted.
+pub struct RefHeadSnapshot {
+    heads: Vec<CapsuleRefHead>,
+    active: BTreeSet<String>,
+    identities: Vec<ETag>,
+    repository_id: String,
+    ref_epoch: String,
+    origin: Option<String>,
+}
+
+impl RefHeadSnapshot {
+    /// Return the validated current-epoch heads in canonical ref-name order.
+    #[must_use]
+    pub fn heads(&self) -> &[CapsuleRefHead] {
+        &self.heads
+    }
+
+    /// Return freshly resolved committed activations for this capture only.
+    #[must_use]
+    pub fn active(&self) -> &BTreeSet<String> {
+        &self.active
+    }
+
+    /// Encode a bounded checkpoint cache without preserving activation outcomes.
+    pub fn checkpoint_cache(&self) -> Result<Option<super::RefHeadCache>> {
+        let Some(origin) = &self.origin else {
+            return Ok(None);
+        };
+        super::RefHeadCache::capture(
+            origin.clone(),
+            &self.repository_id,
+            &self.ref_epoch,
+            self.heads
+                .iter()
+                .zip(&self.identities)
+                .map(|(head, identity)| {
+                    (head, identity.e_tag.as_deref(), identity.version.as_deref())
+                }),
+        )
+    }
+}
+
+/// Capture a stable inventory, reusing only checkpoint bodies with matching physical identities.
+pub async fn capture_ref_head_snapshot(
+    router: &StoreLayout<Store>,
+    root: &super::RepositoryRoot,
+) -> Result<RefHeadSnapshot> {
     // Retain only the preceding attempt's bodies. A provider identity from the
     // next listing must still match before a body can be reused. Empty tokens
     // and S3's mutable null version do not identify content; always GET those
     // bodies again unless an ETag identifies them. Activations are never cached.
-    let mut previous = BTreeMap::<object_store::path::Path, (CapsuleRefHead, ETag)>::new();
+    let origin = super::ref_head::cache::origin(router);
+    let mut previous = match (
+        root.checkpoint()
+            .and_then(|pointer| pointer.ref_heads.as_ref()),
+        &origin,
+    ) {
+        (Some(cache), Some(origin)) if &cache.origin == origin => {
+            let checkpoint = root
+                .checkpoint()
+                .ok_or_else(|| contract_error("ref-head cache has no checkpoint"))?;
+            cache.validate(checkpoint.control_offset())?;
+            let range = &cache.range;
+            let bytes = router
+                .store()
+                .range_get(
+                    &router.capsule_checkpoint_path(checkpoint.hash()),
+                    range.offset()..range.offset() + range.length(),
+                )
+                .await?;
+            cache.verify(bytes)?.heads(router, root)?
+        }
+        _ => BTreeMap::new(),
+    };
     let mut before = list_ref_head_objects(router).await?;
     for attempt in 0_u32..32 {
         // Independent writers need not settle within eight short probes. Keep
@@ -582,12 +649,10 @@ pub async fn capture_ref_heads(
             let cached = cached_heads
                 .get(&object.location)
                 .filter(|(_, etag)| {
-                    (object.e_tag.as_deref().is_some_and(|etag| !etag.is_empty())
-                        || object
-                            .version
-                            .as_deref()
-                            .is_some_and(|version| !version.is_empty() && version != "null"))
-                        && listed_version_matches(&object, etag)
+                    super::ref_head::cache::identifies_body(
+                        object.e_tag.as_deref(),
+                        object.version.as_deref(),
+                    ) && listed_version_matches(&object, etag)
                 })
                 .cloned();
             async move {
@@ -650,7 +715,23 @@ pub async fn capture_ref_heads(
                 ));
             }
         }
-        return Ok((heads, active));
+        let identities = heads
+            .iter()
+            .map(|head| {
+                previous
+                    .remove(&router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name())))
+                    .map(|(_, identity)| identity)
+                    .ok_or_else(|| contract_error("captured head has no provider receipt"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(RefHeadSnapshot {
+            heads,
+            active,
+            identities,
+            repository_id: root.repository_id().to_owned(),
+            ref_epoch: root.ref_epoch().to_owned(),
+            origin,
+        });
     }
     Err(contract_error(
         "capsule ref snapshot changed during every bounded capture attempt",

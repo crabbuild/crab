@@ -10,8 +10,8 @@ use bytes::Bytes;
 use crab_git::pack::VerifiedPackIdentity;
 use crab_git::repack::{GeometricRepackedPack, RepackSource};
 use crab_metadata::capsule_protocol::{
-    CapsuleGitPack, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
-    PackSourceDescriptor, PointerCatalog, source_catalog_digest,
+    CapsuleGitPack, CatalogInput, LayeredCheckpoint, LayeredObjectMember,
+    LayeredVisibilitySnapshot, PackLayer, PackSourceDescriptor, source_catalog_digest,
 };
 #[cfg(test)]
 use crab_metadata::capsule_protocol::{PackMemberDescriptor, PackRange, PackSourceKind};
@@ -257,7 +257,7 @@ pub async fn maintain_capsule_repository_from_view(
         publish_checkpoint(
             layout,
             view,
-            CatalogWrite::Durable(
+            CatalogInput::Durable(
                 prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
                     .await?
                     .map(Box::new),
@@ -359,7 +359,7 @@ pub async fn repack_capsule_repository_from_view(
                 view,
                 consolidation.sources,
                 member_oids,
-                CatalogWrite::Durable(
+                CatalogInput::Durable(
                     prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
                         .await?
                         .map(Box::new),
@@ -373,7 +373,7 @@ pub async fn repack_capsule_repository_from_view(
             publication = publish_checkpoint(
                 layout,
                 view,
-                CatalogWrite::Durable(
+                CatalogInput::Durable(
                     prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
                         .await?
                         .map(Box::new),
@@ -438,7 +438,7 @@ async fn checkpoint_publication_from_view(
         return Ok(CheckpointPublication::default());
     }
     let started = Instant::now();
-    let catalog = CatalogWrite::Durable(
+    let catalog = CatalogInput::Durable(
         prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
             .await?
             .map(Box::new),
@@ -463,7 +463,7 @@ pub async fn publish_capsule_checkpoint_with_catalog_from_view(
     Ok(publish_checkpoint(
         layout,
         view,
-        CatalogWrite::New(catalog),
+        CatalogInput::New(catalog),
         maximum_bytes,
         cancel,
     )
@@ -486,18 +486,12 @@ pub async fn publish_capsule_checkpoint_with_catalog_root_from_view(
     Ok(publish_checkpoint(
         layout,
         view,
-        CatalogWrite::Durable(catalog.map(Box::new)),
+        CatalogInput::Durable(catalog.map(Box::new)),
         maximum_bytes,
         cancel,
     )
     .await?
     .work)
-}
-
-#[derive(Clone)]
-enum CatalogWrite {
-    New(PointerCatalog),
-    Durable(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
 }
 
 /// Prepare durable catalog pages for one captured maintenance view without publishing a checkpoint.
@@ -538,7 +532,7 @@ pub async fn prepare_capsule_catalog_from_view(
 async fn publish_checkpoint(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    catalog: CatalogWrite,
+    catalog: CatalogInput,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
@@ -653,7 +647,7 @@ async fn repack_checkpoint_from_view(
     let Some(selected_start) = layered_suffix_start(checkpoint.sources())? else {
         return Ok(CheckpointPublication::default());
     };
-    let catalog = CatalogWrite::Durable(checkpoint.catalog().cloned().map(Box::new));
+    let catalog = CatalogInput::Durable(checkpoint.catalog().cloned().map(Box::new));
     let consolidation = consolidate_layered_suffix(
         layout,
         view,
@@ -682,7 +676,7 @@ async fn publish_layered_sources(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     sources: Vec<PackSourceDescriptor>,
     member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
-    catalog: CatalogWrite,
+    catalog: CatalogInput,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
@@ -712,7 +706,7 @@ async fn publish_layered_sources_with_policy(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     mut sources: Vec<PackSourceDescriptor>,
     mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
-    catalog: CatalogWrite,
+    catalog: CatalogInput,
     policy: PublicationPolicy<'_>,
 ) -> Result<CheckpointPublication, CheckpointError> {
     let PublicationPolicy {
@@ -743,22 +737,19 @@ async fn publish_layered_sources_with_policy(
         )?;
         checkpoint_phase("visibility_snapshot", started);
         let started = Instant::now();
-        let checkpoint = match catalog.clone() {
-            CatalogWrite::New(catalog) => LayeredCheckpoint::build(
-                generation,
-                root_digest,
-                sources.clone(),
-                catalog,
-                Some(visibility),
-            ),
-            CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
-                generation,
-                root_digest,
-                sources.clone(),
-                catalog.map(|catalog| *catalog),
-                Some(visibility),
-            ),
-        };
+        let checkpoint = LayeredCheckpoint::build_with_catalog(
+            generation,
+            root_digest,
+            sources.clone(),
+            catalog.clone(),
+            Some(visibility),
+            view.ref_head_cache(),
+            if maximum_bytes == 0 {
+                u64::MAX
+            } else {
+                maximum_bytes
+            },
+        );
         checkpoint_phase("encode", started);
         match checkpoint {
             Ok(checkpoint) => break checkpoint,

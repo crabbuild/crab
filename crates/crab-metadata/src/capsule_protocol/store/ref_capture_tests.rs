@@ -2,6 +2,8 @@
 
 use super::*;
 use bytes::Bytes;
+
+mod checkpoint_cache;
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectStore, ObjectStoreExt,
@@ -15,6 +17,8 @@ use std::sync::{
 #[derive(Clone, Copy, Debug)]
 enum Identity {
     ETag,
+    WeakETag,
+    FixedETag,
     Version,
     NullVersion,
     EmptyVersion,
@@ -77,6 +81,12 @@ impl ObjectStore for ChangingHeads {
             .entry(path.to_string())
             .or_default() += 1;
         let mut result = self.inner.get_opts(path, options).await?;
+        if matches!(self.identity, Identity::WeakETag) {
+            result.meta.e_tag = result.meta.e_tag.map(|tag| format!("W/{tag}"));
+        }
+        if matches!(self.identity, Identity::FixedETag) {
+            result.meta.e_tag = Some("opaque".to_owned());
+        }
         if matches!(self.identity, Identity::Version) {
             result.meta.version = result.meta.e_tag.take();
         }
@@ -141,6 +151,12 @@ impl ObjectStore for ChangingHeads {
                 item.map(|mut meta| {
                     match identity {
                         Identity::ETag => {}
+                        Identity::WeakETag => {
+                            meta.e_tag = meta.e_tag.map(|tag| format!("W/{tag}"));
+                        }
+                        Identity::FixedETag => {
+                            meta.e_tag = Some("opaque".to_owned());
+                        }
                         Identity::Version => {
                             meta.version = meta.e_tag.take();
                         }
@@ -239,6 +255,7 @@ async fn fixture(
 async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
     for identity in [
         Identity::ETag,
+        Identity::WeakETag,
         Identity::Version,
         Identity::NullVersion,
         Identity::EmptyVersion,
@@ -258,7 +275,10 @@ async fn ref_capture_reuses_only_unchanged_provider_versions_during_retry() {
                 reads[&unchanged.to_string()],
                 if matches!(
                     identity,
-                    Identity::Absent | Identity::NullVersion | Identity::EmptyVersion
+                    Identity::Absent
+                        | Identity::NullVersion
+                        | Identity::EmptyVersion
+                        | Identity::WeakETag
                 ) {
                     2
                 } else {
@@ -315,8 +335,13 @@ async fn ref_capture_waits_for_a_finite_write_burst() {
     }
 }
 
-#[tokio::test]
-async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
+async fn prepared_head_fixture() -> (
+    StoreLayout<Store>,
+    super::super::RepositoryRoot,
+    Arc<ChangingHeads>,
+    super::super::CapsuleTransactionRecord,
+    String,
+) {
     use super::super::{
         Capsule, CapsulePointer, CapsuleRefEdit, CapsuleTransaction, CapsuleTransactionRecord,
     };
@@ -368,6 +393,15 @@ async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
         .create_strict(&record_path, preparing.encode().unwrap())
         .await
         .unwrap();
+    (layout, root, store, preparing, oid)
+}
+
+#[tokio::test]
+async fn ref_capture_rechecks_activation_when_a_prepared_head_is_reused() {
+    let (layout, root, store, preparing, oid) = prepared_head_fixture().await;
+    let activation = preparing.activation_id().to_owned();
+    let record_path = layout.capsule_transaction_path(&activation);
+    let head_path = layout.capsule_ref_head_path(&capsule_ref_name_key("refs/heads/unchanged"));
     store.replacements.lock().unwrap().insert(
         record_path.clone(),
         Some(preparing.commit().unwrap().encode().unwrap()),

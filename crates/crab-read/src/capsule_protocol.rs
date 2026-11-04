@@ -6,9 +6,10 @@ use crab_metadata::capsule_protocol::visibility_object_set_digest;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsuleControl, CapsulePointer, CapsuleRun, CapsuleRunControl, CapturedVisibility,
     CheckpointPointer, LayeredCheckpoint, PackMemberDescriptor, PackRange, PackSourceDescriptor,
-    PackSourceKind, PointerCatalog, PointerCatalogAssembly, RootRecord, VisibilityReconciliation,
-    apply_transaction_visibility_index, capture_ref_heads, load_root,
-    resolve_referenced_activations, visibility_is_ready,
+    PackSourceKind, PointerCatalog, PointerCatalogAssembly, RefHeadCache, RefHeadSnapshot,
+    RootRecord, VisibilityReconciliation, apply_transaction_visibility_index,
+    capture_ref_head_snapshot, capture_ref_heads, load_root, resolve_referenced_activations,
+    visibility_is_ready,
 };
 use crab_metadata::capsule_protocol::{
     apply_control_refs, materialize_visible_ref_heads, order_ref_controls,
@@ -111,8 +112,7 @@ pub struct CapsuleDependencyProof {
 pub struct CapsuleRepositoryCapture {
     layout: StoreLayout<Store>,
     root: crab_metadata::capsule_protocol::RootSnapshot,
-    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
-    active: BTreeSet<String>,
+    heads: RefHeadSnapshot,
 }
 
 impl CapsuleRepositoryCapture {
@@ -121,12 +121,11 @@ impl CapsuleRepositoryCapture {
         layout: StoreLayout<Store>,
         root: crab_metadata::capsule_protocol::RootSnapshot,
     ) -> Result<Self> {
-        let (heads, active) = capture_ref_heads(&layout, root.record().root()).await?;
+        let heads = capture_ref_head_snapshot(&layout, root.record().root()).await?;
         Ok(Self {
             layout,
             root,
             heads,
-            active,
         })
     }
 
@@ -138,11 +137,13 @@ impl CapsuleRepositoryCapture {
 
     /// Count distinct uncheckpointed transactions without loading immutable bodies.
     pub fn capsule_count(&self) -> Result<u64> {
-        Ok(
-            materialize_visible_ref_heads(self.root.record().root(), &self.heads, &self.active)
-                .map_err(metadata_control_error)?
-                .capsule_count,
+        Ok(materialize_visible_ref_heads(
+            self.root.record().root(),
+            self.heads.heads(),
+            self.heads.active(),
         )
+        .map_err(metadata_control_error)?
+        .capsule_count)
     }
 
     /// Whether this capture may admit a direct layered cold clone.
@@ -152,30 +153,21 @@ impl CapsuleRepositoryCapture {
     /// pack descriptor, visibility and dependency check.
     #[must_use]
     pub fn may_have_layered_cold_clone_packs(&self) -> bool {
-        let root = self.root.record().root();
-        if root.checkpoint().is_none() {
-            return true;
-        }
-        // Validated ref states bind their position to the newest frontier
-        // transaction. A newer visible position therefore leaves a suffix
-        // that checkpoint packs alone cannot cover.
-        root.capsule_frontier().is_empty()
-            && self.heads.iter().all(|head| {
-                head.visible(&self.active)
-                    .transaction_id()
-                    .is_none_or(|transaction| {
-                        root.compacted_ref_transactions()
-                            .get(head.ref_name())
-                            .is_some_and(|compacted| compacted == transaction)
-                    })
-            })
+        may_have_layered_cold_clone_packs(
+            self.root.record().root(),
+            self.heads.heads(),
+            self.heads.active(),
+        )
     }
 
     /// Materialize payload-free refs from the captured heads.
     pub fn ref_view(&self) -> Result<CapsuleRefView> {
-        let visible =
-            materialize_visible_ref_heads(self.root.record().root(), &self.heads, &self.active)
-                .map_err(metadata_control_error)?;
+        let visible = materialize_visible_ref_heads(
+            self.root.record().root(),
+            self.heads.heads(),
+            self.heads.active(),
+        )
+        .map_err(metadata_control_error)?;
         Ok(CapsuleRefView {
             root: self.root.clone(),
             refs: visible.refs,
@@ -190,15 +182,7 @@ impl CapsuleRepositoryCapture {
         &self,
         limits: CapsuleReadLimits,
     ) -> Result<CapsuleRepositoryView> {
-        assemble_layered_control_view(
-            &self.layout,
-            self.root.clone(),
-            limits,
-            &self.heads,
-            &self.active,
-            ControlRead::Fetch,
-        )
-        .await
+        self.control_view(limits, ControlRead::Fetch).await
     }
 
     /// Open ordinary wire-fetch controls with object sets deferred until selected.
@@ -209,28 +193,12 @@ impl CapsuleRepositoryCapture {
         &self,
         limits: CapsuleReadLimits,
     ) -> Result<CapsuleRepositoryView> {
-        assemble_layered_control_view(
-            &self.layout,
-            self.root.clone(),
-            limits,
-            &self.heads,
-            &self.active,
-            ControlRead::TipBoundFetch,
-        )
-        .await
+        self.control_view(limits, ControlRead::TipBoundFetch).await
     }
 
     /// Open complete metadata without Git bodies or a second ref-head capture.
     pub async fn metadata_view(&self, limits: CapsuleReadLimits) -> Result<CapsuleRepositoryView> {
-        assemble_layered_control_view(
-            &self.layout,
-            self.root.clone(),
-            limits,
-            &self.heads,
-            &self.active,
-            ControlRead::Complete,
-        )
-        .await
+        self.control_view(limits, ControlRead::Complete).await
     }
 
     /// Open complete metadata for an owned Git visibility transfer.
@@ -242,22 +210,78 @@ impl CapsuleRepositoryCapture {
         &self,
         limits: CapsuleReadLimits,
     ) -> Result<CapsuleRepositoryView> {
-        assemble_layered_control_view(
+        self.control_view(limits, ControlRead::CompleteForGit).await
+    }
+
+    async fn control_view(
+        &self,
+        limits: CapsuleReadLimits,
+        read: ControlRead,
+    ) -> Result<CapsuleRepositoryView> {
+        let mut view = assemble_layered_control_view(
             &self.layout,
             self.root.clone(),
             limits,
-            &self.heads,
-            &self.active,
-            ControlRead::CompleteForGit,
+            self.heads.heads(),
+            self.heads.active(),
+            read,
         )
-        .await
+        .await?;
+        if matches!(
+            read,
+            ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Repack
+        ) {
+            view.ref_head_cache = self.heads.checkpoint_cache()?;
+        }
+        Ok(view)
     }
+
+    async fn full_view(
+        &self,
+        limits: CapsuleReadLimits,
+        load: CheckpointLoad,
+    ) -> Result<CapsuleRepositoryView> {
+        let mut view = assemble_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            self.heads.heads(),
+            self.heads.active(),
+            load,
+        )
+        .await?;
+        view.ref_head_cache = self.heads.checkpoint_cache()?;
+        Ok(view)
+    }
+}
+
+fn may_have_layered_cold_clone_packs(
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
+) -> bool {
+    if root.checkpoint().is_none() {
+        return true;
+    }
+    // Validated positions bind the newest frontier transaction. A newer
+    // visible position leaves a suffix that checkpoint packs cannot cover.
+    root.capsule_frontier().is_empty()
+        && heads.iter().all(|head| {
+            head.visible(active)
+                .transaction_id()
+                .is_none_or(|transaction| {
+                    root.compacted_ref_transactions()
+                        .get(head.ref_name())
+                        .is_some_and(|compacted| compacted == transaction)
+                })
+        })
 }
 
 /// One authenticated repository root and every post-checkpoint capsule it names.
 #[derive(Clone)]
 pub struct CapsuleRepositoryView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
+    ref_head_cache: Option<RefHeadCache>,
     browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
     checkpoint: Option<LayeredCheckpoint>,
     checkpoint_visibility: Option<Arc<crab_metadata::capsule_protocol::LayeredVisibilityReader>>,
@@ -461,6 +485,12 @@ impl CapsuleRepositoryActivity {
 }
 
 impl CapsuleRepositoryView {
+    /// Return bounded provider receipts captured with this complete metadata view.
+    #[must_use]
+    pub fn ref_head_cache(&self) -> Option<&RefHeadCache> {
+        self.ref_head_cache.as_ref()
+    }
+
     /// Return the authoritative repository generation and ref state.
     #[must_use]
     pub fn root(&self) -> &RootRecord {
@@ -4229,16 +4259,10 @@ pub async fn open_view_from_root(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_view(
-        router,
-        snapshot,
-        limits,
-        heads,
-        active,
-        CheckpointLoad::Complete,
-    )
-    .await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .full_view(limits, CheckpointLoad::Complete)
+        .await
 }
 
 /// Open pinned repack controls without fetch-transition copies.
@@ -4250,17 +4274,10 @@ pub async fn open_view_from_root_for_repack(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let root = snapshot.record().root();
-    let (heads, active) = capture_ref_heads(router, root).await?;
-    assemble_layered_control_view(
-        router,
-        snapshot,
-        limits,
-        &heads,
-        &active,
-        ControlRead::Repack,
-    )
-    .await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .control_view(limits, ControlRead::Repack)
+        .await
 }
 
 /// Load complete checkpoint visibility, catalog commitments and frontier controls.
@@ -4273,16 +4290,10 @@ pub async fn open_view_from_root_with_control(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_view(
-        router,
-        snapshot,
-        limits,
-        heads,
-        active,
-        CheckpointLoad::Control,
-    )
-    .await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .full_view(limits, CheckpointLoad::Control)
+        .await
 }
 
 /// Load only the root-owned layered checkpoint, excluding newer per-ref heads.
@@ -4340,6 +4351,9 @@ pub fn compacted_view_from_checkpoint(
         });
     }
     let visibility = visibility_index_for_checkpoint(Some(&checkpoint))?;
+    // Physical maintenance must not recapture mutable refs. Retain the old
+    // authenticated receipts; later discovery still lists and validates them.
+    let ref_head_cache = checkpoint.ref_head_cache()?;
     let mut tip_bound_transitions = BTreeMap::new();
     append_checkpoint_tip_bound_transitions(
         &mut tip_bound_transitions,
@@ -4348,6 +4362,7 @@ pub fn compacted_view_from_checkpoint(
     Ok(CapsuleRepositoryView {
         refs: root.refs().clone(),
         peeled_refs: root.peeled_refs().clone(),
+        ref_head_cache,
         root: snapshot,
         browse_indexes: None,
         checkpoint: Some(checkpoint),
@@ -4383,16 +4398,10 @@ pub async fn open_view_from_root_with_layered_control(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_view(
-        router,
-        snapshot,
-        limits,
-        heads,
-        active,
-        CheckpointLoad::LayeredControl,
-    )
-    .await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .layered_control_view(limits)
+        .await
 }
 
 /// Capture complete visibility and catalog metadata without loading Git pack bodies.
@@ -4405,16 +4414,10 @@ pub async fn open_view_from_root_with_metadata(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(
-        router,
-        snapshot,
-        limits,
-        &heads,
-        &active,
-        ControlRead::Complete,
-    )
-    .await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .metadata_view(limits)
+        .await
 }
 
 /// Capture complete reference/visibility metadata while keeping run OID admission cold.
@@ -4426,8 +4429,10 @@ pub async fn open_git_view_from_root(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(router, snapshot, limits, &heads, &active, ControlRead::Git).await
+    CapsuleRepositoryCapture::from_root(router.clone(), snapshot)
+        .await?
+        .control_view(limits, ControlRead::Git)
+        .await
 }
 
 #[derive(Clone, Copy)]
@@ -4494,38 +4499,32 @@ mod inline_control_tests {
 enum CheckpointLoad {
     Complete,
     Control,
-    LayeredControl,
 }
 
 async fn assemble_view(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
-    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
-    active: BTreeSet<String>,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
     checkpoint_load: CheckpointLoad,
 ) -> Result<CapsuleRepositoryView> {
-    if matches!(checkpoint_load, CheckpointLoad::LayeredControl)
-        || (matches!(checkpoint_load, CheckpointLoad::Control)
-            && snapshot.record().root().checkpoint().is_some())
+    if matches!(checkpoint_load, CheckpointLoad::Control)
+        && snapshot.record().root().checkpoint().is_some()
     {
         return assemble_layered_control_view(
             router,
             snapshot,
             limits,
-            &heads,
-            &active,
-            if matches!(checkpoint_load, CheckpointLoad::LayeredControl) {
-                ControlRead::Fetch
-            } else {
-                ControlRead::Complete
-            },
+            heads,
+            active,
+            ControlRead::Complete,
         )
         .await;
     }
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), heads, active)
         .map_err(metadata_control_error)?;
     let pending_capsule_count = visible.capsule_count;
     let expected_refs = visible.refs;
@@ -4722,6 +4721,7 @@ async fn assemble_view(
     root_capsules.extend(ordered);
     let tip_bound_transitions = build_tip_bound_transitions(&root_capsules, &[])?;
     Ok(CapsuleRepositoryView {
+        ref_head_cache: None,
         root: snapshot,
         browse_indexes: None,
         checkpoint,
@@ -4969,6 +4969,7 @@ async fn assemble_layered_control_view(
     let ref_capsule_counts = selected.counts;
     if footer_only {
         return Ok(CapsuleRepositoryView {
+            ref_head_cache: None,
             root: snapshot,
             browse_indexes: None,
             checkpoint,
@@ -5071,6 +5072,7 @@ async fn assemble_layered_control_view(
     }
     root_capsules.extend(ordered);
     Ok(CapsuleRepositoryView {
+        ref_head_cache: None,
         root: snapshot,
         browse_indexes: None,
         checkpoint,
@@ -7125,8 +7127,13 @@ mod tests {
                 None,
             )
             .unwrap();
-            capture.heads = vec![base.clone()];
-            assert!(capture.may_have_layered_cold_clone_packs());
+            let mut heads = vec![base.clone()];
+            let mut active = BTreeSet::new();
+            assert!(may_have_layered_cold_clone_packs(
+                capture.root.record().root(),
+                &heads,
+                &active
+            ));
             let prior = current.record().root().capsule_frontier()[0].clone();
             let compacted_root = current
                 .record()
@@ -7151,15 +7158,19 @@ mod tests {
                 .unwrap();
             let compacted = base
                 .successor_state(
-                    &capture.active,
+                    &active,
                     Some("2".repeat(40)),
                     None,
                     prior.transaction_ids()[0].clone(),
                     vec![prior.clone()],
                 )
                 .unwrap();
-            capture.heads = vec![base.commit(compacted).unwrap()];
-            assert!(capture.may_have_layered_cold_clone_packs());
+            heads = vec![base.commit(compacted).unwrap()];
+            assert!(may_have_layered_cold_clone_packs(
+                capture.root.record().root(),
+                &heads,
+                &active
+            ));
             let next_id = "7".repeat(64);
             let next = CapsulePointer::new(
                 prior.hash(),
@@ -7182,11 +7193,15 @@ mod tests {
                         vec![next.clone()],
                     )
                     .unwrap();
-                capture.heads = vec![base.commit(state.clone()).unwrap()];
-                capture.active.clear();
-                assert!(!capture.may_have_layered_cold_clone_packs());
+                heads = vec![base.commit(state.clone()).unwrap()];
+                active.clear();
+                assert!(!may_have_layered_cold_clone_packs(
+                    capture.root.record().root(),
+                    &heads,
+                    &active
+                ));
                 let activation = "6".repeat(64);
-                capture.heads = vec![
+                heads = vec![
                     base.prepare(
                         base.visible(&BTreeSet::new()).clone(),
                         activation.clone(),
@@ -7194,9 +7209,17 @@ mod tests {
                     )
                     .unwrap(),
                 ];
-                assert!(capture.may_have_layered_cold_clone_packs());
-                capture.active.insert(activation);
-                assert!(!capture.may_have_layered_cold_clone_packs());
+                assert!(may_have_layered_cold_clone_packs(
+                    capture.root.record().root(),
+                    &heads,
+                    &active
+                ));
+                active.insert(activation);
+                assert!(!may_have_layered_cold_clone_packs(
+                    capture.root.record().root(),
+                    &heads,
+                    &active
+                ));
             }
             assert!(observer.observations.lock().unwrap().is_empty());
         }

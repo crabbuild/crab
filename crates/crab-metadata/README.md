@@ -45,9 +45,9 @@ Full decoding still materializes the body and validates every pointer commitment
 
 Root envelope and payload version 5 require collectors to include captured-reader
 claims. Version 4 collectors reject these roots before planning deletions; a new
-namespace alone would not protect mounted captures from those collectors. Both
-versions are unreleased. Version 4 roots are rejected, with no implicit upgrade
-or fallback reader. Existing development repositories require a separately
+namespace alone would not protect mounted captures from those collectors.
+Version-5 roots are reachable from `v2.0.0-alpha.1`. Version 4 roots are rejected,
+with no implicit upgrade or fallback reader. Existing development repositories require a separately
 qualified, quiesced conversion before adopting this format.
 
 `store_read_capture` records a view's checkpoint, exact run pointers and selected
@@ -112,6 +112,28 @@ not widen that retry window. Current-state catalog lookups reuse that owner toge
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
+Checkpoint format 11 (`CRBCKP11`) adds an optional authenticated ref-head cache
+inside the existing checkpoint body. `capture_ref_head_snapshot` retains the
+exact committed/prepared heads and provider tokens for complete-view owners;
+the tagged `capture_ref_heads` tuple API shares the same capture loop. Cache
+encoding admits at most 8 MiB and 16,384 heads, and publication omits the cache
+when it would exceed the caller's aggregate metadata budget. Root pointers and
+footers bind the same contiguous range and hash. No separate object namespace
+or GC root is introduced; physical maintenance retains the captured receipts.
+Writers require at least two identified heads: caching one head cannot save a
+request and would add a read after that head changes.
+
+Reuse requires the same resolved transport, ref prefix, repository and epoch,
+fresh matching strong ETags or non-null versions, and stable before/after LISTs.
+Scoped read/staging routes without prefix-wide target proof disable reuse.
+Activations are always read afresh, including for unchanged prepared heads.
+Selected missing/corrupt cache bytes remain errors. Restore filters retired
+heads before activation resolution. Upgrade readers and collectors before
+writers: older format-9 clients reject format-11 roots before GC planning.
+Immutable tagged format-9 checkpoints retain their exact bytes and identities;
+the retired shared-base format-10 experiment remains rejected. Full team-scale
+performance and lifecycle qualification of format 11 remain pending.
+
 Catalog capture coalesces single-ref visibility bodies up to 16 KiB, excluding
 payloads and duplicate descriptor bytes. Larger edits retain selected-page reads
 instead of transferring unrelated changes for every captured tip. The existing
@@ -141,7 +163,7 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
-Checkpoint format 9 (`CRBCKP09`) commits to a small catalog descriptor and
+Checkpoint formats 9 and 11 commit to a small catalog descriptor and
 immutable content-addressed pages under `v2/catalogs/<partition>/<hash>`.
 Descriptor version 2 (`CRBCAT02`) authenticates the roots of file bindings,
 shards, xorbs and reverse chunk placements. Internal directories and nested
@@ -500,8 +522,9 @@ shared-session initialization can retry after that dependency is repaired.
 
 Layered checkpoint visibility uses authenticated dictionary, ref-closure and
 transition pages, shared by readers and recovery. Checkpoint pointers require
-explicit format 9 (`CRBCKP09`); retired or missing formats are rejected. No
-release tag contains this layered format; the released v1 protocol is unchanged.
+explicit format 9 (`CRBCKP09`, tagged in `v2.0.0-alpha.1`) or current format 11
+(`CRBCKP11`); retired or missing formats are rejected. Writers emit format 11;
+immutable format-9 history is read without rewriting.
 
 Footer roots bind the visibility section, retained-object count and ordered
 source-catalog digest. `LayeredVisibilityReader` loads only pages needed for

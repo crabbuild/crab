@@ -60,9 +60,9 @@ pub use history::{
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
 };
 pub use layered::{
-    CheckpointCatalog, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot,
-    PackLayer, PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind,
-    source_catalog_digest, visibility_object_set_digest,
+    CatalogInput, CheckpointCatalog, LayeredCheckpoint, LayeredObjectMember,
+    LayeredVisibilitySnapshot, PackLayer, PackMemberDescriptor, PackRange, PackSourceDescriptor,
+    PackSourceKind, source_catalog_digest, visibility_object_set_digest,
 };
 #[cfg(feature = "storage")]
 pub use layered::{LayeredVisibilityReader, fold_checkpoint_catalog, merge_checkpoint_catalogs};
@@ -85,7 +85,7 @@ pub use pointer::{
 pub use read_capture::{RetainedReadCapture, store_read_capture};
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
-    MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key,
+    MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, RefHeadCache, capsule_ref_name_from_key,
     capsule_ref_name_key,
 };
 #[cfg(feature = "storage")]
@@ -110,10 +110,11 @@ pub use source_retention::{
 };
 #[cfg(feature = "storage")]
 pub use store::{
-    RootSnapshot, capture_ref_heads, create_root, load_capsule_run, load_capsule_run_control,
-    load_capsule_run_git_control, load_history_chain, load_history_segment,
-    load_layered_checkpoint, load_layered_checkpoint_control, load_pointer_catalog,
-    load_pointer_catalog_from_root, load_root, resolve_referenced_activations,
+    RefHeadSnapshot, RootSnapshot, capture_ref_head_snapshot, capture_ref_heads, create_root,
+    load_capsule_run, load_capsule_run_control, load_capsule_run_git_control, load_history_chain,
+    load_history_segment, load_layered_checkpoint, load_layered_checkpoint_control,
+    load_pointer_catalog, load_pointer_catalog_from_root, load_root,
+    resolve_referenced_activations,
 };
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{

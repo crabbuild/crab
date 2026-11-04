@@ -165,6 +165,7 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
         | E::BrowseIndexRecord { .. }
         | E::GitObjectIndexRecord { .. }
         | E::PointerCatalogRecord { .. }
+        | E::RefHeadCacheRecord { .. }
         | E::CapsuleVisibilityRecord { .. } => ErrorKind::Corruption,
         E::Io { source } if source.kind() == std::io::ErrorKind::InvalidData => {
             ErrorKind::Corruption
@@ -276,6 +277,26 @@ pub(crate) fn storage_kind(error: &crab_storage::StorageError) -> ErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_cache_json_error_keeps_corruption_and_source_through_both_read_apis() {
+        use std::error::Error as _;
+        for captured_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefHeadCacheRecord {
+                source: serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err(),
+            };
+            let error = if captured_read {
+                read_error(crab_read::ReadError::Metadata(source))
+            } else {
+                remote_error(crab_remote_git::Error::Metadata(source))
+            };
+            assert_eq!(error.kind(), ErrorKind::Corruption);
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source())
+                    .any(|source| source.is::<serde_json::Error>())
+            );
+        }
+    }
 
     #[test]
     fn admission_failure_keeps_its_kind_through_cache_and_io_wrappers() {

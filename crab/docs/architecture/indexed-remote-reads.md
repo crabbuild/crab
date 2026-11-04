@@ -2625,6 +2625,33 @@ format-10 measurements in the team qualification record describe that experiment
 only; they do not qualify the integrated source or replace fresh lifecycle and
 performance evidence.
 
+### Checkpoint ref-head cache: format 11 under qualification
+
+Current writers emit `CRBCKP11`. A checkpoint may include at most 8 MiB and
+16,384 captured native ref-head bodies with their observed ETags/versions. The
+root pointer and footer authenticate the same range, hash and physical-origin
+binding. Committed and prepared states are retained exactly; activation outcomes
+are never cached. The cache is omitted if it would exceed publication's aggregate
+metadata budget. It remains inside the ordinary checkpoint object, so existing
+history, reader retention, replication and GC ownership protect its lifetime.
+
+Every capture still performs before/after ref inventories. A body is reused only
+when a fresh inventory carries its matching strong ETag or non-null version,
+under the same transport target, ref prefix, repository and authority epoch.
+Scoped routes without prefix-wide physical target proof disable reuse. Changed,
+new or unidentified heads are downloaded; activations are always resolved afresh.
+Missing or corrupt selected cache bytes fail closed. Restore rejects the old
+epoch before demanding its activation dependencies. Physical maintenance retains
+the old receipt without changing its ref snapshot.
+
+Upgrade readers and collectors before writers. Tagged format 9 from
+`v2.0.0-alpha.1` retains exact immutable bytes and pointer identities. Format 10
+belongs to the retired shared-base experiment above and remains rejected; it is
+not reused for this change. Older clients reject format-11 root pointers before
+GC planning. Focused cache and capture regressions do not establish final
+10,000-push latency, byte budgets, complete historical integrity or Kubernetes
+qualification; all must pass on the final combined revision.
+
 ## Capsule chunk discovery without the retired receipt database
 
 Capsule add and push use `CapsuleChunkIndex`, owned by `crab-metadata`.

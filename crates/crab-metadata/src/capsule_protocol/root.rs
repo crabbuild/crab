@@ -159,7 +159,7 @@ impl CapsulePointer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointPointer {
-    format: u32,
+    pub(super) format: u32,
     hash: String,
     size: u64,
     control_offset: u64,
@@ -169,6 +169,12 @@ pub struct CheckpointPointer {
     covered_root_digest: String,
     pack_count: u32,
     object_count: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::ref_head::cache::RefHeadCachePointer::deserialize_optional"
+    )]
+    pub(super) ref_heads: Option<super::ref_head::cache::RefHeadCachePointer>,
 }
 
 impl CheckpointPointer {
@@ -199,6 +205,7 @@ impl CheckpointPointer {
             covered_root_digest: covered_root_digest.into(),
             pack_count,
             object_count,
+            ref_heads: None,
         };
         validate_checkpoint_pointer(&pointer)?;
         Ok(pointer)
@@ -928,8 +935,16 @@ pub(super) fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
 }
 
 pub(super) fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
-    if pointer.format != super::layered::CHECKPOINT_VERSION {
+    if super::layered::checkpoint_maximum_bytes(pointer.format).is_none() {
         return Err(contract_error("checkpoint format is unsupported"));
+    }
+    if let Some(cache) = &pointer.ref_heads {
+        if pointer.format != super::layered::CHECKPOINT_VERSION {
+            return Err(contract_error(
+                "checkpoint ref-head cache requires format 11",
+            ));
+        }
+        cache.validate(pointer.control_offset)?;
     }
     validate_content_hash(
         &pointer.hash,
@@ -1349,7 +1364,8 @@ mod tests {
     fn root_rejects_retired_or_implicit_checkpoint_formats() {
         let record = checkpointed_record();
         let payload = serde_json::to_string(record.root()).unwrap();
-        assert_eq!(payload.matches("\"format\":9,").count(), 1);
+        let field = format!("\"format\":{},", super::super::layered::CHECKPOINT_VERSION);
+        assert_eq!(payload.matches(&field).count(), 1);
         for replacement in [
             "",
             "\"format\":3,",
@@ -1359,7 +1375,7 @@ mod tests {
             "\"format\":7,",
             "\"format\":8,",
         ] {
-            let payload = payload.replace("\"format\":9,", replacement);
+            let payload = payload.replace(&field, replacement);
             // Recompute the envelope digest so only format admission can fail.
             let mut bytes = ROOT_MAGIC.to_vec();
             bytes.extend_from_slice(&ROOT_VERSION.to_be_bytes());

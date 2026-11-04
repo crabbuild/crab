@@ -60,6 +60,12 @@ captured catalog before selecting the replica.
 
 ### Captured Git views
 
+`CapsuleRepositoryCapture` retains metadata's ref-head snapshot when changing
+read detail. Complete metadata views carry bounded provider receipts into
+checkpoint publication; fetch-only views do not encode a new cache. Physical
+checkpoint maintenance retains existing receipts without recapturing mutable
+refs. Later discovery always performs fresh inventory and activation checks.
+
 Complete and control-only views load at most 32 frontier runs concurrently.
 Paged transition materialization uses the same bound and preserves input order.
 Fetch callers expand transitions only for the planner's requested visible refs;

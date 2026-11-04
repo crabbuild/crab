@@ -314,6 +314,30 @@ impl Store {
         self.target_identity.as_ref()
     }
 
+    /// Return target proof only when every read beneath `prefix` uses the bound transport.
+    #[must_use]
+    pub fn read_prefix_target_identity(&self, prefix: &Path) -> Option<&[u8; 32]> {
+        let overlaps = |route: &str| {
+            prefix.as_ref().is_empty()
+                || path_is_inside_prefix(prefix.as_ref(), route)
+                || path_is_inside_prefix(route, prefix.as_ref())
+        };
+        // Scoped routes carry no resolved transport proof. A routed child can
+        // make LIST and GET see different stores with coincident opaque tokens.
+        if self
+            .read_routes
+            .as_ref()
+            .is_some_and(|routes| routes.iter().any(|route| overlaps(&route.prefix)))
+            || self
+                .staging_writes
+                .as_ref()
+                .is_some_and(|state| overlaps(&state.prefix))
+        {
+            return None;
+        }
+        self.target_identity()
+    }
+
     /// Attaches a URL-signer handle so [`Self::signed_url`] can
     /// produce presigned URLs.
     ///
@@ -4181,6 +4205,34 @@ mod tests {
 
         assert_eq!(size, body.len() as u64);
         assert_eq!(std::fs::read(dest).unwrap(), body);
+    }
+
+    #[test]
+    fn read_prefix_target_proof_excludes_overlapping_routes_and_staging() {
+        let store = Store::new(Arc::new(InMemory::new())).with_target_identity([1; 32]);
+        let prefix = Path::from("repo/v2/refs");
+        assert_eq!(store.read_prefix_target_identity(&prefix), Some(&[1; 32]));
+        for (route, expected) in [
+            ("repo", None),
+            ("repo/v2/refs", None),
+            ("repo/v2/refs/one", None),
+            ("repo/v2/refs-other", Some(&[1; 32])),
+            ("repo/v2/payloads", Some(&[1; 32])),
+        ] {
+            let routed = store
+                .clone()
+                .with_read_routes(vec![(route.to_owned(), Arc::new(InMemory::new()))]);
+            let staged = store.clone().with_staging_writes(route.to_owned());
+            assert_eq!(routed.read_prefix_target_identity(&Path::from("")), None);
+            assert_eq!(
+                (
+                    routed.read_prefix_target_identity(&prefix),
+                    staged.read_prefix_target_identity(&prefix)
+                ),
+                (expected, expected),
+                "{route}"
+            );
+        }
     }
 
     #[tokio::test]

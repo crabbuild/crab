@@ -36,6 +36,11 @@ origin order. Ordinary object reads can warm local cache; remote warming is
 part of the write path. Mutable paths bypass caches so refs and manifests
 retain real origin ETags for compare-and-swap.
 
+The read-only storage facade retains resolved transport identity only when
+the origin has no scoped read or staging routes. Mutable bodies and LISTs keep
+their real provider tokens, allowing authenticated checkpoint ref-head reuse
+without assigning an unproved transport identity to routed reads.
+
 Xorb chunks and metadata share the source-specific reader in `src/xorb_read.rs`.
 One attempt never mixes cache and origin bytes. Corrupt or unreadable cache
 entries are bypassed even when eviction fails; corrupt origin bytes return

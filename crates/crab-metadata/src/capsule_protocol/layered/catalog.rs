@@ -81,8 +81,12 @@ impl CheckpointCatalog {
     }
 }
 
-pub(super) enum CatalogInput {
+/// Source of the complete catalog embedded or retained by checkpoint publication.
+#[derive(Clone)]
+pub enum CatalogInput {
+    /// Build immutable catalog pages from validated logical entries.
     New(PointerCatalog),
+    /// Retain a validated, caller-protected immutable catalog root.
     Durable(Option<Box<CheckpointCatalog>>),
 }
 
@@ -140,7 +144,7 @@ async fn publish_objects(
 impl LayeredCheckpoint {
     /// Capture the authenticated checkpoint identity, including footer-only readers.
     pub fn pointer(&self) -> Result<super::super::CheckpointPointer> {
-        super::super::CheckpointPointer::new_layered(
+        let mut pointer = super::super::CheckpointPointer::new_layered(
             self.hash(),
             self.object_size,
             self.control_offset(),
@@ -150,7 +154,11 @@ impl LayeredCheckpoint {
             self.covered_root_digest(),
             self.pack_count()?,
             self.object_count()?,
-        )
+        )?;
+        pointer.format = self.footer.version;
+        pointer.ref_heads = self.footer.ref_heads.clone();
+        super::super::root::validate_checkpoint_pointer(&pointer)?;
+        Ok(pointer)
     }
 
     /// Return the checkpoint and root-descriptor bytes admitted when opening a view.

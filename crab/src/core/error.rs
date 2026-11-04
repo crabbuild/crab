@@ -2091,6 +2091,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
             | crab_metadata::error::MetadataError::CapsuleVisibilityRecord { .. }
             | crab_metadata::error::MetadataError::PointerCatalogRecord { .. }
+            | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -4174,6 +4175,9 @@ mod tests {
         let source = || serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
         for error in [
             CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord {
+                source: source(),
+            }),
+            CrabError::from(crab_metadata::error::MetadataError::RefHeadCacheRecord {
                 source: source(),
             }),
             CrabError::from(
