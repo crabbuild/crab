@@ -35,6 +35,20 @@ pub enum MetadataError {
         #[source]
         source: std::io::Error,
     },
+    /// A complete capsule decoder could not acquire process-wide CPU capacity.
+    #[cfg(feature = "storage")]
+    #[error("capsule decode admission closed")]
+    CapsuleDecodeAdmission {
+        #[source]
+        source: tokio::sync::AcquireError,
+    },
+    /// A complete capsule decoder failed to join its blocking worker.
+    #[cfg(feature = "storage")]
+    #[error("capsule decode worker failed")]
+    CapsuleDecodeWorker {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     /// The derived capsule browse-index record could not be encoded or decoded.
     #[error("invalid capsule browse-index JSON")]
     BrowseIndexRecord {

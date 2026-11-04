@@ -322,21 +322,25 @@ pub async fn load_layered_checkpoint(
         .store()
         .get_with_etag_bounded(&path, pointer.size())
         .await?;
-    let checkpoint = LayeredCheckpoint::decode(bytes)?;
-    if !checkpoint.matches_pointer(pointer)? {
-        return Err(corrupt(
-            &path,
-            "layered checkpoint does not match its authenticated pointer",
-        ));
-    }
-    let total = checkpoint.encoded_metadata_bytes()?;
-    if total > maximum_bytes {
-        return Err(MetadataError::CheckpointSize {
-            bytes: total,
-            maximum: maximum_bytes,
-        });
-    }
-    Ok(checkpoint)
+    let pointer = pointer.clone();
+    super::decode::run(move || {
+        let checkpoint = LayeredCheckpoint::decode(bytes)?;
+        if !checkpoint.matches_pointer(&pointer)? {
+            return Err(corrupt(
+                &path,
+                "layered checkpoint does not match its authenticated pointer",
+            ));
+        }
+        let total = checkpoint.encoded_metadata_bytes()?;
+        if total > maximum_bytes {
+            return Err(MetadataError::CheckpointSize {
+                bytes: total,
+                maximum: maximum_bytes,
+            });
+        }
+        Ok(checkpoint)
+    })
+    .await
 }
 
 /// Load and authenticate only the footer of one layered checkpoint.
@@ -418,8 +422,11 @@ pub async fn load_capsule_run_control(
         ));
     }
     let detached = load_detached_control_sections(router, &path, &control).await?;
-    let capsules = control.materialize_capsules_with_external_controls(&detached)?;
-    Ok((control, capsules))
+    super::decode::run(move || {
+        let capsules = control.materialize_capsules_with_external_controls(&detached)?;
+        Ok((control, capsules))
+    })
+    .await
 }
 
 /// Load complete reference controls while validating admission counts through authenticated pages.
@@ -822,22 +829,26 @@ async fn load_run(
         .store()
         .get_immutable_bounded(&path, pointer.size())
         .await?;
-    let run = CapsuleRun::decode(bytes)?;
-    if run.hash() != pointer.hash()
-        || run.bytes().len() as u64 != pointer.size()
-        || run.level() != pointer.level()
-        || run.transaction_ids() != pointer.transaction_ids()
-        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
-        || run.control_offset() != pointer.control_offset()
-        || run.control_size() != pointer.control_size()
-        || run.footer_hash() != pointer.footer_hash()
-    {
-        return Err(corrupt(
-            &path,
-            "capsule run does not match its authenticated pointer",
-        ));
-    }
-    Ok(run)
+    let pointer = pointer.clone();
+    super::decode::run(move || {
+        let run = CapsuleRun::decode(bytes)?;
+        if run.hash() != pointer.hash()
+            || run.bytes().len() as u64 != pointer.size()
+            || run.level() != pointer.level()
+            || run.transaction_ids() != pointer.transaction_ids()
+            || run.newest_base_root_digest() != pointer.newest_base_root_digest()
+            || run.control_offset() != pointer.control_offset()
+            || run.control_size() != pointer.control_size()
+            || run.footer_hash() != pointer.footer_hash()
+        {
+            return Err(corrupt(
+                &path,
+                "capsule run does not match its authenticated pointer",
+            ));
+        }
+        Ok(run)
+    })
+    .await
 }
 
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> MetadataError {

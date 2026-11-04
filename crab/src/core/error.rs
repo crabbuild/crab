@@ -2082,6 +2082,8 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeAdmission { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::CapsulePlanSize { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
@@ -4390,27 +4392,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_lookup_worker_errors_retain_their_sources() {
-        let gate = tokio::sync::Semaphore::new(0);
-        gate.close();
-        let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
-            source: gate.acquire().await.unwrap_err(),
-        };
-        let task = tokio::spawn(std::future::pending::<()>());
-        task.abort();
-        let worker = crab_metadata::error::MetadataError::FileLookupWorker {
-            source: task.await.unwrap_err(),
-        };
-        for source in [admission, worker] {
-            let CrabError::Io(error) = CrabError::from(source) else {
-                panic!("expected read I/O failure");
+    async fn metadata_worker_errors_retain_their_sources() {
+        for through_read in [false, true] {
+            let gate = tokio::sync::Semaphore::new(0);
+            gate.close();
+            let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
+                source: gate.acquire().await.unwrap_err(),
             };
-            assert!(
-                error
-                    .get_ref()
-                    .and_then(|error| error.downcast_ref::<crab_metadata::error::MetadataError>())
-                    .is_some()
-            );
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let worker = crab_metadata::error::MetadataError::FileLookupWorker {
+                source: task.await.unwrap_err(),
+            };
+            let decode_admission = crab_metadata::error::MetadataError::CapsuleDecodeAdmission {
+                source: gate.acquire().await.unwrap_err(),
+            };
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let decode_worker = crab_metadata::error::MetadataError::CapsuleDecodeWorker {
+                source: task.await.unwrap_err(),
+            };
+            for source in [admission, worker, decode_admission, decode_worker] {
+                let error = if through_read {
+                    CrabError::from(crab_read::ReadError::Metadata(source))
+                } else {
+                    CrabError::from(source)
+                };
+                let CrabError::Io(error) = error else {
+                    panic!("expected read I/O failure");
+                };
+                assert!(error.get_ref().is_some_and(|error| {
+                    error
+                        .downcast_ref::<crab_metadata::error::MetadataError>()
+                        .is_some()
+                }));
+            }
         }
     }
 

@@ -11,6 +11,8 @@ mod captured_visibility;
 #[cfg(feature = "storage")]
 mod catalog_capture;
 mod chunk_candidates;
+#[cfg(feature = "storage")]
+mod decode;
 mod history;
 mod layered;
 #[cfg(feature = "storage")]

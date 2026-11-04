@@ -279,6 +279,47 @@ pub(crate) fn storage_kind(error: &crab_storage::StorageError) -> ErrorKind {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn capsule_decoder_errors_keep_io_kind_and_source_through_both_read_apis() {
+        use std::error::Error as _;
+
+        for captured_read in [false, true] {
+            let gate = tokio::sync::Semaphore::new(0);
+            gate.close();
+            let admission = crab_metadata::error::MetadataError::CapsuleDecodeAdmission {
+                source: gate.acquire().await.unwrap_err(),
+            };
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let worker = crab_metadata::error::MetadataError::CapsuleDecodeWorker {
+                source: task.await.unwrap_err(),
+            };
+            for source in [admission, worker] {
+                let is_worker = matches!(
+                    &source,
+                    crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
+                );
+                let error = if captured_read {
+                    read_error(crab_read::ReadError::Metadata(source))
+                } else {
+                    remote_error(crab_remote_git::Error::Metadata(source))
+                };
+                assert_eq!(error.kind(), ErrorKind::Io);
+                assert!(
+                    std::iter::successors(error.source(), |source| (*source).source()).any(
+                        |source| if is_worker {
+                            source
+                                .downcast_ref::<tokio::task::JoinError>()
+                                .is_some_and(tokio::task::JoinError::is_cancelled)
+                        } else {
+                            source.is::<tokio::sync::AcquireError>()
+                        }
+                    )
+                );
+            }
+        }
+    }
+
     #[test]
     fn checkpoint_cache_json_error_keeps_corruption_and_source_through_both_read_apis() {
         use std::error::Error as _;

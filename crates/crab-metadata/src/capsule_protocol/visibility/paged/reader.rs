@@ -216,14 +216,19 @@ impl CapsuleVisibilityReader {
             .cache
             .read_range(store, &self.path, self.offset..end, self.maximum)
             .await?;
-        if blake3::hash(&bytes).to_hex().as_str() != self.hash
-            || Descriptor::decode(&bytes)? != self.descriptor
-        {
-            return Err(corrupt(
-                "visibility section differs from its captured descriptor",
-            ));
-        }
-        let delta = std::sync::Arc::new(CapsuleVisibilityDelta::decode(&bytes)?);
+        let hash = self.hash.clone();
+        let descriptor = self.descriptor.clone();
+        let delta = crate::capsule_protocol::decode::run(move || {
+            if blake3::hash(&bytes).to_hex().as_str() != hash
+                || Descriptor::decode(&bytes)? != descriptor
+            {
+                return Err(corrupt(
+                    "visibility section differs from its captured descriptor",
+                ));
+            }
+            CapsuleVisibilityDelta::decode(&bytes).map(std::sync::Arc::new)
+        })
+        .await?;
         Ok(self.complete.get_or_init(|| delta).clone())
     }
 

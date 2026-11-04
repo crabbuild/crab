@@ -155,6 +155,8 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeAdmission { .. }
+            | crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
             | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
             | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
@@ -229,6 +231,8 @@ impl From<crab_read::ReadError> for AuthServerError {
             crab_read::ReadError::Metadata(
                 source @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
                 | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+                | crab_metadata::error::MetadataError::CapsuleDecodeAdmission { .. }
+                | crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
                 | crab_metadata::error::MetadataError::CheckpointSize { .. }
                 | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
                 | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
@@ -322,6 +326,46 @@ impl From<io::Error> for AuthServerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capsule_decoder_errors_retain_sources_at_receive_boundaries() {
+        use std::error::Error;
+
+        for through_read in [false, true] {
+            let gate = tokio::sync::Semaphore::new(0);
+            gate.close();
+            let admission = crab_metadata::error::MetadataError::CapsuleDecodeAdmission {
+                source: gate.acquire().await.unwrap_err(),
+            };
+            let task = tokio::spawn(std::future::pending::<()>());
+            task.abort();
+            let worker = crab_metadata::error::MetadataError::CapsuleDecodeWorker {
+                source: task.await.unwrap_err(),
+            };
+            for source in [admission, worker] {
+                let is_worker = matches!(
+                    &source,
+                    crab_metadata::error::MetadataError::CapsuleDecodeWorker { .. }
+                );
+                let error = if through_read {
+                    AuthServerError::from(crab_read::ReadError::Metadata(source))
+                } else {
+                    AuthServerError::from(source)
+                };
+                assert!(
+                    std::iter::successors(error.source(), |source| (*source).source()).any(
+                        |source| if is_worker {
+                            source
+                                .downcast_ref::<tokio::task::JoinError>()
+                                .is_some_and(tokio::task::JoinError::is_cancelled)
+                        } else {
+                            source.is::<tokio::sync::AcquireError>()
+                        }
+                    )
+                );
+            }
+        }
+    }
 
     #[test]
     fn checkpoint_cache_json_source_survives_direct_and_read_boundaries() {

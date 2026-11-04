@@ -42,6 +42,11 @@ Capsule protocol v2 uses one compacted root plus independently mutable ref
 heads and immutable capsule runs. Complete capsule reads share storage's bounded
 immutable transfer policy, including concurrent ranges for large seed capsules.
 Full decoding still materializes the body and validates every pointer commitment.
+Complete runs, run controls, checkpoints and selected bulk visibility decodes
+share four slots on the blocking pool per process. Immutable inputs and execution
+permits stay with the workers after caller cancellation; decoding retains no
+store, publication fence or lookup session. These decoders no longer occupy
+async workers during canonical re-encoding and format validation.
 
 Native capsule storage starts at format **1**. This is a development reset,
 not an upgrade: experimental capsule repositories must be republished into a fresh
