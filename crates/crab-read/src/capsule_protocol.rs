@@ -136,6 +136,15 @@ impl CapsuleRepositoryCapture {
         &self.layout
     }
 
+    /// Count distinct uncheckpointed transactions without loading immutable bodies.
+    pub fn capsule_count(&self) -> Result<u64> {
+        Ok(
+            materialize_visible_ref_heads(self.root.record().root(), &self.heads, &self.active)
+                .map_err(metadata_control_error)?
+                .capsule_count,
+        )
+    }
+
     /// Whether this capture may admit a direct layered cold clone.
     ///
     /// A negative answer selects complete fetch admission without opening a
@@ -265,6 +274,7 @@ pub struct CapsuleRepositoryView {
     visible_ref_transactions: BTreeMap<String, String>,
     ref_capsule_counts: BTreeMap<String, u32>,
     ref_frontier_bytes: BTreeMap<String, u64>,
+    pending_capsule_count: u64,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
     // Fetch-only captures omit reconciled logical deltas. Distinguish that
@@ -437,7 +447,7 @@ impl CapsuleRepositoryActivity {
         &self.state_digest
     }
 
-    /// Return the total immutable capsule count in the visible frontier.
+    /// Return distinct logical capsules not covered by the captured checkpoint.
     #[must_use]
     pub const fn capsule_count(&self) -> u64 {
         self.capsule_count
@@ -776,15 +786,9 @@ impl CapsuleRepositoryView {
         Ok(true)
     }
 
-    /// Return the total immutable capsule count represented by the visible frontier.
+    /// Return the distinct logical capsules not covered by the captured checkpoint.
     pub fn capsule_count(&self) -> Result<u64> {
-        self.capsule_run_pointers
-            .iter()
-            .try_fold(0_u64, |total, pointer| {
-                total
-                    .checked_add(u64::from(pointer.capsule_count()))
-                    .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
-            })
+        Ok(self.pending_capsule_count)
     }
 
     /// Return the number of Git packs authenticated by this exact view.
@@ -4094,14 +4098,9 @@ pub async fn read_activity_from_root(
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
         .map_err(metadata_control_error)?;
-    let capsule_count = visible.pointers.iter().try_fold(0_u64, |total, pointer| {
-        total
-            .checked_add(u64::from(pointer.capsule_count()))
-            .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
-    })?;
     Ok(CapsuleRepositoryActivity {
         state_digest: state_digest(snapshot.record(), &visible.transactions),
-        capsule_count,
+        capsule_count: visible.capsule_count,
         ref_count: u64::try_from(visible.refs.len())
             .map_err(|_| ReadError::internal("capsule ref count overflowed"))?,
     })
@@ -4362,6 +4361,7 @@ pub fn compacted_view_from_checkpoint(
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
         ref_frontier_bytes: BTreeMap::new(),
+        pending_capsule_count: 0,
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
         catalog_sources: Some(Vec::new()),
@@ -4527,6 +4527,7 @@ async fn assemble_view(
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
         .map_err(metadata_control_error)?;
+    let pending_capsule_count = visible.capsule_count;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;
     let visible_ref_transactions = visible.transactions;
@@ -4736,6 +4737,7 @@ async fn assemble_view(
         visible_ref_transactions,
         ref_capsule_counts,
         ref_frontier_bytes,
+        pending_capsule_count,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,
@@ -4760,6 +4762,7 @@ async fn assemble_layered_control_view(
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
     let visible = materialize_visible_ref_heads(snapshot.record().root(), heads, active)
         .map_err(metadata_control_error)?;
+    let pending_capsule_count = visible.capsule_count;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;
     let visible_ref_transactions = visible.transactions;
@@ -4981,6 +4984,7 @@ async fn assemble_layered_control_view(
             visible_ref_transactions,
             ref_capsule_counts,
             ref_frontier_bytes,
+            pending_capsule_count,
             capsule_run_pointers: pointers,
             capsule_run_sources,
             catalog_sources,
@@ -5089,6 +5093,7 @@ async fn assemble_layered_control_view(
         visible_ref_transactions,
         ref_capsule_counts,
         ref_frontier_bytes,
+        pending_capsule_count,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,

@@ -1,6 +1,153 @@
 use super::*;
 use object_store::ObjectStoreExt;
 
+async fn straddling_frontier() -> (StoreLayout<Store>, Arc<Observations>) {
+    let (layout, observations) = empty_fixture().await;
+    let name = "refs/tags/changing";
+    let mut previous = None;
+    let mut captured = None;
+    for version in 0..4 {
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let (oid, pack) = blob_pack(format!("version {version}").as_bytes());
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                name,
+                previous.clone(),
+                Some(oid.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_replacement_objects(
+                previous.clone(),
+                oid.clone(),
+                vec![oid.clone()],
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
+            .await
+            .unwrap();
+        previous = Some(oid);
+        if version == 1 {
+            captured = Some(view(&layout).await);
+        }
+    }
+    // The fourth publication rolls all four transactions into one run before
+    // the older capture checkpoints only the first two transactions.
+    crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        &layout,
+        &captured.unwrap(),
+        0,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    (layout, observations)
+}
+
+#[tokio::test]
+async fn checkpoint_threshold_ignores_covered_run_prefix() {
+    let (layout, _) = straddling_frontier().await;
+    let outcome = crab_remote::checkpoint::publish_capsule_checkpoint(
+        &layout,
+        3,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !outcome.published,
+        "two pending transactions must not meet a three-capsule threshold"
+    );
+}
+
+#[tokio::test]
+async fn captured_views_count_only_uncheckpointed_transactions() {
+    let (straddling, _) = straddling_frontier().await;
+    let (shared, _) = empty_fixture().await;
+    publish_blobs(&shared, &[("first", b"first"), ("second", b"second")]).await;
+    for (layout, expected) in [(straddling, 2), (shared, 1)] {
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(
+            layout.clone(),
+            root.clone(),
+        )
+        .await
+        .unwrap();
+        let views = [
+            view(&layout).await,
+            capture.metadata_view(LIMITS).await.unwrap(),
+            capture.owned_git_metadata_view(LIMITS).await.unwrap(),
+            capture.layered_control_view(LIMITS).await.unwrap(),
+            capture.tip_bound_control_view(LIMITS).await.unwrap(),
+            crab_read::capsule_protocol::open_git_view_from_root(&layout, root.clone(), LIMITS)
+                .await
+                .unwrap(),
+        ];
+        let counts = views
+            .iter()
+            .map(|view| view.capsule_count().unwrap())
+            .chain([
+                crab_read::capsule_protocol::read_activity_from_root(&layout, &root)
+                    .await
+                    .unwrap()
+                    .capsule_count(),
+                capture.capsule_count().unwrap(),
+                u64::try_from(
+                    crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(
+                        &layout, &root,
+                    )
+                    .await
+                    .unwrap()
+                    .pending_capsule_count(),
+                )
+                .unwrap(),
+            ])
+            .collect::<Vec<_>>();
+        assert_eq!(counts, vec![expected; 9]);
+    }
+}
+
+#[tokio::test]
+async fn below_threshold_checkpoint_keeps_immutable_metadata_cold() {
+    let (layout, observations) = straddling_frontier().await;
+    observations.2.reset();
+    crab_remote::checkpoint::publish_capsule_checkpoint(
+        &layout,
+        5,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        observations.2.requests().iter().all(|request| {
+            !request.location.contains("/v2/capsules/")
+                && !request.location.contains("/v2/checkpoints/")
+        }),
+        "below-threshold admission needs only the captured root and ref heads"
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_admits_member_heavy_sources_below_the_source_count_limit() {
     let (layout, _) = empty_fixture().await;

@@ -13,6 +13,8 @@ pub struct VisibleRefHeads {
     /// First uncompacted transaction offset and its ordered physical runs per ref.
     pub frontiers: BTreeMap<String, (usize, Vec<CapsulePointer>)>,
     pub pointers: Vec<CapsulePointer>,
+    /// Distinct logical transactions not covered by the captured checkpoint.
+    pub capsule_count: u64,
 }
 
 /// Materialize only ref-head metadata from one epoch-filtered stable capture.
@@ -26,6 +28,14 @@ pub fn materialize_visible_ref_heads(
     let mut transactions = BTreeMap::new();
     let mut frontiers = BTreeMap::new();
     let mut pointers = root.capsule_frontier().to_vec();
+    // A physical run may retain a checkpointed prefix. Count only selected
+    // transactions, deduplicating publications shared by several ref heads.
+    let mut pending = root
+        .capsule_frontier()
+        .iter()
+        .flat_map(CapsulePointer::transaction_ids)
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     for head in heads {
         let state = head.visible(active);
         if let Some(transaction_id) = state.transaction_id() {
@@ -97,6 +107,7 @@ pub fn materialize_visible_ref_heads(
                 )));
             }
         };
+        pending.extend(ids[start..].iter().map(|id| id.as_str()));
         frontiers.insert(
             head.ref_name().to_owned(),
             (start, state.frontier().to_vec()),
@@ -108,6 +119,8 @@ pub fn materialize_visible_ref_heads(
         transactions,
         frontiers,
         pointers,
+        capsule_count: u64::try_from(pending.len())
+            .map_err(|_| internal("capsule frontier count overflowed"))?,
     })
 }
 

@@ -191,12 +191,20 @@ pub async fn publish_capsule_checkpoint_with_receipt(
     check_cancelled(cancel)?;
     let started = Instant::now();
     let root = crab_write::capsule_protocol::open_root(layout).await?;
+    let capture =
+        crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(layout.clone(), root)
+            .await?;
+    check_cancelled(cancel)?;
+    // Another owner may already have checkpointed the caller's backlog. Keep
+    // that same capture, but leave metadata cold when its logical suffix is small.
+    if capture.capsule_count()? < u64::from(threshold) {
+        return Ok(CheckpointPublication::default());
+    }
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: maximum_bytes,
         max_frontier_bytes: maximum_bytes,
     };
-    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(layout, root, limits)
-        .await?;
+    let view = capture.metadata_view(limits).await?;
     checkpoint_phase("capture", started);
     checkpoint_publication_from_view(layout, &view, threshold, maximum_bytes, cancel).await
 }

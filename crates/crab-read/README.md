@@ -121,6 +121,12 @@ Complete metadata and full-capsule views retain the visibility proof produced
 by transaction ordering. Checkpoint publication reuses that reconciled proof;
 returned indexes remain independent and bound to the captured Git identity.
 
+Maintenance thresholds and activity counts use distinct uncheckpointed
+transactions from the captured ref-head positions. Physical runs can retain a
+covered prefix; their complete source admission stays unchanged. Foreground
+checkpointing checks this logical count before opening bulk metadata and reuses
+the same captured authority when the threshold is met.
+
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
