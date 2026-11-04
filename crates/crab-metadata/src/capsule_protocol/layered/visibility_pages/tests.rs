@@ -10,11 +10,6 @@ use std::sync::{
 fn small_overlapping_checkpoints_share_ref_memberships() {
     let snapshot = overlapping_snapshot(32_000, 32, 30);
     let encoded = snapshot.encode().unwrap();
-    eprintln!(
-        "small checkpoint: {} bytes, {}",
-        encoded.len(),
-        blake3::hash(&encoded)
-    );
     assert!(encoded.len() < 4 * 1024 * 1024, "{} bytes", encoded.len());
     assert_eq!(
         LayeredVisibilitySnapshot::decode(&encoded).unwrap(),
@@ -132,7 +127,6 @@ async fn scattered_checkpoint_tips_keep_membership_proofs_bounded() {
         );
     }
     let bytes = received.load(Relaxed);
-    eprintln!("scattered checkpoint membership proof bytes: {bytes}");
     assert!(bytes <= 1024 * 1024, "{bytes} proof bytes for 64 ref tips");
 }
 

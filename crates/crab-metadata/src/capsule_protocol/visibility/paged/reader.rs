@@ -652,7 +652,6 @@ mod tests {
             Some(vec![Some(VisibilityChange::Added)]),
         );
         let bytes = received.load(Relaxed);
-        eprintln!("selected membership proof: {bytes} of {body_bytes} body bytes");
         assert!(
             bytes < body_bytes,
             "{bytes} bytes fetched for a selected tip"

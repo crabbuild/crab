@@ -194,7 +194,6 @@ async fn scattered_large_ref_tips_bound_transfer_without_extra_requests() {
             Some(vec![None])
         );
     }
-    eprintln!("scattered tip proofs: {total_bytes} bytes, {total_requests} requests");
     assert!(
         total_bytes <= 768 * 1024 && total_requests <= 192,
         "scattered tip proofs used {total_bytes} bytes and {total_requests} requests"
