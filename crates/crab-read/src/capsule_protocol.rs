@@ -112,7 +112,7 @@ pub struct CapsuleDependencyProof {
 pub struct CapsuleRepositoryCapture {
     layout: StoreLayout<Store>,
     root: crab_metadata::capsule_protocol::RootSnapshot,
-    heads: RefHeadSnapshot,
+    heads: Arc<RefHeadSnapshot>,
 }
 
 impl CapsuleRepositoryCapture {
@@ -125,7 +125,7 @@ impl CapsuleRepositoryCapture {
         Ok(Self {
             layout,
             root,
-            heads,
+            heads: Arc::new(heads),
         })
     }
 
@@ -231,7 +231,7 @@ impl CapsuleRepositoryCapture {
             read,
             ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Repack
         ) {
-            view.ref_head_cache = self.heads.checkpoint_cache()?;
+            view.ref_head_cache = self.checkpoint_cache().await?;
         }
         Ok(view)
     }
@@ -250,8 +250,20 @@ impl CapsuleRepositoryCapture {
             load,
         )
         .await?;
-        view.ref_head_cache = self.heads.checkpoint_cache()?;
+        view.ref_head_cache = self.checkpoint_cache().await?;
         Ok(view)
+    }
+
+    async fn checkpoint_cache(
+        &self,
+    ) -> Result<Option<crab_metadata::capsule_protocol::RefHeadCache>> {
+        // Encoding/compression is bounded CPU work. Pin only immutable capture
+        // data so cancellation can release the view without invalidating a worker.
+        let heads = Arc::clone(&self.heads);
+        tokio::task::spawn_blocking(move || heads.checkpoint_cache())
+            .await
+            .map_err(ReadError::RefHeadCacheTask)?
+            .map_err(ReadError::from)
     }
 }
 

@@ -166,6 +166,7 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
         | E::GitObjectIndexRecord { .. }
         | E::PointerCatalogRecord { .. }
         | E::RefHeadCacheRecord { .. }
+        | E::RefHeadCacheCodec { .. }
         | E::CapsuleVisibilityRecord { .. } => ErrorKind::Corruption,
         E::Io { source } if source.kind() == std::io::ErrorKind::InvalidData => {
             ErrorKind::Corruption
@@ -294,6 +295,33 @@ mod tests {
             assert!(
                 std::iter::successors(error.source(), |source| (*source).source())
                     .any(|source| source.is::<serde_json::Error>())
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_cache_codec_error_keeps_corruption_and_source_through_both_read_apis() {
+        use std::error::Error as _;
+
+        for captured_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefHeadCacheCodec {
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, "cache gzip fixture"),
+            };
+            let error = if captured_read {
+                read_error(crab_read::ReadError::Metadata(source))
+            } else {
+                remote_error(crab_remote_git::Error::Metadata(source))
+            };
+            assert_eq!(error.kind(), ErrorKind::Corruption);
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source()).any(|source| {
+                    source
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|source| {
+                            source.kind() == std::io::ErrorKind::InvalidData
+                                && source.to_string() == "cache gzip fixture"
+                        })
+                })
             );
         }
     }

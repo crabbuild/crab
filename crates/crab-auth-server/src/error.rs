@@ -158,6 +158,7 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
             | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
             | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
+            | crab_metadata::error::MetadataError::RefHeadCacheCodec { .. }
             | crab_metadata::error::MetadataError::FileLookupLimit { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
@@ -231,6 +232,7 @@ impl From<crab_read::ReadError> for AuthServerError {
                 | crab_metadata::error::MetadataError::CheckpointSize { .. }
                 | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
                 | crab_metadata::error::MetadataError::RefHeadCacheRecord { .. }
+                | crab_metadata::error::MetadataError::RefHeadCacheCodec { .. }
                 | crab_metadata::error::MetadataError::FileLookupLimit { .. }
                 | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }),
             ) => Self::from(source),
@@ -336,6 +338,30 @@ mod tests {
             assert!(
                 std::iter::successors(error.source(), |source| (*source).source())
                     .any(|source| source.is::<serde_json::Error>())
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_cache_codec_source_survives_direct_and_read_boundaries() {
+        use std::error::Error;
+
+        for through_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefHeadCacheCodec {
+                source: io::Error::new(io::ErrorKind::InvalidData, "cache gzip fixture"),
+            };
+            let error = if through_read {
+                AuthServerError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                AuthServerError::from(source)
+            };
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source()).any(|source| {
+                    source.downcast_ref::<io::Error>().is_some_and(|source| {
+                        source.kind() == io::ErrorKind::InvalidData
+                            && source.to_string() == "cache gzip fixture"
+                    })
+                })
             );
         }
     }

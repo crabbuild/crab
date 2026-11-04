@@ -2817,6 +2817,7 @@ dependencies = [
  "bytes",
  "crab-storage",
  "crab-xet",
+ "flate2",
  "futures-util",
  "gix-validate",
  "object_store 0.14.1",

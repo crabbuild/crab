@@ -363,7 +363,7 @@ pub(super) async fn verify_capsule_candidate(
 ) -> Result<VerifiedCapsuleCandidate> {
     validate_protected_capsule_plan_shape(plan, ctx.repo_prefix(), ctx.push_id())?;
     let prepare = ctx.read_prepare_record().await?;
-    if prepare.schema_version != 2 {
+    if prepare.schema_version != 1 {
         return Err(conflict(
             "capsule push-plan does not match the prepared repository protocol",
         ));

@@ -123,8 +123,11 @@ Checkpoint format 1 (`CRBCKP01`) includes an optional authenticated ref-head cac
 inside the existing checkpoint body. `capture_ref_head_snapshot` retains the
 exact committed/prepared heads and provider tokens for complete-view owners;
 the `capture_ref_heads` tuple API shares the same capture loop. Cache
-encoding admits at most 8 MiB and 16,384 heads, and publication omits the cache
-when it would exceed the caller's aggregate metadata budget. Root pointers and
+encoding admits at most 16,384 heads and 8 MiB of canonical JSON, stored as one
+gzip member with separate 8 MiB encoded and decoded limits. Decoding verifies
+the checksum and complete member, rejects trailing data and additional members,
+then validates canonical records. Publication omits the cache when it would
+exceed the caller's aggregate metadata budget. Root pointers and
 footers bind the same contiguous range and hash. No separate object namespace
 or GC root is introduced; physical maintenance retains the captured receipts.
 Writers require at least two identified heads: caching one head cannot save a
@@ -932,11 +935,9 @@ checkpointed file precedence must not silently replace the supplied replay base.
 Checkpoint visibility shares heavily overlapping ref memberships before the
 128 MiB format ceiling becomes a concern. More than four memberships per retained
 OID, spanning at least two ordinary page bodies, selects shared dictionary/bitmap
-encoding. Split shared leaves use descriptor 3; unsplit trees retain version 2.
-Sparse small checkpoints retain version 1. Complete
-validation rebuilds the declared version's canonical bytes, preserving both
-shipped layouts even when the writer's selection policy changes. Upgrade readers
-before writers, as required by the visibility-format changes in this branch.
+encoding. All checkpoint visibility descriptors use version 1. Shared leaves
+use 4 KiB pages and 32 KiB directories; sparse checkpoints use ordinary object
+sets. Complete validation rebuilds the canonical layout selected by the data.
 
 Nested recipes retain authenticated page references into their original catalog
 sections and must match the aggregate's logical-value commitment.
@@ -961,7 +962,6 @@ the distinct-object proof limit remain unchanged. This reduces per-edit network
 round trips; logical replay and distinct historical-object growth remain open
 qualification gates.
 
-The current capsule format is absent from the six published release tags and
-19 known local tag objects audited on 2026-10-15. The published `v1.2.4` object
-differs from the local tag; both were inspected without replacing that tag.
-Unshipped run footer versions 1 through 4 are rejected, with no fallback reader.
+Crab remains version 2 while native capsule formats start at version 1. Earlier
+development encodings are unsupported; experiments require fresh buckets rather
+than relabeling existing bytes or selecting a fallback reader.

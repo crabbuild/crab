@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 #[cfg(feature = "storage")]
 use std::io::Write;
 
@@ -101,11 +102,44 @@ fn bounded_rows<'de, D: serde::Deserializer<'de>>(
     decoder.deserialize_seq(Rows)
 }
 
-fn decode(bytes: &[u8]) -> Result<Record> {
+fn expand(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.len() > MAX_CACHE_BYTES {
         return Err(corrupt("ref-head cache exceeds its byte limit"));
     }
-    let record: Record = serde_json::from_slice(bytes)
+    let mut decoder = flate2::bufread::GzDecoder::new(bytes);
+    let mut expanded = Vec::new();
+    // The authenticated range bounds encoded bytes; a separate decoded bound
+    // prevents compression from bypassing the existing materialization limit.
+    decoder
+        .by_ref()
+        .take(MAX_CACHE_BYTES as u64 + 1)
+        .read_to_end(&mut expanded)
+        .map_err(|source| MetadataError::RefHeadCacheCodec { source })?;
+    if expanded.len() > MAX_CACHE_BYTES {
+        return Err(corrupt("decoded ref-head cache exceeds its byte limit"));
+    }
+    // Single-member decoding verifies CRC/length at EOF. Reject extra members
+    // or trailing bytes so the entire committed range has one interpretation.
+    if !decoder.into_inner().is_empty() {
+        return Err(corrupt("ref-head cache contains trailing compressed data"));
+    }
+    Ok(expanded)
+}
+
+#[cfg(feature = "storage")]
+fn compress(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder
+        .write_all(bytes)
+        .map_err(|source| MetadataError::RefHeadCacheCodec { source })?;
+    encoder
+        .finish()
+        .map_err(|source| MetadataError::RefHeadCacheCodec { source })
+}
+
+fn decode(bytes: &[u8]) -> Result<Record> {
+    let bytes = expand(bytes)?;
+    let record: Record = serde_json::from_slice(&bytes)
         .map_err(|source| MetadataError::RefHeadCacheRecord { source })?;
     if record.0 != CACHE_VERSION || record.1 != REF_HEAD_VERSION || record.4.is_empty() {
         return Err(corrupt("ref-head cache version or entry count is invalid"));
@@ -224,9 +258,13 @@ impl RefHeadCache {
             return Ok(None);
         }
         output.bytes.extend_from_slice(b"]]");
+        let bytes = compress(&output.bytes)?;
+        if bytes.len() > MAX_CACHE_BYTES {
+            return Ok(None);
+        }
         Ok(Some(Self {
             origin,
-            bytes: Bytes::from(output.bytes),
+            bytes: Bytes::from(bytes),
         }))
     }
 
@@ -278,6 +316,65 @@ pub(in crate::capsule_protocol) fn origin(
 mod tests {
     use super::*;
 
+    fn cache() -> RefHeadCache {
+        let heads = ["main", "other"].map(|name| {
+            CapsuleRefHead::from_root(&format!("refs/heads/{name}"), "1".repeat(64), None, None)
+                .unwrap()
+        });
+        RefHeadCache::capture(
+            "2".repeat(64),
+            &"1".repeat(64),
+            &"1".repeat(64),
+            heads.iter().map(|head| (head, Some("opaque"), None)),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn cache_requires_one_complete_checked_compression_member() {
+        let cache = cache();
+        let mut checksum = cache.bytes.to_vec();
+        let crc_offset = checksum.len() - 8;
+        checksum[crc_offset] ^= 1;
+        let mut member = cache.bytes.to_vec();
+        member.extend_from_slice(&compress(b"[]").unwrap());
+        let mut trailing = cache.bytes.to_vec();
+        trailing.push(0);
+        for (fault, bytes) in [
+            ("checksum", checksum),
+            ("truncated", cache.bytes[..cache.bytes.len() - 1].to_vec()),
+            ("extra member", member),
+            ("trailing bytes", trailing),
+            ("retired plaintext", expand(&cache.bytes).unwrap()),
+        ] {
+            assert!(decode(&bytes).is_err(), "accepted {fault}");
+        }
+    }
+
+    #[test]
+    fn cache_limits_decoded_bytes_before_parsing_compressed_input() {
+        let encoded = compress(&vec![b' '; MAX_CACHE_BYTES + 1]).unwrap();
+        assert!(encoded.len() < MAX_CACHE_BYTES);
+        assert!(
+            matches!(decode(&encoded), Err(MetadataError::CorruptObject { reason, .. })
+            if reason.contains("decoded ref-head cache exceeds"))
+        );
+    }
+
+    #[test]
+    fn cache_retains_canonical_records_across_valid_compression_encodings() {
+        let cache = cache();
+        let plain = expand(&cache.bytes).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(&plain).unwrap();
+        let encoded = encoder.finish().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&decode(&encoded).unwrap()).unwrap(),
+            plain
+        );
+    }
+
     #[test]
     fn cache_encoding_stops_at_whole_entries_within_the_byte_budget() {
         let heads = ["first", "second", "third"].map(|name| {
@@ -326,7 +423,7 @@ mod tests {
         record.4.push(record.4.last().unwrap().clone());
         let bytes = serde_json::to_vec(&record).unwrap();
         assert!(
-            matches!(decode(&bytes), Err(MetadataError::RefHeadCacheRecord { source }) if source.to_string().contains("entry limit"))
+            matches!(decode(&compress(&bytes).unwrap()), Err(MetadataError::RefHeadCacheRecord { source }) if source.to_string().contains("entry limit"))
         );
     }
 
@@ -345,7 +442,8 @@ mod tests {
         .unwrap()
         .unwrap();
         for field in ["version", "head_version", "identity", "duplicate", "state"] {
-            let mut value: serde_json::Value = serde_json::from_slice(&cache.bytes).unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&expand(&cache.bytes).unwrap()).unwrap();
             match field {
                 "version" => value[0] = 2.into(),
                 "head_version" => value[1] = 6.into(),
@@ -362,7 +460,7 @@ mod tests {
                 }
             }
             assert!(
-                decode(&serde_json::to_vec(&value).unwrap()).is_err(),
+                decode(&compress(&serde_json::to_vec(&value).unwrap()).unwrap()).is_err(),
                 "{field}"
             );
         }

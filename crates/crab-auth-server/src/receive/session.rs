@@ -129,6 +129,8 @@ impl ReceiveContext {
         {
             return Err(invalid("unsupported push-plan schema_version"));
         }
+        // Native and published manifest plans can both declare schema 1.
+        // Decode the strict native shape before acquiring any writer fences.
         serde_json::from_slice(&body).map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))
     }
 
@@ -432,7 +434,7 @@ mod tests {
             let result =
                 super::super::commit_receive(&ctx, "crab://bucket/org/repo", &hash('1'), None)
                     .await;
-            let refused = matches!(result, Err(AuthServerError::Configuration {ref origin, ..}) if origin.contains("unsupported push-plan schema_version"));
+            let refused = matches!(result, Err(AuthServerError::Configuration { .. }));
             outcomes.push((refused, writes.0.load(Ordering::Relaxed)));
         }
         assert_eq!(outcomes, [(true, 0); 2]);
@@ -528,7 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_plan_document_selects_capsule_schema() -> Result<()> {
+    async fn read_plan_document_accepts_only_current_native_schema() -> Result<()> {
         let ctx = context();
         let path = ObjectPath::from(format!("org/repo/staging/{PUSH_ID}/push-plan.json"));
         let plan = ProtectedCapsulePushPlan {
@@ -557,6 +559,14 @@ mod tests {
         let actual = ctx.read_plan_document().await?;
 
         assert_eq!(actual, plan);
+        for schema_version in [0, 2, 3, u32::MAX] {
+            let mut retired = plan.clone();
+            retired.schema_version = schema_version;
+            ctx.store()
+                .put_overwrite(&path, Bytes::from(serde_json::to_vec(&retired).unwrap()))
+                .await?;
+            assert!(ctx.read_plan_document().await.is_err(), "{schema_version}");
+        }
         Ok(())
     }
 
@@ -600,7 +610,7 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(record.schema_version, 2);
+        assert_eq!(record.schema_version, 1);
         assert_eq!(record.source_manifest_generation, 0);
         assert!(record.source_manifest_etag.is_empty());
         assert_eq!(record.source_root_digest.as_deref(), Some(root.digest()));
@@ -649,7 +659,7 @@ mod tests {
                 .await;
             let correct = if valid_native {
                 result.is_ok_and(|record| {
-                    record.schema_version == 2
+                    record.schema_version == 1
                         && record.source_root_digest.as_deref() == Some(root.digest())
                 })
             } else {

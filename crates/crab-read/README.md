@@ -62,7 +62,9 @@ captured catalog before selecting the replica.
 
 `CapsuleRepositoryCapture` retains metadata's ref-head snapshot when changing
 read detail. Complete metadata views carry bounded provider receipts into
-checkpoint publication; fetch-only views do not encode a new cache. Physical
+checkpoint publication. Serialization and gzip compression run on a blocking
+worker retaining only immutable snapshot data, so cancellation cannot invalidate
+its input. Fetch-only views do not encode a new cache. Physical
 checkpoint maintenance retains existing receipts without recapturing mutable
 refs. Later discovery always performs fresh inventory and activation checks.
 

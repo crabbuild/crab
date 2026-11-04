@@ -34,8 +34,9 @@ crab-auth-receive                         crab-auth-view
 ref updates, staged Git/Xet/LFS objects, captured pointer catalogs, receipts
 and active-active options. `Prepare`, `Verify` and `Commit` require Capsule root
 authority; a missing or corrupt root fails closed before session or fence writes.
-Only Capsule push-plan schema 3 and Capsule prepare/evidence schema 2 are admitted.
-Manifest plan schemas 1/2 and manifest-only prepare records are rejected. Commit
+Capsule push plans and prepare/evidence records use schema 1. Admission validates
+the complete native shape and root binding; a matching version alone cannot
+authorize a manifest plan or manifest-only prepare record. Commit
 admits the typed plan before writer fences and requires the verified plan digest.
 
 Capsule receive captures source and filtered Git/catalog views separately.

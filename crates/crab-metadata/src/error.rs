@@ -29,6 +29,12 @@ pub enum MetadataError {
         #[source]
         source: serde_json::Error,
     },
+    /// A native ref-head cache compression stream could not be encoded or decoded.
+    #[error("checkpoint ref-head cache compression is invalid")]
+    RefHeadCacheCodec {
+        #[source]
+        source: std::io::Error,
+    },
     /// The derived capsule browse-index record could not be encoded or decoded.
     #[error("invalid capsule browse-index JSON")]
     BrowseIndexRecord {
