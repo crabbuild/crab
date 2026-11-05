@@ -366,7 +366,8 @@ describe("parseSshConfig with Include directives", () => {
       expect(result[0].alias).toBe("main");
     });
 
-    it("gracefully skips Include of an unreadable file", () => {
+    // The fixture uses POSIX chmod to remove read access.
+    it.skipIf(process.platform === "win32")("gracefully skips Include of an unreadable file", () => {
       const mainConfig = path.join(tmpDir, "config");
       const unreadable = path.join(tmpDir, "unreadable");
 

@@ -100,7 +100,10 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
   git(["add", "desktop-smoke.txt"]);
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
-  const application = await electron.launch({ executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+  const application = await electron.launch({
+    executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
+    env: { ...process.env, CRAB_PTY_MODE: "auto" },
+  });
   try {
     expect(await application.evaluate(({ app }) => app.getVersion())).toBe(desktopVersion);
     const page = await application.firstWindow();
@@ -111,6 +114,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<{ pong?: string }> } }).crab;
       try { return (await bridge.rpc("ping", {})).pong; } catch { return undefined; }
     })).toBe(desktopVersion);
+    expect(await page.evaluate(async () => (await window.crab.getPtyMode()).resolvedMode)).toBe("daemon");
     const text = await page.evaluate(async root => {
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
       const handle = await bridge.rpc("open_local", { repo_id: "smoke", path: root });

@@ -616,7 +616,8 @@ describe("Daemon Latency Benchmark", () => {
 
       // Measure daemon path latency
       const daemonLatencies: number[] = [];
-      const iterations = 50;
+      // A nearest-rank p99 with fewer than 100 samples measures the maximum.
+      const iterations = 100;
 
       for (let i = 0; i < iterations; i++) {
         const dataPromise = waitForStreamData(stream, streamDecoder, 5000);
