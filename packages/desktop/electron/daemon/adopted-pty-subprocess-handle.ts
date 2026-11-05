@@ -2,9 +2,8 @@
  * AdoptedPtySubprocessHandle — SubprocessHandle over an inherited PTY master fd.
  *
  * Used by the upgrade successor to wrap PTY fds passed from the predecessor
- * via stdio. Reads are driven by an fs.ReadStream; writes go through an
- * fs.WriteStream. Both streams are opened with autoClose: false so the fd
- * lifetime is managed explicitly by dispose().
+ * via stdio. Reads use libuv's terminal stream so nonblocking descriptors wait
+ * for readiness. The filesystem writer borrows the fd; the reader owns closure.
  *
  * kill() is neutralized after dispose() to prevent SIGHUP-to-recycled-PID.
  * forceKill() uses process.kill(pid, "SIGKILL") directly and is NOT
@@ -12,6 +11,7 @@
  */
 
 import * as fs from "node:fs";
+import { ReadStream } from "node:tty";
 import type { SubprocessHandle } from "./types";
 import type { AdoptedSession } from "./fd-handoff";
 
@@ -19,7 +19,7 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
   readonly pid: number;
   readonly fd: number;
 
-  private readStream: fs.ReadStream;
+  private readStream: ReadStream;
   private writeStream: fs.WriteStream;
   private disposed = false;
   private dataCallbacks: Array<(data: string) => void> = [];
@@ -29,12 +29,10 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
     this.pid = adopted.pid;
     this.fd = adopted.fd;
 
-    // Open read and write streams over the inherited fd without taking
-    // ownership of the fd — autoClose: false means we control the lifetime.
-    this.readStream = fs.createReadStream("", {
-      fd: adopted.fd,
-      autoClose: false,
-    } as Parameters<typeof fs.createReadStream>[1] & { encoding?: string });
+    // Filesystem readers treat EAGAIN on a live nonblocking PTY as an error.
+    // Use the same readiness-driven reader as node-pty instead.
+    this.readStream = new ReadStream(adopted.fd);
+    this.readStream.setEncoding("utf8");
 
     this.writeStream = fs.createWriteStream("", {
       fd: adopted.fd,
@@ -55,6 +53,12 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
         for (const cb of this.exitCallbacks) {
           cb(0);
         }
+      }
+    });
+
+    this.writeStream.on("error", () => {
+      if (!this.disposed) {
+        for (const cb of this.exitCallbacks) cb(1);
       }
     });
 
@@ -144,14 +148,15 @@ export class AdoptedPtySubprocessHandle implements SubprocessHandle {
    * Release the adopted fd streams. After this call:
    * - kill() becomes a no-op (SIGHUP neutralization)
    * - write/resize/signal/pause/resume become no-ops
-   * - The read and write streams are destroyed
+   * - Pending writes finish before the reader closes the descriptor
    */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.dataCallbacks = [];
     this.exitCallbacks = [];
-    this.readStream.destroy();
-    this.writeStream.destroy();
+    // Explicit destroy closes even an autoClose:false filesystem stream.
+    // Finish borrowed writes before the reader closes their shared descriptor.
+    this.writeStream.end(() => this.readStream.destroy());
   }
 }
