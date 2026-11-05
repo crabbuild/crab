@@ -478,8 +478,14 @@ export class TerminalHost {
       throw new SessionCapacityError(this.maxSessions);
     }
 
+    // GUI-launched Windows daemons have no Unix SHELL; use the native command
+    // processor when the RPC caller has not selected an executable.
+    const defaultShell = process.platform === "win32"
+      ? process.env.COMSPEC || "cmd.exe"
+      : process.env.SHELL ?? "/bin/sh";
+    const file = opts.command ?? defaultShell;
     const subprocess = this.spawnSubprocess({
-      file: opts.command ?? process.env.SHELL ?? "/bin/sh",
+      file,
       cols,
       rows,
       cwd: opts.cwd,
