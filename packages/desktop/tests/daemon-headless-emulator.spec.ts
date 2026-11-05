@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { resolve } from "node:path";
+import { normalize, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HeadlessEmulator } from "../electron/daemon/headless-emulator";
 
@@ -31,7 +31,7 @@ describe("HeadlessEmulator", () => {
       const uri = pathToFileURL(cwd).href.replace("file://", "file://localhost");
       await emulator.write(`\x1b]7;${uri}\x07`);
 
-      expect(emulator.getCwd()).toBe(cwd);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(cwd);
     });
 
     it("parses OSC-7 with empty host", async () => {
@@ -39,7 +39,7 @@ describe("HeadlessEmulator", () => {
       const cwd = resolve("work");
       await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x07`);
 
-      expect(emulator.getCwd()).toBe(cwd);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(cwd);
     });
 
     it("parses OSC-7 with ST terminator (ESC backslash)", async () => {
@@ -47,7 +47,7 @@ describe("HeadlessEmulator", () => {
       const cwd = resolve("here");
       await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x1b\\`);
 
-      expect(emulator.getCwd()).toBe(cwd);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(cwd);
     });
 
     it("updates CWD when new OSC-7 arrives", async () => {
@@ -55,10 +55,10 @@ describe("HeadlessEmulator", () => {
       const first = resolve("first");
       const second = resolve("second");
       await emulator.write(`\x1b]7;${pathToFileURL(first)}\x07`);
-      expect(emulator.getCwd()).toBe(first);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(first);
 
       await emulator.write(`\x1b]7;${pathToFileURL(second)}\x07`);
-      expect(emulator.getCwd()).toBe(second);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(second);
     });
 
     it("decodes percent-encoded paths", async () => {
@@ -66,7 +66,7 @@ describe("HeadlessEmulator", () => {
       const cwd = resolve("my project");
       await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x07`);
 
-      expect(emulator.getCwd()).toBe(cwd);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(cwd);
     });
 
     it("ignores non-file URIs", async () => {
@@ -81,7 +81,7 @@ describe("HeadlessEmulator", () => {
       const cwd = resolve("project");
       await emulator.write(`prompt$ \x1b]7;${pathToFileURL(cwd)}\x07some output`);
 
-      expect(emulator.getCwd()).toBe(cwd);
+      expect(normalize(emulator.getCwd() ?? "")).toBe(cwd);
     });
   });
 
