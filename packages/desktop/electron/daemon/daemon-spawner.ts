@@ -9,7 +9,7 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fork } from "node:child_process";
+import { fork, spawn, type ForkOptions } from "node:child_process";
 
 import {
 PROTOCOL_VERSION,
@@ -197,7 +197,7 @@ export class DaemonSpawner {
   // -------------------------------------------------------------------------
 
   /**
-   * Fork the daemon as a detached child with ELECTRON_RUN_AS_NODE=1.
+   * Start the daemon as a detached child with ELECTRON_RUN_AS_NODE=1.
    * Waits for the `ready` IPC message (10s timeout), then unrefs the child.
    *
    * @throws Error if the daemon fails to start or doesn't send `ready` in time.
@@ -214,14 +214,28 @@ export class DaemonSpawner {
     fs.mkdirSync(dir, { recursive: true });
 
     return new Promise<void>((resolve, reject) => {
-      const child = fork(entry, ["--socket", target], {
+      const options: ForkOptions = {
         detached: true,
         stdio: ["ignore", "ignore", "ignore", "ipc"],
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
         },
-      });
+      };
+      // Electron leaves Chromium descriptors inheritable on Linux. Close them
+      // before exec so the durable daemon cannot retain browser sockets/files;
+      // descriptor 3 is the Node IPC channel used for the ready message.
+      const child = process.platform === "linux"
+        ? spawn("/bin/bash", [
+            "-c",
+            'for file in /proc/self/fd/*; do fd=${file##*/}; if [ "$fd" -ge 4 ]; then eval "exec $fd>&-"; fi; done; exec "$@"',
+            "crab-pty-daemon",
+            process.execPath,
+            entry,
+            "--socket",
+            target,
+          ], options)
+        : fork(entry, ["--socket", target], options);
 
       const timer = setTimeout(() => {
         child.removeAllListeners();

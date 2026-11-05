@@ -175,6 +175,10 @@ native v2 object-store snapshot against an isolated S3-compatible fixture. Set
 packaged add/push/reconstruction/clone/hydrate test. The fixture must own its
 credentials, bucket, cache, and user-data directory.
 
+On macOS and Windows, `python3 scripts/qualify-v2.py` starts an owned native
+RustFS fixture and runs the native tests and packaged smoke against the same
+bundled CLI. Set `CRAB_PACKAGED_APP` to qualify a package outside `release/`.
+
 ## v2 behavior
 
 - Remote repository authority and verified content come from the current SDK;

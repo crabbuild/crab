@@ -24,11 +24,12 @@ def main() -> None:
     if not all((git, aws, node)):
         raise RuntimeError("Git, AWS CLI, and Node 22 are required")
     if os.name == "nt":
-        executable = DESKTOP / "release/win-unpacked/Crab.exe"
-        crab = executable.parent / "resources/agent/crab.exe"
+        default_executable = DESKTOP / "release/win-unpacked/Crab.exe"
     else:
-        executable = DESKTOP / "release/mac-arm64/Crab.app/Contents/MacOS/Crab"
-        crab = executable.parents[1] / "Resources/agent/crab"
+        default_executable = DESKTOP / "release/mac-arm64/Crab.app/Contents/MacOS/Crab"
+    executable = Path(os.environ.get("CRAB_PACKAGED_APP", str(default_executable)))
+    resources = executable.parent / "resources" if os.name == "nt" else executable.parents[1] / "Resources"
+    crab = resources / "agent" / ("crab.exe" if os.name == "nt" else "crab")
     parent, prefix, _ = fixture.rustfs_work_location(target / "desktop-proof")
     with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
         work = Path(temporary)
@@ -38,6 +39,7 @@ def main() -> None:
         endpoint = f"http://127.0.0.1:{port}"
         env = fixture.fixture_environment(work, work, endpoint, "desktop", Path(git), crab, target)
         env["CRAB_PACKAGED_APP"] = str(executable)
+        env["CRAB_BIN"] = str(crab)
         server_env = {**env, "RUSTFS_ACCESS_KEY": env["AWS_ACCESS_KEY_ID"],
                       "RUSTFS_SECRET_KEY": env["AWS_SECRET_ACCESS_KEY"],
                       "RUSTFS_CONSOLE_ENABLE": "false", "RUST_LOG": "warn"}

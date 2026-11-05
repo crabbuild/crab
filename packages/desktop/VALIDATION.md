@@ -22,13 +22,13 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
 ## Evidence
 
 - TypeScript renderer and Electron type checks pass.
-- Native runtime staging and packaging checks pass (3 build tests).
+- Native runtime staging, packaging, and release assembly checks pass (15 tests).
 - Before the provider-auth changes, the full JavaScript suite passed 4,048 tests
   in 221 files. Auth integration runs cover 4,074 tests; each latest broad run
   passed 4,073 and exposed one of the existing issues recorded below.
 - All 27 focused storage-connection tests pass, including a regression that
   failed before fixing credential redaction during an in-flight forget.
-- 251 Rust agent tests pass, including a real native-v2 repository on private
+- 252 Rust agent tests pass, including a real native-v2 repository on private
   RustFS and real Azure HTTP listings with account-key and SAS authentication.
 - SDK configuration tests (9), provider Debug redaction tests (2), Azure CLI
   placement, provider option tests (6), and the minimal SDK feature build pass.
@@ -43,6 +43,13 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
   a real app restart that recovers the cloned checkout's saved connection.
 - `scripts/qualify-v2.py` provides the disposable storage fixture used by CI;
   it uses the existing SDK qualification tool's pinned RustFS binary and checksum.
+  Both native test consumers use the CLI from the selected packaged app.
+- A rebuilt unsigned macOS arm64 package passes all three packaged smoke tests
+  against that fixture, including cloud writes, restart, clone, and hydration.
+- A Linux Electron reproduction traced shutdown hangs to Chromium descriptors
+  inherited by the persistent PTY daemon. Closing them before daemon exec keeps
+  the terminal daemon alive while app shutdown completes and browser files are
+  released. All 23 Linux spawner tests and 46 macOS spawner/mode tests pass.
 
 ## Built-in storage connections
 
@@ -111,7 +118,8 @@ exercise electron-updater's real macOS architecture selection, including Rosetta
 and its Linux file selection. A local assembly also checked the existing macOS
 arm64 DMG, ZIP, and blockmaps; other platform inputs were fixtures. A rebuilt
 unsigned macOS arm64 app passed the packaged updater and repository smoke tests.
-The hosted release builds and signs the macOS and Windows artifacts before publication.
+The hosted release builds unsigned alpha artifacts; later channels require
+signed macOS and Windows artifacts before publication.
 Actual signed cross-platform installation and updates still require configured
 signing credentials and qualification in the release environment.
 
@@ -167,7 +175,7 @@ no baseline, ignore list, or expected-failure file was changed to hide them.
 configuration. Installation reports 63 dependency audit findings, including
 28 high and 3 critical findings; dependency remediation remains a launch gate.
 
-The macOS x64, Linux, and Windows workflow is authored but has not run here.
+Cross-platform publication remains gated on the hosted builds and packaged smoke.
 Public-cloud AWS/GCS/Azure, managed-service credentials, SSH deployment, NFS
 mounting, and external agent integrations still need their platform/account
 qualification. Signing and notarization need release-environment credentials.
