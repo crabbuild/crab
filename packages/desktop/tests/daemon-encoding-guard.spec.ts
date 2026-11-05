@@ -18,9 +18,9 @@ const GUARD_SCRIPT = path.join(DAEMON_DIR, "encoding-guard.sh");
 describe("daemon encoding guard", () => {
   it("encoding-guard.sh exists and is executable", () => {
     expect(fs.existsSync(GUARD_SCRIPT)).toBe(true);
-    const stat = fs.statSync(GUARD_SCRIPT);
-    // Check executable bit (owner)
-    expect(stat.mode & 0o100).not.toBe(0);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(GUARD_SCRIPT).mode & 0o100).not.toBe(0);
+    }
   });
 
   it("no base64 or toString('utf8') violations in data-path files", () => {

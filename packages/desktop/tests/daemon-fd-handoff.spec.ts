@@ -170,7 +170,7 @@ describe("writeSnapshot", () => {
     expect(fs.existsSync(snapshotPath)).toBe(true);
   });
 
-  it("writes file with 0600 permissions", () => {
+  it.skipIf(process.platform === "win32")("writes file with 0600 permissions", () => {
     const dir = makeTmpDir();
     tmpDirs.push(dir);
     const snapshotPath = path.join(dir, "snapshot.json");
@@ -849,7 +849,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("successor handoff: upgrade-ack", () => {
-  it("sends upgrade-ack after successfully adopting a session from snapshot", async () => {
+  it.skipIf(process.platform === "win32")("sends upgrade-ack after successfully adopting a session from snapshot", async () => {
     const dir = makeTmpDir();
     tmpDirs.push(dir);
 
@@ -903,7 +903,7 @@ describe("successor handoff: upgrade-ack", () => {
     expect(msg.type).toBe("upgrade-ack");
   }, 15_000);
 
-  it("sends upgrade-ack for multiple sessions", async () => {
+  it.skipIf(process.platform === "win32")("sends upgrade-ack for multiple sessions", async () => {
     const dir = makeTmpDir();
     tmpDirs.push(dir);
 
@@ -1030,7 +1030,9 @@ describe("successor handoff: upgrade-nak", () => {
 // Successor-side: pending buffer replay
 // ---------------------------------------------------------------------------
 
-describe("successor handoff: pending buffer replay", () => {
+// Live handoff transfers POSIX descriptors. Snapshot and empty-handoff checks
+// still exercise the Windows named-pipe runtime.
+describe.skipIf(process.platform === "win32")("successor handoff: pending buffer replay", () => {
   it("replays pending buffer into headless emulator so createOrAttach snapshot contains it", async () => {
     const dir = makeTmpDir();
     tmpDirs.push(dir);

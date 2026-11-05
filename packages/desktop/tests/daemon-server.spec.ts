@@ -331,7 +331,7 @@ describe("DaemonServer", () => {
       socket.destroy();
     });
 
-    it("writes token file with 0600 permissions", async () => {
+    it("writes the auth token with private POSIX permissions", async () => {
       const paths = createServerPaths(tmpDir);
       server = new DaemonServer({
         ...paths,
@@ -340,9 +340,9 @@ describe("DaemonServer", () => {
       });
       await server.start();
 
-      const stat = fs.statSync(paths.tokenPath);
-      // 0600 = 0o600 = 384 decimal. Mode includes file type bits.
-      expect(stat.mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") {
+        expect(fs.statSync(paths.tokenPath).mode & 0o777).toBe(0o600);
+      }
 
       const tokenContent = fs.readFileSync(paths.tokenPath, "utf-8");
       expect(tokenContent).toBe(server.authToken);
