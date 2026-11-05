@@ -1578,6 +1578,13 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_SHA="${{ needs.prepare.outputs.source_sha }}"
           PRERELEASE="${{ needs.prepare.outputs.prerelease }}"
+          # GitHub CLI's commit guard compares default-branch HEAD, not this tag.
+          # Require the prepared commit locally and at the published tag instead.
+          tag_source="$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ] || [ "$tag_source" != "$SOURCE_SHA" ]; then
+            echo "::error::Release tag $TAG no longer matches the prepared source commit." >&2
+            exit 1
+          fi
           FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)
           FILES+=(dist/desktop/*)
           existing="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json isDraft --jq .isDraft 2>/dev/null || true)"
@@ -1608,7 +1615,6 @@ jobs:
           gh release create "$TAG" "${FILES[@]}" \
             --repo "$RELEASE_REPO" \
             --verify-tag \
-            --fail-on-no-commits \
             --draft \
             --title "Crab ${TAG}" \
             --notes-file "$notes_file"
