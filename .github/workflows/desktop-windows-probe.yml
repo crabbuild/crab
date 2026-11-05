@@ -4,8 +4,10 @@ on:
     branches: [codex/qualify-windows-ipc]
 permissions:
   contents: read
+  actions: read
 jobs:
   ipc:
+    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') }}
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -88,3 +90,32 @@ jobs:
       - name: Broad Windows regression suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm test -- --maxWorkers 1 --minWorkers 1
+
+  broad:
+    if: ${{ contains(github.event.head_commit.message, '[probe broad]') }}
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41965473959
+          name: crab-windows-x86_64
+          path: ${{ runner.temp }}/cli-proof
+      - run: |
+          unzip -q "$RUNNER_TEMP/cli-proof/crab-windows-x86_64.zip" -d "$RUNNER_TEMP/cli-proof"
+          "$RUNNER_TEMP/cli-proof/crab.exe" --version
+          echo "CRAB_BIN=$RUNNER_TEMP/cli-proof/crab.exe" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run build:electron
+      - run: npm test -- --maxWorkers 1 --minWorkers 1
