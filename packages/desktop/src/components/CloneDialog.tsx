@@ -19,6 +19,7 @@ import { dialogs, nextJobId, rpc } from "../ipc";
 import { useStore } from "../state";
 import { useSetting } from "../settings";
 import { useJobLines } from "../lib/useJobLines";
+import { localPathName } from "../lib/local-path-name";
 import { ManagedRepositoryPicker } from "./ManagedRepositoryPicker";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -373,7 +374,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
       const handle = await rpc.openLocal(finalDest);
       addRepo({
         ...handle,
-        label: finalDest.split("/").pop() ?? finalDest,
+        label: localPathName(finalDest),
         path: finalDest,
         openedAt: Date.now(),
       });
@@ -430,7 +431,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
             </h2>
             {targetWorkspaceRootPath && (
               <p className="mt-0.5 text-[11px] text-gx-muted">
-                Into workspace: <span className="font-medium text-gx-accent">{targetWorkspaceRootPath.split("/").pop()}</span>
+                Into workspace: <span className="font-medium text-gx-accent">{localPathName(targetWorkspaceRootPath)}</span>
               </p>
             )}
           </div>
