@@ -127,7 +127,7 @@ fn strip_code_cell_outputs(nb: &mut Value) -> Result<usize> {
 /// Run `git hash-object -w <path>` to write the file as a blob and
 /// return its SHA.
 async fn git_hash_object(work_dir: &Path, file_path: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
+    let output = crate::shellout::git_command()
         .args(["hash-object", "-w"])
         .arg(file_path)
         .current_dir(work_dir)
@@ -157,7 +157,7 @@ async fn git_hash_object(work_dir: &Path, file_path: &Path) -> Result<String> {
 /// the blob at the given path in the index.
 async fn git_update_index(work_dir: &Path, sha: &str, path: &str) -> Result<()> {
     let cacheinfo = format!("100644,{sha},{path}");
-    let output = tokio::process::Command::new("git")
+    let output = crate::shellout::git_command()
         .args(["update-index", "--cacheinfo", &cacheinfo])
         .current_dir(work_dir)
         .output()

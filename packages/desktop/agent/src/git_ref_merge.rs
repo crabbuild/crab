@@ -221,7 +221,7 @@ impl GitOutput {
 }
 
 async fn git_output(work_dir: &Path, args: &[&str]) -> Result<GitOutput> {
-    let output = tokio::process::Command::new("git")
+    let output = crate::shellout::git_command()
         .args(args)
         .current_dir(work_dir)
         .output()

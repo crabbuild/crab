@@ -95,7 +95,7 @@ pub async fn git_commit(work_dir: &Path, params: &GitCommitParams) -> Result<Val
 
     debug!(args = ?args, "git commit");
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(work_dir)
         .output()

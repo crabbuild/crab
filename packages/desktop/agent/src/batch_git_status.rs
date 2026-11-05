@@ -164,7 +164,7 @@ pub async fn batch_git_status(
 /// Run `git status --porcelain -b` in the given directory.
 /// Returns (Some(stdout), None) on success, or (None, Some(error)) on failure.
 async fn run_git_status(repo_path: &Path) -> (Option<String>, Option<String>) {
-    let result = tokio::process::Command::new("git")
+    let result = crate::shellout::git_command()
         .args(["status", "--porcelain", "-b"])
         .current_dir(repo_path)
         .output()

@@ -10,7 +10,6 @@ use crab_sdk::storage::{ContentCache, DirectStoreOptions};
 use crab_sdk::{Client, GitPath, OpenOptions, RepositoryLocator, Revision};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 use crate::{AgentError, Result, shellout};
 
@@ -79,7 +78,7 @@ impl BrowseSession {
     pub async fn open_local(path: &Path) -> Result<Self> {
         let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
         let root = PathBuf::from(String::from_utf8(root)?.trim());
-        let origin = Command::new("git")
+        let origin = crate::shellout::git_command()
             .args(["remote", "get-url", "origin"])
             .current_dir(&root)
             .kill_on_drop(true)
@@ -488,11 +487,10 @@ fn entry(path: String, size: u64, blob: &[u8]) -> BrowserEntry {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
+    let output = crate::shellout::git_command()
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
-        .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output()
         .await?;
@@ -507,7 +505,7 @@ async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
     use std::process::Stdio;
-    let mut child = Command::new("git")
+    let mut child = crate::shellout::git_command()
         .args(["cat-file", mode])
         .current_dir(root)
         .stdin(Stdio::piped())

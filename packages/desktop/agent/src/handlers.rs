@@ -1028,7 +1028,7 @@ async fn list_refs(state: &State, p: ListRefsParams) -> Result<Value> {
     }
     cmd_args.extend(namespace_args);
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&cmd_args)
         .current_dir(&work_dir)
         .output()
@@ -2305,7 +2305,7 @@ async fn local_branch_exists(repo_dir: &Path, branch: &str) -> bool {
 
 /// Run a git command in the given directory and return stdout.
 async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(args)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -2325,7 +2325,7 @@ async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
 
 /// Run a git command and return stdout, mapping failures to AgentError.
 async fn run_git_worktree_cmd(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -2745,7 +2745,7 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
     // as 0 so the renderer falls back to default behaviour.
     let work_dir = state.get_work_dir(&p.repo_id).await.ok();
     let total_commits: u64 = if let Some(wd) = work_dir {
-        tokio::process::Command::new("git")
+        crate::shellout::git_command()
             .args(["rev-list", "--all", "--count"])
             .current_dir(&wd)
             .kill_on_drop(true)
@@ -2793,7 +2793,7 @@ struct GitDiffFileParams {
 /// path as the key since it's what users expect to click in the UI.
 async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["status", "--porcelain=v1", "-z", "-uall"])
         .current_dir(&work_dir)
         .output()
@@ -2860,7 +2860,7 @@ async fn git_diff_file_work(state: &State, p: GitDiffFileParams) -> Result<Value
     args.push("--".into());
     args.push(p.path.clone());
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3053,7 +3053,7 @@ async fn git_add_paths(state: &State, p: GitAddPathsParams) -> Result<Value> {
     let mut args: Vec<&str> = vec!["add", "--"];
     let path_refs: Vec<&str> = p.paths.iter().map(String::as_str).collect();
     args.extend(&path_refs);
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .output()
@@ -3075,7 +3075,7 @@ async fn git_reset_paths(state: &State, p: GitAddPathsParams) -> Result<Value> {
     let mut args: Vec<&str> = vec!["reset", "HEAD", "--"];
     let path_refs: Vec<&str> = p.paths.iter().map(String::as_str).collect();
     args.extend(&path_refs);
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .output()
@@ -3264,7 +3264,7 @@ async fn git_grep_work(state: &State, p: GitGrepParams) -> Result<Value> {
         }
     }
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3632,7 +3632,7 @@ async fn git_log_work(state: &State, p: GitLogParams) -> Result<Value> {
     // branches), `rev-list --count --all` can take 1-2 seconds on a
     // cold filesystem cache — serializing it after `git log` was the
     // primary bottleneck causing the "Loading git log..." hang.
-    let log_future = tokio::process::Command::new("git")
+    let log_future = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3646,7 +3646,7 @@ async fn git_log_work(state: &State, p: GitLogParams) -> Result<Value> {
     } else {
         count_args.push("HEAD".into());
     }
-    let count_future = tokio::process::Command::new("git")
+    let count_future = crate::shellout::git_command()
         .args(&count_args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3727,7 +3727,7 @@ async fn git_stash_list(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     // `%gd` is the stash ref; `%s` the subject. Stash messages
     // typically include the branch name, which we want to show.
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["stash", "list", "--format=%gd%x00%s"])
         .current_dir(&work_dir)
         .output()
@@ -3794,7 +3794,7 @@ async fn git_stash_save(state: &State, p: StashSaveParams) -> Result<Value> {
 async fn git_stash_show(state: &State, p: StashRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     // --stat gives file summary, --patch gives full diff
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["stash", "show", "--stat", "--name-status", &p.stash_ref])
         .current_dir(&work_dir)
         .output()
@@ -3823,7 +3823,7 @@ async fn git_stash_show(state: &State, p: StashRefParams) -> Result<Value> {
 
 async fn git_stash_show_patch(state: &State, p: StashRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["stash", "show", "-p", "--no-color", &p.stash_ref])
         .current_dir(&work_dir)
         .output()
@@ -3841,7 +3841,7 @@ async fn git_stash_show_patch(state: &State, p: StashRefParams) -> Result<Value>
 
 async fn run_git(state: &State, repo_id: &str, args: &[&str]) -> Result<Value> {
     let work_dir = state.get_work_dir(repo_id).await?;
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(args)
         .current_dir(&work_dir)
         .output()
@@ -3920,7 +3920,7 @@ async fn git_commit_changes(state: &State, p: GitCommitChangesParams) -> Result<
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // First, capture commit metadata (mirrors git_log's fields).
-    let meta_out = tokio::process::Command::new("git")
+    let meta_out = crate::shellout::git_command()
         .args([
             "log",
             "-1",
@@ -3959,7 +3959,7 @@ async fn git_commit_changes(state: &State, p: GitCommitChangesParams) -> Result<
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let parent_ref = parents.first().copied().unwrap_or(EMPTY_TREE);
 
-    let diff_out = tokio::process::Command::new("git")
+    let diff_out = crate::shellout::git_command()
         .args([
             "diff",
             "--numstat",
@@ -4085,7 +4085,7 @@ struct ResolveRefParams {
 async fn resolve_ref(state: &State, p: ResolveRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let peel_spec = format!("{}^{{commit}}", p.name);
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["rev-parse", "--verify", &peel_spec])
         .current_dir(&work_dir)
         .output()
@@ -4531,7 +4531,7 @@ async fn push(p: JobParams, out: SharedStdout) -> Result<Value> {
     // Crab push is driven through `git push`; the remote helper
     // takes over. Calling `git push` here keeps the UI aligned with
     // standard git workflow.
-    let mut command = tokio::process::Command::new("git");
+    let mut command = crate::shellout::git_command();
     crate::storage_auth::configure_command(&mut command)?;
     let git = command
         .arg("push")
@@ -4702,8 +4702,6 @@ struct CrabResetFilesParams {
 /// prefixed with "hash:". For hash-based removal, we scan the working
 /// tree to find the corresponding pointer file.
 async fn crab_reset_files(work_dir: &std::path::Path, paths: &[String]) -> Result<Value> {
-    use tokio::process::Command;
-
     if paths.is_empty() {
         return Ok(json!({ "ok": true, "files_reset": 0 }));
     }
@@ -4724,7 +4722,7 @@ async fn crab_reset_files(work_dir: &std::path::Path, paths: &[String]) -> Resul
     // For hash-based lookups, scan git ls-files and read pointer blobs
     // to find matching file paths.
     if !hashes_to_find.is_empty() {
-        let ls_output = Command::new("git")
+        let ls_output = crate::shellout::git_command()
             .args(["ls-files", "--cached", "-z"])
             .current_dir(work_dir)
             .stdout(std::process::Stdio::piped())
@@ -4850,7 +4848,6 @@ struct CrabAddAutoParams {
 async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Result<Value> {
     use std::collections::HashSet;
     use std::path::Path;
-    use tokio::process::Command;
     use tracing::{debug, warn};
 
     let mut tracked: u64 = 0;
@@ -4923,10 +4920,9 @@ async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Resu
         git_args.extend(refs);
 
         debug!(paths = ?succeeded_paths, "crab_add_auto: staging pointer blobs");
-        let git_output = Command::new("git")
+        let git_output = crate::shellout::git_command()
             .args(&git_args)
             .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -4946,10 +4942,9 @@ async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Resu
     // Also stage .gitattributes if we added new patterns.
     if !patterns_added.is_empty() {
         debug!("crab_add_auto: staging .gitattributes");
-        let _ = Command::new("git")
+        let _ = crate::shellout::git_command()
             .args(["add", ".gitattributes"])
             .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -4990,7 +4985,6 @@ struct CrabTrackAndAddParams {
 async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams) -> Result<Value> {
     use std::collections::HashSet;
     use std::path::Path;
-    use tokio::process::Command;
     use tracing::{debug, warn};
 
     let mut patterns_added: Vec<String> = Vec::new();
@@ -5069,10 +5063,9 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
         }
 
         debug!(paths = ?succeeded_paths, "crab_track_and_add: staging pointer blobs");
-        let git_output = Command::new("git")
+        let git_output = crate::shellout::git_command()
             .args(&git_args)
             .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -5089,10 +5082,9 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
         }
     } else if !patterns_added.is_empty() {
         // Stage .gitattributes even if no files succeeded (patterns were still added).
-        let _ = Command::new("git")
+        let _ = crate::shellout::git_command()
             .args(["add", ".gitattributes"])
             .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -5120,10 +5112,9 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
         });
 
         debug!(message = %message, "crab_track_and_add: committing");
-        let commit_output = Command::new("git")
+        let commit_output = crate::shellout::git_command()
             .args(["commit", "-m", &message])
             .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -5132,7 +5123,7 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
 
         if commit_output.status.success() {
             // Extract the commit SHA from git log.
-            let sha_output = Command::new("git")
+            let sha_output = crate::shellout::git_command()
                 .args(["rev-parse", "HEAD"])
                 .current_dir(work_dir)
                 .stdout(std::process::Stdio::piped())
@@ -5465,7 +5456,7 @@ async fn git_pull_branch(state: &State, p: GitPullBranchParams) -> Result<Value>
     let remote = p.remote.as_deref().unwrap_or("origin");
 
     // Check if the target branch is currently checked out.
-    let head_out = tokio::process::Command::new("git")
+    let head_out = crate::shellout::git_command()
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -5520,7 +5511,7 @@ async fn git_config_get(state: &State, p: GitConfigGetParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let mut values = serde_json::Map::new();
     for key in &p.keys {
-        let out = tokio::process::Command::new("git")
+        let out = crate::shellout::git_command()
             .args(["config", "--get", key])
             .current_dir(&work_dir)
             .output()
@@ -5555,7 +5546,7 @@ async fn git_blame(state: &State, p: GitBlameParams) -> Result<Value> {
     args.push("--");
     args.push(&p.path);
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .output()
@@ -5613,7 +5604,7 @@ async fn git_diff_name_only(state: &State, p: GitDiffNameOnlyParams) -> Result<V
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let range = format!("{}...{}", p.base, p.head);
 
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["diff", "--name-status", &range])
         .current_dir(&work_dir)
         .output()
@@ -5647,7 +5638,7 @@ async fn git_diff_name_only(state: &State, p: GitDiffNameOnlyParams) -> Result<V
 
 /// Shared helper for simple git commands that return status + output.
 async fn run_git_simple(work_dir: &std::path::Path, args: &[&str]) -> Result<Value> {
-    let mut command = tokio::process::Command::new("git");
+    let mut command = crate::shellout::git_command();
     crate::storage_auth::configure_command(&mut command)?;
     let out = command
         .args(args)

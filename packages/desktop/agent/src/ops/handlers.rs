@@ -265,7 +265,7 @@ pub async fn worktree_cherry_pick(work_dir: &Path, p: WorktreeCherryPickParams) 
 
 /// Run a git command and return (exit_code, stdout, stderr).
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<(i32, String, String)> {
-    let output = tokio::process::Command::new("git")
+    let output = crate::shellout::git_command()
         .args(args)
         .current_dir(work_dir)
         .output()
