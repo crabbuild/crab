@@ -61,7 +61,7 @@ describe("workspace-discovery", () => {
 
       expect(results).toHaveLength(2);
       const relativePaths = results.map((r) => r.relativePath).sort();
-      expect(relativePaths).toEqual(["org/backend", "org/frontend"]);
+      expect(relativePaths).toEqual([path.join("org", "backend"), path.join("org", "frontend")]);
     });
 
     it("does not recurse into discovered repos", async () => {
@@ -115,7 +115,7 @@ describe("workspace-discovery", () => {
       const results = await discoverRepos({ rootPath: tmpDir, maxDepth: 2 });
 
       const relativePaths = results.map((r) => r.relativePath).sort();
-      expect(relativePaths).toEqual(["a/level2", "level1"]);
+      expect(relativePaths).toEqual([path.join("a", "level2"), "level1"]);
     });
 
     it("defaults to maxDepth 3", async () => {

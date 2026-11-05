@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { HeadlessEmulator } from "../electron/daemon/headless-emulator";
 
 describe("HeadlessEmulator", () => {
@@ -25,39 +27,46 @@ describe("HeadlessEmulator", () => {
   describe("OSC-7 CWD tracking", () => {
     it("parses OSC-7 file URI with BEL terminator", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("\x1b]7;file://localhost/Users/test/project\x07");
+      const cwd = resolve("project");
+      const uri = pathToFileURL(cwd).href.replace("file://", "file://localhost");
+      await emulator.write(`\x1b]7;${uri}\x07`);
 
-      expect(emulator.getCwd()).toBe("/Users/test/project");
+      expect(emulator.getCwd()).toBe(cwd);
     });
 
     it("parses OSC-7 with empty host", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("\x1b]7;file:///home/user/work\x07");
+      const cwd = resolve("work");
+      await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x07`);
 
-      expect(emulator.getCwd()).toBe("/home/user/work");
+      expect(emulator.getCwd()).toBe(cwd);
     });
 
     it("parses OSC-7 with ST terminator (ESC backslash)", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("\x1b]7;file:///path/here\x1b\\");
+      const cwd = resolve("here");
+      await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x1b\\`);
 
-      expect(emulator.getCwd()).toBe("/path/here");
+      expect(emulator.getCwd()).toBe(cwd);
     });
 
     it("updates CWD when new OSC-7 arrives", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("\x1b]7;file:///first\x07");
-      expect(emulator.getCwd()).toBe("/first");
+      const first = resolve("first");
+      const second = resolve("second");
+      await emulator.write(`\x1b]7;${pathToFileURL(first)}\x07`);
+      expect(emulator.getCwd()).toBe(first);
 
-      await emulator.write("\x1b]7;file:///second\x07");
-      expect(emulator.getCwd()).toBe("/second");
+      await emulator.write(`\x1b]7;${pathToFileURL(second)}\x07`);
+      expect(emulator.getCwd()).toBe(second);
     });
 
     it("decodes percent-encoded paths", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("\x1b]7;file:///Users/test/my%20project\x07");
+      const cwd = resolve("my project");
+      await emulator.write(`\x1b]7;${pathToFileURL(cwd)}\x07`);
 
-      expect(emulator.getCwd()).toBe("/Users/test/my project");
+      expect(emulator.getCwd()).toBe(cwd);
     });
 
     it("ignores non-file URIs", async () => {
@@ -69,9 +78,10 @@ describe("HeadlessEmulator", () => {
 
     it("handles OSC-7 embedded in other output", async () => {
       emulator = new HeadlessEmulator({ cols: 80, rows: 24 });
-      await emulator.write("prompt$ \x1b]7;file:///home/user\x07some output");
+      const cwd = resolve("project");
+      await emulator.write(`prompt$ \x1b]7;${pathToFileURL(cwd)}\x07some output`);
 
-      expect(emulator.getCwd()).toBe("/home/user");
+      expect(emulator.getCwd()).toBe(cwd);
     });
   });
 
