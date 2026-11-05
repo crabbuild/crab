@@ -79,6 +79,22 @@ jobs:
       - id: build
         run: |
           if [ "$REUSE_NATIVE" = true ]; then
+            node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const file = 'electron/agent.ts';
+          let source = fs.readFileSync(file, 'utf8');
+          for (const [before, after] of [
+            ['  private nextId = 1;', '  private nextId = 1;\n  private probeIds = new Set<string>();'],
+            ['    const id = String(this.nextId++);', '    const id = String(this.nextId++);\n    if (method === "open_local") { this.probeIds.add(id); process.stderr.write("[DEBUG-a4f2] agent sending open_local\\n"); }'],
+            ['      this.child!.stdin.write(frame, (err) => {', '      this.child!.stdin.write(frame, (err) => {\n        if (method === "open_local") process.stderr.write("[DEBUG-a4f2] agent stdin write finished " + (err ? "error" : "ok") + "\\n");'],
+            ['      const id = String(frame.id);', '      const id = String(frame.id);\n      if (this.probeIds.delete(id)) process.stderr.write("[DEBUG-a4f2] native open_local reply " + ("error" in frame ? "error" : "ok") + "\\n");'],
+            ['    stderrRl.on("line", (rawLine) => {', '    stderrRl.on("line", (rawLine) => {\n      if (rawLine.includes("opened local repo")) process.stderr.write("[DEBUG-a4f2] native open_local completed\\n");'],
+          ]) {
+            if (!source.includes(before)) throw Error('Native transport instrumentation anchor moved');
+            source = source.replace(before, after);
+          }
+          fs.writeFileSync(file, source);
+          NODE
             npm run build:renderer
             npm run build:electron
           else
@@ -111,6 +127,29 @@ jobs:
               lines.append(line)
           spec.write_text('\n'.join(lines) + '\n', encoding='utf-8')
           if os.environ['REUSE_NATIVE'] == 'true':
+              launch = '''
+          async function launchTraced(options: Parameters<typeof electron.launch>[0]) {
+            const application = await electron.launch(options);
+            const launchProcess = application.process();
+            launchProcess.once("exit", (code, signal) => console.log(`[DEBUG-a4f2] launch process exit ${code} ${signal}`));
+            launchProcess.once("close", (code, signal) => console.log(`[DEBUG-a4f2] launch process close ${code} ${signal}`));
+            const relay = (chunk: Buffer) => {
+              for (const line of chunk.toString().split(/\\r?\\n/)) {
+                if (line.startsWith("[DEBUG-a4f2]")) console.log(line);
+              }
+            };
+            launchProcess.stdout?.on("data", relay);
+            launchProcess.stderr?.on("data", relay);
+            await application.evaluate(({ app }) => {
+              app.on("before-quit", () => process.stderr.write("[DEBUG-a4f2] browser before-quit\\n"));
+              app.on("will-quit", () => process.stderr.write("[DEBUG-a4f2] browser will-quit\\n"));
+              app.on("quit", () => process.stderr.write("[DEBUG-a4f2] browser quit\\n"));
+            });
+            return application;
+          }
+          '''
+              code = spec.read_text(encoding='utf-8').replace('await electron.launch(', 'await launchTraced(')
+              spec.write_text(code + launch, encoding='utf-8')
               # Replay the real GUI against the same native runtime. The tagged
               # build independently compiles and runs the complete native suite.
               qualifier = Path('scripts/qualify-v2.py')
@@ -131,7 +170,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
       - name: Broad Windows regression suite
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.REUSE_NATIVE != 'true' }}
         run: npm test -- --maxWorkers 1 --minWorkers 1
 
   broad:
