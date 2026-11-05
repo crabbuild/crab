@@ -33,3 +33,57 @@ jobs:
       - name: Measure terminal latency in isolation
         if: ${{ !cancelled() && steps.daemon_checks.outcome != 'skipped' }}
         run: npm test -- daemon-latency-benchmark.spec.ts --maxWorkers 1 --minWorkers 1
+
+  packaged:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: 1
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-desktop-target" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - run: npm ci
+      - id: build
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows-diagnostic-native-runtime
+          path: packages/desktop/resources/native/win-x64/
+          if-no-files-found: error
+          retention-days: 3
+      - run: node scripts/package.mjs --win
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install awscli
+      - name: Trace packaged smoke phases without logging payloads
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          spec = Path('tests/e2e/core-v2.spec.ts')
+          lines = []
+          for number, line in enumerate(spec.read_text(encoding='utf-8').splitlines(), 1):
+              match = re.match(r'^( {2,4})(?:(?:const )?\w+ = )?await ', line)
+              if match:
+                  lines.append(f'{match[1]}console.log("[DEBUG-a4f2] core-v2 await line {number}");')
+              lines.append(line)
+          spec.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          python scripts/qualify-v2.py
+      - name: Broad Windows regression suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm test -- --maxWorkers 1 --minWorkers 1
