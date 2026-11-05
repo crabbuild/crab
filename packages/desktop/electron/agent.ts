@@ -1,5 +1,5 @@
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -126,7 +126,7 @@ export class Agent extends EventEmitter {
         }),
       ]);
     } catch (error) {
-      this.shutdown();
+      await this.shutdown();
       throw error;
     } finally {
       clearTimeout(timer);
@@ -155,16 +155,20 @@ export class Agent extends EventEmitter {
     });
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     if (!this.child) return;
     this.stopping = true;
     const child = this.child;
-    // EOF lets the agent drain requests and close SDK and SlateDB sessions.
-    const timer = setTimeout(() => child.kill("SIGTERM"), 8_000);
-    timer.unref();
-    child.once("exit", () => clearTimeout(timer));
-    child.stdin.end();
     this.child = null;
+    // Keep Electron alive while EOF drains requests and closes SDK sessions.
+    const exited = once(child, "exit");
+    const timer = setTimeout(() => child.kill("SIGTERM"), 8_000);
+    try {
+      child.stdin.end();
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private onLine(line: string): void {
