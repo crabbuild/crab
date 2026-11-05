@@ -58,6 +58,12 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
   transport passes real command execution and the 50-session stress check.
   POSIX permission modes and live descriptor transfer are checked on Unix;
   authentication, snapshot handling, and common session tests still run on Windows.
+- A direct Windows sidecar request reproduced `git remote get-url` hanging
+  with the agent's RPC stdin inherited. The native probe passed with stdin
+  closed; the agent now gives Git a separate input pipe only when needed.
+- The packaged Windows updater test confirms the application closes its
+  launch pipes while the detached daemon stays alive. All 23 Windows spawner
+  tests also passed with the system shell launcher.
 
 ## Built-in storage connections
 
