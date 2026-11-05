@@ -6194,7 +6194,7 @@ mod tests {
 /// contribution heatmap data). Each entry is `{date: "YYYY-MM-DD", count: N}`.
 async fn git_activity(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "log",
             "--all",
@@ -6295,7 +6295,7 @@ async fn git_contributors(state: &State, p: GitContributorsParams) -> Result<Val
         since_flag = "--since=5 years ago".to_string();
         args.push(&since_flag);
     }
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -6355,7 +6355,7 @@ async fn git_pulse(state: &State, p: GitPulseParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let since_arg = format!("{}.days.ago", p.days);
 
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "log",
             &format!("--since={since_arg}"),
@@ -6500,7 +6500,7 @@ async fn git_commit_frequency(state: &State, p: GitCommitFrequencyParams) -> Res
 
     let since_arg = start_date.format("%Y-%m-%d").to_string();
 
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "log",
             "--all",
@@ -6667,7 +6667,7 @@ async fn compute_code_freq_range(
         args.push(format!("--until={u}"));
     }
 
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(&args)
         .current_dir(work_dir)
         .kill_on_drop(true)
@@ -7786,7 +7786,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     let base = p.base.as_deref().unwrap_or("HEAD");
 
     // 1. Upstream tracking.
-    let upstream = tokio::process::Command::new("git")
+    let upstream = shellout::git_command()
         .args([
             "for-each-ref",
             "--format=%(upstream:short)",
@@ -7801,7 +7801,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
         .filter(|s| !s.is_empty());
 
     // 2. Ahead/behind vs base.
-    let ab_output = tokio::process::Command::new("git")
+    let ab_output = shellout::git_command()
         .args([
             "rev-list",
             "--left-right",
@@ -7831,7 +7831,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
 
     // 3. Ahead/behind vs upstream (if tracking).
     let (upstream_ahead, upstream_behind) = if let Some(ref up) = upstream {
-        let ab = tokio::process::Command::new("git")
+        let ab = shellout::git_command()
             .args([
                 "rev-list",
                 "--left-right",
@@ -7863,7 +7863,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
 
     // 4. Recent commits on the branch (last 20).
     let fmt = "%H%x00%an%x00%aI%x00%s";
-    let log_output = tokio::process::Command::new("git")
+    let log_output = shellout::git_command()
         .args([
             "log",
             "--max-count=20",
@@ -7891,7 +7891,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     }
 
     // 5. Files changed vs base (diffstat).
-    let diff_output = tokio::process::Command::new("git")
+    let diff_output = shellout::git_command()
         .args(["diff", "--stat", "--numstat", &format!("{base}...{branch}")])
         .current_dir(&work_dir)
         .output()
@@ -7921,7 +7921,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     }
 
     // 6. Is this the current branch?
-    let current_branch = tokio::process::Command::new("git")
+    let current_branch = shellout::git_command()
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()
@@ -7973,7 +7973,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // Get all local branches with their last commit date.
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "for-each-ref",
             "--sort=-committerdate",
@@ -7998,7 +7998,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
     let mut stale_count: u32 = 0;
 
     // Get the default branch (HEAD target) for ahead/behind computation.
-    let default_branch = tokio::process::Command::new("git")
+    let default_branch = shellout::git_command()
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8043,7 +8043,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
         let (ahead, behind) = if name == default_branch {
             (0u32, 0u32)
         } else {
-            tokio::process::Command::new("git")
+            shellout::git_command()
                 .args([
                     "rev-list",
                     "--left-right",
@@ -8100,7 +8100,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // 1. Remotes.
-    let remotes_out = tokio::process::Command::new("git")
+    let remotes_out = shellout::git_command()
         .args(["remote", "-v"])
         .current_dir(&work_dir)
         .output()
@@ -8142,7 +8142,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     ];
     let mut config: Vec<Value> = Vec::new();
     for key in &config_keys {
-        let out = tokio::process::Command::new("git")
+        let out = shellout::git_command()
             .args(["config", "--get", key])
             .current_dir(&work_dir)
             .output()
@@ -8176,7 +8176,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     hooks.sort();
 
     // 4. Submodules.
-    let submodules_out = tokio::process::Command::new("git")
+    let submodules_out = shellout::git_command()
         .args(["submodule", "status"])
         .current_dir(&work_dir)
         .output()
@@ -8204,7 +8204,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     }
 
     // 5. HEAD info.
-    let head_sha = tokio::process::Command::new("git")
+    let head_sha = shellout::git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8214,7 +8214,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_default();
 
-    let head_branch = tokio::process::Command::new("git")
+    let head_branch = shellout::git_command()
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()
@@ -8392,7 +8392,7 @@ async fn count_pointer_files(work_dir: &Path) -> Result<u64> {
         return Ok(0);
     }
 
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -8433,7 +8433,7 @@ async fn count_pointer_files(work_dir: &Path) -> Result<u64> {
 /// Mode A: repo has pointer files — estimate dedup savings.
 async fn dedup_savings_mode_a(work_dir: &Path, pointer_count: u64) -> Result<Value> {
     // Get total logical bytes from pointer files by summing their declared sizes.
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -8521,7 +8521,7 @@ async fn dedup_savings_mode_b(work_dir: &Path) -> Result<Value> {
     let max_files: usize = 1000;
 
     // Use git ls-files to get tracked files, then check sizes.
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "ls-files",
             "-z",
@@ -8652,7 +8652,7 @@ struct GitReleaseTimelineParams {
 async fn git_release_timeline(state: &State, p: GitReleaseTimelineParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args([
             "tag",
             "--sort=-creatordate",
@@ -8767,7 +8767,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
     }
 
     // Get the first commit date.
-    let first_commit_out = tokio::process::Command::new("git")
+    let first_commit_out = shellout::git_command()
         .args(["log", "--reverse", "--format=%aI", "-1"])
         .current_dir(&work_dir)
         .output()
@@ -8801,7 +8801,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
     let current_size = get_current_repo_size(&work_dir).await?;
 
     // Get total number of commits to estimate growth curve.
-    let commit_count_out = tokio::process::Command::new("git")
+    let commit_count_out = shellout::git_command()
         .args(["rev-list", "--count", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8860,7 +8860,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
 
         // Count commits up to this date.
         let until_arg = format!("{}T23:59:59", date_str);
-        let count_out = tokio::process::Command::new("git")
+        let count_out = shellout::git_command()
             .args(["rev-list", "--count", "--before", &until_arg, "HEAD"])
             .current_dir(&work_dir)
             .output()
@@ -8928,7 +8928,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
 /// Get the current total size of tracked files in the repo.
 async fn get_current_repo_size(work_dir: &Path) -> Result<u64> {
     // Use `git ls-files -z` + stat to get total size of tracked files.
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -8995,7 +8995,7 @@ async fn git_commit_size_distribution(
 
     // Use %H%x00%s as format so we can split SHA and subject by NUL,
     // then --shortstat appends a stats line after each commit.
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(["log", "--shortstat", "--format=%H%x00%s", "-100"])
         .current_dir(&work_dir)
         .output()
@@ -9170,7 +9170,7 @@ async fn git_contributor_growth(state: &State, p: GitContributorGrowthParams) ->
 
     // Run git log with NUL separator between author name and date for
     // reliable parsing (author names can contain spaces, pipes, etc.).
-    let out = tokio::process::Command::new("git")
+    let out = shellout::git_command()
         .args(["log", "--all", &since_arg, "--format=%aN%x00%aI"])
         .current_dir(&work_dir)
         .output()

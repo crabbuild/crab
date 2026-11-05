@@ -122,6 +122,8 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
       return bridge.rpc("read_text", { repo_id: "smoke", path: "desktop-smoke.txt" });
     }, root);
     expect(text.text).toBe("Crab Desktop v2 real-sidecar smoke\n");
+    const activity = await call(page, "git_activity", { repo_id: "smoke" });
+    expect(activity.days).toEqual([expect.objectContaining({ count: 1 })]);
     await expect(page.getByText(path.basename(root), { exact: true }).first()).toBeVisible();
     await expect(page.getByRole("button", { name: "Kanban Board", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => Object.hasOwn(window.crab, "kanban"))).toBe(false);
