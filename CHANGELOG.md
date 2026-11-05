@@ -5,14 +5,6 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
-- Reset native Capsule storage schemas to version 1, retaining the latest
-  authenticated layouts and resource bounds. Removed experimental-format readers,
-  version-dependent geometry and `doctor --migrate-chunk-index`. Republish
-  experimental repositories into a fresh bucket with a matching client; a fresh
-  repository prefix alone does not isolate bucket-global hints. Historical
-  qualification remains tied to its original binaries. Git/Xet/LFS dependency
-  formats and the protocol-v2 namespace keep their independent contracts.
-
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop
@@ -21,6 +13,8 @@ the current stable release.
 
 ### Desktop
 
+- Fixed unsigned installer packaging and worktree metadata persistence across
+  Windows path spellings and filesystem aliases.
 - Removed the desktop Kanban board, tracker integrations, and board automation.
   Agent tasks and workflows remain available; existing task history is retained.
 - Added the Electron desktop app with the matching v2 CLI and native SDK sidecar,
@@ -37,9 +31,15 @@ the current stable release.
 
 ### CLI
 
+- Reset native Capsule storage schemas to version 1, retaining the latest
+  authenticated layouts and resource bounds. Removed experimental-format readers,
+  version-dependent geometry and `doctor --migrate-chunk-index`. Republish
+  experimental repositories into a fresh bucket with a matching client; a fresh
+  repository prefix alone does not isolate bucket-global hints. Historical
+  qualification remains tied to its original binaries. Git/Xet/LFS dependency
+  formats and the protocol-v2 namespace keep their independent contracts.
 - Replaced per-page global chunk-hint rewrites with verified packed runs,
-  size-tiered compaction, and authenticated negative filters. Added explicit
-  `crab doctor --migrate-chunk-index` conversion preserving exact placement IDs.
+  size-tiered compaction, and authenticated negative filters.
 
 - Restored Capsule push progress for `crab push` and the Git remote helper,
   including live phases, verified transfer totals, and JSONL progress events.

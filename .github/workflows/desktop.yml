@@ -126,6 +126,10 @@ jobs:
           if [ "$RELEASE_BUILD" = true ] && [ "$RUNNER_OS" != Linux ]; then
             node scripts/package.mjs --config.forceCodeSigning=true
           else
+            # Empty certificate links are imported as the working directory.
+            # Unsigned builds must omit signing inputs entirely.
+            unset CSC_LINK CSC_KEY_PASSWORD WIN_CSC_LINK WIN_CSC_KEY_PASSWORD
+            unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
             node scripts/package.mjs
           fi
       - name: Verify signed and notarized macOS application

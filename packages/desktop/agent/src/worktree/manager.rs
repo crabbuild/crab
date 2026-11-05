@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crab_git::worktree::normalize_identity_path;
 use tracing::debug;
 
 use crate::{AgentError, Result};
@@ -71,8 +72,10 @@ impl WorktreeManager {
 
         // Reconcile: keep only metadata entries whose paths still
         // appear in git's worktree list.
-        let entry_paths: std::collections::HashSet<&Path> =
-            entries.iter().map(|e| e.path.as_path()).collect();
+        let entry_paths: std::collections::HashSet<PathBuf> = entries
+            .iter()
+            .map(|e| PathBuf::from(normalize_identity_path(&e.path)))
+            .collect();
         let before_len = meta_list.len();
         meta_list.retain(|m| entry_paths.contains(m.path.as_path()));
         if meta_list.len() < before_len {
@@ -89,7 +92,17 @@ impl WorktreeManager {
         let hydrated = entries
             .into_iter()
             .map(|entry| {
-                let meta = meta_list.iter().find(|m| m.path == entry.path).cloned();
+                let identity = normalize_identity_path(&entry.path);
+                let meta = meta_list
+                    .iter()
+                    .find(|m| m.path == Path::new(&identity))
+                    .cloned()
+                    .map(|mut meta| {
+                        // Keep Git's display path at the UI/command boundary;
+                        // Windows canonical paths may use verbatim syntax.
+                        meta.path = entry.path.clone();
+                        meta
+                    });
                 HydratedWorktree { entry, meta }
             })
             .collect();
@@ -284,6 +297,9 @@ impl WorktreeManager {
                 .unwrap_or_else(|_| self.repo_path.join(path))
         };
 
+        // Resolve metadata while the directory still exists; aliases cannot
+        // be resolved after Git removes the worktree.
+        let mut meta_list = self.load_meta().await?;
         let mut args: Vec<String> = Vec::new();
         if force {
             args.push("--force".to_owned());
@@ -295,15 +311,8 @@ impl WorktreeManager {
         debug!(path = %path.display(), force, "worktree removed");
 
         // Remove the entry from worktrees.json metadata.
-        let mut meta_list = self.load_meta().await?;
         let before_len = meta_list.len();
-        meta_list.retain(|m| {
-            // Compare using the raw path as well as canonicalized form.
-            // After removal the directory no longer exists, so
-            // canonicalize may fail — fall back to raw comparison.
-            let meta_resolved = m.path.canonicalize().unwrap_or_else(|_| m.path.clone());
-            meta_resolved != resolved && m.path != resolved
-        });
+        meta_list.retain(|m| m.path != resolved);
         if meta_list.len() < before_len {
             debug!("removed metadata entry for deleted worktree");
         }
@@ -337,6 +346,8 @@ impl WorktreeManager {
                 .unwrap_or_else(|_| self.repo_path.join(old_path))
         };
 
+        // Load identities before the old directory disappears during the move.
+        let mut meta_list = self.load_meta().await?;
         let args = vec![old_str.into_owned(), new_str.into_owned()];
         core_cli::move_worktree(&self.repo_path, &args).await?;
 
@@ -358,16 +369,8 @@ impl WorktreeManager {
         };
 
         // Update the path in worktrees.json metadata.
-        let mut meta_list = self.load_meta().await?;
-        for entry in &mut meta_list {
-            let entry_resolved = entry
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| entry.path.clone());
-            if entry_resolved == resolved_old || entry.path == resolved_old {
-                entry.path = resolved_new.clone();
-                break;
-            }
+        if let Some(entry) = meta_list.iter_mut().find(|m| m.path == resolved_old) {
+            entry.path = resolved_new;
         }
         self.save_meta(&meta_list).await?;
 
@@ -428,8 +431,10 @@ impl WorktreeManager {
             .collect::<Vec<_>>();
 
         let mut meta_list = self.load_meta().await?;
-        let entry_paths: std::collections::HashSet<&Path> =
-            entries.iter().map(|e| e.path.as_path()).collect();
+        let entry_paths: std::collections::HashSet<PathBuf> = entries
+            .iter()
+            .map(|e| PathBuf::from(normalize_identity_path(&e.path)))
+            .collect();
 
         let before_len = meta_list.len();
         meta_list.retain(|m| entry_paths.contains(m.path.as_path()));
@@ -520,7 +525,8 @@ impl WorktreeManager {
     /// entry matching the given path, and updates it in place. If no
     /// entry exists for the path, a new one is inserted. The updated
     /// metadata is then persisted back to disk.
-    pub async fn worktree_set_meta(&self, meta: WorktreeMeta) -> Result<()> {
+    pub async fn worktree_set_meta(&self, mut meta: WorktreeMeta) -> Result<()> {
+        meta.path = PathBuf::from(normalize_identity_path(&meta.path));
         let mut meta_list = self.load_meta().await?;
 
         // Find an existing entry by path and update it, or insert new.
@@ -643,7 +649,13 @@ impl WorktreeManager {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(AgentError::Io)?;
-        let meta: Vec<WorktreeMeta> = serde_json::from_str(&content).map_err(AgentError::Decode)?;
+        let mut meta: Vec<WorktreeMeta> =
+            serde_json::from_str(&content).map_err(AgentError::Decode)?;
+        // Persisted metadata and Git output must use the same filesystem
+        // identity across Windows path spellings and symlink aliases.
+        for entry in &mut meta {
+            entry.path = PathBuf::from(normalize_identity_path(&entry.path));
+        }
         Ok(meta)
     }
 
@@ -1992,6 +2004,39 @@ mod tests {
     }
 
     // ---- worktree_set_meta tests ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_survives_worktree_path_aliases() {
+        let (_repo, root) = git_init_with_commit();
+        let work = tempfile::tempdir().expect("worktree parent");
+        let path = work.path().join("worktree");
+        let alias = work.path().join("alias");
+        let mgr = WorktreeManager::new(root.clone());
+        mgr.worktree_add(&path, "metadata-alias", true, None)
+            .await
+            .expect("create worktree");
+        std::os::unix::fs::symlink(&path, &alias).expect("worktree alias");
+        mgr.worktree_set_meta(WorktreeMeta {
+            path: alias,
+            display_name: Some("Retained metadata".into()),
+            colour: None,
+            pinned: true,
+            hydration_policy: HydrationChoice::OnAccess,
+        })
+        .await
+        .expect("set metadata through alias");
+
+        let restarted = WorktreeManager::new(root);
+        let listed = restarted.worktree_list().await.expect("list worktrees");
+        let entry = listed.iter().find(|entry| !entry.entry.is_main);
+        assert_eq!(
+            entry
+                .and_then(|entry| entry.meta.as_ref())
+                .and_then(|meta| meta.display_name.as_deref()),
+            Some("Retained metadata")
+        );
+    }
 
     #[tokio::test]
     async fn set_meta_creates_new_entry() {
