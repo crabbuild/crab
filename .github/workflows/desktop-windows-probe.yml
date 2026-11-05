@@ -58,12 +58,12 @@ jobs:
       - name: Confirm staged native code is unchanged
         if: env.REUSE_NATIVE == 'true'
         working-directory: .
-        run: git diff --exit-code f43afd4db98 HEAD -- Cargo.toml Cargo.lock crab crates packages/desktop/agent packages/desktop/scripts/build-native.mjs
+        run: git diff --exit-code 87ab8f0f176 HEAD -- Cargo.toml Cargo.lock crab crates packages/desktop/agent packages/desktop/scripts/build-native.mjs
       - uses: actions/download-artifact@v4
         if: env.REUSE_NATIVE == 'true'
         with:
           github-token: ${{ github.token }}
-          run-id: 41987787434
+          run-id: 41996136547
           name: Windows-stdin-isolated-native-runtime
           path: packages/desktop/resources/native/win-x64
       - uses: actions/setup-node@v4
