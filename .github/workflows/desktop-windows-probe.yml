@@ -112,6 +112,11 @@ jobs:
             source = source.replace(before, after);
           }
           fs.writeFileSync(file, source);
+          const terminal = 'electron/in-process-bridge.ts';
+          const exitSource = fs.readFileSync(terminal, 'utf8');
+          const exitAnchor = '        this.handleSessionExit(id, exitCode);';
+          if (!exitSource.includes(exitAnchor)) throw Error('Terminal exit trace anchor moved');
+          fs.writeFileSync(terminal, exitSource.replace(exitAnchor, '        process.stderr.write("[DEBUG-a4f2] local terminal exited " + exitCode + "\n");\n' + exitAnchor));
           NODE
             npm run build:renderer
             npm run build:electron

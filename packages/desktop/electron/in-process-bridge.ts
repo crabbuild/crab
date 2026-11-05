@@ -81,7 +81,7 @@ export interface SpawnResult {
 // ---------------------------------------------------------------------------
 
 export class InProcessBridge {
-  private readonly terminals = new Map<string, IPty>();
+  private readonly terminals = new Map<string, { term: IPty; exited: Promise<void>; closing: boolean }>();
   private termCounter = 0;
   private shuttingDown = false;
 
@@ -98,7 +98,9 @@ export class InProcessBridge {
     this.shellEnvPromise = opts.shellEnvPromise;
     this.writeSessionLog = opts.writeSessionLog;
 
-    opts.app.on("before-quit", () => this.dispose());
+    opts.app.on("before-quit", () => {
+      this.shuttingDown = true;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -178,8 +180,6 @@ export class InProcessBridge {
       env: termEnv,
     });
 
-    this.terminals.set(id, term);
-
     // For startup commands, suppress shell init output until the command
     // is injected. For normal terminals, relay immediately.
     let relayEnabled = !opts.startupCommand;
@@ -208,13 +208,13 @@ export class InProcessBridge {
       this.writeSessionLog(id, data);
     });
 
-    term.onExit(({ exitCode }: { exitCode: number }) => {
-      this.terminals.delete(id);
-      const win = this.getMainWindow();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send("crab:term-exit", { id, exitCode });
-      }
+    const exited = new Promise<void>((resolve) => {
+      term.onExit(({ exitCode }) => {
+        resolve();
+        this.handleSessionExit(id, exitCode);
+      });
     });
+    this.terminals.set(id, { term, exited, closing: false });
 
     // If a startup command is specified, wait for the shell to be ready
     // before injecting the command.
@@ -250,23 +250,22 @@ export class InProcessBridge {
 
   /** Write data to an active terminal session. */
   handleWrite(_evt: unknown, id: string, data: string): void {
-    const term = this.terminals.get(id);
-    if (term) term.write(data);
+    const session = this.terminals.get(id);
+    if (session && !session.closing) session.term.write(data);
   }
 
   /** Resize an active terminal session. */
   handleResize(_evt: unknown, id: string, cols: number, rows: number): void {
-    const term = this.terminals.get(id);
-    if (term) term.resize(cols, rows);
+    const session = this.terminals.get(id);
+    if (session && !session.closing) session.term.resize(cols, rows);
   }
 
   /** Kill an active terminal session. */
   handleKill(_evt: unknown, id: string): void {
-    const term = this.terminals.get(id);
-    if (term) {
-      term.kill();
-      this.terminals.delete(id);
-    }
+    const session = this.terminals.get(id);
+    if (!session || session.closing) return;
+    session.term.kill();
+    session.closing = true;
   }
 
   /**
@@ -299,16 +298,28 @@ export class InProcessBridge {
     }
   }
 
-  /** Kill all active terminals and release resources. */
-  dispose(): void {
+  /** Close local terminals before Electron tears down their native callbacks. */
+  async dispose(): Promise<void> {
     this.shuttingDown = true;
-    for (const [id, term] of this.terminals) {
+    const exits: Promise<void>[] = [];
+    for (const [id, session] of this.terminals) {
+      exits.push(session.exited);
       try {
-        term.kill();
+        this.handleKill(null, id);
       } catch {
-        // Best-effort — don't block dispose on a stale PTY
+        // The native exit callback may already be queued.
       }
-      this.terminals.delete(id);
+    }
+    if (!exits.length) return;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(exits),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 8_000); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

@@ -12,7 +12,7 @@ import { getUserShellBaseEnv } from "./env/userShellEnv";
 import { SidecarManager,registerSidecarIpc } from "./sidecars";
 import { initializeDaemonSubsystem } from "./daemon/init";
 import { registerDiagnosticsUiIpc } from "./daemon/diagnostics-ui-ipc";
-import { createInProcessBridge } from "./in-process-bridge";
+import { createInProcessBridge,type InProcessBridge } from "./in-process-bridge";
 import { TermRouter } from "./term-router";
 import { registerKeychainHandlers } from "./keychain";
 import { registerForgeAuth } from "./forge-auth";
@@ -91,6 +91,7 @@ const agentReady = new Promise<void>((resolve, reject) => {
 void agentReady.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
+let localTerminalBridge: InProcessBridge | null = null;
 let isShuttingDown = false;
 
 // Workspace state (managed by IPC handlers)
@@ -2148,6 +2149,7 @@ app.whenReady().then(async () => {
     writeSessionLog,
     app,
   });
+  localTerminalBridge = inProcessBridge;
 
   let daemonSubsystem: Awaited<ReturnType<typeof initializeDaemonSubsystem>> | null = null;
 
@@ -2639,13 +2641,14 @@ app.on("before-quit", () => {
 });
 
 app.on("will-quit", (e) => {
+  e.preventDefault();
   if (isShuttingDown) return;
   isShuttingDown = true;
-  e.preventDefault();
   stopAllWatchers();
   stopAutoUpdater();
   Promise.all([
     agent?.shutdown(),
+    localTerminalBridge?.dispose(),
     sidecarManager.stopAll(),
     lspManager.stopAll(),
   ]).finally(() => {
