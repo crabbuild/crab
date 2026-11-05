@@ -116,7 +116,8 @@ jobs:
           const exitSource = fs.readFileSync(terminal, 'utf8');
           const exitAnchor = '        this.handleSessionExit(id, exitCode);';
           if (!exitSource.includes(exitAnchor)) throw Error('Terminal exit trace anchor moved');
-          fs.writeFileSync(terminal, exitSource.replace(exitAnchor, '        process.stderr.write("[DEBUG-a4f2] local terminal exited " + exitCode + "\n");\n' + exitAnchor));
+          const exitMarker = '        process.stderr.write("[DEBUG-a4f2] local terminal exited " + exitCode + ' + JSON.stringify('\n') + ');';
+          fs.writeFileSync(terminal, exitSource.replace(exitAnchor, exitMarker + '\n' + exitAnchor));
           NODE
             npm run build:renderer
             npm run build:electron
