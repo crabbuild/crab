@@ -21,10 +21,15 @@ jobs:
           cache-dependency-path: packages/desktop/package-lock.json
       - run: npm ci
       - run: npm run build:electron
-      - run: >-
+      - id: daemon_checks
+        run: >-
           npm test -- daemon-spawner.spec.ts daemon-server.spec.ts daemon-client.spec.ts
           daemon-socket-address.spec.ts daemon-native-terminal.spec.ts
           daemon-agent-state-events.spec.ts daemon-byte-fidelity.spec.ts
           daemon-init-wiring.spec.ts daemon-control-plane.spec.ts daemon-legacy-adapter.spec.ts
-          daemon-orchestrator-integration.spec.ts daemon-latency-benchmark.spec.ts daemon-stress.spec.ts
-          --maxWorkers 2 --minWorkers 1
+          daemon-orchestrator-integration.spec.ts daemon-stress.spec.ts
+          daemon-terminal-host.spec.ts
+          --maxWorkers 1 --minWorkers 1
+      - name: Measure terminal latency in isolation
+        if: ${{ !cancelled() && steps.daemon_checks.outcome != 'skipped' }}
+        run: npm test -- daemon-latency-benchmark.spec.ts --maxWorkers 1 --minWorkers 1
