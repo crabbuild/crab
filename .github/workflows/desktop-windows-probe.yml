@@ -1,0 +1,223 @@
+name: Desktop Windows IPC qualification
+on:
+  push:
+    branches: [codex/qualify-windows-integrated]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  ipc:
+    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') && !contains(github.event.head_commit.message, '[probe replay]') && !contains(github.event.head_commit.message, '[probe native]') }}
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build:electron
+      - id: daemon_checks
+        run: >-
+          npm test -- daemon-spawner.spec.ts daemon-server.spec.ts daemon-client.spec.ts
+          daemon-socket-address.spec.ts daemon-native-terminal.spec.ts
+          daemon-agent-state-events.spec.ts daemon-byte-fidelity.spec.ts
+          daemon-init-wiring.spec.ts daemon-control-plane.spec.ts daemon-legacy-adapter.spec.ts
+          daemon-orchestrator-integration.spec.ts daemon-stress.spec.ts
+          daemon-terminal-host.spec.ts
+          --maxWorkers 1 --minWorkers 1
+      - name: Measure terminal latency in isolation
+        if: ${{ !cancelled() && steps.daemon_checks.outcome != 'skipped' }}
+        run: npm test -- daemon-latency-benchmark.spec.ts --maxWorkers 1 --minWorkers 1
+
+  packaged:
+    if: ${{ contains(github.event.head_commit.message, '[probe package]') || contains(github.event.head_commit.message, '[probe replay]') }}
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: 1
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+      REUSE_NATIVE: ${{ contains(github.event.head_commit.message, '[probe replay]') }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          mkdir -p "$RUNNER_TEMP/crab-desktop-target"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-desktop-target" >> "$GITHUB_ENV"
+      - name: Confirm staged native code is unchanged
+        if: env.REUSE_NATIVE == 'true'
+        working-directory: .
+        run: git diff --exit-code f43afd4db98 HEAD -- Cargo.toml Cargo.lock crab crates packages/desktop/agent packages/desktop/scripts/build-native.mjs
+      - uses: actions/download-artifact@v4
+        if: env.REUSE_NATIVE == 'true'
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41987787434
+          name: Windows-stdin-isolated-native-runtime
+          path: packages/desktop/resources/native/win-x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        if: env.REUSE_NATIVE != 'true'
+        with:
+          toolchain: 1.97.0
+      - run: npm ci
+      - id: build
+        run: |
+          if [ "$REUSE_NATIVE" = true ]; then
+            node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const file = 'electron/agent.ts';
+          let source = fs.readFileSync(file, 'utf8');
+          for (const [before, after] of [
+            ['  private nextId = 1;', '  private nextId = 1;\n  private probeIds = new Set<string>();'],
+            ['    const id = String(this.nextId++);', '    const id = String(this.nextId++);\n    if (method === "open_local") { this.probeIds.add(id); process.stderr.write("[DEBUG-a4f2] agent sending open_local\\n"); }'],
+            ['      this.child!.stdin.write(frame, (err) => {', '      this.child!.stdin.write(frame, (err) => {\n        if (method === "open_local") process.stderr.write("[DEBUG-a4f2] agent stdin write finished " + (err ? "error" : "ok") + "\\n");'],
+            ['      const id = String(frame.id);', '      const id = String(frame.id);\n      if (this.probeIds.delete(id)) process.stderr.write("[DEBUG-a4f2] native open_local reply " + ("error" in frame ? "error" : "ok") + "\\n");'],
+            ['    stderrRl.on("line", (rawLine) => {', '    stderrRl.on("line", (rawLine) => {\n      if (rawLine.includes("opened local repo")) process.stderr.write("[DEBUG-a4f2] native open_local completed\\n");'],
+          ]) {
+            if (!source.includes(before)) throw Error('Native transport instrumentation anchor moved');
+            source = source.replace(before, after);
+          }
+          fs.writeFileSync(file, source);
+          NODE
+            npm run build:renderer
+            npm run build:electron
+          else
+            npm run build
+          fi
+      - uses: actions/upload-artifact@v4
+        if: env.REUSE_NATIVE != 'true'
+        with:
+          name: Windows-diagnostic-native-runtime
+          path: packages/desktop/resources/native/win-x64/
+          if-no-files-found: error
+          retention-days: 3
+      - run: node scripts/package.mjs --win
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install awscli
+      - name: Trace packaged smoke phases without logging payloads
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          spec = Path('tests/e2e/core-v2.spec.ts')
+          lines = []
+          for number, line in enumerate(spec.read_text(encoding='utf-8').splitlines(), 1):
+              match = re.match(r'^( {2,4})(?:(?:const )?\w+ = )?await ', line)
+              if match:
+                  lines.append(f'{match[1]}console.log("[DEBUG-a4f2] core-v2 await line {number}");')
+              lines.append(line)
+          spec.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          if os.environ['REUSE_NATIVE'] == 'true':
+              launch = '''
+          async function launchTraced(options: Parameters<typeof electron.launch>[0]) {
+            const application = await electron.launch(options);
+            const launchProcess = application.process();
+            launchProcess.once("exit", (code, signal) => console.log(`[DEBUG-a4f2] launch process exit ${code} ${signal}`));
+            launchProcess.once("close", (code, signal) => console.log(`[DEBUG-a4f2] launch process close ${code} ${signal}`));
+            const relay = (chunk: Buffer) => {
+              for (const line of chunk.toString().split(/\\r?\\n/)) {
+                if (line.startsWith("[DEBUG-a4f2]")) console.log(line);
+              }
+            };
+            launchProcess.stdout?.on("data", relay);
+            launchProcess.stderr?.on("data", relay);
+            await application.evaluate(({ app }) => {
+              app.on("before-quit", () => process.stderr.write("[DEBUG-a4f2] browser before-quit\\n"));
+              app.on("will-quit", () => process.stderr.write("[DEBUG-a4f2] browser will-quit\\n"));
+              app.on("quit", () => process.stderr.write("[DEBUG-a4f2] browser quit\\n"));
+            });
+            return application;
+          }
+          '''
+              code = spec.read_text(encoding='utf-8').replace('await electron.launch(', 'await launchTraced(')
+              spec.write_text(code + launch, encoding='utf-8')
+              # Replay the real GUI against the same native runtime. The tagged
+              # build independently compiles and runs the complete native suite.
+              qualifier = Path('scripts/qualify-v2.py')
+              code = qualifier.read_text(encoding='utf-8')
+              code, matches = re.subn(r'^                subprocess\.run\(\["cargo"[^\n]*\n[^\n]*\n[^\n]*\n', '', code, flags=re.M)
+              assert matches == 1, 'Expected exactly one duplicate native test invocation'
+              qualifier.write_text(code, encoding='utf-8')
+          PY
+          python scripts/qualify-v2.py
+      - uses: actions/upload-artifact@v4
+        if: env.REUSE_NATIVE == 'true'
+        with:
+          name: Windows-diagnostic-installer
+          path: |
+            packages/desktop/release/Crab-*-win-x64.exe
+            packages/desktop/release/Crab-*-win-x64.exe.blockmap
+            packages/desktop/release/alpha.yml
+          if-no-files-found: error
+          retention-days: 3
+      - name: Broad Windows regression suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.REUSE_NATIVE != 'true' }}
+        run: npm test -- --maxWorkers 1 --minWorkers 1
+
+  broad:
+    if: ${{ contains(github.event.head_commit.message, '[probe broad]') }}
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41965473959
+          name: crab-windows-x86_64
+          path: ${{ runner.temp }}/cli-proof
+      - run: |
+          unzip -q "$RUNNER_TEMP/cli-proof/crab-windows-x86_64.zip" -d "$RUNNER_TEMP/cli-proof"
+          "$RUNNER_TEMP/cli-proof/crab.exe" --version
+          echo "CRAB_BIN=$RUNNER_TEMP/cli-proof/crab.exe" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run build:electron
+      - run: npm test -- --maxWorkers 1 --minWorkers 1
+
+  native:
+    if: ${{ contains(github.event.head_commit.message, '[probe native]') }}
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41987787434
+          name: Windows-diagnostic-native-runtime
+          path: ${{ runner.temp }}/native-proof
+      - run: node .github/agent-rpc-probe.mjs "$RUNNER_TEMP/native-proof/crab-desktop-agent.exe"
