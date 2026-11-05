@@ -26,6 +26,7 @@ async function createTempRepo(): Promise<string> {
   await execFile("git", ["init", "--initial-branch=main"], { cwd: repoDir });
   await execFile("git", ["config", "user.email", "test@crab.dev"], { cwd: repoDir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: repoDir });
+  await execFile("git", ["config", "core.autocrlf", "false"], { cwd: repoDir });
 
   // Create an initial commit so we have a valid HEAD.
   const readmePath = path.join(repoDir, "README.md");

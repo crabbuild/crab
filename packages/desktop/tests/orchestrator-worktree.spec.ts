@@ -158,7 +158,7 @@ describe("orchestrator-worktree", () => {
 
       try {
         // Path should be under .crab/worktrees/.
-        expect(worktreePath).toContain(".crab/worktrees/");
+        expect(path.dirname(worktreePath)).toBe(path.join(repoDir, ".crab", "worktrees"));
         expect(fs.existsSync(worktreePath)).toBe(true);
 
         // Directory name should be a friendly name (not a UUID).
