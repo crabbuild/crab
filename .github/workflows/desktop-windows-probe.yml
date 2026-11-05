@@ -7,7 +7,7 @@ permissions:
   actions: read
 jobs:
   ipc:
-    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') && !contains(github.event.head_commit.message, '[probe replay]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') && !contains(github.event.head_commit.message, '[probe replay]') && !contains(github.event.head_commit.message, '[probe native]') }}
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -162,3 +162,23 @@ jobs:
       - run: npm ci
       - run: npm run build:electron
       - run: npm test -- --maxWorkers 1 --minWorkers 1
+
+  native:
+    if: ${{ contains(github.event.head_commit.message, '[probe native]') }}
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41974776281
+          name: Windows-diagnostic-native-runtime
+          path: ${{ runner.temp }}/native-proof
+      - run: node .github/agent-rpc-probe.mjs "$RUNNER_TEMP/native-proof/crab-desktop-agent.exe"
