@@ -15,6 +15,7 @@ the current stable release.
 
 - Fixed daemon connections and default terminal startup on Windows. Live file
   descriptor handoff is Unix-only.
+- Show folder names for local repositories and workspaces opened on Windows.
 - Fixed Linux terminal handoff closing idle sessions before they could reattach.
 - Fixed Linux shutdown retaining browser files and connections in the persistent
   terminal daemon.

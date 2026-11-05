@@ -28,6 +28,7 @@ import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
 import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
+import { localPathName } from "./lib/local-path-name";
 import type { StartupCommand } from "./lib/terminal-presets";
 
 // Side-effect imports: register commands in the command-registry at startup.
@@ -385,7 +386,7 @@ function Shell() {
       if (!detail?.handle) return;
       addRepo({
         ...detail.handle,
-        label: detail.path.split("/").pop() ?? detail.path,
+        label: localPathName(detail.path),
         path: detail.path,
         openedAt: Date.now(),
       });

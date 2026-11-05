@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
+import { localPathName } from "../lib/local-path-name";
 import {
   ChevronDown,
   ChevronRight,
@@ -302,7 +303,7 @@ export function Sidebar({ onCollapse }: Props) {
     setBusy(true);
     try {
       const handle = await rpc.openLocal(picked);
-      addRepo({ ...handle, label: picked.split("/").pop() ?? picked, path: picked, openedAt: Date.now() });
+      addRepo({ ...handle, label: localPathName(picked), path: picked, openedAt: Date.now() });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -509,7 +510,7 @@ export function Sidebar({ onCollapse }: Props) {
                           const handle = await rpc.openLocal(wtPath);
                           addRepo({
                             ...handle,
-                            label: `↳ worktree:${wtPath.split("/").pop() ?? wtPath}`,
+                            label: `↳ worktree:${localPathName(wtPath)}`,
                             path: wtPath,
                             openedAt: Date.now(),
                           });
@@ -555,7 +556,7 @@ export function Sidebar({ onCollapse }: Props) {
                               const handle = await rpc.openLocal(wtPath);
                               addRepo({
                                 ...handle,
-                                label: `↳ worktree:${wtPath.split("/").pop() ?? wtPath}`,
+                                label: `↳ worktree:${localPathName(wtPath)}`,
                                 path: wtPath,
                                 openedAt: Date.now(),
                               });
