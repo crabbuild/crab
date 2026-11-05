@@ -21,6 +21,14 @@ use tracing::{debug, warn};
 
 use crate::{AgentError, Result, SharedStdout, notify};
 
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    // The agent owns stdin for NDJSON. Git must never inherit that pipe;
+    // commands that consume data supply their own stdin explicitly.
+    command.stdin(Stdio::null());
+    command
+}
+
 pub fn command() -> Result<Command> {
     let mut command = Command::new(resolve_crab_bin());
     crate::storage_auth::configure_command(&mut command)?;

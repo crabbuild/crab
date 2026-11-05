@@ -23,7 +23,6 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::{AgentError, Result};
@@ -114,7 +113,7 @@ pub async fn diff_index_patch(
         args.push("--".into());
         args.push(p.to_owned());
     }
-    let out = Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(work_dir)
         .output()
@@ -153,7 +152,7 @@ pub async fn diff_cached_patch(work_dir: &Path, path: Option<&str>) -> Result<Va
         args.push("--".into());
         args.push(p.to_owned());
     }
-    let out = Command::new("git")
+    let out = crate::shellout::git_command()
         .args(&args)
         .current_dir(work_dir)
         .output()
@@ -262,7 +261,7 @@ async fn validate_anchors_against_index(work_dir: &Path, hunks: &[HunkAnchor]) -
         // Unstage patches come from `git diff --cached`, so the
         // "new side" of the hunk is the index content; that's what
         // we compare against for staleness detection.
-        let out = Command::new("git")
+        let out = crate::shellout::git_command()
             .args(["show", &format!(":{}", h.path)])
             .current_dir(work_dir)
             .output()
@@ -518,7 +517,7 @@ async fn run_git_apply(work_dir: &Path, patch: &str, cached: bool, reverse: bool
     args.push("--unidiff-zero");
     args.push("-");
 
-    let mut child = Command::new("git")
+    let mut child = crate::shellout::git_command()
         .args(&args)
         .current_dir(work_dir)
         .stdin(std::process::Stdio::piped())
