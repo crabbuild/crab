@@ -50,6 +50,14 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
   inherited by the persistent PTY daemon. Closing them before daemon exec keeps
   the terminal daemon alive while app shutdown completes and browser files are
   released. All 23 Linux spawner tests and 46 macOS spawner/mode tests pass.
+- The three Linux live handoff failures reproduced in isolated Electron 33.
+  A readiness-driven reader now waits on inherited nonblocking descriptors;
+  it closes the descriptor after borrowed writes finish. All 33 handoff tests
+  pass in the Linux fixture and on macOS.
+- A native Windows runner reproduced filesystem socket failures. The named-pipe
+  transport passes real command execution and the 50-session stress check.
+  POSIX permission modes and live descriptor transfer are checked on Unix;
+  authentication, snapshot handling, and common session tests still run on Windows.
 
 ## Built-in storage connections
 
