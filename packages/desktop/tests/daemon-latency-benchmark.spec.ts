@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { DaemonServer } from "../electron/daemon/daemon-server";
+import { StreamDataBatcher } from "../electron/daemon/stream-data-batcher";
 import {
   PROTOCOL_VERSION,
   encodeFrame,
@@ -618,13 +619,29 @@ describe("Daemon Latency Benchmark", () => {
       const daemonLatencies: number[] = [];
       // A nearest-rank p99 with fewer than 100 samples measures the maximum.
       const iterations = 100;
+      const stages: Array<{ total: number; emit: number; enqueue: number; flush: number; receive: number }> = [];
+      let enqueuedAt = 0;
+      let flushedAt = 0;
+      const enqueue = StreamDataBatcher.prototype.enqueue;
+      const flush = StreamDataBatcher.prototype["flushClient"];
+      const batcher = server["batcher"];
+      batcher.enqueue = function (...args) {
+        enqueuedAt = performance.now();
+        return enqueue.apply(this, args);
+      };
+      batcher["flushClient"] = function (clientId) {
+        flushedAt = performance.now();
+        return flush.call(this, clientId);
+      };
 
       for (let i = 0; i < iterations; i++) {
         const dataPromise = waitForStreamData(stream, streamDecoder, 5000);
         const sentAt = performance.now();
         handle.emitData(`overhead-test-${i}\n`);
+        const emittedAt = performance.now();
         const { receivedAt } = await dataPromise;
         daemonLatencies.push(receivedAt - sentAt);
+        stages.push({ total: receivedAt - sentAt, emit: emittedAt - sentAt, enqueue: enqueuedAt - sentAt, flush: flushedAt - enqueuedAt, receive: receivedAt - flushedAt });
         await new Promise((r) => setTimeout(r, 12));
       }
 
@@ -639,6 +656,7 @@ describe("Daemon Latency Benchmark", () => {
       }
 
       daemonLatencies.sort((a, b) => a - b);
+      console.log("[DEBUG-a4f2] benchmark slowest phases", JSON.stringify(stages.sort((a, b) => b.total - a.total).slice(0, 5)));
       directLatencies.sort((a, b) => a - b);
 
       const daemonP50 = percentile(daemonLatencies, 50);
