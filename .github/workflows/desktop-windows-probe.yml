@@ -39,7 +39,7 @@ jobs:
   packaged:
     if: ${{ contains(github.event.head_commit.message, '[probe package]') || contains(github.event.head_commit.message, '[probe replay]') }}
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_PROFILE_RELEASE_OPT_LEVEL: 1
       CSC_IDENTITY_AUTO_DISCOVERY: false
@@ -59,13 +59,6 @@ jobs:
         if: env.REUSE_NATIVE == 'true'
         working-directory: .
         run: git diff --exit-code 87ab8f0f176 HEAD -- Cargo.toml Cargo.lock crab crates packages/desktop/agent packages/desktop/scripts/build-native.mjs
-      - uses: actions/download-artifact@v4
-        if: env.REUSE_NATIVE == 'true'
-        with:
-          github-token: ${{ github.token }}
-          run-id: 41996136547
-          name: Windows-stdin-isolated-native-runtime
-          path: packages/desktop/resources/native/win-x64
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
@@ -76,6 +69,28 @@ jobs:
         with:
           toolchain: 1.97.0
       - run: npm ci
+      - name: Wait for native dashboard qualification
+        if: env.REUSE_NATIVE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in {1..96}; do
+            status="$(gh run view 41996136547 --repo "$GITHUB_REPOSITORY" --json status,conclusion --jq '.status + ":" + .conclusion')"
+            case "$status" in
+              completed:success) exit 0 ;;
+              completed:*) echo "Native dashboard qualification did not pass: $status"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "Timed out waiting for the rebuilt sidecar"
+          exit 1
+      - uses: actions/download-artifact@v4
+        if: env.REUSE_NATIVE == 'true'
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41996136547
+          name: Windows-stdin-isolated-native-runtime
+          path: packages/desktop/resources/native/win-x64
       - id: build
         run: |
           if [ "$REUSE_NATIVE" = true ]; then
