@@ -160,6 +160,27 @@ describe("TerminalHost", () => {
     vi.useRealTimers();
   });
 
+  it("uses the Windows command processor when no command is supplied", () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const previousEnvironment = { SHELL: process.env.SHELL, COMSPEC: process.env.COMSPEC };
+    const { spawner, spawnCalls } = createMockSpawner();
+    const host = new TerminalHost({ spawnSubprocess: spawner });
+    try {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      delete process.env.SHELL;
+      process.env.COMSPEC = "C:\\Windows\\System32\\cmd.exe";
+      host.createOrAttach({ sessionId: "native-shell", cols: 80, rows: 24, streamClient: createMockClient() });
+      expect(spawnCalls[0].file).toBe(process.env.COMSPEC);
+    } finally {
+      host.dispose();
+      Object.defineProperty(process, "platform", platformDescriptor);
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   // -------------------------------------------------------------------------
   // createOrAttach idempotency
   // -------------------------------------------------------------------------
