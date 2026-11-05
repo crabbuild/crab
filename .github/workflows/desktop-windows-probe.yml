@@ -221,3 +221,19 @@ jobs:
           name: Windows-diagnostic-native-runtime
           path: ${{ runner.temp }}/native-proof
       - run: node .github/agent-rpc-probe.mjs "$RUNNER_TEMP/native-proof/crab-desktop-agent.exe"
+      - name: Isolate Git child process options
+        if: ${{ !cancelled() && contains(github.event.head_commit.message, '[probe process]') }}
+        run: |
+          probe="$RUNNER_TEMP/git-process-probe"
+          mkdir -p "$probe/src"
+          cp .github/git-process-probe.rs "$probe/src/main.rs"
+          cat > "$probe/Cargo.toml" <<'TOML'
+          [package]
+          name = "git-process-probe"
+          version = "0.1.0"
+          edition = "2024"
+          [dependencies]
+          tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process"] }
+          TOML
+          CARGO_TARGET_DIR="$RUNNER_TEMP/git-process-probe-target" cargo build --manifest-path "$probe/Cargo.toml"
+          node .github/git-process-probe.mjs "$RUNNER_TEMP/git-process-probe-target/debug/git-process-probe.exe"

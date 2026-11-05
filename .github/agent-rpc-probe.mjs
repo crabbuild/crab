@@ -80,7 +80,10 @@ try {
     }
   } else console.log('Git did not write a Trace2 event');
   if (process.platform === 'win32' && child?.pid) {
-    const script = `Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${child.pid}' | Select-Object ProcessId,Name | ConvertTo-Json -Compress`;
+    const script = `Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${child.pid}' | ForEach-Object {
+      $verb = if ($_.CommandLine -match 'rev-parse') { 'rev-parse' } elseif ($_.CommandLine -match 'remote.+get-url') { 'remote get-url' } elseif ($_.CommandLine -match 'config.+--get') { 'config --get' } else { 'other' }
+      [pscustomobject]@{ pid = $_.ProcessId; name = $_.Name; executable = $_.ExecutablePath; verb = $verb }
+    } | ConvertTo-Json -Compress`;
     try { console.log('Remaining sidecar children:', execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 5000 }).trim()); }
     catch { console.log('Unable to query sidecar children'); }
   }
