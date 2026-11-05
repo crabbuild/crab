@@ -1,7 +1,7 @@
 name: Desktop Windows IPC qualification
 on:
   push:
-    branches: [codex/qualify-windows-ipc]
+    branches: [codex/qualify-windows-daemon-launch]
 permissions:
   contents: read
   actions: read
@@ -111,7 +111,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install awscli
       - name: Trace packaged smoke phases without logging payloads
         run: |
           python - <<'PY'
@@ -158,7 +157,28 @@ jobs:
               assert matches == 1, 'Expected exactly one duplicate native test invocation'
               qualifier.write_text(code, encoding='utf-8')
           PY
-          python scripts/qualify-v2.py
+          python - <<'PY'
+          from pathlib import Path
+          spec = Path('tests/e2e/core-v2.spec.ts')
+          source = spec.read_text(encoding='utf-8')
+          source = source.replace('import { tmpdir } from "node:os";', 'import { homedir, tmpdir } from "node:os";\nimport { PROTOCOL_VERSION } from "../../electron/daemon/protocol";')
+          source = source.replace('  let application: Awaited', '  let daemonPid: number | undefined;\n  let application: Awaited', 1)
+          needle = '    const page = await application.firstWindow();'
+          source = source.replace(needle, needle + '''
+              await expect.poll(async () => {
+                try { return (await page.evaluate(() => window.crab.getPtyMode())).resolvedMode; }
+                catch { return undefined; }
+              }, { timeout: 15000 }).toBe("daemon");
+              daemonPid = JSON.parse(readFileSync(path.join(homedir(), ".crab", "desktop", "daemon", `daemon-v${PROTOCOL_VERSION}.pid`), "utf8")).pid;
+          ''', 1)
+          source = source.replace('    await application?.close();', '''    await application?.close();
+              if (daemonPid) expect(() => process.kill(daemonPid!, 0)).not.toThrow();''', 1)
+          spec.write_text(source, encoding='utf-8')
+          PY
+          E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke core-v2.spec.ts --grep 'packaged updater'
+      - name: Check real daemon startup and readiness
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm test -- daemon-spawner.spec.ts --maxWorkers 1 --minWorkers 1
       - uses: actions/upload-artifact@v4
         if: env.REUSE_NATIVE == 'true'
         with:
