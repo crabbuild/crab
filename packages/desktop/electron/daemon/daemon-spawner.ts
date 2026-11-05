@@ -10,6 +10,7 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fork, spawn, type ForkOptions } from "node:child_process";
+import { socketAddress } from "./socket-address";
 
 import {
 PROTOCOL_VERSION,
@@ -98,7 +99,7 @@ export class DaemonSpawner {
    * Returns true if the connection succeeds (daemon is listening).
    */
   async probe(socketPath?: string): Promise<boolean> {
-    const target = socketPath ?? this.socketPath;
+    const target = socketAddress(socketPath ?? this.socketPath);
 
     return new Promise<boolean>((resolve) => {
       const socket = net.createConnection(target);
@@ -130,7 +131,7 @@ export class DaemonSpawner {
    * it responds within 2 seconds. Returns true if the daemon is healthy.
    */
   async healthCheck(socketPath?: string, token?: string): Promise<boolean> {
-    const target = socketPath ?? this.socketPath;
+    const target = socketAddress(socketPath ?? this.socketPath);
     const authToken = token ?? this.readToken();
 
     if (!authToken) return false;
@@ -365,6 +366,8 @@ export class DaemonSpawner {
    * @throws Error if the path is too long.
    */
   validateSocketPathLength(socketPath: string): void {
+    // Named-pipe addresses are bounded separately from their control-file paths.
+    if (process.platform === "win32") return;
     const pathBytes = Buffer.byteLength(socketPath, "utf-8");
     const limit =
       process.platform === "darwin"

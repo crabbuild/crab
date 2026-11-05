@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 /**
  * Latency Benchmark for PTY Daemon
  *
@@ -127,7 +128,7 @@ function createServerPaths(dir: string) {
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }
