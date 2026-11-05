@@ -569,6 +569,9 @@ mod tests {
             .output()
             .unwrap();
 
+        // These fixtures assert exact LF bytes after Git checkout/cherry-pick,
+        // independently of the developer or runner's core.autocrlf setting.
+        std::fs::write(dir.join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
         std::fs::write(dir.join("file.txt"), "initial\n").unwrap();
         Command::new("git")
             .args(["add", "."])

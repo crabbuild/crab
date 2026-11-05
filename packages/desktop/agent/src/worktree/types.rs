@@ -39,7 +39,7 @@ pub struct WorktreeEntry {
 /// appear in git's worktree list, preserves metadata for existing ones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeMeta {
-    /// Path to the worktree (matches [`WorktreeEntry::path`]).
+    /// Canonical path on disk; hydrated entries use [`WorktreeEntry::path`].
     pub path: PathBuf,
     /// User-chosen display name shown in the worktree card.
     pub display_name: Option<String>,
