@@ -94,6 +94,28 @@ async function waitForServer(server: net.Server): Promise<void> {
   });
 }
 
+function writeReadyDaemon(dir: string): string {
+  const script = path.join(dir, "ready-daemon.cjs");
+  const serverModule = path.resolve(__dirname, "../dist-electron/daemon/daemon-server.cjs");
+  fs.writeFileSync(script, `
+    const path = require("node:path");
+    const { DaemonServer } = require(${JSON.stringify(serverModule)});
+    const socketPath = process.argv[process.argv.indexOf("--socket") + 1];
+    const { dir, name } = path.parse(socketPath);
+    const server = new DaemonServer({
+      socketPath, tokenPath: path.join(dir, name + ".token"),
+      pidPath: path.join(dir, name + ".pid"),
+      spawnSubprocess() { throw new Error("No terminal expected"); },
+      idleTimeoutMs: 0,
+    });
+    server.start().then(() => {
+      process.send?.({ type: "ready", pid: process.pid });
+      setTimeout(() => void server.shutdown({ killSessions: true }), 1500);
+    });
+  `);
+  return script;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -396,20 +418,8 @@ describe("DaemonSpawner", () => {
       );
     });
 
-    it("resolves when daemon sends ready IPC message", async () => {
-      // Create a script that sends ready immediately
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `// Daemon that sends ready immediately
-         if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         // Keep alive briefly so disconnect works
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+    it("resolves when the launched daemon is ready", async () => {
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
@@ -502,17 +512,7 @@ describe("DaemonSpawner", () => {
     });
 
     it("spawns new daemon when probe fails", async () => {
-      // Create a script that sends ready
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
@@ -542,17 +542,7 @@ describe("DaemonSpawner", () => {
       });
       await waitForServer(server);
 
-      // Create a script that sends ready for the respawn
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
