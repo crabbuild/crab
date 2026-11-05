@@ -98,9 +98,7 @@ export class InProcessBridge {
     this.shellEnvPromise = opts.shellEnvPromise;
     this.writeSessionLog = opts.writeSessionLog;
 
-    opts.app.on("before-quit", () => {
-      this.shuttingDown = true;
-    });
+    opts.app.on("before-quit", () => this.dispose());
   }
 
   // -------------------------------------------------------------------------
@@ -133,12 +131,6 @@ export class InProcessBridge {
    * terminal.
    */
   async handleSpawn(opts: SpawnOptions): Promise<SpawnResult> {
-    if (this.shuttingDown) {
-      throw Object.assign(new Error("Application is shutting down"), {
-        code: "app-shutting-down",
-      });
-    }
-
     const id = `term-l-${++this.termCounter}`;
     const requestedShell = opts.shell ?? this.getDefaultShell();
     const requestedCwd = opts.cwd || process.env.HOME || "/";
@@ -149,6 +141,12 @@ export class InProcessBridge {
       this.shellEnvPromise,
       new Promise<void>((resolve) => setTimeout(resolve, 2000)),
     ]);
+
+    if (this.shuttingDown) {
+      throw Object.assign(new Error("Application is shutting down"), {
+        code: "app-shutting-down",
+      });
+    }
 
     const termEnv = this.buildTerminalEnv({
       CRAB_TERMINAL: "1",
@@ -303,6 +301,7 @@ export class InProcessBridge {
 
   /** Kill all active terminals and release resources. */
   dispose(): void {
+    this.shuttingDown = true;
     for (const [id, term] of this.terminals) {
       try {
         term.kill();

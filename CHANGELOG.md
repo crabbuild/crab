@@ -15,8 +15,11 @@ the current stable release.
 
 - Fixed daemon connections and default terminal startup on Windows. Live file
   descriptor handoff is Unix-only.
-- Fixed Windows repository open hanging on Git subprocesses and app shutdown
-  retaining launch handles in the terminal daemon.
+- Fixed Windows repository opening and dashboard activity hanging on Git
+  subprocesses.
+- Desktop shutdown closes local terminals and waits for the native sidecar
+  to release storage sessions. Durable daemon terminals remain available
+  after restarting the app.
 - Show folder names for local repositories and workspaces opened on Windows.
 - Fixed Linux terminal handoff closing idle sessions before they could reattach.
 - Fixed Linux shutdown retaining browser files and connections in the persistent

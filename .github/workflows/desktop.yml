@@ -73,7 +73,9 @@ jobs:
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
-      - run: npm ci
+      - name: Install desktop dependencies
+        # Electron's install script downloads its runtime outside npm's cache.
+        run: npm ci || npm ci
       - name: Validate release version
         if: ${{ inputs.release }}
         env:
@@ -130,7 +132,8 @@ jobs:
             # Unsigned builds must omit signing inputs entirely.
             unset CSC_LINK CSC_KEY_PASSWORD WIN_CSC_LINK WIN_CSC_KEY_PASSWORD
             unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
-            node scripts/package.mjs
+            # Installer tools are downloaded separately from the npm dependencies.
+            node scripts/package.mjs || node scripts/package.mjs
           fi
       - name: Verify signed and notarized macOS application
         if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' }}
