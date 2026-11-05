@@ -1,0 +1,23 @@
+name: Desktop Windows IPC qualification
+on:
+  push:
+    branches: [codex/qualify-windows-ipc]
+permissions:
+  contents: read
+jobs:
+  ipc:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - run: npm ci
+      - run: npm test -- daemon-spawner.spec.ts daemon-server.spec.ts daemon-client.spec.ts --maxWorkers 2 --minWorkers 1
