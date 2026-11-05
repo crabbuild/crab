@@ -68,7 +68,7 @@ jobs:
         if: env.REUSE_NATIVE != 'true'
         with:
           toolchain: 1.97.0
-      - run: npm ci
+      - run: npm ci || npm ci
       - name: Wait for native dashboard qualification
         if: env.REUSE_NATIVE == 'true'
         env:
@@ -125,7 +125,7 @@ jobs:
           path: packages/desktop/resources/native/win-x64/
           if-no-files-found: error
           retention-days: 3
-      - run: node scripts/package.mjs --win
+      - run: node scripts/package.mjs --win --dir
       - name: Check the sidecar exits with a repository open
         continue-on-error: true
         run: CRAB_PROBE_KEEP_REPO_OPEN=1 node ../../.github/agent-rpc-probe.mjs resources/native/win-x64/crab-desktop-agent.exe
@@ -158,7 +158,7 @@ jobs:
             launchProcess.once("close", (code, signal) => console.log(`[DEBUG-a4f2] launch process close ${code} ${signal}`));
             const relay = (chunk: Buffer) => {
               for (const line of chunk.toString().split(/\\r?\\n/)) {
-                if (line.startsWith("[DEBUG-a4f2]") || line.includes("Waiting for the debugger to disconnect")) console.log(line);
+                if (line.startsWith("[DEBUG-a4f2]") || line.includes("Waiting for the debugger to disconnect") || /(?:FATAL:|Check failed|Assertion failed|fatal error)/i.test(line)) console.log(line);
               }
             };
             launchProcess.stdout?.on("data", relay);
@@ -191,17 +191,27 @@ jobs:
               assert matches == 1, 'Expected exactly one duplicate native test invocation'
               qualifier.write_text(code, encoding='utf-8')
           PY
+          python - <<'PY'
+          from pathlib import Path
+          smoke = Path('scripts/smoke.mjs')
+          code = smoke.read_text(encoding='utf-8')
+          assert code.count('"core-v2.spec.ts"]') == 1
+          smoke.write_text(code.replace('"core-v2.spec.ts"]', '"core-v2.spec.ts", "--repeat-each=3", "--workers=1"]'), encoding='utf-8')
+          PY
           python scripts/qualify-v2.py
-      - uses: actions/upload-artifact@v4
-        if: env.REUSE_NATIVE == 'true'
-        with:
-          name: Windows-diagnostic-installer
-          path: |
-            packages/desktop/release/Crab-*-win-x64.exe
-            packages/desktop/release/Crab-*-win-x64.exe.blockmap
-            packages/desktop/release/alpha.yml
-          if-no-files-found: error
-          retention-days: 3
+      - name: Read application error events for Crab
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $events = Get-WinEvent -FilterHashtable @{ LogName='Application'; Id=1000; StartTime=(Get-Date).AddMinutes(-20) } -ErrorAction SilentlyContinue
+          foreach ($event in $events) {
+            $xml = [xml]$event.ToXml()
+            $fields = @{}
+            foreach ($field in $xml.Event.EventData.Data) { $fields[$field.Name] = $field.'#text' }
+            if ($fields['AppName'] -eq 'Crab.exe') {
+              Write-Host "[DEBUG-a4f2] WER Crab pid=$($fields['ProcessId']) module=$($fields['ModuleName']) exception=$($fields['ExceptionCode']) offset=$($fields['FaultingOffset'])"
+            }
+          }
       - name: Broad Windows regression suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' && env.REUSE_NATIVE != 'true' }}
         run: npm test -- --maxWorkers 1 --minWorkers 1
