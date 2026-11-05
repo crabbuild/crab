@@ -295,4 +295,4 @@ jobs:
           path: packages/desktop/resources/native/win-x64/
           if-no-files-found: error
           retention-days: 3
-      - run: node .github/agent-rpc-probe.mjs packages/desktop/resources/native/win-x64/crab-desktop-agent.exe
+      - run: CRAB_PROBE_KEEP_REPO_OPEN=1 CRAB_PROBE_DASHBOARD=1 node .github/agent-rpc-probe.mjs packages/desktop/resources/native/win-x64/crab-desktop-agent.exe
