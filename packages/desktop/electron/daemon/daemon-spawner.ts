@@ -9,7 +9,8 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fork, spawn, type ForkOptions } from "node:child_process";
+import { execFile, fork, spawn, type ForkOptions } from "node:child_process";
+import { promisify } from "node:util";
 import { socketAddress } from "./socket-address";
 
 import {
@@ -38,7 +39,7 @@ const PROBE_TIMEOUT_MS = 1000;
 /** Timeout for health check (hello + ping exchange). */
 const HEALTH_CHECK_TIMEOUT_MS = 2000;
 
-/** Timeout waiting for daemon `ready` IPC message after spawn. */
+/** Timeout waiting for daemon readiness. */
 const SPAWN_READY_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ export class DaemonSpawner {
    */
   async healthCheck(socketPath?: string, token?: string): Promise<boolean> {
     const target = socketAddress(socketPath ?? this.socketPath);
-    const authToken = token ?? this.readToken();
+    const authToken = token ?? this.readToken(socketPath);
 
     if (!authToken) return false;
 
@@ -199,7 +200,7 @@ export class DaemonSpawner {
 
   /**
    * Start the daemon as a detached child with ELECTRON_RUN_AS_NODE=1.
-   * Waits for the `ready` IPC message (10s timeout), then unrefs the child.
+   * Waits for authenticated pipe readiness on Windows and IPC ready on Unix.
    *
    * @throws Error if the daemon fails to start or doesn't send `ready` in time.
    */
@@ -213,6 +214,11 @@ export class DaemonSpawner {
     // Ensure socket directory exists
     const dir = path.dirname(target);
     fs.mkdirSync(dir, { recursive: true });
+
+    if (process.platform === "win32") {
+      await this.spawnWindows(entry, target);
+      return;
+    }
 
     return new Promise<void>((resolve, reject) => {
       const options: ForkOptions = {
@@ -386,9 +392,36 @@ export class DaemonSpawner {
   // Private helpers
   // -------------------------------------------------------------------------
 
-  private readToken(): string | null {
+  private async spawnWindows(entry: string, socketPath: string): Promise<void> {
+    // libuv inherits Windows handles even with ignored stdio. The system
+    // shell starts an independent process, so the durable daemon cannot
+    // retain Electron's launch pipes after the application exits.
+    const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const args = literal(`"${entry}" --socket "${socketPath}"`);
+    const command = `$ErrorActionPreference='Stop'; (Start-Process -FilePath ${literal(process.execPath)} -ArgumentList ${args} -WindowStyle Hidden -PassThru).Id`;
+    const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
+    const { stdout } = await promisify(execFile)(powershell, [
+      "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64"),
+    ], {
+      windowsHide: true,
+      timeout: SPAWN_READY_TIMEOUT_MS,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    });
+    const pid = Number(stdout.trim());
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Daemon launcher did not return a process ID");
+    while (Date.now() < deadline) {
+      if (!isProcessAlive(pid)) throw new Error("Daemon exited prematurely");
+      if (await this.healthCheck(socketPath)) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    try { process.kill(pid); } catch { /* The daemon already exited. */ }
+    throw new Error(`Daemon pipe did not become ready within ${SPAWN_READY_TIMEOUT_MS}ms`);
+  }
+
+  private readToken(socketPath = this.socketPath): string | null {
     try {
-      return fs.readFileSync(this.tokenPath, "utf-8").trim();
+      return fs.readFileSync(socketPath.replace(/\.sock$/, ".token"), "utf-8").trim();
     } catch {
       return null;
     }
