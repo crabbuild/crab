@@ -8,7 +8,6 @@
 use std::path::Path;
 
 use serde::Serialize;
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -38,7 +37,7 @@ type Result<T> = std::result::Result<T, WarmerError>;
 
 /// Resolve HEAD to a short sha for use as the cache revision key.
 async fn resolve_head(work_dir: &Path) -> Result<String> {
-    let output = Command::new("git")
+    let output = crate::shellout::git_command()
         .kill_on_drop(true)
         .args(["rev-parse", "HEAD"])
         .current_dir(work_dir)
@@ -108,7 +107,7 @@ pub async fn warm_file_summaries(
     let head = resolve_head(work_dir).await?;
     check_cancelled(cancel)?;
 
-    let output = Command::new("git")
+    let output = crate::shellout::git_command()
         .kill_on_drop(true)
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
@@ -206,7 +205,7 @@ pub async fn warm_git_log(
     // Use a record separator (%x1e) between fields and %x1f between entries
     // to avoid ambiguity with commit messages containing newlines.
     let format = "%H%x1e%an%x1e%aI%x1e%s";
-    let output = Command::new("git")
+    let output = crate::shellout::git_command()
         .kill_on_drop(true)
         .args(["log", "--format", format, "-n", "500"])
         .current_dir(work_dir)
@@ -281,7 +280,7 @@ pub async fn warm_pointer_metadata(
     check_cancelled(cancel)?;
 
     // Get the list of tracked files.
-    let output = Command::new("git")
+    let output = crate::shellout::git_command()
         .kill_on_drop(true)
         .args(["ls-files", "-z"])
         .current_dir(work_dir)

@@ -179,6 +179,11 @@ On macOS and Windows, `python3 scripts/qualify-v2.py` starts an owned native
 RustFS fixture and runs the native tests and packaged smoke against the same
 bundled CLI. Set `CRAB_PACKAGED_APP` to qualify a package outside `release/`.
 
+Windows daemon terminals use named pipes and the Windows command processor
+when no shell executable is supplied. Live descriptor handoff and POSIX file
+mode checks run on macOS and Linux. Windows still runs the common terminal
+tests and packaged storage qualification.
+
 ## v2 behavior
 
 - Remote repository authority and verified content come from the current SDK;

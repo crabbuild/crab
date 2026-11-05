@@ -420,8 +420,9 @@ describe("HistoryManager", () => {
 
   describe("error handling", () => {
     it("disables on failure and continues operating", () => {
-      // Use a path that will cause permission errors
-      const hm = new HistoryManager({ basePath: "/dev/null/impossible" });
+      const blocked = path.join(tmpDir, "file-in-place-of-directory");
+      fs.writeFileSync(blocked, "");
+      const hm = new HistoryManager({ basePath: path.join(blocked, "history") });
 
       // Should not throw — just disables
       hm.openSession("sess-1", { cwd: "/tmp", cols: 80, rows: 24 });

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   TerminalHost,
   SessionTombstonedError,
@@ -158,6 +161,27 @@ describe("TerminalHost", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("uses the Windows command processor when no command is supplied", () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const previousEnvironment = { SHELL: process.env.SHELL, COMSPEC: process.env.COMSPEC };
+    const { spawner, spawnCalls } = createMockSpawner();
+    const host = new TerminalHost({ spawnSubprocess: spawner });
+    try {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      delete process.env.SHELL;
+      process.env.COMSPEC = "C:\\Windows\\System32\\cmd.exe";
+      host.createOrAttach({ sessionId: "native-shell", cols: 80, rows: 24, streamClient: createMockClient() });
+      expect(spawnCalls[0].file).toBe(process.env.COMSPEC);
+    } finally {
+      host.dispose();
+      Object.defineProperty(process, "platform", platformDescriptor);
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -759,12 +783,14 @@ describe("TerminalHost", () => {
     it("listSessions returns info for all sessions", () => {
       const { spawner, spawned } = createMockSpawner();
       const host = new TerminalHost({ spawnSubprocess: spawner });
+      const initialCwd = path.join(os.tmpdir(), "workspace", "main");
+      const updatedCwd = path.join(initialCwd, "src");
 
       host.createOrAttach({
         sessionId: "sess-1",
         cols: 80,
         rows: 24,
-        cwd: "/workspace/main",
+        cwd: initialCwd,
         streamClient: createMockClient(),
       });
 
@@ -780,7 +806,7 @@ describe("TerminalHost", () => {
         },
       });
 
-      spawned[0]!.emitData("\x1b]7;file:///workspace/main/src\x07");
+      spawned[0]!.emitData(`\x1b]7;${pathToFileURL(updatedCwd).href}\x07`);
 
       const sessions = host.listSessions();
       expect(sessions).toHaveLength(2);
@@ -791,8 +817,8 @@ describe("TerminalHost", () => {
       expect(s1!.isAlive).toBe(true);
       expect(s1!.cols).toBe(80);
       expect(s1!.rows).toBe(24);
-      expect(s1!.initialCwd).toBe("/workspace/main");
-      expect(s1!.cwd).toBe("/workspace/main/src");
+      expect(s1!.initialCwd).toBe(initialCwd);
+      expect(path.normalize(s1!.cwd ?? "")).toBe(updatedCwd);
       expect(s1!.agentMeta).toBeUndefined();
 
       const s2 = sessions.find((s) => s.sessionId === "sess-2");
@@ -804,8 +830,8 @@ describe("TerminalHost", () => {
 
       const liveSessions = host.getLiveSessionInfo();
       const liveS1 = liveSessions.find((s) => s.id === "sess-1");
-      expect(liveS1!.initialCwd).toBe("/workspace/main");
-      expect(liveS1!.cwd).toBe("/workspace/main/src");
+      expect(liveS1!.initialCwd).toBe(initialCwd);
+      expect(path.normalize(liveS1!.cwd ?? "")).toBe(updatedCwd);
     });
 
     it("getCwd returns null initially, then cwd after OSC-7", () => {
@@ -821,8 +847,9 @@ describe("TerminalHost", () => {
 
       expect(host.getCwd("sess-1")).toBeNull();
 
-      spawned[0]!.emitData("\x1b]7;file:///home/user/project\x07");
-      expect(host.getCwd("sess-1")).toBe("/home/user/project");
+      const cwd = path.join(os.tmpdir(), "project");
+      spawned[0]!.emitData(`\x1b]7;${pathToFileURL(cwd).href}\x07`);
+      expect(path.normalize(host.getCwd("sess-1") ?? "")).toBe(cwd);
     });
 
     it("onSessionExit callback is invoked when session exits", () => {

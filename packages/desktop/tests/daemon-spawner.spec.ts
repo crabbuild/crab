@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -79,7 +80,7 @@ function createMockDaemonServer(
     });
   });
 
-  server.listen(socketPath);
+  server.listen(socketAddress(socketPath));
   return server;
 }
 
@@ -91,6 +92,28 @@ async function waitForServer(server: net.Server): Promise<void> {
       server.on("listening", resolve);
     }
   });
+}
+
+function writeReadyDaemon(dir: string): string {
+  const script = path.join(dir, "ready-daemon.cjs");
+  const serverModule = path.resolve(__dirname, "../dist-electron/daemon/daemon-server.cjs");
+  fs.writeFileSync(script, `
+    const path = require("node:path");
+    const { DaemonServer } = require(${JSON.stringify(serverModule)});
+    const socketPath = process.argv[process.argv.indexOf("--socket") + 1];
+    const { dir, name } = path.parse(socketPath);
+    const server = new DaemonServer({
+      socketPath, tokenPath: path.join(dir, name + ".token"),
+      pidPath: path.join(dir, name + ".pid"),
+      spawnSubprocess() { throw new Error("No terminal expected"); },
+      idleTimeoutMs: 0,
+    });
+    server.start().then(() => {
+      process.send?.({ type: "ready", pid: process.pid });
+      setTimeout(() => void server.shutdown({ killSessions: true }), 1500);
+    });
+  `);
+  return script;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,20 +418,8 @@ describe("DaemonSpawner", () => {
       );
     });
 
-    it("resolves when daemon sends ready IPC message", async () => {
-      // Create a script that sends ready immediately
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `// Daemon that sends ready immediately
-         if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         // Keep alive briefly so disconnect works
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+    it("resolves when the launched daemon is ready", async () => {
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
@@ -441,7 +452,7 @@ describe("DaemonSpawner", () => {
       expect(() => spawner.validateSocketPathLength("/tmp/short.sock")).not.toThrow();
     });
 
-    it("rejects paths exceeding the OS limit", () => {
+    it("applies the platform IPC address limit", () => {
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: "/fake/entry.js",
@@ -450,9 +461,12 @@ describe("DaemonSpawner", () => {
       // Create a path that exceeds 104 bytes (macOS limit)
       const longPath = "/tmp/" + "a".repeat(200) + ".sock";
 
-      expect(() => spawner.validateSocketPathLength(longPath)).toThrow(
-        /Socket path exceeds/,
-      );
+      const validate = () => spawner.validateSocketPathLength(longPath);
+      if (process.platform === "win32") {
+        expect(validate).not.toThrow();
+      } else {
+        expect(validate).toThrow(/Socket path exceeds/);
+      }
     });
   });
 
@@ -498,17 +512,7 @@ describe("DaemonSpawner", () => {
     });
 
     it("spawns new daemon when probe fails", async () => {
-      // Create a script that sends ready
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
@@ -538,17 +542,7 @@ describe("DaemonSpawner", () => {
       });
       await waitForServer(server);
 
-      // Create a script that sends ready for the respawn
-      const scriptPath = path.join(tmpDir, "ready-daemon.js");
-      fs.writeFileSync(
-        scriptPath,
-        `if (process.send) {
-           process.send({ type: "ready", pid: process.pid });
-         }
-         setTimeout(() => process.exit(0), 500);
-        `,
-      );
-
+      const scriptPath = writeReadyDaemon(tmpDir);
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: scriptPath,
@@ -570,15 +564,16 @@ describe("DaemonSpawner", () => {
 
   describe("path derivation", () => {
     it("derives correct socket/token/pid paths from socketDir", () => {
+      const socketDir = path.join(os.tmpdir(), "crab", "desktop", "daemon");
       const spawner = new DaemonSpawner({
-        socketDir: "/home/user/.crab/desktop/daemon",
+        socketDir,
         entryPath: "/app/daemon-main.js",
         protocolVersion: 2,
       });
 
-      expect(spawner.socketPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.sock");
-      expect(spawner.tokenPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.token");
-      expect(spawner.pidPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.pid");
+      expect(spawner.socketPath).toBe(path.join(socketDir, "daemon-v2.sock"));
+      expect(spawner.tokenPath).toBe(path.join(socketDir, "daemon-v2.token"));
+      expect(spawner.pidPath).toBe(path.join(socketDir, "daemon-v2.pid"));
     });
   });
 });

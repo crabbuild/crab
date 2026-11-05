@@ -13,6 +13,12 @@ the current stable release.
 
 ### Desktop
 
+- Fixed daemon connections and default terminal startup on Windows. Live file
+  descriptor handoff is Unix-only.
+- Fixed Windows repository open hanging on Git subprocesses and app shutdown
+  retaining launch handles in the terminal daemon.
+- Show folder names for local repositories and workspaces opened on Windows.
+- Fixed Linux terminal handoff closing idle sessions before they could reattach.
 - Fixed Linux shutdown retaining browser files and connections in the persistent
   terminal daemon.
 - Fixed unsigned installer packaging and worktree metadata persistence across
@@ -33,6 +39,7 @@ the current stable release.
 
 ### CLI
 
+- Linux release binaries target Ubuntu 24.04 compatible systems (glibc 2.39).
 - Reset native Capsule storage schemas to version 1, retaining the latest
   authenticated layouts and resource bounds. Removed experimental-format readers,
   version-dependent geometry and `doctor --migrate-chunk-index`. Republish

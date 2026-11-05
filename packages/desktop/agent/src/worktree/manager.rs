@@ -614,7 +614,7 @@ impl WorktreeManager {
             "worktree cherry-pick"
         );
 
-        let output = tokio::process::Command::new("git")
+        let output = crate::shellout::git_command()
             .args(["cherry-pick", sha])
             .current_dir(&resolved)
             .output()
@@ -714,7 +714,7 @@ fn find_hydrated_worktree(
 
 /// Run a git command in the given directory and return stdout.
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -794,7 +794,7 @@ async fn scan_for_pointer_files(
 
     // Use `git cat-file --batch` to efficiently read blob contents.
     // Feed each path as `HEAD:<path>` to get the blob content.
-    let mut child = tokio::process::Command::new("git")
+    let mut child = crate::shellout::git_command()
         .args(["cat-file", "--batch"])
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::piped())

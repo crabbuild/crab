@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 /**
  * Latency Benchmark for PTY Daemon
  *
@@ -127,7 +128,7 @@ function createServerPaths(dir: string) {
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }
@@ -615,7 +616,8 @@ describe("Daemon Latency Benchmark", () => {
 
       // Measure daemon path latency
       const daemonLatencies: number[] = [];
-      const iterations = 50;
+      // A nearest-rank p99 with fewer than 100 samples measures the maximum.
+      const iterations = 100;
 
       for (let i = 0; i < iterations; i++) {
         const dataPromise = waitForStreamData(stream, streamDecoder, 5000);

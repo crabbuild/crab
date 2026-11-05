@@ -398,7 +398,8 @@ describe("KnownHostsManager", () => {
 
     it("contains start (S) and end (E) markers", () => {
       const { manager } = createManager(tmpDir);
-      const key = generateTestKey();
+      // The walk can return to its starting cell. Use a key whose endpoints differ.
+      const key = Buffer.from("crab-known-host-randomart-fixture");
 
       const art = manager.generateAsciiArt(key);
 

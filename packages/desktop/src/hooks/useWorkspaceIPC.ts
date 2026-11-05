@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "../state";
 import type { RepoStatus, WorkspaceConfig } from "../state";
+import { localPathName } from "../lib/local-path-name";
 
 const LS_WORKSPACE = "crab.workspace.v1";
 
@@ -35,7 +36,7 @@ export function useWorkspaceIPC() {
 
     const unsubscribe = window.crab.workspace.onDiscovered(
       ({ rootPath, repos }: { rootPath: string; repos: Array<{ absolutePath: string; relativePath: string; name: string }> }) => {
-        const name = rootPath.split("/").pop() ?? rootPath.split("\\").pop() ?? "Workspace";
+        const name = localPathName(rootPath);
         lastRootPathRef.current = rootPath;
 
         // Persist workspace paths so they survive reload/restart.

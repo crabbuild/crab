@@ -15,6 +15,7 @@ import * as path from "node:path";
 
 import { DaemonServer } from "../electron/daemon/daemon-server";
 import { HistoryManager } from "../electron/daemon/history-manager";
+import { socketAddress } from "../electron/daemon/socket-address";
 import {
   PROTOCOL_VERSION,
   encodeFrame,
@@ -163,7 +164,7 @@ function writeCrashedSession(
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }

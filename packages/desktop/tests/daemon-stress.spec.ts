@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 /**
  * Stress and Soak Tests for PTY Daemon
  *
@@ -17,6 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { DaemonServer } from "../electron/daemon/daemon-server";
+import { DaemonClient } from "../electron/daemon/daemon-client";
 import {
   PROTOCOL_VERSION,
   encodeFrame,
@@ -28,7 +30,7 @@ import {
   type DaemonEvent,
 } from "../electron/daemon/protocol";
 import { CircuitBreaker, type CircuitState } from "../electron/daemon/circuit-breaker";
-import type { SubprocessHandle } from "../electron/daemon/types";
+import type { SessionInfo, SubprocessHandle } from "../electron/daemon/types";
 import type {
   SubprocessSpawner,
   SubprocessSpawnOptions,
@@ -159,16 +161,17 @@ function createTmpDir(): string {
 }
 
 function createServerPaths(dir: string) {
+  const base = path.join(dir, `daemon-v${PROTOCOL_VERSION}`);
   return {
-    socketPath: path.join(dir, "daemon-v1.sock"),
-    tokenPath: path.join(dir, "daemon-v1.token"),
-    pidPath: path.join(dir, "daemon-v1.pid"),
+    socketPath: `${base}.sock`,
+    tokenPath: `${base}.token`,
+    pidPath: `${base}.pid`,
   };
 }
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }
@@ -319,78 +322,34 @@ describe("Stress and Soak Tests", () => {
       });
       await server.start();
 
-      const socket = await connectSocket(paths.socketPath);
-      await sendHello(socket, server.authToken);
-
-      // Spawn 50 sessions concurrently
-      const createPromises = Array.from({ length: 50 }, (_, i) =>
-        sendRequest(socket, {
-          id: `create-${i}`,
-          type: "createOrAttach",
-          payload: { sessionId: `stress-sess-${i}`, cols: 80, rows: 24 },
-        }),
-      );
-
-      const results = await Promise.all(createPromises);
-
-      // All 50 should succeed
-      for (let i = 0; i < 50; i++) {
-        expect(results[i]!.ok).toBe(true);
-        const payload = results[i]!.payload as { isNew: boolean };
-        expect(payload.isNew).toBe(true);
-      }
-
-      // Verify session count
-      expect(server.sessionCount).toBe(50);
-      expect(spawned.length).toBe(50);
-
-      // Verify capacity limit — 51st session should fail
-      const overflowResp = await sendRequest(socket, {
-        id: "create-overflow",
-        type: "createOrAttach",
-        payload: { sessionId: "stress-sess-overflow", cols: 80, rows: 24 },
+      const client = new DaemonClient({
+        socketDir: tmpDir, daemonEntryPath: "",
+        onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
       });
-      expect(overflowResp.ok).toBe(false);
-      expect(overflowResp.error).toContain("capacity");
+      try {
+        await client.ensureConnected();
+        const sessionIds = Array.from({ length: 50 }, (_, i) => `stress-sess-${i}`);
+        // The production client correlates concurrent responses by request ID.
+        const results = await Promise.all(sessionIds.map(sessionId =>
+          client.request<{ isNew: boolean }>("createOrAttach", { sessionId, cols: 80, rows: 24 }),
+        ));
+        expect(results.every(result => result.isNew)).toBe(true);
+        expect(server.sessionCount).toBe(50);
+        expect(spawned.length).toBe(50);
 
-      // Kill all sessions
-      const killPromises = Array.from({ length: 50 }, (_, i) =>
-        sendRequest(socket, {
-          id: `kill-${i}`,
-          type: "kill",
-          payload: { sessionId: `stress-sess-${i}` },
-        }),
-      );
+        await expect(client.request("createOrAttach", {
+          sessionId: "stress-sess-overflow", cols: 80, rows: 24,
+        })).rejects.toThrow("capacity");
 
-      const killResults = await Promise.all(killPromises);
-      for (const kr of killResults) {
-        expect(kr.ok).toBe(true);
+        await Promise.all(sessionIds.map(sessionId => client.request("kill", { sessionId })));
+        expect(spawned.every(handle => handle.killCalled)).toBe(true);
+        for (const handle of spawned) handle.emitExit(137);
+
+        const sessions = await client.request<SessionInfo[]>("listSessions");
+        expect(sessions.filter(session => session.state === "running")).toHaveLength(0);
+      } finally {
+        client.disconnect();
       }
-
-      // Verify all subprocesses received kill signal
-      for (const handle of spawned) {
-        expect(handle.killCalled).toBe(true);
-      }
-
-      // Simulate all processes exiting
-      for (const handle of spawned) {
-        handle.emitExit(137);
-      }
-
-      // Allow event loop to process exits
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Verify cleanup — all sessions should be gone from active count
-      const listResp = await sendRequest(socket, {
-        id: "list-after-kill",
-        type: "listSessions",
-      });
-      expect(listResp.ok).toBe(true);
-      const sessions = listResp.payload as Array<{ state: string }>;
-      const aliveSessions = sessions.filter((s) => s.state === "running");
-      expect(aliveSessions.length).toBe(0);
-
-      socket.destroy();
     });
   });
 

@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -151,7 +152,7 @@ function createServerPaths(dir: string) {
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }
@@ -330,7 +331,7 @@ describe("DaemonServer", () => {
       socket.destroy();
     });
 
-    it("writes token file with 0600 permissions", async () => {
+    it("writes the auth token with private POSIX permissions", async () => {
       const paths = createServerPaths(tmpDir);
       server = new DaemonServer({
         ...paths,
@@ -339,9 +340,9 @@ describe("DaemonServer", () => {
       });
       await server.start();
 
-      const stat = fs.statSync(paths.tokenPath);
-      // 0600 = 0o600 = 384 decimal. Mode includes file type bits.
-      expect(stat.mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") {
+        expect(fs.statSync(paths.tokenPath).mode & 0o777).toBe(0o600);
+      }
 
       const tokenContent = fs.readFileSync(paths.tokenPath, "utf-8");
       expect(tokenContent).toBe(server.authToken);

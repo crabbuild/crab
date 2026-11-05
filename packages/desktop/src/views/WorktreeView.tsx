@@ -1,5 +1,6 @@
 import { useCallback,useEffect,useMemo,useRef,useState } from "react";
 import { useSessionScroll } from "../hooks/useSessionScroll";
+import { localPathName } from "../lib/local-path-name";
 import {
 ArrowDown,
 ArrowUp,
@@ -383,7 +384,7 @@ function WorktreeViewInner({
         const handle = await rpc.openLocal(path);
         addRepo({
           ...handle,
-          label: `↳ worktree:${path.split("/").pop() ?? path}`,
+          label: `↳ worktree:${localPathName(path)}`,
           path,
           openedAt: Date.now(),
         });

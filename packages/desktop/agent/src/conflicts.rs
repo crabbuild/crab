@@ -38,7 +38,7 @@ pub struct ApplyResolutionParams {
 /// Runs `git status --porcelain` and filters to conflict codes:
 /// UU, AA, DD, DU, UD, AU, UA.
 pub async fn conflict_list(work_dir: &Path) -> Result<Value> {
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["status", "--porcelain=v1", "-z"])
         .current_dir(work_dir)
         .output()
@@ -133,7 +133,7 @@ pub async fn git_apply_resolution(
         .map_err(AgentError::Io)?;
 
     // Stage the resolved file.
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["add", "--", &params.path])
         .current_dir(work_dir)
         .output()
@@ -161,7 +161,7 @@ fn is_conflict_code(code: &str) -> bool {
 /// Returns `None` if the stage doesn't exist (command fails).
 async fn read_stage(work_dir: &Path, stage: u8, path: &str) -> Option<String> {
     let spec = format!(":{stage}:{path}");
-    let out = tokio::process::Command::new("git")
+    let out = crate::shellout::git_command()
         .args(["show", &spec])
         .current_dir(work_dir)
         .output()

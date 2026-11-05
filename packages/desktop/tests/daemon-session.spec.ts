@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { normalize, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Session } from "../electron/daemon/session";
 import type { SubprocessHandle, StreamClient } from "../electron/daemon/types";
 
@@ -745,10 +747,11 @@ describe("Session", () => {
         shellReadySupported: false,
       });
 
-      subprocess.emitData("\x1b]7;file:///home/user/project\x07");
+      const cwd = resolve("project");
+      subprocess.emitData(`\x1b]7;${pathToFileURL(cwd)}\x07`);
 
       // HeadlessEmulator processes OSC-7 synchronously in scanOsc7
-      expect(session.getCwd()).toBe("/home/user/project");
+      expect(normalize(session.getCwd() ?? "")).toBe(cwd);
     });
   });
 

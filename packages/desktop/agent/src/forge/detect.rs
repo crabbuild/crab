@@ -351,7 +351,7 @@ fn read_manual_override(work_dir: &Path) -> Option<Provider> {
 
 /// Read `remote.origin.url` from the git config of the repository.
 async fn read_remote_origin_url(work_dir: &Path) -> Option<String> {
-    let output = tokio::process::Command::new("git")
+    let output = crate::shellout::git_command()
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(work_dir)
         .output()
