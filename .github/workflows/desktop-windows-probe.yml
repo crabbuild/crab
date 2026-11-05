@@ -89,6 +89,9 @@ jobs:
             ['      this.child!.stdin.write(frame, (err) => {', '      this.child!.stdin.write(frame, (err) => {\n        if (method === "open_local") process.stderr.write("[DEBUG-a4f2] agent stdin write finished " + (err ? "error" : "ok") + "\\n");'],
             ['      const id = String(frame.id);', '      const id = String(frame.id);\n      if (this.probeIds.delete(id)) process.stderr.write("[DEBUG-a4f2] native open_local reply " + ("error" in frame ? "error" : "ok") + "\\n");'],
             ['    stderrRl.on("line", (rawLine) => {', '    stderrRl.on("line", (rawLine) => {\n      if (rawLine.includes("opened local repo")) process.stderr.write("[DEBUG-a4f2] native open_local completed\\n");'],
+              ['    this.child = child;', '    this.child = child;\n    process.stderr.write("[DEBUG-a4f2] native agent PID " + child.pid + "\\n");'],
+              ['    child.on("exit", (code, signal) => {', '    child.on("exit", (code, signal) => {\n      process.stderr.write("[DEBUG-a4f2] native agent exit " + code + " " + signal + "\\n");'],
+              ['      const line = this.storageConnections?.redactText(rawLine) ?? rawLine;', '      if (rawLine.includes("stdin closed; agent shutting down")) process.stderr.write("[DEBUG-a4f2] agent stdin EOF\\n");\n      const line = this.storageConnections?.redactText(rawLine) ?? rawLine;'],
           ]) {
             if (!source.includes(before)) throw Error('Native transport instrumentation anchor moved');
             source = source.replace(before, after);
@@ -108,10 +111,12 @@ jobs:
           if-no-files-found: error
           retention-days: 3
       - run: node scripts/package.mjs --win
+      - name: Check the sidecar exits with a repository open
+        continue-on-error: true
+        run: CRAB_PROBE_KEEP_REPO_OPEN=1 node ../../.github/agent-rpc-probe.mjs resources/native/win-x64/crab-desktop-agent.exe
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install awscli
       - name: Trace packaged smoke phases without logging payloads
         run: |
           python - <<'PY'
@@ -131,11 +136,13 @@ jobs:
           async function launchTraced(options: Parameters<typeof electron.launch>[0]) {
             const application = await electron.launch(options);
             const launchProcess = application.process();
+            const appPid = await application.evaluate(() => process.pid);
+            console.log(`[DEBUG-a4f2] app PID ${appPid}; launch PID ${launchProcess.pid}`);
             launchProcess.once("exit", (code, signal) => console.log(`[DEBUG-a4f2] launch process exit ${code} ${signal}`));
             launchProcess.once("close", (code, signal) => console.log(`[DEBUG-a4f2] launch process close ${code} ${signal}`));
             const relay = (chunk: Buffer) => {
               for (const line of chunk.toString().split(/\\r?\\n/)) {
-                if (line.startsWith("[DEBUG-a4f2]")) console.log(line);
+                if (line.startsWith("[DEBUG-a4f2]") || line.includes("Waiting for the debugger to disconnect")) console.log(line);
               }
             };
             launchProcess.stdout?.on("data", relay);
@@ -145,10 +152,20 @@ jobs:
               app.on("will-quit", () => process.stderr.write("[DEBUG-a4f2] browser will-quit\\n"));
               app.on("quit", () => process.stderr.write("[DEBUG-a4f2] browser quit\\n"));
             });
+            const close = application.close.bind(application);
+            application.close = async () => {
+              const trace = setTimeout(() => {
+                const cmd = `$ids=@(${appPid},${launchProcess.pid}); $all=Get-CimInstance Win32_Process; $kids=@($all | Where-Object { $_.ParentProcessId -in $ids } | ForEach-Object ProcessId); $all | Where-Object { $_.ProcessId -in $ids -or $_.ParentProcessId -in ($ids+$kids) } | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`;
+                execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], { timeout: 6000, windowsHide: true }, (error, stdout) => {
+                  console.log("[DEBUG-a4f2] shutdown process tree", error ? "unavailable" : stdout.trim());
+                });
+              }, 3500);
+              try { await close(); } finally { clearTimeout(trace); }
+            };
             return application;
           }
           '''
-              code = spec.read_text(encoding='utf-8').replace('await electron.launch(', 'await launchTraced(')
+              code = spec.read_text(encoding='utf-8').replace('await electron.launch(', 'await launchTraced(').replace('import { execFileSync }', 'import { execFile, execFileSync }')
               spec.write_text(code + launch, encoding='utf-8')
               # Replay the real GUI against the same native runtime. The tagged
               # build independently compiles and runs the complete native suite.
@@ -158,7 +175,7 @@ jobs:
               assert matches == 1, 'Expected exactly one duplicate native test invocation'
               qualifier.write_text(code, encoding='utf-8')
           PY
-          python scripts/qualify-v2.py
+          E2E_SMOKE=1 node node_modules/@playwright/test/cli.js test --project=e2e-smoke core-v2.spec.ts --grep 'packaged desktop opens'
       - uses: actions/upload-artifact@v4
         if: env.REUSE_NATIVE == 'true'
         with:
