@@ -13,6 +13,8 @@ the current stable release.
 
 ### Desktop
 
+- Fixed Linux shutdown retaining browser files and connections in the persistent
+  terminal daemon.
 - Fixed unsigned installer packaging and worktree metadata persistence across
   Windows path spellings and filesystem aliases.
 - Removed the desktop Kanban board, tracker integrations, and board automation.
