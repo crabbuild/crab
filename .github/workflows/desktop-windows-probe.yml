@@ -7,7 +7,7 @@ permissions:
   actions: read
 jobs:
   ipc:
-    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') && !contains(github.event.head_commit.message, '[probe replay]') && !contains(github.event.head_commit.message, '[probe native]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[probe broad]') && !contains(github.event.head_commit.message, '[probe replay]') && !contains(github.event.head_commit.message, '[probe native]') && !contains(github.event.head_commit.message, '[probe agent build]') }}
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -242,3 +242,57 @@ jobs:
           TOML
           CARGO_TARGET_DIR="$RUNNER_TEMP/git-process-probe-target" cargo build --manifest-path "$probe/Cargo.toml"
           node .github/git-process-probe.mjs "$RUNNER_TEMP/git-process-probe-target/debug/git-process-probe.exe"
+
+  agent-build:
+    if: ${{ contains(github.event.head_commit.message, '[probe agent build]') }}
+    runs-on: windows-2022
+    timeout-minutes: 95
+    env:
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: 1
+      CARGO_INCREMENTAL: 0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-agent-probe-target" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: '. -> ${{ runner.temp }}/crab-agent-probe-target'
+          key: windows-sidecar-probe
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41974776281
+          name: Windows-diagnostic-native-runtime
+          path: packages/desktop/resources/native/win-x64
+      - run: cargo build --release --locked -p crab-desktop-agent
+      - name: Stage the rebuilt sidecar for direct RPC qualification
+        run: |
+          runtime=packages/desktop/resources/native/win-x64
+          cp "$CARGO_TARGET_DIR/release/crab-desktop-agent.exe" "$runtime/"
+          node --input-type=module - "$runtime" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const directory = process.argv[2];
+          const manifest = path.join(directory, 'runtime.json');
+          const runtime = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+          const filename = 'crab-desktop-agent.exe';
+          runtime.hashes[filename] = createHash('sha256').update(fs.readFileSync(path.join(directory, filename))).digest('hex');
+          fs.writeFileSync(manifest, JSON.stringify(runtime, null, 2) + '\n');
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows-stdin-isolated-native-runtime
+          path: packages/desktop/resources/native/win-x64/
+          if-no-files-found: error
+          retention-days: 3
+      - run: node .github/agent-rpc-probe.mjs packages/desktop/resources/native/win-x64/crab-desktop-agent.exe
