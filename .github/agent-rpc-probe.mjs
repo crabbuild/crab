@@ -59,6 +59,13 @@ try {
   assert.equal((await call('ping', {})).pong, '2.0.0-alpha.1');
   await call('open_local', { repo_id: 'probe', path: directory });
   assert.equal((await call('read_text', { repo_id: 'probe', path: 'probe.txt' })).text, content);
+  if (process.env.CRAB_PROBE_DASHBOARD) {
+    const activity = await call('git_activity', { repo_id: 'probe' });
+    assert.equal(activity.days.reduce((sum, day) => sum + day.count, 0), 1);
+    const pulse = await call('git_pulse', { repo_id: 'probe', days: 7 });
+    assert.equal(pulse.commits, 1);
+    await call('git_branch_health', { repo_id: 'probe' });
+  }
   if (!process.env.CRAB_PROBE_KEEP_REPO_OPEN) await call('close', { repo_id: 'probe' });
   child.stdin.end();
   let timer;
