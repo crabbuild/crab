@@ -345,7 +345,9 @@ async function main(): Promise<void> {
   }
 
   // Check for stale socket and clean up if needed
-  if (fs.existsSync(socketPath)) {
+  // Windows pipes have no socket file. The PID guard must still protect a live
+  // daemon's token from being overwritten by a duplicate startup.
+  if (fs.existsSync(socketPath) || fs.existsSync(pidPath)) {
     cleanupStaleSocket(socketPath, pidPath);
   }
 

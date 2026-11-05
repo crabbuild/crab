@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -151,7 +152,7 @@ function createServerPaths(dir: string) {
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }

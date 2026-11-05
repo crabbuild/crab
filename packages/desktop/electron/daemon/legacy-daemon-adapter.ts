@@ -17,6 +17,7 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { socketAddress } from "./socket-address";
 
 import {
   encodeFrame,
@@ -304,8 +305,9 @@ export class LegacyDaemonAdapter {
   }
 
   private connectSocket(socketPath: string): Promise<net.Socket> {
+    const address = socketAddress(socketPath);
     return new Promise<net.Socket>((resolve, reject) => {
-      const socket = net.createConnection(socketPath);
+      const socket = net.createConnection(address);
 
       const timer = setTimeout(() => {
         socket.destroy();

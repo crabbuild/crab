@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -133,7 +134,7 @@ async function createFakeLegacyDaemon(version: number): Promise<FakeLegacyDaemon
   });
 
   await new Promise<void>((resolve) => {
-    server.listen(socketPath, () => resolve());
+    server.listen(socketAddress(socketPath), () => resolve());
   });
 
   return {

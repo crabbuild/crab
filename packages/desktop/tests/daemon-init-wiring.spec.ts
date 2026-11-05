@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 /**
  * Integration test for daemon-main-style wiring.
  *
@@ -115,7 +116,7 @@ function serverPaths(dir: string) {
 
 async function connectSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath, () => resolve(socket));
+    const socket = net.createConnection(socketAddress(socketPath), () => resolve(socket));
     socket.on("error", reject);
   });
 }

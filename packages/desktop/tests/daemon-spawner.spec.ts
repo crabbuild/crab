@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -79,7 +80,7 @@ function createMockDaemonServer(
     });
   });
 
-  server.listen(socketPath);
+  server.listen(socketAddress(socketPath));
   return server;
 }
 
@@ -441,7 +442,7 @@ describe("DaemonSpawner", () => {
       expect(() => spawner.validateSocketPathLength("/tmp/short.sock")).not.toThrow();
     });
 
-    it("rejects paths exceeding the OS limit", () => {
+    it("applies the platform IPC address limit", () => {
       const spawner = new DaemonSpawner({
         socketDir: tmpDir,
         entryPath: "/fake/entry.js",
@@ -450,9 +451,12 @@ describe("DaemonSpawner", () => {
       // Create a path that exceeds 104 bytes (macOS limit)
       const longPath = "/tmp/" + "a".repeat(200) + ".sock";
 
-      expect(() => spawner.validateSocketPathLength(longPath)).toThrow(
-        /Socket path exceeds/,
-      );
+      const validate = () => spawner.validateSocketPathLength(longPath);
+      if (process.platform === "win32") {
+        expect(validate).not.toThrow();
+      } else {
+        expect(validate).toThrow(/Socket path exceeds/);
+      }
     });
   });
 
@@ -570,15 +574,16 @@ describe("DaemonSpawner", () => {
 
   describe("path derivation", () => {
     it("derives correct socket/token/pid paths from socketDir", () => {
+      const socketDir = path.join(os.tmpdir(), "crab", "desktop", "daemon");
       const spawner = new DaemonSpawner({
-        socketDir: "/home/user/.crab/desktop/daemon",
+        socketDir,
         entryPath: "/app/daemon-main.js",
         protocolVersion: 2,
       });
 
-      expect(spawner.socketPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.sock");
-      expect(spawner.tokenPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.token");
-      expect(spawner.pidPath).toBe("/home/user/.crab/desktop/daemon/daemon-v2.pid");
+      expect(spawner.socketPath).toBe(path.join(socketDir, "daemon-v2.sock"));
+      expect(spawner.tokenPath).toBe(path.join(socketDir, "daemon-v2.token"));
+      expect(spawner.pidPath).toBe(path.join(socketDir, "daemon-v2.pid"));
     });
   });
 });

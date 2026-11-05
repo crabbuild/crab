@@ -1,8 +1,8 @@
 /**
- * DaemonServer — Unix domain socket server, auth, and request routing.
+ * DaemonServer — local IPC server, auth, and request routing.
  *
  * Responsibilities:
- * - Unix domain socket with 0600 permissions
+ * - Unix socket or Windows named pipe
  * - Token-based auth (UUID written to file)
  * - Hello handshake with version + token verification
  * - Dual-socket support (control + stream per client)
@@ -23,6 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { socketAddress } from "./socket-address";
 
 import { TerminalHost } from "./terminal-host";
 import type { SubprocessSpawner } from "./subprocess-handle";
@@ -236,12 +237,13 @@ export class DaemonServer {
     });
     fs.writeFileSync(this.pidPath, pidData, { mode: 0o600 });
 
-    // Create Unix domain socket server
+    // Keep disk control files separate from the Windows named-pipe namespace.
+    const address = socketAddress(this.socketPath);
     this.server = net.createServer((socket) => this.handleConnection(socket));
 
     await new Promise<void>((resolve, reject) => {
       this.server!.on("error", reject);
-      this.server!.listen(this.socketPath, () => {
+      this.server!.listen(address, () => {
         // Set socket file permissions to 0600
         try {
           fs.chmodSync(this.socketPath, 0o600);

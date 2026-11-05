@@ -1,3 +1,4 @@
+import { socketAddress } from "../electron/daemon/socket-address";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
@@ -101,7 +102,7 @@ function createMockDaemon(socketPath: string, opts: MockDaemonOpts = {}) {
     });
   });
 
-  server.listen(socketPath);
+  server.listen(socketAddress(socketPath));
 
   return {
     server,
@@ -334,7 +335,7 @@ describe("DaemonClient", () => {
           }
         });
       });
-      server.listen(socketPath);
+      server.listen(socketAddress(socketPath));
       await waitForServer(server);
 
       const client = new DaemonClient(createClientOpts(tmpDir));
