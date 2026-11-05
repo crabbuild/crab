@@ -2644,8 +2644,8 @@ app.on("will-quit", (e) => {
   e.preventDefault();
   stopAllWatchers();
   stopAutoUpdater();
-  agent?.shutdown();
   Promise.all([
+    agent?.shutdown(),
     sidecarManager.stopAll(),
     lspManager.stopAll(),
   ]).finally(() => {
