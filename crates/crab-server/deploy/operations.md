@@ -114,6 +114,64 @@ storage. The last node uses normal termination, since handoff needs a successor.
 Do not assume mixed-version rollback or cross-provider restore works without
 qualification against the chosen SDK and provider.
 
+## Replace a version or restore a deployment
+
+Version replacement is coordinated and includes downtime. The
+Helm Deployment uses `Recreate`; this orders pods within that Deployment. It does
+not stop another release, a direct `crab://` writer or an external automation job
+that can write the same storage root. Stop every writer before taking the
+recovery point. Do not run mixed application/Cellar versions against that root.
+
+1. Close public ingress and pause automation and direct-storage writers. Record
+   the exact source, image/chart digests, Cellar version, storage root and schema
+   preparation state. Keep private management available while draining.
+2. Stop the existing servers normally and confirm successful shutdown. A handoff
+   needs a live successor; the final node uses normal termination. An incomplete
+   drain is a failed precondition for replacement, not a successful backup point.
+3. Preserve the **complete** root in an independent recovery location. Include
+   catalog/auth records, Git objects and refs, LFS payloads, shared xorbs/shards,
+   Cellar/LTX objects and release assets. Preserve required metadata and tags.
+   Check the source remained unchanged throughout capture. Keep the state key,
+   IdP configuration and peer trust/key material in the operator's protected
+   secret backup; an object-root copy does not contain those external secrets.
+4. Deploy the verified replacement image and chart. Keep ingress closed while
+   checking repository readiness, Directory status and the relevant organization
+   and repository preparation commands for that version. Serving does not
+   install or migrate feature tables implicitly.
+5. Exercise authenticated browse, Git fetch/push and representative LFS/Xet
+   transfers through the actual ingress. Check original submission recovery,
+   public identities and permissions, metrics and alarms before reopening traffic.
+6. If recovery is needed, stop the replacement writers first. Restore the whole
+   selected recovery point into a clean root, restore its matching secrets and
+   start with an empty local cache. Use only an image qualified for that state.
+   Changing the image alone or running Helm `--atomic` does not revert durable
+   state. Restoring a pre-upgrade point can discard later writes; choose and
+   document that recovery policy before reopening traffic.
+
+Measure the accepted data-loss window and recovery time on the selected provider
+and workload. A second prefix in the same storage service is useful for fixture
+proof, but is not an independent failure-domain backup. Online consistent backup,
+zero-downtime version transitions and cross-provider restore require their own
+qualified protocols; this procedure does not promise them.
+
+The isolated process harness exercises SIGKILL, complete-root SHA-256/metadata
+copy verification and restoration into an empty cache. Install its pinned tools
+in a disposable virtual environment, then run:
+
+```sh
+python -m pip install -r crates/crab-server/tests/process-requirements.txt
+python crates/crab-server/tests/qualify_cellar_process.py \
+  --binary "$CARGO_TARGET_DIR/debug/crab-server" --recovery \
+  --large-file-bytes 3221225472 \
+  --artifacts "$CARGO_TARGET_DIR/native-recovery-proof"
+```
+
+This creates and destroys only its own local RustFS resources. The receipt
+records actual copied bytes/objects, application/ref comparisons and elapsed
+offline copy/restore time. It qualifies the tested image's recovery mechanics,
+not compatibility with a different runtime or application version. Production
+upgrade qualification must exercise the exact previous/candidate version pair.
+
 ## Qualify changes
 
 Run the isolated native process smoke described in

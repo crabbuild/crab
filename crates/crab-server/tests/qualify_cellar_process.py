@@ -28,7 +28,12 @@ executable.add_argument("--image", help="Linux image to run using host networkin
 parser.add_argument("--artifacts", required=True, type=pathlib.Path)
 parser.add_argument("--large-file-bytes", type=int, default=0,
                     help="Also qualify a stock Git LFS object of this exact size")
+parser.add_argument("--recovery", action="store_true",
+                    help="Also qualify SIGKILL and a full-root restore into an empty cache; requires boto3")
 args = parser.parse_args()
+if args.recovery:
+    import boto3
+    from project_root_backup import copy_root
 if args.large_file_bytes < 0 or args.large_file_bytes == 1:
     parser.error("--large-file-bytes must be zero or at least two")
 root = args.artifacts.resolve()
@@ -45,6 +50,8 @@ name = "crab-cellar-process-" + uuid.uuid4().hex[:8]
 storage_volume = name + "-data"
 server = None
 large_file = None
+recovery = None
+storage_url = "s3://crab-cellar-test/repositories"
 with open(run / "commands.log", "w") as log:
 
     def cmd(args, **kw):
@@ -156,6 +163,17 @@ with open(run / "commands.log", "w") as log:
         server = None
         if result:
             raise RuntimeError("server shutdown failed: " + str(result))
+
+    def crash():
+        global server
+        if args.image:
+            cmd(["docker", "kill", "--signal", "KILL", name + "-server"])
+        else:
+            server.kill()
+        result = server.wait(timeout=125)
+        server = None
+        assert result != 0, "SIGKILL unexpectedly produced a clean shutdown"
+        return result
 
     try:
         # Docker may use a different host filesystem. Initialize only this
@@ -292,7 +310,7 @@ with open(run / "commands.log", "w") as log:
         (run / "server.toml").write_text(f'''listen = "127.0.0.1:{public}"
     management_listen = "127.0.0.1:{private}"
     [storage]
-    url = "s3://crab-cellar-test/repositories"
+    url = "{storage_url}"
     [cells]
     data_dir = "{run}/cells"
     local_disk_limit_bytes = 34359738368
@@ -736,8 +754,8 @@ with open(run / "commands.log", "w") as log:
             large_file = large_files.prepare(cmd, run, origin, args.large_file_bytes, env)
             large_files.verify_resume(run, origin, large_file)
 
-        # State submissions recover after a complete process restart.
-        stop()
+        # The same assertions cover graceful and abrupt process replacement.
+        forced_status = crash() if args.recovery else stop()
         server = start()
         wait()
         if large_file:
@@ -761,7 +779,54 @@ with open(run / "commands.log", "w") as log:
             value = request(path)
             assert {key: value[key] for key in saved} == saved
             assert request(path + "/milestone")["milestone"]["number"] == milestone["number"]
+        if args.recovery:
+            paths = ["/api/profile", organization_root, organization_root + "/members",
+                     "/api/repos/team/project/issues", "/api/repos/team/project/pulls", pins_path]
+            saved = {path: request(path) for path in paths}
+            remote = origin + "/git/team/project.git"
+            refs = subprocess.check_output(["git", "ls-remote", remote], env=env, text=True)
+            started = time.monotonic()
+            stop()
+            assert server is None, "All fixture writers must stop before the root is copied"
+            backup = run / "backup"
+            backup.mkdir()
+            original_storage = storage_url
+            storage_url, root_proof, cleanup_backup = copy_root(storage_url, backup, env)
+            restored_cache = run / "restored-cells"
+            restored_cache.mkdir(mode=0o777)
+            restored_cache.chmod(0o777)
+            config = run / "server.toml"
+            text = config.read_text()
+            assert text.count(original_storage) == 1
+            assert text.count(f'data_dir = "{run}/cells"') == 1
+            text = text.replace(original_storage, storage_url)
+            text = text.replace(f'data_dir = "{run}/cells"', f'data_dir = "{restored_cache}"')
+            config.chmod(0o600)
+            config.write_text(text)
+            if args.image:
+                config.chmod(0o444)
+            assert not any(restored_cache.iterdir()), "Restoration must not reuse the old cache"
+            server = start()
+            wait()
+            assert {path: request(path) for path in paths} == saved, "Restored application state differs"
+            assert subprocess.check_output(["git", "ls-remote", remote], env=env, text=True) == refs
+            if large_file:
+                large_files.verify(cmd, run, origin, large_file, "restore", env)
+                large_files.verify_resume(run, origin, large_file)
+            recovery = {
+                "abrupt_process_restart": True,
+                "boto3_version": boto3.__version__,
+                "forced_exit_status": forced_status,
+                "root_copy": root_proof,
+                "restored_into_empty_cache": True,
+                "application_state_verified": True,
+                "git_refs_verified": True,
+                "offline_copy_and_restore_seconds": time.monotonic() - started,
+            }
+            if large_file:
+                recovery["large_file_verified"] = True
         stop()
+        selected_storage = urllib.parse.urlsplit(storage_url)
         count = subprocess.check_output(
             [
                 "aws",
@@ -770,9 +835,9 @@ with open(run / "commands.log", "w") as log:
                 "s3api",
                 "list-objects-v2",
                 "--bucket",
-                "crab-cellar-test",
+                selected_storage.netloc,
                 "--prefix",
-                "repositories/.crab/cellar/",
+                selected_storage.path.strip("/") + "/.crab/cellar/",
                 "--query",
                 "length(Contents)",
             ],
@@ -843,6 +908,9 @@ with open(run / "commands.log", "w") as log:
                 "range_resume": True,
                 "process_restart": True,
             }
+        if recovery:
+            report["recovery"] = recovery
+            cleanup_backup()
         (run / "receipt.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
     finally:
