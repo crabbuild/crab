@@ -27,6 +27,8 @@ pub(crate) enum Page<T, C> {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamSummary"))]
 pub(crate) struct Summary {
     #[serde(flatten)]
     pub view: View,

@@ -54,6 +54,7 @@ impl IdentityKey {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct ActorProfile {
     pub id: Uuid,
     pub handle: String,

@@ -17,10 +17,7 @@ import { CommandError, useProjectCommands } from "../commands";
 import { ProjectDraftReview } from "../review";
 import { FieldSelect } from "@/components/ui/field-select";
 import { statuses, health, workspaceHref, type Detail } from "./model";
-import type {
-  Membership,
-  OrganizationPage,
-} from "@/features/organizations/model";
+import type { OrganizationMembership, OrganizationPage } from "@/lib/contracts";
 import { useProjectDraft } from "../drafts";
 
 export function NewProject({
@@ -160,7 +157,7 @@ export function ProjectProperties({
   const [after, setAfter] = useState<string>();
   const commands = useProjectCommands();
   const id = useId();
-  const members = useRequest<OrganizationPage<Membership>>(
+  const members = useRequest<OrganizationPage<OrganizationMembership>>(
     `/api/organizations/${organization}/members?${new URLSearchParams(after ? { after } : {})}`,
   );
   const leads: Record<string, string> = { none: "No lead" };

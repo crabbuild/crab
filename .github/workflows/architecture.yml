@@ -40,6 +40,9 @@ on:
       - "crab/scripts/release/update-homebrew.sh"
       - "crab/scripts/verify-nfs-smoke-report.py"
       - "crates/**"
+      - "packages/ui/src/lib/contracts.ts"
+      - "packages/ui/scripts/contracts.mjs"
+      - "packages/ui/package.json"
   pull_request:
     paths:
       - ".github/workflows/architecture.yml"
@@ -78,6 +81,9 @@ on:
       - "crab/scripts/release/update-homebrew.sh"
       - "crab/scripts/verify-nfs-smoke-report.py"
       - "crates/**"
+      - "packages/ui/src/lib/contracts.ts"
+      - "packages/ui/scripts/contracts.mjs"
+      - "packages/ui/package.json"
   workflow_dispatch:
 
 permissions:
@@ -207,6 +213,9 @@ jobs:
         run: |
           npm ci --prefix packages/ui
           npm run build --prefix packages/ui
+
+      - name: Verify server and browser contracts
+        run: npm run contracts:check --prefix packages/ui
 
       - name: Install AWS CLI
         run: |

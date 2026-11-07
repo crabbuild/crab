@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 #[derive(Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "RepositoryAssignee"))]
 pub(crate) struct Candidate {
     pub id: Uuid,
     pub name: String,

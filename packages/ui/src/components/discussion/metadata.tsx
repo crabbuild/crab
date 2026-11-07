@@ -12,11 +12,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { PersonAddIcon, XIcon } from "@primer/octicons-react";
+import type { RepositoryAssignee } from "@/lib/contracts";
 import {
   endpoint,
   useRequest,
   type Repository,
-  type RepositoryAssignee,
   type RepositoryLabel,
 } from "@/lib/api";
 import { Reviewers } from "@/features/pull-requests/reviews/reviewers";

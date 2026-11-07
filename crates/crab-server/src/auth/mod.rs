@@ -8,6 +8,8 @@ mod state;
 mod transport;
 use backchannel_logout::backchannel_logout;
 use git_tokens::{issue_git_token, revoke_git_tokens};
+#[cfg(test)]
+pub(crate) use http::{SessionIdentity, SessionMode, SessionResponse};
 use http::{callback, login, logout, session};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

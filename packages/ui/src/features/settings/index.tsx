@@ -1,5 +1,6 @@
 import { Link } from "@/components/navigation/link";
-import { type Refs, type Repository, type Session } from "@/lib/api";
+import type { Session } from "@/lib/contracts";
+import { type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";

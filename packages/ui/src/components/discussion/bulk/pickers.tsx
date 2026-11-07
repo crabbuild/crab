@@ -1,11 +1,7 @@
 import { useId, useRef, useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
-import {
-  endpoint,
-  useRequest,
-  type Repository,
-  type RepositoryAssignee,
-} from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {

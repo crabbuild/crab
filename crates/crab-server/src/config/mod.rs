@@ -105,6 +105,7 @@ pub struct RepositoryConfig {
 /// An exact branch whose direct updates are disabled.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct BranchProtection {
     pub branch: String,
     #[serde(default)]
@@ -116,6 +117,7 @@ pub struct BranchProtection {
 /// A provider subject's explicit repository permission.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RepositoryMember {
     pub subject: String,
     pub name: String,
@@ -125,6 +127,7 @@ pub struct RepositoryMember {
 /// An exact signed OIDC group identifier's repository permission.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RepositoryGroup {
     pub group: String,
     pub access: RepositoryAccess,
@@ -133,6 +136,7 @@ pub struct RepositoryGroup {
 /// Repository access, ordered from read-only through repository administration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub enum RepositoryAccess {
     Read,
     Triage,

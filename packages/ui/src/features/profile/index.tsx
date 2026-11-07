@@ -5,7 +5,7 @@ import { Result } from "@/components/request/result";
 import { timestamp } from "@/components/discussion/time";
 import { useRequest } from "@/lib/api";
 import { ProfileForm } from "./form";
-import type { ActorProfile, OwnProfile } from "./model";
+import type { ActorProfile, OwnProfile } from "@/lib/contracts";
 
 export function ProfileSettings({
   csrf,

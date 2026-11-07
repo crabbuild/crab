@@ -18,12 +18,12 @@ import { FieldSelect } from "@/components/ui/field-select";
 import { useRequest } from "@/lib/api";
 import { MutationError } from "./feedback";
 import type {
-  Membership,
+  OrganizationMembership,
   Organization,
-  OrganizationPage as Page,
+  OrganizationMembers,
   OrganizationRole,
   OrganizationView,
-} from "./model";
+} from "@/lib/contracts";
 import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
@@ -163,7 +163,7 @@ function People({
   onChanged: (message: string) => void;
 }) {
   const [after, setAfter] = useState<string>();
-  const members = useRequest<Page<Membership> & { can_manage: boolean }>(
+  const members = useRequest<OrganizationMembers>(
     `${endpoint}/members?${new URLSearchParams(after ? { after } : {})}`,
   );
   const refresh = () => {
@@ -225,7 +225,7 @@ function MemberRow({
   csrf,
   onChanged,
 }: {
-  member: Membership;
+  member: OrganizationMembership;
   canManage: boolean;
   endpoint: string;
   csrf: string;

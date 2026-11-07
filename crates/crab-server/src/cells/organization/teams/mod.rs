@@ -18,11 +18,13 @@ pub(crate) use preparation::{GetPreparation, Prepare, PrepareInput};
 pub(super) use preparation::{ensure_ready, initialize, membership_changed};
 pub(crate) use reads::{
     Candidates, Get, GetMembership, GetPolicy, List, ListInput, MemberCursor, MemberInput, Members,
-    Page, QueryCursor,
+    Page, QueryCursor, Summary,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamVisibility"))]
 pub(crate) enum Visibility {
     Closed,
     Secret,
@@ -44,6 +46,8 @@ impl Visibility {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamRole"))]
 pub(crate) enum Role {
     Member,
     Maintainer,
@@ -65,6 +69,7 @@ impl Role {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct Team {
     pub id: Uuid,
     pub name: String,
@@ -76,6 +81,8 @@ pub(crate) struct Team {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamView"))]
 pub(crate) struct View {
     pub team: Team,
     pub role: Option<Role>,
@@ -83,6 +90,8 @@ pub(crate) struct View {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamMembership"))]
 pub(crate) struct Membership {
     pub actor: Uuid,
     pub role: Option<Role>,
@@ -90,6 +99,8 @@ pub(crate) struct Membership {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamPolicy"))]
 pub(crate) struct Policy {
     pub member_creation: bool,
     pub version: u64,

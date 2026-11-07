@@ -14,8 +14,7 @@ use openidconnect::{
     AccessTokenHash, AuthorizationCode, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
     Scope, TokenResponse, core::CoreAuthenticationFlow,
 };
-use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::json;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -447,24 +446,72 @@ async fn finish_github_login(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) enum SessionMode {
+    Local,
+    Oidc,
+    GitHub,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct SessionIdentity {
+    issuer: String,
+    subject: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "Session"))]
+pub(crate) struct SessionResponse {
+    authenticated: bool,
+    mode: SessionMode,
+    user: Option<SessionIdentity>,
+    csrf: Option<String>,
+}
+
 pub(crate) async fn session(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-) -> Json<serde_json::Value> {
+) -> Json<SessionResponse> {
     let mode = server
         .auth
         .as_ref()
         .map(|auth| match auth.config.provider {
-            AuthProvider::Oidc => "oidc",
-            AuthProvider::GitHub => "github",
+            AuthProvider::Oidc => SessionMode::Oidc,
+            AuthProvider::GitHub => SessionMode::GitHub,
         })
-        .unwrap_or("local");
+        .unwrap_or(SessionMode::Local);
     let value = if principal.is_local() {
-        json!({"authenticated":true,"mode":"local","user":null,"csrf":null})
+        SessionResponse {
+            authenticated: true,
+            mode: SessionMode::Local,
+            user: None,
+            csrf: None,
+        }
     } else if let Some(session) = principal.user_session() {
-        json!({"authenticated":true,"mode":mode,"user":session.identity,"csrf":session.csrf})
+        SessionResponse {
+            authenticated: true,
+            mode,
+            // Keep the HTTP projection explicit so future private identity
+            // fields cannot enter the browser session through serialization.
+            user: Some(SessionIdentity {
+                issuer: session.identity.issuer.clone(),
+                subject: session.identity.subject.clone(),
+                name: session.identity.name.clone(),
+            }),
+            csrf: Some(session.csrf.clone()),
+        }
     } else {
-        json!({"authenticated":false,"mode":mode,"user":null,"csrf":null})
+        SessionResponse {
+            authenticated: false,
+            mode,
+            user: None,
+            csrf: None,
+        }
     };
     Json(value)
 }

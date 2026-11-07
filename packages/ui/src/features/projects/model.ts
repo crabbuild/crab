@@ -1,4 +1,5 @@
-import { type Repository, type RepositoryAssignee } from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
+import { type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 export type Subject = { kind: "issue" | "pull"; number: number };
 export type ProjectRepository = Pick<

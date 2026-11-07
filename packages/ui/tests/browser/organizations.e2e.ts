@@ -5,10 +5,10 @@ import {
 } from "./accessibility";
 import type {
   Invitation,
-  Membership,
+  OrganizationMembership,
   Organization,
   OrganizationRole,
-} from "../../src/features/organizations/model";
+} from "@/lib/contracts";
 
 const id = "01900000-0000-7000-8000-000000000010";
 const alice = "01900000-0000-7000-8000-000000000011";
@@ -18,7 +18,7 @@ async function fixture(page: Page) {
   const state: {
     organization: Organization;
     role: OrganizationRole;
-    members: Membership[];
+    members: OrganizationMembership[];
     invitation: Invitation | null;
     writes: unknown[];
     fail: boolean;
@@ -163,6 +163,7 @@ async function fixture(page: Page) {
         state.invitation = {
           recipient: bob,
           role: input.role,
+          member_version: 0,
           version: input.version + 1,
           state: "pending",
           created_at_ms: Date.now(),
@@ -264,6 +265,7 @@ test("an invitee accepts through their own endpoint and reload shows the persist
     recipient: bob,
     role: "member",
     version: 4,
+    member_version: 0,
     state: "pending",
     created_at_ms: Date.now(),
     expires_at_ms: Date.now() + 7 * 86400000,
@@ -354,6 +356,7 @@ test("a former member can inspect their old decision without current metadata or
     recipient: bob,
     role: "member",
     version: 2,
+    member_version: 0,
     state: "accepted",
     created_at_ms: 1700000000000,
     expires_at_ms: 1700604800000,

@@ -26,7 +26,8 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
 }
 
 #[derive(Serialize)]
-struct Output {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct MembershipState {
     revision: u64,
     members: Vec<RepositoryMember>,
     groups: Vec<RepositoryGroup>,
@@ -144,7 +145,7 @@ async fn list(
         record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
     });
     match record {
-        Some(record) => Json(Output {
+        Some(record) => Json(MembershipState {
             revision: document.version,
             members: record.members,
             groups: record.groups,
@@ -237,7 +238,7 @@ async fn replace(
             let can_admin = principal
                 .with_membership(record.id, &config, issuer)
                 .can_admin(record.id);
-            Json(Output {
+            Json(MembershipState {
                 revision: if old.as_ref() == Some(&(record.members.clone(), record.groups.clone()))
                 {
                     document.version

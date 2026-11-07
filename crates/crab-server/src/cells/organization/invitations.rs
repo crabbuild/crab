@@ -4,6 +4,7 @@ const LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) enum InvitationState {
     Pending,
     Accepted,
@@ -13,6 +14,7 @@ pub(crate) enum InvitationState {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct Invitation {
     pub recipient: Uuid,
     pub role: Role,
@@ -252,6 +254,7 @@ impl Mutation for DecideInvitation {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct InvitationView {
     pub organization: Option<Organization>,
     pub invitation: Option<Invitation>,
