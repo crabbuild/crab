@@ -216,7 +216,7 @@ def qualify(output: Path, tests: dict[str, Path], environment: dict[str, str],
         arguments = [
             sys.executable, str(ROOT / "crab/scripts/qualify_sdk.py"), "run",
             "--output", str(output / f"{case.rsplit('::', 1)[-1]}.json"),
-            "--backend", "native-rustfs", "--features", "remote,content,write,local,managed",
+            "--backend", "native-rustfs", "--features", "remote,files,publish,local,service",
             "--fixture-digest", digest, "--expected-tests", "1", "--toolchain", toolchain,
             "--git", str(git), "--crab", str(crab), "--timeout-seconds", "1800",
         ]

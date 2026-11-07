@@ -27,7 +27,7 @@ impl ObjectId {
         })?;
         Ok(Self(bytes))
     }
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub(crate) const fn owner(self) -> gix_hash::ObjectId {
         gix_hash::ObjectId::Sha1(self.0)
     }
@@ -117,7 +117,7 @@ impl GitPath {
         &self.0
     }
 
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub(crate) fn owner(&self) -> Result<crab_remote_git::GitPath> {
         crab_remote_git::GitPath::new(self.0.to_vec()).map_err(crate::remote_error::remote_error)
     }
@@ -189,7 +189,7 @@ enum RepositoryLocation {
     Direct(String),
     #[cfg(feature = "local")]
     Http(String),
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     Managed {
         authority: String,
         organization: String,
@@ -205,7 +205,7 @@ impl RepositoryLocator {
             RepositoryLocation::Direct(prefix) => Some(prefix),
             #[cfg(feature = "local")]
             RepositoryLocation::Http(_) => None,
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             RepositoryLocation::Managed { .. } => None,
         }
     }
@@ -256,7 +256,7 @@ impl RepositoryLocator {
     }
 
     /// Validate one managed authority, organization and repository identity.
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub fn managed(authority: &str, organization: &str, repository: &str) -> Result<Self> {
         let owner = crab_git::ManagedRepository::new(authority, organization, repository).map_err(
             |source| {
@@ -281,7 +281,7 @@ impl RepositoryLocator {
             RepositoryLocation::Direct(_) => None,
             #[cfg(feature = "local")]
             RepositoryLocation::Http(_) => None,
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             RepositoryLocation::Managed {
                 authority,
                 organization,
@@ -307,7 +307,7 @@ impl RepositoryLocator {
                 ErrorKind::UnsupportedCapability,
                 "HTTP repositories are available only through local Git workflows",
             )),
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             RepositoryLocation::Managed { .. } => Err(Error::new(
                 ErrorKind::UnsupportedCapability,
                 "managed repository requires managed resolution",
@@ -315,7 +315,7 @@ impl RepositoryLocator {
         }
     }
 
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) fn managed_owner(&self) -> Option<crab_git::ManagedRepository> {
         let RepositoryLocation::Managed {
             authority,
@@ -332,7 +332,7 @@ impl RepositoryLocator {
         })
     }
 
-    #[cfg(all(feature = "managed", feature = "local"))]
+    #[cfg(all(feature = "service", feature = "local"))]
     pub(crate) fn from_managed_owner(owner: crab_git::ManagedRepository) -> Self {
         Self(RepositoryLocation::Managed {
             authority: owner.authority,

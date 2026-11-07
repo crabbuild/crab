@@ -1,4 +1,4 @@
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 use std::path::PathBuf;
 
 use crate::{Client, OperationOptions, RepositoryLocator, Result};
@@ -123,7 +123,7 @@ impl Client {
     }
 
     /// Resume a saved remote mutation with current credentials and scratch space.
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn resume_remote(
         &self,
         token: crate::remote::write::RecoveryToken,
@@ -135,7 +135,7 @@ impl Client {
     }
 
     /// Reconcile a saved remote mutation without requiring a readable repository.
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn reconcile_remote(
         &self,
         token: crate::remote::write::RecoveryToken,

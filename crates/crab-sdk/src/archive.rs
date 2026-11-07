@@ -67,7 +67,7 @@ pub(crate) async fn open(
     options: ReadOptions,
     limits: OperationLimits,
     mode: ContentMode,
-    #[cfg(feature = "content")] runtime: Arc<crate::content::crab::ContentRuntime>,
+    #[cfg(feature = "files")] runtime: Arc<crate::content::crab::ContentRuntime>,
 ) -> Result<ArchiveStream> {
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
@@ -106,7 +106,7 @@ pub(crate) async fn open(
                 )
                 .await?;
                 if let Some(bytes) = entry.bytes {
-                    #[cfg(feature = "content")]
+                    #[cfg(feature = "files")]
                     let hydrated = if mode == ContentMode::Hydrated {
                         let operation = reader.operation().ok_or(
                             crab_remote_git::Error::InternalInvariant {
@@ -125,7 +125,7 @@ pub(crate) async fn open(
                     } else {
                         false
                     };
-                    #[cfg(not(feature = "content"))]
+                    #[cfg(not(feature = "files"))]
                     let hydrated = false;
                     if !hydrated {
                         for chunk in bytes.chunks(64 * 1024) {
@@ -176,7 +176,7 @@ async fn emit(
     }
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 async fn hydrate(
     send: &mpsc::Sender<ArchiveEvent>,
     metadata: Option<&crab_remote_git::BlobMetadata>,

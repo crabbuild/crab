@@ -117,8 +117,8 @@ jobs:
         run: |
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features remote
-          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features remote,content,write
-          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features local,managed
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features remote,files,publish
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features local,service
 
       - name: Deny SDK and publication lints
         run: >-
@@ -393,7 +393,7 @@ jobs:
       - name: Build SDK examples, tests, and compatible Crab
         run: |
           cargo "+${SDK_MSRV}" build -p crab-sdk --locked --examples \
-            --no-default-features --features remote,content
+            --no-default-features --features remote,files
           cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features \
             --features simd-accel,tier,watch
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
@@ -436,27 +436,27 @@ jobs:
         run: >-
           python3 crab/scripts/qualify_sdk.py run
           --output "$RUNNER_TEMP/sdk-evidence/read.json"
-          --backend rustfs --features remote,content
+          --backend rustfs --features remote,files
           --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
           --expected-tests 1
           --transport-report "$CRAB_SDK_TEST_READ_GUARD_REPORT"
           --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN"
           --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
-          --features remote,content --test remote_blob
+          --features remote,files --test remote_blob
           s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
           -- --exact --ignored --nocapture
       - name: Qualify large ordinary trees
         run: >-
           python3 crab/scripts/qualify_sdk.py run
           --output "$RUNNER_TEMP/sdk-evidence/large-tree.json"
-          --backend rustfs --features remote,content
+          --backend rustfs --features remote,files
           --fixture-digest "$(sha256sum crates/crab-sdk/tests/remote_blob/large_tree.rs | cut -d' ' -f1)"
           --expected-tests 1 --toolchain "$SDK_MSRV"
           --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN"
           --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
-          --features remote,content --test remote_blob
+          --features remote,files --test remote_blob
           large_tree::s3_ten_thousand_files_paginate_and_archive_without_source
           -- --exact --ignored --nocapture
       - name: Qualify remote write and recovery
@@ -466,26 +466,26 @@ jobs:
           for test in remote_edit_round_trip_without_git stale_ref_batch_changes_no_refs initialization_preserves_foreign_content; do
             python3 crab/scripts/qualify_sdk.py run \
               --output "$RUNNER_TEMP/sdk-evidence/${test}.json" \
-              --backend rustfs --features remote,content,write \
+              --backend rustfs --features remote,files,publish \
               --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
               --expected-tests 1 --toolchain "$SDK_MSRV" \
               --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
               --timeout-seconds 1200 -- \
               cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-              --features remote,content,write --test remote_write "$test" \
+              --features remote,files,publish --test remote_write "$test" \
               -- --exact --ignored --nocapture
           done
           QUALIFICATION_BUCKET="$CRAB_SDK_TEST_S3_BUCKET" \
           QUALIFICATION_PREFIX="qualification/sdk-ref-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             python3 crab/scripts/qualify_sdk.py run \
               --output "$RUNNER_TEMP/sdk-evidence/ref_batches_rustfs_recover_without_git_after_restart.json" \
-              --backend rustfs --features remote,content,write \
+              --backend rustfs --features remote,files,publish \
               --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
               --expected-tests 1 --toolchain "$SDK_MSRV" \
               --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
               --timeout-seconds 1200 -- \
               cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-              --features remote,content,write --lib \
+              --features remote,files,publish --lib \
               client::mutation::tests::ref_batches_rustfs_recover_without_git_after_restart \
               -- --exact --ignored --nocapture
       - name: Qualify shared HTTP publication faults
@@ -562,7 +562,7 @@ jobs:
             cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --lib local::tests::
           python3 crab/scripts/qualify_sdk.py run \
             --output "$RUNNER_TEMP/sdk-evidence/minimum-git-local.json" \
-            --backend filesystem --features remote,content,write,local,managed --fixture-digest "$fixture_digest" \
+            --backend filesystem --features remote,files,publish,local,service --fixture-digest "$fixture_digest" \
             --expected-tests 44 --toolchain "$SDK_MSRV" \
             --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
             --timeout-seconds 1200 -- \
@@ -660,7 +660,7 @@ jobs:
       - name: Publish deterministic 1 GiB fixture
         run: |
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --release \
-            --no-default-features --features remote,content --test remote_blob \
+            --no-default-features --features remote,files --test remote_blob \
             large::publish_large_qualification_repository -- --exact --ignored --nocapture \
             | tee "$RUNNER_TEMP/sdk-large-publish.log"
           result="$(grep -oE 'commit=[0-9a-f]{40} crab_bytes=[0-9]+ crab_blake3=[0-9a-f]{64}' \
@@ -675,7 +675,7 @@ jobs:
       - name: Build optimized shared-core and SDK readers
         run: >-
           cargo "+${SDK_MSRV}" build -p crab-sdk --locked --release
-          --no-default-features --features remote,content
+          --no-default-features --features remote,files
           --example core_crab_read --example remote_read
       - name: Run five cold and warm pairs
         run: >-
@@ -778,11 +778,11 @@ jobs:
         run: >-
           python3 crab/scripts/qualify_sdk.py run
           --output "$RUNNER_TEMP/sdk-s3-evidence/read.json"
-          --backend s3 --features remote,content
+          --backend s3 --features remote,files
           --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
           --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
-          --features remote,content --test remote_blob
+          --features remote,files --test remote_blob
           s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
           -- --exact --ignored --nocapture
       - name: Qualify native S3 writes and restart recovery
@@ -792,20 +792,20 @@ jobs:
           for test in remote_edit_round_trip_without_git stale_ref_batch_changes_no_refs initialization_preserves_foreign_content; do
             python3 crab/scripts/qualify_sdk.py run \
               --output "$RUNNER_TEMP/sdk-s3-evidence/${test}.json" \
-              --backend s3 --features remote,content,write \
+              --backend s3 --features remote,files,publish \
               --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
               --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
               cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-              --features remote,content,write --test remote_write "$test" \
+              --features remote,files,publish --test remote_write "$test" \
               -- --exact --ignored --nocapture
           done
           python3 crab/scripts/qualify_sdk.py run \
             --output "$RUNNER_TEMP/sdk-s3-evidence/restart.json" \
-            --backend s3 --features remote,content,write \
+            --backend s3 --features remote,files,publish \
             --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
             --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
             cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-            --features remote,content,write --lib \
+            --features remote,files,publish --lib \
             client::mutation::tests::ref_batches_rustfs_recover_without_git_after_restart \
             -- --exact --ignored --nocapture
       - name: Qualify local S3 workflows
@@ -911,21 +911,21 @@ jobs:
         run: >-
           python3 crab/scripts/qualify_sdk.py run
           --output "$RUNNER_TEMP/sdk-cloud-evidence/gcs.json"
-          --backend gcs --features remote,write
+          --backend gcs --features remote,publish
           --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
           --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
-          --features remote,write --test gcs_read live_gcs_read_is_byte_exact_and_read_only
+          --features remote,publish --test gcs_read live_gcs_read_is_byte_exact_and_read_only
           -- --exact --ignored --nocapture
       - name: Qualify Azure
         run: >-
           python3 crab/scripts/qualify_sdk.py run
           --output "$RUNNER_TEMP/sdk-cloud-evidence/azure.json"
-          --backend azure --features remote,write
+          --backend azure --features remote,publish
           --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
           --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
-          --features remote,write --test azure_read live_azure_read_is_byte_exact_and_read_only
+          --features remote,publish --test azure_read live_azure_read_is_byte_exact_and_read_only
           -- --exact --ignored --nocapture
       - name: Upload cloud evidence
         if: always()
@@ -982,13 +982,13 @@ jobs:
             managed_local_matrix_contract; do
             python3 crab/scripts/qualify_sdk.py run \
               --output "$RUNNER_TEMP/sdk-managed-evidence/${test}.json" \
-              --backend managed --features local,managed \
+              --backend managed --features local,service \
               --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
               --expected-tests 1 --require-rss-below 2147483648 \
               --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN" \
               --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 -- \
               cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-              --features local,managed --test managed "$test" \
+              --features local,service --test managed "$test" \
               -- --exact --ignored --nocapture
           done
       - name: Upload managed evidence

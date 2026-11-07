@@ -32,7 +32,7 @@ pub(crate) fn read_error(source: crab_read::ReadError) -> Error {
             kind = storage_kind(error);
             break;
         }
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         if matches!(
             error.downcast_ref::<crab_cache_store::CacheStoreError>(),
             Some(crab_cache_store::CacheStoreError::OriginIntegrity { .. })
@@ -157,7 +157,7 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
         return kind;
     }
     match error {
-        #[cfg(any(feature = "content", feature = "write"))]
+        #[cfg(any(feature = "files", feature = "publish"))]
         E::FileLookupLimit { .. } => ErrorKind::LimitExceeded,
         E::CapsulePlanSize { .. } => ErrorKind::LimitExceeded,
         E::Storage { source } => storage_kind(source),
@@ -178,7 +178,7 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
     }
 }
 
-#[cfg(any(feature = "content", feature = "write"))]
+#[cfg(any(feature = "files", feature = "publish"))]
 pub(crate) fn lfs_kind(source: &crab_lfs::LfsError) -> ErrorKind {
     use crab_lfs::LfsError as E;
     match source {

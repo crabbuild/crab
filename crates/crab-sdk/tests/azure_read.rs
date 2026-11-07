@@ -1,12 +1,12 @@
 #![cfg(feature = "remote")]
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 use crab_sdk::remote::EntryMode;
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};
 use crab_sdk::storage::{AzureOptions, DirectStoreOptions};
 use crab_sdk::{Client, ErrorKind, RepositoryLocator};
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 use crab_sdk::{GitPath, Revision};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -123,7 +123,7 @@ async fn explicit_azure_requests_ignore_environment_and_report_missing_repositor
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 #[ignore = "requires a dedicated Azure container and explicit bearer token"]
 async fn live_azure_read_is_byte_exact_and_read_only() {
     use futures_util::TryStreamExt as _;

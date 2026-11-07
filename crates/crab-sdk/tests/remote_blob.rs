@@ -2,22 +2,22 @@
 
 #[path = "remote_blob/archive.rs"]
 mod archive;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[path = "remote_blob/crab.rs"]
 mod crab;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[path = "remote_blob/large.rs"]
 mod large;
 #[path = "remote_blob/large_tree.rs"]
 mod large_tree;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[path = "remote_blob/lfs.rs"]
 mod lfs;
 #[path = "remote_blob/ranges.rs"]
 mod ranges;
 
 pub mod support;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 use support::capsule_fixture::catalog_for_shard;
 use support::{capsule_fixture::CapsuleFixture, copy_published_objects, git};
 
@@ -118,29 +118,29 @@ async fn verify_native_reads(bucket: Option<String>) {
     );
     std::fs::write(source.join("second.txt"), b"another tree entry\nnew line\n").unwrap();
     git(&source, &["add", "second.txt"]);
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let crab_fixture = crab::Fixture::new(second_bytes);
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let crab_pointer = crab_fixture.pointer.serialize();
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     let crab_pointer = b"version https://crab.dev/spec/v1\nfile-hash 0000000000000000000000000000000000000000000000000000000000000000\nsize 32\n".to_vec();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let crab_no_hint = crab_types::pointer::Pointer {
         file_hash: crab_fixture.pointer.file_hash,
         size: crab_fixture.pointer.size,
         shard_hint: None,
     }
     .serialize();
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     let crab_no_hint = crab_pointer.clone();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let crab_stale_hint = crab_types::pointer::Pointer {
         file_hash: crab_fixture.pointer.file_hash,
         size: crab_fixture.pointer.size,
         shard_hint: Some([0; 32]),
     }
     .serialize();
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     let crab_stale_hint = crab_pointer.clone();
     let lfs_oid: [u8; 32] = sha2::Sha256::digest(second_bytes).into();
     let lfs_pointer = crab_git::LfsPointer {
@@ -178,9 +178,9 @@ async fn verify_native_reads(bucket: Option<String>) {
     let pack = directory.path().join(format!("fixture-{hash}.pack"));
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "repository".to_owned());
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     crab_fixture.publish(&store, &layout).await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     {
         let lfs = crab_lfs::LfsObjectStore::new(store.clone(), "repository");
         store
@@ -199,10 +199,10 @@ async fn verify_native_reads(bucket: Option<String>) {
         &[first.clone(), second.clone()],
     )
     .await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let catalog =
         catalog_for_shard(&layout, &crab_fixture.shard.0.hex(), &crab_fixture.shard.1).await;
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     let catalog = Default::default();
     native
         .publish(
@@ -218,14 +218,14 @@ async fn verify_native_reads(bucket: Option<String>) {
         Some(bucket) => DirectStoreOptions::s3_from_env(bucket).unwrap(),
         None => DirectStoreOptions::filesystem(&storage).unwrap(),
     };
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let fixture_store = cloud.clone().unwrap_or_else(|| {
         Store::new(Arc::new(
             object_store::local::LocalFileSystem::new_with_prefix(&storage).unwrap(),
         ))
     });
     let builder = Client::builder().direct_store(options.clone());
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let builder = {
         let cache = directory.path().join("content-cache");
         std::fs::create_dir(&cache).unwrap();
@@ -426,7 +426,7 @@ async fn verify_native_reads(bucket: Option<String>) {
             .unwrap()
             .unwrap();
     }
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     assert_eq!(
         current
             .archive(crab_sdk::remote::ContentMode::Hydrated)
@@ -436,7 +436,7 @@ async fn verify_native_reads(bucket: Option<String>) {
             .kind(),
         crab_sdk::ErrorKind::UnsupportedCapability
     );
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     {
         let hydrated = archive::collect(&current, crab_sdk::remote::ContentMode::Hydrated).await;
         let expected = archived
@@ -531,7 +531,7 @@ async fn verify_native_reads(bucket: Option<String>) {
             current.read_blob(path.clone()).await.unwrap().as_ref(),
             pointer
         );
-        if !cfg!(feature = "content") {
+        if !cfg!(feature = "files") {
             assert_eq!(
                 current.open_file(path).await.err().unwrap().kind(),
                 crab_sdk::ErrorKind::UnsupportedCapability
@@ -542,13 +542,13 @@ async fn verify_native_reads(bucket: Option<String>) {
     ranges::verify_limits(&current, &filename).await;
     ranges::verify_controls(&current, &filename).await;
     ranges::verify_progress(&current, &filename).await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     lfs::verify(&current, &fixture_store, lfs_oid, second_bytes).await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     crab::verify(&current, second_bytes).await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     crab::verify_limits(options.clone(), &directory.path().join("limits-cache")).await;
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     crab_fixture
         .verify_corruption(
             &fixture_store,
@@ -590,7 +590,7 @@ async fn verify_native_reads(bucket: Option<String>) {
         same_commit.commit_id().unwrap(),
         current.commit_id().unwrap()
     );
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     {
         crab::verify_pinned_lookup(&current, second_bytes).await;
         crab::verify_lookup_missing(&same_commit).await;
@@ -616,12 +616,12 @@ async fn verify_native_reads(bucket: Option<String>) {
         .open_file(GitPath::new(filename.clone()).unwrap())
         .await
         .unwrap();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let lfs = current
         .open_file(GitPath::new(b"z-lfs".to_vec()).unwrap())
         .await
         .unwrap();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let crab = current
         .open_file(GitPath::new(b"z-crab".to_vec()).unwrap())
         .await
@@ -632,9 +632,9 @@ async fn verify_native_reads(bucket: Option<String>) {
         .unwrap();
     archive.close().await.unwrap();
     content.close().await.unwrap();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     lfs.close().await.unwrap();
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     crab.close().await.unwrap();
     if let (Some(bucket), Some(examples)) = (&bucket, std::env::var_os("CRAB_SDK_TEST_EXAMPLES")) {
         let examples = std::path::PathBuf::from(examples);
@@ -650,7 +650,7 @@ async fn verify_native_reads(bucket: Option<String>) {
                     blake3::hash(expected)
                 )
             });
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             let hydrated = {
                 let cache = directory.path().join("example-cache");
                 std::fs::create_dir(&cache).unwrap();
@@ -665,9 +665,9 @@ async fn verify_native_reads(bucket: Option<String>) {
                     })
                 })
             };
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             let inputs = std::iter::once(raw).chain(hydrated).collect::<Vec<_>>();
-            #[cfg(not(feature = "content"))]
+            #[cfg(not(feature = "files"))]
             let inputs = vec![raw];
             std::fs::write(&cases, serde_json::to_vec(&inputs).unwrap()).unwrap();
             let result = Command::new(
@@ -705,7 +705,7 @@ async fn verify_native_reads(bucket: Option<String>) {
                 )
             );
         }
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         if std::env::var_os("CRAB_SDK_TEST_READ_GUARD").is_none() {
             let cache = directory.path().join("example-cache");
             std::fs::create_dir(&cache).unwrap();

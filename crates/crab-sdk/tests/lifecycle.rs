@@ -135,7 +135,7 @@ async fn warm_cache_respects_limits() {
     fixture.client.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stream_close_reports_integrity_failure() {
     use std::sync::Arc;

@@ -54,7 +54,7 @@ class QualificationRunnerTests(unittest.TestCase):
             report = Path(directory) / "report.json"
             result = subprocess.run([
                 "python3", str(SCRIPT), "run", "--output", str(report),
-                "--backend", "rustfs", "--features", "remote,content",
+                "--backend", "rustfs", "--features", "remote,files",
                 "--fixture-digest", DIGEST, "--expected-tests", "1", "--",
                 "python3", "-c",
                 "print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out')",

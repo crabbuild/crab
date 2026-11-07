@@ -15,11 +15,11 @@ all-features = true
 [features]
 default = []
 remote = ["dep:crab-read", "dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
-write = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
-local = ["write", "content", "crab-remote/local", "dep:dunce", "dep:toml"]
-managed = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
+publish = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
+local = ["publish", "files", "crab-remote/local", "dep:dunce", "dep:toml"]
+service = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
 
-content = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
+files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
 
 [dependencies]
 crab-remote = { workspace = true, optional = true }
@@ -76,15 +76,15 @@ required-features = ["remote"]
 
 [[example]]
 name = "core_crab_read"
-required-features = ["content"]
+required-features = ["files"]
 
 [[example]]
 name = "remote_edit"
-required-features = ["content", "write"]
+required-features = ["files", "publish"]
 
 [[example]]
 name = "s3_gateway_fixture"
-required-features = ["content", "write"]
+required-features = ["files", "publish"]
 
 [[example]]
 name = "resolve_conflict"

@@ -23,13 +23,13 @@ content.close().await?;
 
 A `remote::Snapshot` provides commit metadata, paginated tree and history
 traversal, diff, blame, raw blobs, hydrated files, and streamed archives.
-`read_blob` returns exact Git blob bytes. With `content`, `open_file`
+`read_blob` returns exact Git blob bytes. With `files`, `open_file`
 reconstructs and verifies referenced Crab or Git LFS content. Successful EOF
 proves full-file integrity.
 
 ## Remote commits
 
-With `write`, remote commits accept streamed replacements and deletions.
+With `publish`, remote commits accept streamed replacements and deletions.
 Hydrated edits publish verified content before their pointer enters the Git
 tree.
 

@@ -80,7 +80,7 @@ pub enum EntryMode {
     Submodule,
 }
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 impl EntryMode {
     pub(crate) fn tree_mode(self) -> Result<gix_object::tree::EntryMode> {
         use gix_object::tree::EntryKind;

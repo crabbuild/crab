@@ -177,7 +177,7 @@ impl CapsuleFixture {
     }
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub async fn catalog_for_shard(
     layout: &StoreLayout<Store>,
     hash: &str,

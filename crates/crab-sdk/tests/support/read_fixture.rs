@@ -104,7 +104,7 @@ impl ReadFixture {
                 Default::default(),
             )
             .await;
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         store
             .put(
                 &crab_lfs::LfsObjectStore::object_path_for_prefix("repository", &oid),

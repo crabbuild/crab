@@ -4,13 +4,13 @@ use crate::DirectStoreOptions;
 #[derive(Default)]
 pub struct ClientBuilder {
     pub(crate) store: Option<DirectStoreOptions>,
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     pub(crate) cache: Option<crate::ContentCache>,
     #[cfg(feature = "local")]
     pub(crate) local_tools: Option<crate::LocalTools>,
     #[cfg(feature = "local")]
     pub(crate) local_execution_policy: crate::LocalExecutionPolicy,
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) managed: Option<crate::ManagedOptions>,
 }
 
@@ -23,7 +23,7 @@ impl ClientBuilder {
     }
 
     /// Select explicit disk placement and retention budget for Crab reconstruction.
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     #[must_use]
     pub fn content_cache(mut self, cache: crate::ContentCache) -> Self {
         self.cache = Some(cache);
@@ -40,7 +40,7 @@ impl ClientBuilder {
     }
 
     /// Select managed-service profile, token-cache and authority resolution.
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     #[must_use]
     pub fn managed(mut self, options: crate::ManagedOptions) -> Self {
         self.managed = Some(options);

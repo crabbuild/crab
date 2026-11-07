@@ -68,7 +68,7 @@ impl PreparedMutation {
             directories,
             commit: _,
         } = self;
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         if token.managed_finalize().is_some() {
             return execute_managed(client, token, options).await;
         }
@@ -211,7 +211,7 @@ async fn execute_mutation(
         .await
 }
 
-#[cfg(feature = "managed")]
+#[cfg(feature = "service")]
 async fn execute_managed(
     client: Client,
     token: RecoveryToken,
@@ -414,7 +414,7 @@ pub(crate) async fn prepare_local_pack_update(
         prepared = prepared.attach_content(content).map_err(Failure::from)?;
     }
     owned_directories.push(directory);
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     if !persist_recovery && locator.managed_owner().is_some() {
         // Managed dry-run is local validation only. Preparing a protected
         // service session would reserve admission and create remote objects.
@@ -462,9 +462,9 @@ pub(super) async fn finish_preparation(
         commit,
         persist_recovery,
     } = input;
-    #[cfg(not(feature = "managed"))]
+    #[cfg(not(feature = "service"))]
     let _ = options;
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     if let Some(repository) = locator.managed_owner() {
         if !persist_recovery {
             return Err(Error::new(
@@ -998,7 +998,7 @@ impl Client {
         scratch: PathBuf,
         options: OperationOptions,
     ) -> Result<MutationOutcome> {
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         if token.managed_finalize().is_some() {
             return execute_managed(self.clone(), token, options).await;
         }
@@ -1073,7 +1073,7 @@ impl Client {
         token: RecoveryToken,
         options: OperationOptions,
     ) -> Result<MutationOutcome> {
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         if token.managed_finalize().is_some() {
             return execute_managed(self.clone(), token, options).await;
         }

@@ -196,7 +196,7 @@ need to open a long-lived handle:
 
 ```rust,ignore
 impl Client {
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn initialize_remote(
         &self,
         locator: RepositoryLocator,
@@ -410,10 +410,10 @@ The feature graph is:
 | --- | --- | --- |
 | default | Value, error, storage option, and builder types | No Tokio, Git process, auth, or provider runtime |
 | `remote` | `Client`, remote open/read interface, operation module | No Git or Crab executable dependency |
-| `content` | Hydrated remote reads and content cache | Implies `remote` |
-| `write` | Remote initialization and `remote::write` | Implies `remote` |
-| `local` | Local options, open/clone/configure, and local workflows | Implies `write` and `content` |
-| `managed` | Managed locator resolution and administration | Implies `remote` |
+| `files` | Verified file streams, ranges, and content cache | Implies `remote` |
+| `publish` | Remote initialization and `remote::write` | Implies `remote` |
+| `local` | Local options, open/clone/configure, and local workflows | Implies `publish` and `files` |
+| `service` | Managed locator resolution and administration | Implies `remote` |
 
 Modules, exports, examples, tests, and dependencies use the same gates. A
 remote-only consumer never compiles local process code. Namespaces organize the
@@ -462,7 +462,7 @@ The public API is qualified only when all of the following are true:
   [the capability inventory](sdk-capabilities.md);
 - rustdoc, examples, guides, package consumers, and the checked API snapshot
   expose the inventory in section 2;
-- minimal, remote, content, write, local, managed, and combined feature builds
+- minimal, remote, files, publish, local, service, and combined feature builds
   pass;
 - compile-fail coverage proves disabled features do not leak public types;
 - dropped requests, streams, prepared mutations, leases, cancellation, and

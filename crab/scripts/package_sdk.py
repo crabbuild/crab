@@ -23,7 +23,7 @@ CLOSURE = [
     "crab-diff", "crab-lfs", "crab-metadata", "crab-remote-git", "crab-read",
     "crab-write", "crab-remote", "crab-staging", "crab-sdk",
 ]
-PROFILES = ["minimal", "remote-content", "local", "managed"]
+PROFILES = ["minimal", "remote-files", "local", "service"]
 COMPILE_FAIL_PROBES = [
     (
         "minimal-hides-runtime",
@@ -33,7 +33,7 @@ COMPILE_FAIL_PROBES = [
     ),
     (
         "remote-hides-local",
-        "remote-content",
+        "remote-files",
         "fn main() { let _ = crab_sdk::local::CloneOptions::default(); }\n",
         "could not find `local` in `crab_sdk`",
     ),
@@ -51,7 +51,7 @@ COMPILE_FAIL_PROBES = [
     ),
     (
         "old-open-method-is-absent",
-        "remote-content",
+        "remote-files",
         "fn check(client: &crab_sdk::Client, locator: crab_sdk::RepositoryLocator) { let _ = client.open_remote(locator); }\nfn main() {}\n",
         "no method named `open_remote`",
     ),

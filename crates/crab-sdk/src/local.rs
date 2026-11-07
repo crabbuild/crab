@@ -562,7 +562,7 @@ impl Client {
                 }
                 let resolved = state.resolve_repository(&locator, &cancel).await?;
                 let (remote, environment, managed_token_cache) = if resolved.managed {
-                    #[cfg(feature = "managed")]
+                    #[cfg(feature = "service")]
                     {
                         let managed = state.managed.as_ref().ok_or_else(|| {
                             Error::new(
@@ -587,7 +587,7 @@ impl Client {
                             Some(managed.token_cache_directory.as_path()),
                         )
                     }
-                    #[cfg(not(feature = "managed"))]
+                    #[cfg(not(feature = "service"))]
                     return Err(Error::new(
                         ErrorKind::UnsupportedCapability,
                         "managed repository support is disabled",
@@ -976,7 +976,7 @@ async fn discover_locator(
             "atomic local transfer requires one remote URL",
         ));
     }
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     if let Some(managed) = state.managed.as_ref() {
         match managed.resolver.classify(remote) {
             Ok(crab_git::RepositoryLocator::Managed(repository)) => {

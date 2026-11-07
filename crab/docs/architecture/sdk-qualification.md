@@ -1,5 +1,10 @@
 # SDK qualification inputs and evidence
 
+Current SDK Cargo features are `remote`, `files`, `publish`, `local`, and
+`service`. The former `content`, `write`, and `managed` feature names were
+renamed to `files`, `publish`, and `service`. Historical commands and reports
+below retain the feature names used by their recorded source revision.
+
 This record accompanies `crab-sdk.md`. The delivery inventory in
 `sdk-capabilities.json` covers all 48 section-8 cells: 45 implemented contracts
 and three explicit 1.0 exclusions. Its generated Markdown view is

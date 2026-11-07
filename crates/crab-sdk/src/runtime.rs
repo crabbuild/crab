@@ -10,7 +10,7 @@ use crate::{Error, ErrorKind, OperationId, OperationOptions, Result};
 #[derive(Clone, Copy)]
 enum Completion {
     Read,
-    #[cfg(any(feature = "write", feature = "managed"))]
+    #[cfg(any(feature = "publish", feature = "service"))]
     Mutation,
 }
 
@@ -33,7 +33,7 @@ impl Default for Operations {
 }
 
 impl Operations {
-    #[cfg(any(feature = "write", feature = "managed"))]
+    #[cfg(any(feature = "publish", feature = "service"))]
     pub(crate) async fn run_mutation<T, F, Fut>(
         &self,
         options: OperationOptions,
@@ -209,7 +209,7 @@ where
         Ok(value)
             if match completion {
                 Completion::Read => false,
-                #[cfg(any(feature = "write", feature = "managed"))]
+                #[cfg(any(feature = "publish", feature = "service"))]
                 Completion::Mutation => true,
             } =>
         {
@@ -312,7 +312,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     #[tokio::test]
     async fn mutation_deadline_retains_commit_evidence_after_cleanup() {
         let operations = Operations::default();

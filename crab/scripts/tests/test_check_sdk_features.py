@@ -22,9 +22,9 @@ class FeatureBoundaryTests(unittest.TestCase):
 
     def test_forbidden_dependencies_and_missing_owners_are_detected(self):
         for profile, extra in [("default", "tokio"), ("default", "crab-storage"),
-                               ("remote", "crab-cache"), ("remote-content", "crab-vfs"),
-                               ("remote-content", "crab-server"), ("remote", "crab"),
-                               ("write", "crab"), ("write", "crab-auth-server")]:
+                               ("remote", "crab-cache"), ("remote-files", "crab-vfs"),
+                               ("remote-files", "crab-server"), ("remote", "crab"),
+                               ("publish", "crab"), ("publish", "crab-auth-server")]:
             with self.subTest(profile=profile, extra=extra):
                 forbidden, _ = module.violations(
                     profile, set(module.PROFILES[profile]), {"crab-sdk", extra}
@@ -32,14 +32,14 @@ class FeatureBoundaryTests(unittest.TestCase):
                 self.assertIn(extra, forbidden)
         self.assertEqual(
             module.violations(
-                "remote-content", set(module.PROFILES["remote-content"]),
+                "remote-files", set(module.PROFILES["remote-files"]),
                 {"crab-sdk", "crab-storage", "crab-remote-git"},
             ),
             ([], ["crab-lfs", "crab-read"]),
         )
         self.assertEqual(
             module.violations(
-                "write", set(module.PROFILES["write"]),
+                "publish", set(module.PROFILES["publish"]),
                 {"crab-sdk", "crab-storage", "crab-remote-git", "crab-read", "crab-lfs"},
             ),
             ([], ["crab-coordination", "crab-remote", "crab-write"]),
