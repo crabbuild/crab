@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -62,6 +63,23 @@ class ExistingRefPushTest(unittest.TestCase):
                 with patch.object(ConcurrentPushSmoke, "init_seed"), self.assertRaises(SmokeError):
                     smoke.init_seed()
                 self.assertNotIn("ref_setup", smoke.report.workload)
+
+    def test_each_update_commits_a_fresh_four_kib_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = self.fixture(Path(directory), self.refs())
+            repo = smoke.branch_agents / "branch-agent-000"
+            (repo / "agents").mkdir(parents=True)
+            smoke.logs.mkdir()
+            smoke.run_git(repo, ["init", "-b", "agent-000"])
+            smoke.configure_git_identity(repo, "payload-test")
+            payloads = []
+            for round_index in (1, 2):
+                smoke.prepare_branch_update(0, round_index)
+                payloads.append(subprocess.check_output(
+                    [smoke.args.git_bin, "show", "HEAD:payload.bin"], cwd=repo, env=smoke.env,
+                ))
+            self.assertEqual((len(payloads[0]), len(payloads[1]), payloads[0] != payloads[1]),
+                             (4096, 4096, True))
 
 
 if __name__ == "__main__":

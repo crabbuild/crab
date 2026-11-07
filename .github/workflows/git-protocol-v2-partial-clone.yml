@@ -841,6 +841,8 @@ jobs:
               report = json.loads(path.read_text())
               if report["status"] != "ok":
                   raise SystemExit(f"{actors}-writer integrity qualification failed")
+              if report["workload"]["update_payload_bytes"] != 4096:
+                  raise SystemExit("latency qualification requires 4 KiB update payloads")
               timings = sorted(row["command"]["duration_ms"] for row in report["branch_updates"])
               if not timings:
                   raise SystemExit(f"{actors}-writer measurement has no update samples")
