@@ -121,7 +121,7 @@ pub(super) async fn verify_limits(snapshot: &Snapshot, name: &[u8]) {
     assert!(snapshot.read_blob(path).await.is_ok());
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(super) async fn verify_hydration_limit(
     snapshot: &Snapshot,
     path: GitPath,

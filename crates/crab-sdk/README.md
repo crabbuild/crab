@@ -38,10 +38,14 @@ application.
 | Feature | API | Implies |
 | --- | --- | --- |
 | `remote` | Client construction, remote repositories, refs, snapshots, and raw Git reads | — |
-| `content` | Verified Crab and Git LFS content reads and content caching | `remote` |
-| `write` | Remote initialization, commit creation, atomic ref updates, and recovery | `remote` |
-| `local` | Local clone, fetch, edit, integration, hydration, and push workflows | `write`, `content` |
-| `managed` | Managed repository resolution and lifecycle administration | `remote` |
+| `files` | Verified file streams, ranges, and caching for Git, Crab/Xet, and Git LFS | `remote` |
+| `publish` | Remote initialization, commit creation, atomic ref updates, and recovery | `remote` |
+| `local` | Local clone, fetch, edit, integration, hydration, and push workflows | `publish`, `files` |
+| `service` | Managed repository resolution and lifecycle administration | `remote` |
+
+Existing Cargo dependencies must replace `content` with `files`, `write` with
+`publish`, and `managed` with `service`. The old feature names are removed.
+Rust API paths such as `remote::write` and `managed` retain their names.
 
 Typical dependency configurations are:
 
@@ -50,10 +54,10 @@ Typical dependency configurations are:
 crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["remote"] }
 
 # Remote logical content and writes
-crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["content", "write"] }
+crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["files", "publish"] }
 
 # Local and managed workflows
-crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["local", "managed"] }
+crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["local", "service"] }
 ```
 
 ## Repository protocol
@@ -111,7 +115,7 @@ A remote `Repository` captures one immutable generation. Existing snapshots
 stay pinned if refs move. Call `repository.remote()?.refresh()` to open the
 latest visible generation.
 
-`Snapshot::read_blob` returns exact Git blob bytes. With `content` enabled,
+`Snapshot::read_blob` returns exact Git blob bytes. With `files` enabled,
 `Snapshot::open_file` streams verified logical content for regular Git blobs,
 Crab pointers, and Git LFS pointers.
 
@@ -175,7 +179,7 @@ the service verifies and promotes the complete dependency set.
 
 ## Managed repositories
 
-Enable `managed` to resolve managed repository locators and administer their
+Enable `service` to resolve managed repository locators and administer their
 lifecycle. The token cache path must be absolute.
 
 ```rust,no_run

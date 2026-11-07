@@ -125,7 +125,7 @@ async fn snapshot_stays_pinned() {
     fixture.client.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[tokio::test]
 async fn raw_and_hydrated_bytes_are_distinct() {
     let fixture = support::read_fixture::ReadFixture::new().await;
@@ -171,7 +171,7 @@ async fn byte_paths_round_trip() {
     fixture.client.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[tokio::test]
 async fn lfs_extensions_never_deliver_untransformed_hydrated_bytes() {
     let fixture = support::read_fixture::ReadFixture::new().await;
@@ -228,7 +228,7 @@ async fn lfs_extensions_never_deliver_untransformed_hydrated_bytes() {
     fixture.client.close().await.unwrap();
 }
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 #[tokio::test(flavor = "multi_thread")]
 async fn indexed_reads_outlive_the_opening_admission() {
     let fixture = support::read_fixture::ReadFixture::new().await;

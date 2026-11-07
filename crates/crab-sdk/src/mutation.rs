@@ -424,12 +424,12 @@ impl RefUpdate {
         &self.name
     }
 
-    #[cfg(any(feature = "local", feature = "managed"))]
+    #[cfg(any(feature = "local", feature = "service"))]
     pub(crate) fn expected(&self) -> Result<Option<ObjectId>> {
         self.old.as_deref().map(ObjectId::from_hex).transpose()
     }
 
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) fn target(&self) -> Result<Option<ObjectId>> {
         self.new.as_deref().map(ObjectId::from_hex).transpose()
     }
@@ -610,7 +610,7 @@ impl RequestBinding {
             RecoveryBackend::Direct => {
                 RepositoryLocator::new(&self.repository)?;
             }
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             RecoveryBackend::Managed { push_id, finalize } => {
                 if push_id.is_nil() || managed_locator(&self.repository)?.managed_owner().is_none()
                 {
@@ -682,7 +682,7 @@ struct TokenBinding {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RecoveryBackend {
     Direct,
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     Managed {
         push_id: uuid::Uuid,
         finalize: crab_auth::managed::PushFinalizeRequest,
@@ -739,7 +739,7 @@ impl RecoveryToken {
         Ok(token)
     }
 
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) fn new_managed(
         placement: [u8; 32],
         repository: &RepositoryLocator,
@@ -861,11 +861,11 @@ impl RecoveryToken {
     pub(crate) fn locator(&self) -> Result<RepositoryLocator> {
         match &self.0.backend {
             RecoveryBackend::Direct => RepositoryLocator::new(&self.0.request.repository),
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             RecoveryBackend::Managed { .. } => managed_locator(&self.0.request.repository),
         }
     }
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) fn managed_finalize(
         &self,
     ) -> Option<(uuid::Uuid, &crab_auth::managed::PushFinalizeRequest)> {
@@ -876,7 +876,7 @@ impl RecoveryToken {
     }
 }
 
-#[cfg(feature = "managed")]
+#[cfg(feature = "service")]
 fn managed_locator(value: &str) -> Result<RepositoryLocator> {
     let rest = value
         .strip_prefix("crab://")

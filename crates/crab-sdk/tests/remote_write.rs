@@ -1,4 +1,4 @@
-#![cfg(all(feature = "write", feature = "content"))]
+#![cfg(all(feature = "publish", feature = "files"))]
 
 use std::{io::Write as _, path::PathBuf};
 

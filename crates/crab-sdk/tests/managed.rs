@@ -1,4 +1,4 @@
-#![cfg(all(feature = "local", feature = "managed"))]
+#![cfg(all(feature = "local", feature = "service"))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

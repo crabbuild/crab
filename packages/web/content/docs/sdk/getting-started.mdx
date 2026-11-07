@@ -17,14 +17,18 @@ application uses:
 | Feature | Adds |
 | --- | --- |
 | `remote` | `Client`, unified open, pinned remote reads, and operation controls |
-| `content` | Verified Crab and Git LFS reconstruction |
-| `write` | Remote initialization, commits, ref updates, and recovery |
-| `local` | Local worktree workflows; implies `write` and `content` |
-| `managed` | Managed grants and repository lifecycle APIs |
+| `files` | Verified file streams, ranges, and caching for Git, Crab/Xet, and Git LFS |
+| `publish` | Remote initialization, commits, ref updates, and recovery |
+| `local` | Local worktree workflows; implies `publish` and `files` |
+| `service` | Managed grants and repository lifecycle APIs |
+
+Replace the former Cargo features `content`, `write`, and `managed` with `files`,
+`publish`, and `service`. Rust API paths such as `remote::write` and `managed`
+retain their names.
 
 ```toml
 [dependencies]
-crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["remote", "content"] }
+crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["remote", "files"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

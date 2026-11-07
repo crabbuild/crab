@@ -9,14 +9,14 @@ import subprocess
 PROFILES = {
     "default": (),
     "remote": ("remote",),
-    "remote-content": ("remote", "content"),
-    "write": ("write",),
+    "remote-files": ("remote", "files"),
+    "publish": ("publish",),
     "local": ("local",),
-    "managed": ("managed",),
-    "managed-remote": ("managed", "remote"),
-    "managed-content": ("managed", "remote", "content"),
-    "managed-write": ("managed", "write"),
-    "local-managed": ("local", "managed"),
+    "service": ("service",),
+    "service-remote": ("service", "remote"),
+    "service-files": ("service", "remote", "files"),
+    "service-publish": ("service", "publish"),
+    "local-service": ("local", "service"),
 }
 HYDRATION = { "crab-lfs", "crab-cache", "crab-cache-store", "xet-data", "xet-client"}
 
@@ -30,15 +30,15 @@ def violations(profile, features, packages):
         forbidden |= {name for name in packages if name.startswith("crab-") and name != "crab-sdk"}
     else:
         required |= {"crab-remote-git", "crab-storage", "crab-read"}
-        if "content" not in features and "write" not in features and "local" not in features:
+        if "files" not in features and "publish" not in features and "local" not in features:
             forbidden |= packages & HYDRATION
         else:
             required |= {"crab-read", "crab-lfs"}
-        if "write" in features or "local" in features:
+        if "publish" in features or "local" in features:
             required |= {"crab-remote", "crab-write", "crab-coordination"}
         if "local" in features:
             required |= {"crab-remote", "tokio"}
-        if "managed" in features:
+        if "service" in features:
             required |= {"crab-auth", "crab-auth-store"}
     return sorted(forbidden), sorted(required - packages)
 

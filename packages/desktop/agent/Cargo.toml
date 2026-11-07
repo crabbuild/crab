@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Read-side verbs go through the SDK.
-crab-sdk = { workspace = true, features = ["content", "managed", "local"] }
+crab-sdk = { workspace = true, features = ["files", "service", "local"] }
 crab-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
@@ -127,7 +127,7 @@ npyz = "0.8"
 libc = "0.2"
 
 [dev-dependencies]
-crab-sdk = { workspace = true, features = ["write"] }
+crab-sdk = { workspace = true, features = ["publish"] }
 # Real filesystem + git-repo fixtures for hunk-staging tests.
 # Using a temp dir + shelling out to `git init` keeps tests hermetic
 # without pulling a second git implementation into the agent.

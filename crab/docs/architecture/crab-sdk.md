@@ -181,7 +181,7 @@ let outcome = push.execute().await?;
 It reports implemented operation families through the non-exhaustive
 `remote::Capability` enum; it does not promise authorization or backend
 qualification. The current read SDK reports `ReadGit`, plus `ReadContent` when
-the `content` feature is enabled. `UpdateRefs` is implemented with `write` on
+the `files` feature is enabled. `UpdateRefs` is implemented with `publish` on
 conditional-write cloud stores; filesystem stores reject publication before
 lease admission. Other mutation families remain unadvertised until implemented.
 Cached capability metadata remains inspectable after client close.
@@ -235,9 +235,9 @@ Never silently replace a missing large file with its pointer text.
   into `crab-remote`; both clients use it. Preserve existing file schema and
   tested precedence. Do not copy the broad CLI `Config` aggregate.
 - `default = []`: value types and builders only. `remote` enables read APIs;
-  `write` implies `remote` and publication; `local` implies `write` plus local
-  workflows/processes; `managed` enables existing managed auth clients.
-- `content` enables hydration and LFS reconstruction and is implied by `local`.
+  `publish` implies `remote` and publication; `local` implies `publish` plus local
+  workflows/processes; `service` enables existing managed auth clients.
+- `files` enables hydration and LFS reconstruction and is implied by `local`.
   A metadata-only `remote` consumer must not acquire `crab-read`'s disk cache or
   reconstruction stack just to browse Git trees.
 - No SDK `s3`/`gcs`/`azure` feature flags in 1.0: `crab-storage` currently selects
@@ -613,7 +613,7 @@ manage resources. Prerequisite: phase 0.
 
 Work: add the workspace package, SDK errors/value types, features, Client,
 `Repository`, `remote::Remote`, `remote::Snapshot`, direct provider configuration, cancellation, bounded
-progress and `close`. Implement all section 4 read methods; add `content` for
+progress and `close`. Implement all section 4 read methods; add `files` for
 Crab/LFS reconstruction. Create compiling examples `remote_read.rs` and
 `remote_archive.rs`. Add owner-default and feature-closure checks.
 
@@ -645,7 +645,7 @@ Acceptance:
 - Storage-request and fetched-byte limits charge Store retries, provider HTTP
   retries, each listing page, and response-body chunks. Admission rejection
   stops before the next physical request.
-- Default/remote/remote+content compile separately; no CLI/server/VFS normal
+- Default/remote/remote+files compile separately; no CLI/server/VFS normal
   dependency; remote without content excludes the hydration stack.
 
 ### Phase 2 — Shared publication and recovery
@@ -848,7 +848,7 @@ user-visible contracts and are the initial matrix validator references.
 | 6 | `crates/crab-sdk/tests/managed.rs` | `managed_lifecycle_round_trip`, `revoked_push_never_commits`, `lost_finalize_reuses_push_id`, `placement_change_invalidates_cached_access` |
 | 6 | `crates/crab-sdk/tests/http_git.rs` | `native_http_round_trip`, `server_force_rejection_is_typed`, `lost_acknowledgement_is_indeterminate` |
 | 7 | `crab/scripts/qualify_sdk.py` | Runs real-backend targets and independent Git/byte checks; emits the required report fields |
-| 8 | `crates/crab-sdk/tests/package-consumer/` | Separate workspace for minimal, remote/content, local and managed published-package consumers |
+| 8 | `crates/crab-sdk/tests/package-consumer/` | Separate workspace for minimal, remote/files, local and service published-package consumers |
 
 Live-backend tests may be opt-in locally. The qualification runner must select
 them explicitly (including `--ignored` when necessary), verify their executed
@@ -867,16 +867,16 @@ checks run in CI or a dedicated test environment.
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo check -p crab-sdk --locked --no-default-features
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p crab-sdk --locked --no-default-features --features remote
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p crab-sdk --locked --no-default-features --features remote,content,write
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p crab-sdk --locked --no-default-features --features local,managed
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p crab-sdk --locked --no-default-features --features remote,files,publish
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p crab-sdk --locked --no-default-features --features local,service
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo clippy -p crab-sdk -p crab-remote --locked --all-targets --all-features -- -D warnings
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo doc -p crab-sdk --locked --all-features --no-deps
 python3 crab/scripts/verify_sdk_capabilities.py
 python3 crab/scripts/check-sdk-features.py
 ```
 
-Feature CI additionally builds `managed` alone and with `remote`, `remote,content`
-and `write` to prove additive features. Each extracting phase tests every touched
+Feature CI additionally builds `service` alone and with `remote`, `remote,files`
+and `publish` to prove additive features. Each extracting phase tests every touched
 owner plus direct callers, not just `crab-sdk`. SDK package tests use a dedicated
 consumer workspace; CI is responsible for building the matching filter binary.
 Local executable installation uses the existing `make install` workflow.

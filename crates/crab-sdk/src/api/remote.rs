@@ -1,18 +1,18 @@
 //! Remote repository reads and publication without a local worktree.
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 use std::path::PathBuf;
 
 pub use crate::archive::{ArchiveEvent, ArchiveStream, ContentMode};
 pub use crate::client::{Reference, References, RepositoryCapability as Capability, Snapshot};
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub use crate::content::ContentStream;
 pub use crate::read_types::{
     Blame, BlameRange, Commit, Diff, DiffClassification, DiffHunk, EntryMode, HistoryTraversal,
     Page, PageCursor, PageRequest, Signature, SignatureHeader, TreeEntry,
 };
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 pub mod write {
     //! Remote commit and atomic ref-publication contracts.
 
@@ -57,7 +57,7 @@ impl<'a> Remote<'a> {
     }
 
     /// Prepare a commit and branch update without a local worktree or Git executable.
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn prepare_commit(
         &self,
         commit: write::CommitOptions,
@@ -71,7 +71,7 @@ impl<'a> Remote<'a> {
     }
 
     /// Prepare an atomic ref batch using already available remote objects.
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn prepare_ref_update(
         &self,
         batch: write::RefBatch,
@@ -84,7 +84,7 @@ impl<'a> Remote<'a> {
     }
 
     /// Reconcile historical commitment after verifying this repository binding.
-    #[cfg(feature = "write")]
+    #[cfg(feature = "publish")]
     pub fn reconcile(
         &self,
         token: write::RecoveryToken,

@@ -1,10 +1,10 @@
 [package]
-name = "crab-sdk-consumer-remote-content"
+name = "crab-sdk-consumer-remote-files"
 version = "0.0.0"
 publish = false
 edition = "2024"
 rust-version = "1.97"
 
 [dependencies]
-crab-sdk = { version = "=0.1.0", default-features = false, features = ["remote", "content", "write"] }
+crab-sdk = { version = "=0.1.0", default-features = false, features = ["remote", "files", "publish"] }
 tokio = { version = "1", features = ["macros", "rt"] }

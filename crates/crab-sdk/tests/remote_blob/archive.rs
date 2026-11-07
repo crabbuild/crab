@@ -31,7 +31,7 @@ pub(super) async fn collect(snapshot: &Snapshot, mode: ContentMode) -> Vec<(Vec<
     entries
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(super) async fn logical_limit(snapshot: &Snapshot, first_size: usize) {
     let options = crab_sdk::operation::ReadOptions::default()
         .with_limits(crab_sdk::operation::ReadLimits {
@@ -60,7 +60,7 @@ pub(super) async fn logical_limit(snapshot: &Snapshot, first_size: usize) {
     stream.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(super) async fn fails_without_completing_entry(
     snapshot: &Snapshot,
     path: &[u8],
@@ -87,7 +87,7 @@ pub(super) async fn fails_without_completing_entry(
     stream.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(super) async fn close_during_hydration(snapshot: &Snapshot) {
     for (path, cancel) in [
         (b"z-crab".as_slice(), false),

@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let revision = Revision::branch(branch)?;
     let path = GitPath::new(path.as_bytes().to_vec())?;
     let builder = Client::builder().direct_store(DirectStoreOptions::s3_from_env(bucket)?);
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     let builder = match cache {
         [directory, rest @ ..] => builder.content_cache(crab_sdk::storage::ContentCache::new(
             std::path::Path::new(directory),
@@ -44,11 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?),
         _ => builder,
     };
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "files"))]
     if !cache.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "cache configuration requires the content feature",
+            "cache configuration requires the files feature",
         )
         .into());
     }

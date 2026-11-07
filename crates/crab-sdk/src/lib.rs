@@ -1,9 +1,9 @@
 #![cfg_attr(
-    all(feature = "local", feature = "managed"),
+    all(feature = "local", feature = "service"),
     doc = include_str!("../README.md")
 )]
 #![cfg_attr(
-    not(all(feature = "local", feature = "managed")),
+    not(all(feature = "local", feature = "service")),
     doc = "Asynchronous Rust client for remote, local, and managed Crab repository workflows."
 )]
 
@@ -18,10 +18,10 @@ mod error;
 #[cfg(feature = "local")]
 #[path = "local.rs"]
 mod local_impl;
-#[cfg(feature = "managed")]
+#[cfg(feature = "service")]
 #[path = "managed.rs"]
 mod managed_impl;
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 mod mutation;
 #[cfg(feature = "remote")]
 mod operation_options;
@@ -47,7 +47,7 @@ mod value;
 #[cfg(feature = "local")]
 #[path = "api/local.rs"]
 pub mod local;
-#[cfg(feature = "managed")]
+#[cfg(feature = "service")]
 #[path = "api/managed.rs"]
 pub mod managed;
 #[cfg(feature = "remote")]
@@ -63,7 +63,7 @@ pub use builder::ClientBuilder;
 #[cfg(feature = "remote")]
 pub use client::Client;
 pub use error::{Error, ErrorKind, Result};
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 pub use mutation::WritePolicy;
 #[cfg(feature = "remote")]
 pub use repository::{OpenOptions, Repository, RepositoryMode};
@@ -75,9 +75,9 @@ pub use value::{GitPath, HashAlgorithm, ObjectId, RepositoryLocator, Revision};
 pub(crate) use archive::{ArchiveStream, ContentMode};
 #[cfg(feature = "remote")]
 pub(crate) use client::ReadOptions;
-#[cfg(all(feature = "write", test))]
+#[cfg(all(feature = "publish", test))]
 pub(crate) use client::RepositoryCapability;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(crate) use content::ContentCache;
 #[cfg(feature = "remote")]
 pub(crate) use content::ContentStream;
@@ -85,11 +85,11 @@ pub(crate) use content::ContentStream;
 pub(crate) use error::OperationId;
 #[cfg(feature = "local")]
 pub(crate) use local_impl::{LocalExecutionPolicy, LocalRepository, LocalTools};
-#[cfg(feature = "managed")]
+#[cfg(feature = "service")]
 pub(crate) use managed_impl::ManagedOptions;
-#[cfg(any(feature = "local", all(feature = "write", test)))]
+#[cfg(any(feature = "local", all(feature = "publish", test)))]
 pub(crate) use mutation::CommitIdentity;
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 pub(crate) use mutation::{
     CommitOptions, CommitReceipt, FileEdit, MutationOutcome, Readiness, RecoveryToken, RefBatch,
     RefRejection, RefUpdate,
@@ -104,7 +104,7 @@ pub(crate) use progress::ProgressEvent;
 pub(crate) use progress::{Progress, ProgressUpdate};
 #[cfg(feature = "remote")]
 pub(crate) use read_limits::ReadLimits;
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 pub(crate) use read_types::EntryMode;
 #[cfg(feature = "remote")]
 pub(crate) use read_types::{Blame, Commit, Diff, HistoryTraversal, Page, PageRequest, TreeEntry};

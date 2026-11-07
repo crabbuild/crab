@@ -11,11 +11,11 @@ use crate::runtime::Operations;
 use crate::stream::{End, StreamReceiver};
 use crate::{Error, ErrorKind, GitPath, ReadOptions, Result};
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(crate) mod crab;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub(crate) mod lfs;
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 pub use crab::ContentCache;
 
 const OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
@@ -57,7 +57,7 @@ pub(crate) async fn open(
     snapshot: RemoteGitSnapshot,
     path: GitPath,
     options: ReadOptions,
-    #[cfg(feature = "content")] runtime: Arc<crab::ContentRuntime>,
+    #[cfg(feature = "files")] runtime: Arc<crab::ContentRuntime>,
 ) -> Result<ContentStream> {
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
@@ -69,7 +69,7 @@ pub(crate) async fn open(
             .map_err(remote_error)?;
         let result = async {
             let blob = snapshot.read_blob(&path, &operation).await?;
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             if blob.metadata.classification != ContentClassification::OrdinaryGit {
                 let size = blob.metadata.logical_size.ok_or(
                     crab_remote_git::Error::InternalInvariant {
@@ -84,7 +84,7 @@ pub(crate) async fn open(
                     )
                     .await?;
             }
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             if blob.metadata.classification == ContentClassification::LfsPointer {
                 return lfs::deliver(
                     &runtime.layout,
@@ -96,7 +96,7 @@ pub(crate) async fn open(
                 )
                 .await;
             }
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             if blob.metadata.classification == ContentClassification::CrabPointer {
                 return runtime
                     .deliver(blob.bytes, options, &operation, send, ready)

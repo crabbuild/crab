@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "write")]
+#[cfg(feature = "publish")]
 pub(crate) mod mutation;
 
 use bytes::Bytes;
@@ -26,7 +26,7 @@ impl ClientBuilder {
         let local_store = self.store.clone();
         let (store, namespace) = match self.store {
             Some(options) => options.build()?,
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             None if self.managed.is_some() => (
                 Store::new(Arc::new(object_store::memory::InMemory::new())),
                 "managed-only".to_owned(),
@@ -38,7 +38,7 @@ impl ClientBuilder {
                 ));
             }
         };
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         let managed = self
             .managed
             .map(crate::managed_impl::ManagedState::new)
@@ -48,7 +48,7 @@ impl ClientBuilder {
         Ok(Client(Arc::new(ClientState {
             store,
             namespace,
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             cache: self.cache,
             operations: Operations::default(),
             git: Arc::new(git),
@@ -65,14 +65,14 @@ impl ClientBuilder {
             local_store,
             #[cfg(feature = "local")]
             local_execution_policy: self.local_execution_policy,
-            #[cfg(feature = "managed")]
+            #[cfg(feature = "service")]
             managed,
         })))
     }
 }
 
 pub(crate) struct ClientState {
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     cache: Option<crate::ContentCache>,
     pub(crate) store: Store,
     pub(crate) direct_store_configured: bool,
@@ -85,7 +85,7 @@ pub(crate) struct ClientState {
     pub(crate) local_tools: Option<crate::LocalTools>,
     #[cfg(feature = "local")]
     pub(crate) local_execution_policy: crate::LocalExecutionPolicy,
-    #[cfg(feature = "managed")]
+    #[cfg(feature = "service")]
     pub(crate) managed: Option<crate::managed_impl::ManagedState>,
 }
 
@@ -197,7 +197,7 @@ impl ClientState {
         locator: &crate::RepositoryLocator,
         _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<ResolvedRepository> {
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         if let Some(repository) = locator.managed_owner() {
             let managed = self.managed.as_ref().ok_or_else(|| {
                 Error::new(
@@ -267,7 +267,7 @@ pub(crate) fn memory_local_client(local_tools: crate::LocalTools) -> Client {
     Client(Arc::new(ClientState {
         store,
         namespace: "memory-local-test".to_owned(),
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         cache: None,
         operations: Operations::default(),
         git: Arc::new(RemoteGitRuntime::default()),
@@ -275,12 +275,12 @@ pub(crate) fn memory_local_client(local_tools: crate::LocalTools) -> Client {
         local_store: Some(crate::DirectStoreOptions::s3_from_env("bucket").unwrap()),
         local_tools: Some(local_tools),
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         managed: None,
     }))
 }
 
-#[cfg(all(test, feature = "local", feature = "content"))]
+#[cfg(all(test, feature = "local", feature = "files"))]
 pub(crate) fn memory_local_client_with_cache(
     local_tools: crate::LocalTools,
     cache: crate::ContentCache,
@@ -321,7 +321,7 @@ impl Client {
         options: OperationOptions,
     ) -> Result<RemoteRepository> {
         let options = options.with_owner_deadline()?;
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         let maximum_catalog_bytes = options.read_limits().max_fetched_bytes;
         let state = self.0.clone();
         let worker_locator = locator.clone();
@@ -340,7 +340,7 @@ impl Client {
                     .await
             })
             .await?;
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         let content = Arc::new(crate::content::crab::ContentRuntime::new(
             self.0.cache.clone(),
             StoreLayout::new(resolved.store.clone(), resolved.prefix.clone()),
@@ -352,14 +352,14 @@ impl Client {
                 )
                 .map_err(crate::remote_error::read_error)?,
         ));
-        #[cfg(not(feature = "content"))]
+        #[cfg(not(feature = "files"))]
         let _ = capsule;
         Ok(RemoteRepository {
             client: self.clone(),
             locator,
             owner: Arc::new(owner),
             managed: resolved.managed,
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             content,
         })
     }
@@ -454,7 +454,7 @@ impl ReadOptions {
 /// Immutable repository generation; refresh returns a separate handle.
 #[derive(Clone)]
 pub struct RemoteRepository {
-    #[cfg(feature = "content")]
+    #[cfg(feature = "files")]
     content: Arc<crate::content::crab::ContentRuntime>,
     client: Client,
     locator: RepositoryLocator,
@@ -533,7 +533,7 @@ impl RemoteRepository {
     /// Inspect implemented operation families without I/O or refreshing state.
     ///
     /// This metadata remains available after client close. ReadContent requires
-    /// the `content` feature. UpdateRefs and CreateCommits require `write` and a
+    /// the `files` feature. UpdateRefs and CreateCommits require `publish` and a
     /// conditional-write provider or managed protected-push service; the
     /// filesystem backend cannot publish refs.
     #[must_use]
@@ -541,19 +541,19 @@ impl RemoteRepository {
         if self.managed {
             return &[
                 RepositoryCapability::ReadGit,
-                #[cfg(feature = "content")]
+                #[cfg(feature = "files")]
                 RepositoryCapability::ReadContent,
-                #[cfg(feature = "write")]
+                #[cfg(feature = "publish")]
                 RepositoryCapability::UpdateRefs,
-                #[cfg(feature = "write")]
+                #[cfg(feature = "publish")]
                 RepositoryCapability::CreateCommits,
             ];
         }
-        #[cfg(feature = "write")]
+        #[cfg(feature = "publish")]
         if self.client.0.store.bucket_identity().cloud != crab_storage::StorageProviderKind::Local {
             return &[
                 RepositoryCapability::ReadGit,
-                #[cfg(feature = "content")]
+                #[cfg(feature = "files")]
                 RepositoryCapability::ReadContent,
                 RepositoryCapability::UpdateRefs,
                 RepositoryCapability::CreateCommits,
@@ -561,7 +561,7 @@ impl RemoteRepository {
         }
         &[
             RepositoryCapability::ReadGit,
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             RepositoryCapability::ReadContent,
         ]
     }
@@ -805,7 +805,7 @@ impl Snapshot {
             self.owner.clone(),
             path,
             options,
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             self.repository.content.clone(),
         )
         .await
@@ -824,10 +824,10 @@ impl Snapshot {
         mode: crate::ContentMode,
         options: ReadOptions,
     ) -> Result<crate::ArchiveStream> {
-        if mode == crate::ContentMode::Hydrated && !cfg!(feature = "content") {
+        if mode == crate::ContentMode::Hydrated && !cfg!(feature = "files") {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
-                "hydrated archives require content support",
+                "hydrated archives require the files feature",
             ));
         }
         crate::archive::open(
@@ -837,7 +837,7 @@ impl Snapshot {
             options.clone(),
             options.limits()?,
             mode,
-            #[cfg(feature = "content")]
+            #[cfg(feature = "files")]
             self.repository.content.clone(),
         )
         .await

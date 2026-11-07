@@ -328,7 +328,7 @@ jobs:
           cargo build --release --locked -p crab --bin crab \
             --no-default-features --features simd-accel,gix-pathmatch
           cargo build --release --locked -p crab-sdk \
-            --example s3_gateway_fixture --features content,write
+            --example s3_gateway_fixture --features files,publish
 
       - name: Build locked gateway image
         id: build

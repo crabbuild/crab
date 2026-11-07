@@ -1,4 +1,4 @@
-#![cfg(all(feature = "remote", feature = "write"))]
+#![cfg(all(feature = "remote", feature = "publish"))]
 
 use crab_sdk::remote::EntryMode;
 use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};

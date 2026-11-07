@@ -3,7 +3,7 @@ use std::{io::BufReader, path::Path, sync::Arc};
 use super::*;
 use crate::{GitPath, ObjectId, RefUpdate, Revision};
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 fn prepared_or_panic(result: crate::Result<PreparedMutation>) -> PreparedMutation {
     result.unwrap_or_else(|error| {
         let mut message = error.to_string();
@@ -180,7 +180,7 @@ pub(super) fn memory_client() -> Client {
     Client(Arc::new(super::super::ClientState {
         store,
         namespace: "memory-test".to_owned(),
-        #[cfg(feature = "content")]
+        #[cfg(feature = "files")]
         cache: None,
         operations: crate::runtime::Operations::default(),
         git: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
@@ -191,7 +191,7 @@ pub(super) fn memory_client() -> Client {
         local_tools: None,
         #[cfg(feature = "local")]
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
-        #[cfg(feature = "managed")]
+        #[cfg(feature = "service")]
         managed: None,
     }))
 }
@@ -634,7 +634,7 @@ async fn remote_commit_rejects_mis_sized_streams_before_publication() {
     }
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_commit_streams_git_and_hydrated_content_and_resumes_from_its_pack() {
     let mut client = memory_client();
@@ -742,7 +742,7 @@ async fn remote_commit_streams_git_and_hydrated_content_and_resumes_from_its_pac
     client.close().await.unwrap();
 }
 
-#[cfg(feature = "content")]
+#[cfg(feature = "files")]
 #[tokio::test(flavor = "multi_thread")]
 async fn recovered_hydrated_content_rejects_a_changed_xorb_without_moving_refs() {
     let client = memory_client();

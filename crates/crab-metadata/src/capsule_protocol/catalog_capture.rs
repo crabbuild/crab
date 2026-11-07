@@ -347,8 +347,8 @@ async fn reconcile(
         visible,
         runs,
     } = captured;
-    let selected = select_ref_control_frontiers(root, &visible.frontiers, &runs)?;
-    let pending = select_ref_journal_controls(root, &selected.required, &runs)?;
+    let selected = select_ref_control_frontiers(root, &visible.frontiers, runs)?;
+    let pending = select_ref_journal_controls(root, &selected.required, runs)?;
     // Reconciliation must check every selected new tip. Fetch those immutable
     // point proofs in bounded waves; serial closure ordering still validates
     // prior tips, removals and final membership before accepting the catalog.
