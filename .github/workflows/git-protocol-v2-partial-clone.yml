@@ -811,17 +811,49 @@ jobs:
           docker logs crab-existing-ref-rustfs >&2 || true
           exit 1
 
-      - name: Measure fifty independent writers and verify cold readback
+      - name: Measure independent writers and verify cold readback
         run: |
-          python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
-            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
-            --source "$RUNNER_TEMP/Github/curl/curl" \
-            --root "$CRAB_PERF_ROOT" --run-id fifty-existing-refs \
-            --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
-            --push-client "${{ matrix.client }}" \
-            --agents 50 --branch-update-rounds 7 --max-parallel-pushes 50 \
-            --consumer-mode cold-final --skip-same-branch --no-request-capture \
-            --timeout 600 --push-timeout 600
+          for actors in 50 10 1; do
+            rounds=$((100 / actors))
+            if [ "$actors" = 50 ]; then rounds=7; fi
+            python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+              --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+              --source "$RUNNER_TEMP/Github/curl/curl" \
+              --root "$CRAB_PERF_ROOT" --run-id "writers-${actors}" \
+              --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+              --push-client "${{ matrix.client }}" \
+              --agents "$actors" --branch-update-rounds "$rounds" --max-parallel-pushes "$actors" \
+              --consumer-mode cold-final --skip-same-branch --no-request-capture \
+              --timeout 600 --push-timeout 600
+          done
+
+      - name: Report latency and enforce the native push median budget
+        run: |
+          python3 - "$CRAB_PERF_ROOT" "${{ matrix.client }}" <<'PY'
+          import json
+          import math
+          import sys
+          from pathlib import Path
+
+          results = []
+          for actors in (1, 10, 50):
+              path = Path(sys.argv[1]) / f"writers-{actors}" / "artifacts" / "report.json"
+              report = json.loads(path.read_text())
+              if report["status"] != "ok":
+                  raise SystemExit(f"{actors}-writer integrity qualification failed")
+              timings = sorted(row["command"]["duration_ms"] for row in report["branch_updates"])
+              if not timings:
+                  raise SystemExit(f"{actors}-writer measurement has no update samples")
+              results.append({"actors": actors, "samples": len(timings),
+                              "p50_ms": timings[math.ceil(len(timings) * 0.5) - 1],
+                              "p95_ms": timings[math.ceil(len(timings) * 0.95) - 1],
+                              "max_ms": max(timings)})
+          output = {"client": sys.argv[2], "cohorts": results}
+          (Path(sys.argv[1]) / "latency.json").write_text(json.dumps(output, indent=2) + "\n")
+          print(json.dumps(output))
+          if sys.argv[2] == "native" and any(row["p50_ms"] >= 500 for row in results):
+              raise SystemExit("native push p50 must be below 500 ms at every measured concurrency")
+          PY
 
       - name: Capture RustFS logs and stop fixture
         if: always()
@@ -836,8 +868,9 @@ jobs:
         with:
           name: existing-ref-performance-${{ matrix.client }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.CRAB_PERF_ROOT }}/fifty-existing-refs/artifacts/**
-            ${{ env.CRAB_PERF_ROOT }}/fifty-existing-refs/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/writers-*/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/writers-*/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/latency.json
             ${{ env.CRAB_PERF_ROOT }}/rustfs.log
             ${{ env.CRAB_PERF_ROOT }}/rustfs-image.json
           if-no-files-found: warn
