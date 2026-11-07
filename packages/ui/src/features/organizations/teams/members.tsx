@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { FieldSelect } from "@/components/ui/field-select";
 import { useTeamRead } from "./read";
 import type { Commands } from "./commands";
-import type { Member, Role, Roster } from "./model";
+import type { TeamMember, TeamRole, TeamRoster } from "@/lib/contracts";
 export function TeamMembers({
   organization,
   actor,
@@ -23,7 +23,7 @@ export function TeamMembers({
   const [after, setAfter] = useState<string>();
   const root = `/api/organizations/${organization}/teams/${team}`;
   const params = new URLSearchParams(after ? { after } : {});
-  const members = useTeamRead<Roster>(
+  const members = useTeamRead<TeamRoster>(
     `${root}/members?${params}`,
     commands.generation,
   );
@@ -101,7 +101,7 @@ function Candidates({
 }) {
   const [after, setAfter] = useState<string>();
   const params = new URLSearchParams(after ? { after } : {});
-  const state = useTeamRead<Roster>(
+  const state = useTeamRead<TeamRoster>(
     `/api/organizations/${organization}/teams/${team}/candidates?${params}`,
     commands.generation,
   );
@@ -170,7 +170,7 @@ function Candidates({
     </section>
   );
 }
-function Identity({ member }: { member: Member }) {
+function Identity({ member }: { member: TeamMember }) {
   return (
     <div className="min-w-0 break-words">
       {member.profile ? (
@@ -197,11 +197,11 @@ function MemberRow({
   organization: string;
   actor: string;
   team: string;
-  member: Member;
+  member: TeamMember;
   manage: boolean;
   commands: Commands;
 }) {
-  const [role, setRole] = useState<Role>(member.role ?? "member");
+  const [role, setRole] = useState<TeamRole>(member.role ?? "member");
   const [removing, setRemoving] = useState(false);
   return (
     <li className="flex flex-col gap-3 p-4">
@@ -214,7 +214,7 @@ function MemberRow({
                 label={`Team role for ${member.profile?.name ?? member.actor}`}
                 value={role}
                 disabled={commands.locked}
-                onValueChange={(role) => setRole(role as Role)}
+                onValueChange={(role) => setRole(role as TeamRole)}
                 options={{ member: "Member", maintainer: "Maintainer" }}
               />
               <Button

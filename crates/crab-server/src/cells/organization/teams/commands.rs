@@ -9,6 +9,8 @@ pub(crate) struct Request {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamCommand"))]
 pub(crate) enum Command {
     Create {
         name: String,

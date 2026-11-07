@@ -4,7 +4,7 @@ import {
   expectNoAccessibilityViolations,
   contrastRatio,
 } from "./accessibility";
-import type { RepositoryGroup } from "@/lib/api";
+import type { RepositoryGroup } from "@/lib/contracts";
 
 test("SSO group access edits are revisioned, persist after reload and preserve group administrator access", async ({
   page,

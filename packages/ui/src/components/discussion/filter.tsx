@@ -21,15 +21,11 @@ import {
 } from "@/components/ui/popover";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { RequestWidget } from "@/components/request/result";
-import {
-  endpoint,
-  useRequest,
-  type Repository,
-  type RepositoryAssignee,
-} from "@/lib/api";
+import type { RepositoryAssignee, ActorProfile } from "@/lib/contracts";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
-import type { ActorProfile } from "@/features/profile/model";
+
 import { cn } from "@/lib/utils";
 
 interface Choice {

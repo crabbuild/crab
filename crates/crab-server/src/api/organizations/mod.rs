@@ -7,7 +7,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::{LookupAccounts, LookupProfiles},
+        directory::{ActorSummary, LookupAccounts, LookupProfiles},
         organization::{
             self, Caller, ChangeMember, ChangeOutcome, Edit, EditInput, GetOrganization,
             ListMembers, MemberChange, Page, PageCursor, PageQuery, Role,
@@ -25,9 +25,42 @@ use crate::{
     server::Server,
 };
 
-mod invitations;
+pub(super) mod invitations;
 mod projects;
-mod teams;
+pub(super) mod teams;
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct OrganizationView {
+    organization: organization::Organization,
+    actor: Uuid,
+    role: Role,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct OrganizationPage<T> {
+    items: Vec<T>,
+    next: Option<String>,
+    revision: u64,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct OrganizationMembership {
+    actor: Uuid,
+    role: Role,
+    version: u64,
+    profile: Option<ActorSummary>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct OrganizationMembers {
+    #[serde(flatten)]
+    page: OrganizationPage<OrganizationMembership>,
+    can_manage: bool,
+}
 
 #[cfg(test)]
 mod tests;
@@ -73,7 +106,7 @@ async fn own(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>> {
+) -> Result<Json<OrganizationView>> {
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let view = cells
@@ -83,9 +116,11 @@ async fn own(
         .output
         .ok_or(Error::NotFound)?;
     app::account(&principal)?;
-    Ok(Json(
-        json!({"organization":view.organization,"role":view.role,"actor":actor}),
-    ))
+    Ok(Json(OrganizationView {
+        organization: view.organization,
+        role: view.role,
+        actor,
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,7 +185,7 @@ async fn members(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
     Query(params): Query<MemberParameters>,
-) -> Result<Json<Value>> {
+) -> Result<Json<OrganizationMembers>> {
     let actor = actor(&server, &principal).await?;
     let after = params.after.as_deref().map(decode).transpose()?;
     let limit = params.limit.unwrap_or(30);
@@ -204,13 +239,27 @@ async fn members(
         .output
         .ok_or(Error::NotFound)?;
     app::account(&principal)?;
-    let items=items.into_iter().zip(profiles).map(|(member,profile)|json!({"actor":member.actor,"role":member.role,"version":member.version,"profile":profile})).collect::<Vec<_>>();
+    let items = items
+        .into_iter()
+        .zip(profiles)
+        .map(|(member, profile)| OrganizationMembership {
+            actor: member.actor,
+            role: member.role,
+            version: member.version,
+            profile,
+        })
+        .collect();
     let next = next
         .map(|cursor| serde_json::to_vec(&cursor).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
         .transpose()?;
-    Ok(Json(
-        json!({"items":items,"next":next,"revision":revision,"can_manage":current.role==Role::Owner}),
-    ))
+    Ok(Json(OrganizationMembers {
+        page: OrganizationPage {
+            items,
+            next,
+            revision,
+        },
+        can_manage: current.role == Role::Owner,
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -11,7 +11,8 @@ import { TeamFields } from "./form";
 import { TeamPages } from "./members";
 import { TeamDetail } from "./team";
 import { useTeamRead } from "./read";
-import { teamHref, type Draft, type Listing, type Policy } from "./model";
+import type { TeamListing, TeamPolicy } from "@/lib/contracts";
+import { teamHref, type Draft } from "./model";
 import type { Commands } from "./commands";
 
 export function Teams({
@@ -65,7 +66,7 @@ function TeamList({
   const root = `/api/organizations/${id}/teams`;
   const params = new URLSearchParams({ search });
   if (after) params.set("after", after);
-  const listing = useTeamRead<Listing>(
+  const listing = useTeamRead<TeamListing>(
     `${root}?${params}`,
     commands.generation,
   );
@@ -225,7 +226,7 @@ function CreationPolicy({
   actor: string;
   commands: Commands;
 }) {
-  const state = useTeamRead<Policy>(
+  const state = useTeamRead<TeamPolicy>(
     `/api/organizations/${id}/teams/policy`,
     commands.generation,
   );

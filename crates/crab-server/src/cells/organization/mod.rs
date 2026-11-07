@@ -25,7 +25,7 @@ pub(crate) use commands::{
 };
 pub(crate) use invitations::{
     CancelInvitation, DecideInvitation, Decision, GetInvitation, Invitation, InvitationKey,
-    InvitationState, Invite, InviteInput, ListInvitations,
+    InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
 };
 pub(crate) use reads::{
     Caller, Collection, GetMember, GetOrganization, ListActivity, ListMembers, MemberKey, Page,
@@ -34,6 +34,8 @@ pub(crate) use reads::{
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "OrganizationRole"))]
 pub(crate) enum Role {
     Member,
     Owner,
@@ -55,6 +57,7 @@ impl Role {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct Organization {
     pub id: Uuid,
     pub name: String,

@@ -1,12 +1,5 @@
-import type { ActorProfile } from "@/features/profile/model";
+import type { BranchProtection } from "@/lib/contracts";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-
-export interface Session {
-  authenticated: boolean;
-  mode: "local" | "oidc" | "github";
-  user: { issuer: string; subject: string; name: string } | null;
-  csrf: string | null;
-}
 
 export interface GitImportInput {
   source: string;
@@ -36,27 +29,7 @@ export interface Repository {
   archive_version: number;
   archived: boolean;
   protection_version: number;
-  protected_branches: Array<{
-    branch: string;
-    required_approvals: number;
-    required_checks: string[];
-  }>;
-}
-export interface RepositoryMember {
-  subject: string;
-  name: string;
-  access: "read" | "triage" | "write" | "admin";
-}
-export interface RepositoryGroup {
-  group: string;
-  access: RepositoryMember["access"];
-}
-export interface MembershipState {
-  revision: number;
-  members: RepositoryMember[];
-  groups: RepositoryGroup[];
-  can_admin: boolean;
-  groups_supported: boolean;
+  protected_branches: BranchProtection[];
 }
 export interface RepositoryLabel {
   id: number;
@@ -66,11 +39,6 @@ export interface RepositoryLabel {
   version: number;
   created_at: number;
   updated_at: number;
-}
-export interface RepositoryAssignee {
-  id: string;
-  name: string;
-  profile: Pick<ActorProfile, "id" | "handle" | "name"> | null;
 }
 export interface Ref {
   name: string;

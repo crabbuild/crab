@@ -14,7 +14,7 @@ import {
   FieldSet,
 } from "@/components/ui/field";
 import { useRequest } from "@/lib/api";
-import type { ActorProfile, OwnProfile } from "./model";
+import type { ActorProfile, OwnProfile } from "@/lib/contracts";
 
 export function ProfileForm({
   profile,

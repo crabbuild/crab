@@ -6,7 +6,8 @@ import {
   TriangleDownIcon,
 } from "@primer/octicons-react";
 import type { Icon } from "@primer/octicons-react";
-import type { Repository, Session } from "@/lib/api";
+import type { Session } from "@/lib/contracts";
+import type { Repository } from "@/lib/api";
 
 interface GitToken {
   username: string;

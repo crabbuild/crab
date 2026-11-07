@@ -75,6 +75,7 @@ pub struct CatalogDocument {
 /// Revision-bound replacement of the complete repository access list.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct AccessUpdate {
     pub expected_revision: u64,
     pub members: Vec<RepositoryMember>,

@@ -1,6 +1,7 @@
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
-import { type RepositoryAssignee, type RepositoryLabel } from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
+import { type RepositoryLabel } from "@/lib/api";
 import { type ReactionSummary } from "@/components/discussion/reactions";
 import { type InlineDiffThread } from "@/features/repository/diff/model";
 

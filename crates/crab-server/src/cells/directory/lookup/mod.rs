@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct ActorSummary {
     pub id: Uuid,
     pub handle: String,

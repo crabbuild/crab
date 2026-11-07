@@ -23,7 +23,7 @@ import {
   EmptyDescription,
 } from "@/components/ui/empty";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
-import type { OrganizationView } from "@/features/organizations/model";
+import type { OrganizationView } from "@/lib/contracts";
 import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
 import { DraftRecovery } from "../drafts";

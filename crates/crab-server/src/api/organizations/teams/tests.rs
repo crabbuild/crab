@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::http::{Harness, organizations::bootstrap};
 use reqwest::{Method, Response};
+use serde_json::{Value, json};
 async fn join(h: &Harness, id: Uuid, alice: &str, bob: &str, person: Uuid, version: u64) {
     let offer: Value = h
         .write(

@@ -7,8 +7,7 @@ use axum::{
     middleware,
     routing::get,
 };
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +25,12 @@ use crate::{
 
 pub(in crate::api) mod attribution;
 
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct OwnProfile {
+    profile: Option<ActorProfile>,
+}
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/profile", get(own).post(create).patch(edit))
@@ -37,7 +42,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 async fn own(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-) -> Result<Json<Value>> {
+) -> Result<Json<OwnProfile>> {
     let identity = app::account(&principal)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let profile = app::query_output(
@@ -46,7 +51,7 @@ async fn own(
             .await,
     )?;
     app::account(&principal)?;
-    Ok(Json(json!({"profile":profile})))
+    Ok(Json(OwnProfile { profile }))
 }
 async fn actor(
     State(server): State<Arc<Server>>,

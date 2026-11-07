@@ -1,10 +1,10 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { PencilIcon, XIcon } from "lucide-react";
+import type { RepositoryAssignee } from "@/lib/contracts";
 import {
   endpoint,
   useRequest,
   type Repository,
-  type RepositoryAssignee,
   type RepositoryLabel,
 } from "@/lib/api";
 import { Result } from "@/components/request/result";

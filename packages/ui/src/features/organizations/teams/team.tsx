@@ -5,7 +5,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { teamHref, type Draft, type View } from "./model";
+import type { TeamView } from "@/lib/contracts";
+import { teamHref, type Draft } from "./model";
 import type { Commands } from "./commands";
 import { TeamFields } from "./form";
 import { TeamMembers } from "./members";
@@ -26,7 +27,7 @@ export function TeamDetail({
 }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const state = useTeamRead<View>(
+  const state = useTeamRead<TeamView>(
     `/api/organizations/${organization}/teams/${team}`,
     commands.generation,
   );
