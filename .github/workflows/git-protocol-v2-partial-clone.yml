@@ -37,6 +37,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -99,6 +101,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -231,6 +235,7 @@ jobs:
       - name: Verify executable compatibility matrix
         run: |
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_concurrent_push_smoke.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_existing_ref_push_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_mixed_team_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_lfs_qualification.py
           python3 crab/scripts/verify_git_capability_matrix.py
@@ -736,5 +741,104 @@ jobs:
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/artifacts/**
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/logs/**
             ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  existing-ref-performance:
+    name: Existing-ref throughput (${{ matrix.client }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: [release-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [native, git]
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install fixture dependencies
+        run: |
+          echo "CRAB_PERF_ROOT=$RUNNER_TEMP/crab-existing-ref-${{ matrix.client }}" >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract and verify source provenance
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
+
+      - name: Prepare pinned real Git history
+        run: |
+          curl_source="$RUNNER_TEMP/Github/curl/curl"
+          mkdir -p "$(dirname "$curl_source")"
+          git clone --no-checkout https://github.com/curl/curl.git "$curl_source"
+          git -C "$curl_source" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+          git -C "$curl_source" status --porcelain
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "$CRAB_PERF_ROOT/rustfs-data"
+          sudo chown 10001:10001 "$CRAB_PERF_ROOT/rustfs-data"
+          docker run -d --name crab-existing-ref-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            -v "$CRAB_PERF_ROOT/rustfs-data:/data" \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          docker image inspect "$RUSTFS_IMAGE" --format '{{json .RepoDigests}}' \
+            > "$CRAB_PERF_ROOT/rustfs-image.json"
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = 200 ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-existing-ref-rustfs >&2 || true
+          exit 1
+
+      - name: Measure fifty independent writers and verify cold readback
+        run: |
+          python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --source "$RUNNER_TEMP/Github/curl/curl" \
+            --root "$CRAB_PERF_ROOT" --run-id fifty-existing-refs \
+            --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+            --push-client "${{ matrix.client }}" \
+            --agents 50 --branch-update-rounds 7 --max-parallel-pushes 50 \
+            --consumer-mode cold-final --skip-same-branch --no-request-capture \
+            --timeout 600 --push-timeout 600
+
+      - name: Capture RustFS logs and stop fixture
+        if: always()
+        run: |
+          mkdir -p "$CRAB_PERF_ROOT"
+          docker logs crab-existing-ref-rustfs > "$CRAB_PERF_ROOT/rustfs.log" 2>&1 || true
+          docker stop crab-existing-ref-rustfs || true
+
+      - name: Upload performance and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: existing-ref-performance-${{ matrix.client }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_PERF_ROOT }}/fifty-existing-refs/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/fifty-existing-refs/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/rustfs.log
+            ${{ env.CRAB_PERF_ROOT }}/rustfs-image.json
           if-no-files-found: warn
           retention-days: 14

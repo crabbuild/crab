@@ -2923,12 +2923,16 @@ fn run(
 
     let cancel = CancellationToken::new();
 
+    let worker_threads = if is_remote_helper {
+        // Each Git command owns a helper process. Pack and visibility work use
+        // blocking workers; bound async workers to avoid multiplying CPU-sized pools.
+        2
+    } else {
+        // FUSE/VFS hydration retains headroom while synchronous callbacks wait.
+        std::thread::available_parallelism().map_or(4, |n| n.get().max(4))
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        // FUSE/VFS workloads block FUSE callback threads via rt.block_on.
-        // We ensure the tokio runtime has at least 4 worker threads so
-        // hydration workers always have headroom while FUSE callbacks
-        // are blocked. See finding S1-P12-1 in the e2e code review.
-        .worker_threads(std::thread::available_parallelism().map_or(4, |n| n.get().max(4)))
+        .worker_threads(worker_threads)
         .enable_all()
         .build()
         .map_err(|e| (OutputMode::Text, "error", CrabError::from(e)))?;
