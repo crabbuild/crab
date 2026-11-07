@@ -2921,11 +2921,27 @@ fn run(
         return Ok(code);
     }
 
+    let cli = if is_remote_helper {
+        None
+    } else {
+        Some(match symlink_subcmd {
+            Some(subcmd) => {
+                let mut args = vec![OsString::from("crab"), OsString::from(subcmd)];
+                args.extend(std::env::args_os().skip(1));
+                Cli::parse_from(args)
+            }
+            None => Cli::parse(),
+        })
+    };
     let cancel = CancellationToken::new();
 
-    let worker_threads = if is_remote_helper {
-        // Each Git command owns a helper process. Pack and visibility work use
-        // blocking workers; bound async workers to avoid multiplying CPU-sized pools.
+    let worker_threads = if is_remote_helper
+        || cli
+            .as_ref()
+            .is_some_and(|cli| matches!(&cli.cmd, Some(Cmd::Push(_))))
+    {
+        // Each push owns a process. Pack and visibility work use blocking
+        // workers; avoid multiplying CPU-sized async pools across publishers.
         2
     } else {
         // FUSE/VFS hydration retains headroom while synchronous callbacks wait.
@@ -2940,22 +2956,7 @@ fn run(
     runtime.block_on(async move {
         spawn_signal_handler(cancel.clone());
 
-        if is_remote_helper {
-            // Remote helper never uses machine-mode error envelopes on
-            // stdout — git owns that fd.
-            run_remote_helper_dispatch(cancel)
-                .await
-                .map_err(|e| (OutputMode::Text, "error", e))
-        } else {
-            let cli = match symlink_subcmd {
-                Some(subcmd) => {
-                    let mut args = vec![OsString::from("crab"), OsString::from(subcmd)];
-                    args.extend(std::env::args_os().skip(1));
-                    Cli::parse_from(args)
-                }
-                None => Cli::parse(),
-            };
-
+        if let Some(cli) = cli {
             // Resolve the output mode and schema name before dispatching
             // so we can emit a structured error envelope when a
             // machine-mode command fails.
@@ -2967,6 +2968,12 @@ fn run(
             run_cli_stub(cli, cancel)
                 .await
                 .map_err(|e| (mode, schema, e))
+        } else {
+            // Remote helper never uses machine-mode error envelopes on
+            // stdout — git owns that fd.
+            run_remote_helper_dispatch(cancel)
+                .await
+                .map_err(|e| (OutputMode::Text, "error", e))
         }
     })
 }
