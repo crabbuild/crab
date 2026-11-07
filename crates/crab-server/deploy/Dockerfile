@@ -25,6 +25,8 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
+        apt=2.6.2 \
+        libapt-pkg6.0=2.6.2 \
         git \
         libpcre2-8-0=10.42-1+deb12u2 \
     && rm -rf /var/lib/apt/lists/* \

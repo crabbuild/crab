@@ -319,6 +319,23 @@ def check_release_workflow(root: Path) -> list[str]:
     if 'crab/scripts/release/update-homebrew.sh "$TAG"' not in text:
         errors.append("release.yml: Homebrew publishing must use crab/scripts/release/update-homebrew.sh")
 
+    try:
+        publish_step = workflow_step_run(text, "Publish GitHub release")
+    except ValueError as error:
+        errors.append(f"release.yml: {error}")
+    else:
+        for needle in (
+            'tag_source="$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"',
+            'if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ] || [ "$tag_source" != "$SOURCE_SHA" ]; then',
+            'echo "::error::Release tag $TAG no longer matches the prepared source commit." >&2\n            exit 1\n          fi',
+        ):
+            if needle not in publish_step:
+                errors.append(f"release.yml release tag verification: expected {needle!r}")
+        if "--fail-on-no-commits" in publish_step:
+            errors.append("release.yml: release creation must compare the prepared tag, not default-branch HEAD")
+        if publish_step.find('gh release create "$TAG"') < publish_step.find('if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]'):
+            errors.append("release.yml: release tag verification must precede release creation")
+
     for needle in (
         "os: macos-15",
         "os: macos-15-intel",
@@ -350,7 +367,6 @@ def check_release_workflow(root: Path) -> list[str]:
         "Publish GitHub release",
         "GH_TOKEN: ${{ github.token }}",
         "--verify-tag",
-        "--fail-on-no-commits",
         '--notes-file "$notes_file"',
         "cargo test -p crab --test workflow_v1_contracts --no-default-features --features simd-accel,tier,watch --locked",
         'if ! aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null 2>&1; then',
