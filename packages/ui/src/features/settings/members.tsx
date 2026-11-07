@@ -15,15 +15,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import {
-  endpoint,
-  navigate,
-  type MembershipState,
-  type Repository,
-  type RepositoryMember,
-  type RepositoryGroup,
-  type Session,
-} from "@/lib/api";
+import type {
+  AccessUpdate,
+  MembershipState,
+  RepositoryMember,
+  RepositoryGroup,
+  Session,
+} from "@/lib/contracts";
+import { endpoint, navigate, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import {
   AlertIcon,
@@ -190,6 +189,11 @@ export function MemberSettings({
     setSuccess(undefined);
     setSaving(true);
     try {
+      const update: AccessUpdate = {
+        expected_revision: state.revision,
+        members: normalizedMembers(),
+        groups,
+      };
       const response = await fetch(endpoint(repo, "members"), {
         method: "PUT",
         headers: {
@@ -198,11 +202,7 @@ export function MemberSettings({
           "X-CSRF-Token": csrf,
           "X-Crab-Repository-Id": repo.id,
         },
-        body: JSON.stringify({
-          expected_revision: state.revision,
-          members: normalizedMembers(),
-          groups,
-        }),
+        body: JSON.stringify(update),
       });
       if (response.status === 401)
         window.dispatchEvent(new Event("crab-session-expired"));

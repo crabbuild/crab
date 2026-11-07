@@ -8,7 +8,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldSelect } from "@/components/ui/field-select";
-import type { Draft, Visibility } from "./model";
+import type { TeamVisibility } from "@/lib/contracts";
+import type { Draft } from "./model";
 export function TeamFields({
   draft,
   onChange,
@@ -53,7 +54,7 @@ export function TeamFields({
           value={draft.visibility}
           disabled={disabled}
           onValueChange={(visibility) =>
-            onChange({ ...draft, visibility: visibility as Visibility })
+            onChange({ ...draft, visibility: visibility as TeamVisibility })
           }
           options={{ closed: "Visible", secret: "Secret" }}
         />

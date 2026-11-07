@@ -17,18 +17,15 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { FieldSelect } from "@/components/ui/field-select";
 import { useRequest } from "@/lib/api";
-import type { ActorProfile } from "@/features/profile/model";
-import { MutationError } from "./feedback";
 import type {
-  Invitation,
+  ActorSummary,
+  InvitationOffer,
   InvitationView,
-  Membership,
   OrganizationPage,
   OrganizationRole,
-} from "./model";
+} from "@/lib/contracts";
+import { MutationError } from "./feedback";
 
-type Candidate = Pick<ActorProfile, "id" | "name" | "handle">;
-type Offer = { invitation: Invitation; profile: Membership["profile"] };
 export function Invitations({
   endpoint,
   id,
@@ -39,7 +36,7 @@ export function Invitations({
   csrf: string;
 }) {
   const [after, setAfter] = useState<string>();
-  const offers = useRequest<OrganizationPage<Offer>>(
+  const offers = useRequest<OrganizationPage<InvitationOffer>>(
     `${endpoint}/invitations?${new URLSearchParams(after ? { after } : {})}`,
   );
   const [notice, setNotice] = useState("");
@@ -193,8 +190,8 @@ function InviteForm({
 }) {
   const [search, setSearch] = useState("");
   const query = useDeferredValue(search.trim());
-  const [selected, setSelected] = useState<Candidate>();
-  const candidates = useRequest<{ items: Candidate[]; truncated: boolean }>(
+  const [selected, setSelected] = useState<ActorSummary>();
+  const candidates = useRequest<{ items: ActorSummary[]; truncated: boolean }>(
     query && !selected
       ? `${endpoint}/invitations/candidates?${new URLSearchParams({ q: query })}`
       : null,
@@ -318,7 +315,7 @@ function OfferRow({
   csrf,
   onChanged,
 }: {
-  item: Offer;
+  item: InvitationOffer;
   endpoint: string;
   csrf: string;
   onChanged: () => void;

@@ -107,10 +107,12 @@ class WorkspaceDependencyTests(unittest.TestCase):
         manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
         entry = next(line for line in manifest.splitlines() if line.startswith("rusqlite = "))
         cases = (
-            ('{ version = "0.31", features = ["bundled"] }', True),
-            ('{ version = "0.34", features = ["bundled"] }', False),
-            ('{ version = "0.39", features = ["bundled", "fallible_uint"] }', False),
-            ('{ version = "0.31", features = ["bundled", "blob"] }', False),
+            ('{ version = "=0.40.2", default-features = false, features = ["bundled", "cache", "fallible_uint"] }', True),
+            ('{ version = "0.31", features = ["bundled"] }', False),
+            ('{ version = "=0.40.2", default-features = false, features = ["bundled", "cache"] }', False),
+            ('{ version = "=0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }', False),
+            ('{ version = "0.40.2", default-features = false, features = ["bundled", "cache", "fallible_uint"] }', False),
+            ('{ version = "=0.40.2", features = ["bundled", "cache", "fallible_uint"] }', False),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

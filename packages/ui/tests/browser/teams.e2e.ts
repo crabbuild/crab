@@ -4,21 +4,21 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 import type {
-  Member,
-  Policy,
-  Submission,
-  View,
-} from "../../src/features/organizations/teams/model";
+  TeamMember,
+  TeamPolicy,
+  TeamSubmission,
+  TeamView,
+} from "@/lib/contracts";
 const id = "01900000-0000-7000-8000-000000000010";
 const alice = "01900000-0000-7000-8000-000000000011";
 const bob = "01900000-0000-7000-8000-000000000012";
 const root = `/-/organizations/${id}`;
 async function fixture(page: Page, local = false) {
   const state: {
-    teams: View[];
-    members: Map<string, Member[]>;
-    writes: { body: Submission; cancel: boolean; path: string }[];
-    policy: Policy;
+    teams: TeamView[];
+    members: Map<string, TeamMember[]>;
+    writes: { body: TeamSubmission; cancel: boolean; path: string }[];
+    policy: TeamPolicy;
     lost: boolean;
     denied: boolean;
     revoked: boolean;
@@ -93,7 +93,7 @@ async function fixture(page: Page, local = false) {
       });
     if (path === `${base}/teams/commands` || path === `${base}/teams/cancel`) {
       expect(request.headers()["x-csrf-token"]).toBe(local ? "" : "csrf");
-      const body = request.postDataJSON() as Submission,
+      const body = request.postDataJSON() as TeamSubmission,
         cancel = path.endsWith("/cancel");
       state.writes.push({ body, cancel, path });
       let receipt = receipts.get(body.request_id);

@@ -1,7 +1,8 @@
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { Comment } from "@/components/discussion/conversation/model";
-import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
+import type { RepositoryLabel } from "@/lib/api";
 
 export type IssueStateReason = "completed" | "not_planned" | "reopened";
 export interface Issue extends Comment {

@@ -1,6 +1,6 @@
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
-import type { RepositoryAssignee } from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
 import { emptyReactions } from "./fixtures";
 import {
   expectNoAccessibilityViolations,

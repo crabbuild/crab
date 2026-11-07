@@ -1,5 +1,5 @@
 import { Link } from "@/components/navigation/link";
-import type { ActorProfile } from "@/features/profile/model";
+import type { ActorProfile } from "@/lib/contracts";
 
 export interface DiscussionAuthor {
   name: string;

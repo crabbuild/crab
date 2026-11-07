@@ -22,12 +22,8 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import {
-  endpoint,
-  useRequest,
-  type Repository,
-  type RepositoryAssignee,
-} from "@/lib/api";
+import type { RepositoryAssignee } from "@/lib/contracts";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 

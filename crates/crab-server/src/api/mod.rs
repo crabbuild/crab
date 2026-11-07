@@ -24,6 +24,9 @@ mod releases;
 mod statuses;
 mod write;
 
+#[cfg(test)]
+mod contracts;
+
 mod query;
 mod representation;
 pub(crate) use query::comparison_blobs;

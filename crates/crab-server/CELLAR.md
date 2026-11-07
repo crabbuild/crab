@@ -1,15 +1,19 @@
 # Native Cellar runtime
 
-`crab-server` embeds the published `cellar-main = 0.1.0` SDK, imported as
-`cellar`. Product HTTP authorization, Git publication,
-repository policy, and the catalog remain Crab responsibilities. Cellar 0.1.0
-links `rusqlite` 0.31, so the workspace SQLite dependency follows that version;
-the cache progress-handler call uses its matching API.
+`crab-server` embeds the published [`cellar-main = 0.1.1`](https://github.com/crabbuild/cellar/releases/tag/v0.1.1)
+SDK, imported as `cellar`. Product HTTP authorization, Git publication,
+repository policy, and the catalog remain Crab responsibilities. The workspace
+matches Cellar's exact `rusqlite = 0.40.2` dependency, disables its default
+features, and retains bundled SQLite, statement caching and checked unsigned
+integer conversions. Cache inspection propagates progress-handler setup errors.
 
-The linked libsqlite3-sys 0.28 bundles SQLite 3.45.0. It predates the upstream
+The linked libsqlite3-sys 0.38.2 bundles SQLite 3.53.2, which includes the upstream
 [WAL-reset fix](https://www.sqlite.org/wal.html#walreset) for concurrent
-write/checkpoint connections. A matched dependency upgrade carrying that fix
-is required before release; a smoke pass cannot qualify away the dependency bug.
+write/checkpoint connections. This removes the old SQLite dependency blocker;
+provider, fault, resource and cross-platform qualification gates remain. The
+upgrade uses published crates without dependency patches or vendored changes.
+Update and drain all peers together; mixed Cellar runtime versions and rollback
+against state written by 0.1.1 are not qualified.
 
 ## Execution and persistence
 
@@ -69,8 +73,9 @@ capture proved `Hydrator::step` dereferenced a null `sqlite3_vfs_find` result af
 the registration was removed. Stored-state preparation cannot repair that live
 lifetime race. Foreground VFS reads retain their own reader/hydration references;
 paged handoff keeps the complete L0 chain and epoch GC pins that chain while the
-fill is disabled. Re-enable background hydration only after an SDK lifetime fix
-is released and the ten-repository process qualification passes with it.
+fill is disabled. The 0.1.1 hydrator still looks up the VFS inside its page loop.
+Re-enable background hydration only after an SDK lifetime fix is released and
+the ten-repository process qualification passes with it.
 
 Replication uses 32 MiB multipart parts. The pinned LTX client uploads parts
 serially; its default 5 MiB parts made a roughly 190 MB restored snapshot require
@@ -318,10 +323,10 @@ the catalog ready.
 
 Cellar objects live below `storage.url/.crab/cellar/`. Crab's Azure URL shape is
 `az://ACCOUNT/CONTAINER/PREFIX`; the adapter passes the account separately to
-Cellar. S3 endpoint precedence follows `crab-storage`. Cellar 0.1.0 requires
+Cellar. S3 endpoint precedence follows `crab-storage`. Cellar 0.1.1 requires
 path-style S3 for explicit endpoints and virtual-hosted S3 otherwise; contradictory
 addressing settings fail configuration. Azure authentication remains subject to
-Cellar 0.1.0's supported credential families and public-cloud restrictions.
+Cellar 0.1.1's supported credential families and public-cloud restrictions.
 
 Label choices read the existing canonical SQL catalog and validate its records;
 they do not introduce a second label store or a new index format. Native query
@@ -581,7 +586,7 @@ Supported `cells` commands are `capacity --json [--live]`, `metrics`,
 `status --owner OWNER --name NAME`, `runtime`, `initialize-directory`, and
 `rebuild-search --owner OWNER --name NAME`. Repository create/adopt and
 storage probing remain available. Reads use the authoritative Cell owner. `local_disk_limit_bytes` bounds the
-Crab staging envelope; Cellar 0.1.0 has no injected shared disk budget. Place its
+Crab staging envelope; Cellar 0.1.1 has no injected shared disk budget. Place its
 cache on a filesystem with an appropriate quota. Physical free-space checks
 still guard staging admission. Staging reserves 20% of available disk
 (at least 1 GiB) for filesystem and native cache headroom and requires space for
@@ -641,6 +646,21 @@ stored fields. Unindexed sessions are rejected and must sign in again.
 Revocation visits only the identity index; it never scans old session records.
 
 ## Verification
+
+The 0.1.1 upgrade passed focused macOS verification on 2026-11-07: five native
+receipt/restart tests, two mTLS routing/handoff tests, 104 cache hint/private-VFS/
+catalog tests, and 22 architecture regression tests. Server all-target checking,
+the embedded UI build, architecture gates and Rustfmt passed. The isolated
+RustFS process smoke passed repository creation, HTTP mutation/replay, Git push,
+search rebuild and restart recovery, retaining 117 native durable objects.
+Both `cells runtime` and private Cell status reported 0.1.1. The fixture now
+waits for authenticated S3 readiness because RustFS health can precede IAM
+initialization. CLI, desktop sidecar and cache-server checks passed with default
+features disabled; strict all-target Clippy passed for the server and cache
+with dependency linting excluded. Including dependency linting fails on two
+unchanged `needless_borrow` sites in metadata's `catalog_capture.rs`, also present
+on current `crab-v2`. Broader provider, fault, resource and cross-platform release
+qualification remains required; earlier evidence below describes its own slices.
 
 Focused native tests cover stored-record formats, restart recovery,
 conflicting retries, and archive/write ordering. mTLS tests cover connection-error

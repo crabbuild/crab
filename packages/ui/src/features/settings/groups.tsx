@@ -14,7 +14,7 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from "@/components/ui/native-select";
-import type { RepositoryGroup } from "@/lib/api";
+import type { RepositoryGroup } from "@/lib/contracts";
 
 export function GroupAccess({
   value,

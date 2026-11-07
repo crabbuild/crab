@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:browser": "playwright test",
     "format": "prettier --write src tests playwright.config.ts vite.config.ts tsconfig.json package.json components.json index.html",
-    "format:check": "prettier --check src tests playwright.config.ts vite.config.ts tsconfig.json package.json components.json index.html"
+    "format:check": "prettier --check src tests playwright.config.ts vite.config.ts tsconfig.json package.json components.json index.html",
+    "contracts:generate": "node scripts/contracts.mjs generate",
+    "contracts:check": "node scripts/contracts.mjs check"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.3",

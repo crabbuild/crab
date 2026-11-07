@@ -185,11 +185,15 @@ with open(run / "commands.log", "w") as log:
         for i in range(120):
             try:
                 with urllib.request.urlopen(endpoint + "/health/ready", timeout=1):
-                    break
-            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                    pass
+                # The health route can open before IAM loads the root identity.
+                # Require authenticated S3 readiness before creating the fixture.
+                cmd(["aws", "--endpoint-url", endpoint, "s3api", "list-buckets"], env=env)
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError, subprocess.CalledProcessError):
                 time.sleep(0.25)
         else:
-            raise RuntimeError("RustFS failed readiness")
+            raise RuntimeError("RustFS failed authenticated S3 readiness")
         cmd(
             [
                 "aws",
@@ -581,7 +585,11 @@ with open(run / "commands.log", "w") as log:
             env=env,
         )
         runtime = json.loads(status)
-        assert runtime["runtime"] == "cellar" and runtime["version"] == "0.1.0"
+        assert runtime["runtime"] == "cellar" and runtime["version"] == "0.1.1"
+        selected_runtime = json.loads(subprocess.check_output(
+            server_command("cells", "runtime"), text=True, env=env
+        ))
+        assert selected_runtime == {key: runtime[key] for key in ("runtime", "version")}
         follow_up = request("/api/repos/team/project/labels", {
             "request_id": str(uuid.uuid4()), "name": "Follow up", "color": "008672", "description": "Complete filter workflow",
         })

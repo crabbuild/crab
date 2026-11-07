@@ -6,9 +6,10 @@ Cloudflare Access authenticates the operator; Crab uses its existing loopback
 operator identity. Everyone allowed by Access has full operator access. This
 profile does not provide Crab's per-user membership enforcement.
 
-The native runtime's [release gates](../../CELLAR.md) still apply. In particular,
-Cellar 0.1.0's bundled SQLite predates the WAL-reset fix. Successful cloud smoke
-tests do not qualify this profile for critical repositories or a server release.
+The native runtime's [release gates](../../CELLAR.md) still apply. Cellar 0.1.1
+carries the SQLite WAL-reset fix; provider, fault and resource qualification
+remain required. Successful cloud smoke tests do not qualify this profile for
+critical repositories or a server release.
 
 ## Prepare storage and identity
 

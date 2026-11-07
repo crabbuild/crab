@@ -31,13 +31,8 @@ import {
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
-import {
-  navigate,
-  useLocation,
-  useRequest,
-  type Repository,
-  type Session,
-} from "@/lib/api";
+import type { Session } from "@/lib/contracts";
+import { navigate, useLocation, useRequest, type Repository } from "@/lib/api";
 import {
   codeThemeChoices,
   codeThemeFrom,

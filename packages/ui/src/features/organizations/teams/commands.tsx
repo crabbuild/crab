@@ -3,23 +3,23 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  teamHref,
-  type Acknowledgement,
-  type Command,
-  type Submission,
-} from "./model";
+import type {
+  TeamAcknowledgement,
+  TeamCommand,
+  TeamSubmission,
+} from "@/lib/contracts";
+import { teamHref } from "./model";
 
 interface Intent {
   account: string;
   organization: string;
   actor: string;
-  body: Submission;
+  body: TeamSubmission;
   label: string;
 }
 interface Resolution {
   intent: Intent;
-  acknowledgement: Acknowledgement;
+  acknowledgement: TeamAcknowledgement;
 }
 export function useTeamCommands(csrf: string, account: string | null) {
   const mutation = useMutation(csrf, null);
@@ -51,7 +51,7 @@ export function useTeamCommands(csrf: string, account: string | null) {
     busy.current = true;
     setInvalid(false);
     try {
-      const value = await mutation.run<Acknowledgement>(
+      const value = await mutation.run<TeamAcknowledgement>(
         `/api/organizations/${captured.organization}/teams/${cancel ? "cancel" : "commands"}`,
         "POST",
         captured.body,
@@ -84,7 +84,7 @@ export function useTeamCommands(csrf: string, account: string | null) {
   function submit(
     organization: string,
     actor: string,
-    command: Command,
+    command: TeamCommand,
     label: string,
   ) {
     if (!account || current.current || busy.current)

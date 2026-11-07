@@ -70,6 +70,36 @@ and signed group claims. Browser tests use port
 5175, mock transport per scenario, and check both interactions and accessibility.
 Build the UI before building `crab-server`; its build script embeds `dist/`.
 
+## Server-owned contracts
+
+`src/lib/contracts.ts` is generated from the Rust types actually serialized or
+accepted by the server. Sessions, public profiles, repository access lists,
+organization membership/invitations, and team commands share these declarations.
+Import wire records directly from `@/lib/contracts`; keep browser state and
+presentation helpers with their feature. `lib/api.ts` owns transport and the
+remaining browse records, not a second copy of the common identity/access types.
+
+Build the UI once, then use this checkout's external Cargo directory to check or
+regenerate the contract:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-WORKTREE" npm run contracts:check
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-WORKTREE" npm run contracts:generate
+```
+
+Replace `crab-WORKTREE` with the directory assigned to this checkout. Generation
+is explicit; checking never rewrites the file. The server's normal library tests
+and architecture CI also check freshness. `ts-rs` is a development dependency;
+the production server has no generator or Node dependency. Serde JSON numbers
+map to TypeScript `number`, and UUIDs to `string`. The generator owns formatting
+of each declaration. TypeScript does not replace the server's input validation,
+authorization, version, or replay checks.
+
+The [enterprise coverage guide](../../crab/docs/architecture/enterprise-server-ui.md)
+records implemented infrastructure, authority boundaries, and remaining delivery
+gates. A common role type does not make organization/team membership a repository
+grant, and this consolidation does not establish full GitHub Enterprise parity.
+
 ## Ownership
 
 - `src/components/ui/`: owned shadcn/Radix primitives, explicit variants and

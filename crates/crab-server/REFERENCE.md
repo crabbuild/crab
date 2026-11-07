@@ -1,6 +1,6 @@
 # Operate and integrate `crab-server`
 
-The server embeds Cellar 0.1.0. [CELLAR.md](CELLAR.md) defines its native
+The server embeds Cellar 0.1.1. [CELLAR.md](CELLAR.md) defines its native
 storage and lifecycle boundary, retired operator controls, and verification
 limitations. Only native Cellar application storage is supported.
 
@@ -66,7 +66,7 @@ routing, leases, activation, SQLite/LTX persistence, replication, and recovery.
 | Owner | Responsibility |
 | --- | --- |
 | `crab-server` | Product HTTP, catalog, authorization, typed repository operations, and private mTLS transport |
-| Cellar 0.1.0 | Native execution domain, ownership, persistence, output durability, and peer protocol |
+| Cellar 0.1.1 | Native execution domain, ownership, persistence, output durability, and peer protocol |
 | Shared Crab crates | Git objects, storage mechanics, read/write publication, and metadata contracts |
 
 ### Follow one repository read
@@ -220,7 +220,7 @@ returns the native runtime version, repository UUID, application revision, and
 lifecycle. `cells capacity --json --live` inspects that server's startup envelope;
 without `--live`, it calculates an envelope for the current process.
 
-Release bootstrap, pinned-backup, and node-session commands are unavailable. Cellar 0.1.0
+Release bootstrap, pinned-backup, and node-session commands are unavailable. Cellar 0.1.1
 does not supply equivalent APIs. Keep the old deployment and complete storage
 root until an explicit data migration has been verified. A new storage prefix
 is a separate deployment, not an import of collaboration data.

@@ -5,7 +5,7 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::LookupProfiles,
+        directory::{ActorSummary, LookupProfiles},
         organization::{Caller, teams as native},
     },
     server::Server,
@@ -18,10 +18,43 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct TeamListing {
+    #[serde(flatten)]
+    page: super::OrganizationPage<native::Summary>,
+    can_create: bool,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct TeamMember {
+    actor: Uuid,
+    role: Option<native::Role>,
+    version: u64,
+    profile: Option<ActorSummary>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct TeamRoster {
+    #[serde(flatten)]
+    page: super::OrganizationPage<TeamMember>,
+    can_manage: bool,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamAcknowledgement"))]
+pub(in crate::api) enum Acknowledgement {
+    Applied { id: Uuid },
+    Cancelled { id: Uuid },
+}
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
@@ -90,7 +123,7 @@ async fn list(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
     Query(params): Query<Parameters>,
-) -> Result<Json<Value>> {
+) -> Result<Json<TeamListing>> {
     if params.search.chars().count() > 100 || params.search.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "Team search must contain at most 100 characters without control characters",
@@ -122,9 +155,14 @@ async fn list(
         return Err(Error::PageChanged);
     };
     app::account(&principal)?;
-    Ok(Json(
-        json!({"items":items,"next":encode(next)?,"revision":revision,"can_create":result.can_create}),
-    ))
+    Ok(Json(TeamListing {
+        page: super::OrganizationPage {
+            items,
+            next: encode(next)?,
+            revision,
+        },
+        can_create: result.can_create,
+    }))
 }
 async fn own(
     State(server): State<Arc<Server>>,
@@ -168,7 +206,7 @@ async fn people(
     team: Uuid,
     params: Parameters,
     kind: People,
-) -> Result<Json<Value>> {
+) -> Result<Json<TeamRoster>> {
     if !params.search.is_empty() {
         return Err(Error::Invalid(
             "Team member pages do not accept a search filter",
@@ -222,17 +260,31 @@ async fn people(
         return Err(Error::PageChanged);
     }
     app::account(principal)?;
-    let items=items.into_iter().zip(profiles).map(|(membership,profile)|json!({"actor":membership.actor,"role":membership.role,"version":membership.version,"profile":profile})).collect::<Vec<_>>();
-    Ok(Json(
-        json!({"items":items,"next":encode(next)?,"revision":revision,"can_manage":current_view.can_manage}),
-    ))
+    let items = items
+        .into_iter()
+        .zip(profiles)
+        .map(|(membership, profile)| TeamMember {
+            actor: membership.actor,
+            role: membership.role,
+            version: membership.version,
+            profile,
+        })
+        .collect();
+    Ok(Json(TeamRoster {
+        page: super::OrganizationPage {
+            items,
+            next: encode(next)?,
+            revision,
+        },
+        can_manage: current_view.can_manage,
+    }))
 }
 async fn members(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((id, team)): Path<(Uuid, Uuid)>,
     Query(params): Query<Parameters>,
-) -> Result<Json<Value>> {
+) -> Result<Json<TeamRoster>> {
     people(&server, &principal, id, team, params, People::Members).await
 }
 async fn candidates(
@@ -240,7 +292,7 @@ async fn candidates(
     Extension(principal): Extension<Principal>,
     Path((id, team)): Path<(Uuid, Uuid)>,
     Query(params): Query<Parameters>,
-) -> Result<Json<Value>> {
+) -> Result<Json<TeamRoster>> {
     people(&server, &principal, id, team, params, People::Candidates).await
 }
 async fn membership(
@@ -269,7 +321,9 @@ async fn membership(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ChangeRequest {
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "TeamSubmission"))]
+pub(in crate::api) struct ChangeRequest {
     request_id: String,
     command: native::Command,
 }
@@ -319,12 +373,12 @@ async fn save(
                 } else {
                     StatusCode::OK
                 },
-                Json(json!({"outcome":"applied","id":id})),
+                Json(Acknowledgement::Applied { id }),
             )
                 .into_response());
         }
         native::Outcome::Cancelled { id } => {
-            return Ok(Json(json!({"outcome":"cancelled","id":id})).into_response());
+            return Ok(Json(Acknowledgement::Cancelled { id }).into_response());
         }
         native::Outcome::Conflict => Error::Conflict,
         native::Outcome::InvalidName => Error::Invalid(

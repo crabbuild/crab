@@ -173,6 +173,10 @@ and session migration paths are supported.
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary
   after merging these routers. Shared request policy remains in `app.rs`.
+- `api/contracts.rs` exports the public identity/access/organization/team wire
+  types to `packages/ui/src/lib/contracts.ts` during tests. Update the actual
+  Serde owner, regenerate with `npm run contracts:generate` in `packages/ui`,
+  and verify with `contracts:check`; never hand-edit generated declarations.
 - `repository/` owns pinned reads, catalog materialization, maintenance, and
   browse projections. Its `settings.rs` supplies policy to both browser and
   native Git paths. `catalog/` owns durable catalog persistence and membership.

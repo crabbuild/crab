@@ -58,9 +58,16 @@ The full Next.js/RustFS idle and mixed-load qualification remains in progress.
 
 ## Architecture
 
-The server embeds the published [Cellar 0.1.0](https://github.com/crabbuild/cellar)
+The server embeds the published [Cellar 0.1.1](https://github.com/crabbuild/cellar)
 native SDK. Crab owns HTTP authorization and product policy; Cellar owns Cell
 execution, leases, routing, SQLite/LTX persistence, and output durability.
+
+The [server/UI enterprise contract](../../crab/docs/architecture/enterprise-server-ui.md)
+maps common models, infrastructure, qualification, and remaining enterprise gaps.
+The UI's common identity/access/organization/team types are generated from the
+server's real Serde records; `api/contracts.rs` checks their freshness. HTTP
+presentation uses typed records while native owners retain authorization and
+durability. Keep UI and server changes in the same product change.
 
 Issues, comments, labels, checks, branch protections, pull requests, reviews, releases,
 and browse projections use one native Cell per repository. Git objects and the

@@ -24,7 +24,7 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
-- `crab-server` embeds the published Cellar 0.1.0 native SDK. Cellar owns
+- `crab-server` embeds the published Cellar 0.1.1 native SDK. Cellar owns
   reusable runtime, persistence, and peer protocol contracts.
 
 ### Read, Cache, and Virtual Filesystems

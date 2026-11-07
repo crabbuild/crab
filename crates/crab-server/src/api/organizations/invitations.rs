@@ -5,6 +5,13 @@ use organization::{
     InviteInput, ListInvitations,
 };
 
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(in crate::api) struct InvitationOffer {
+    invitation: organization::Invitation,
+    profile: Option<ActorSummary>,
+}
+
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/organizations/{id}/invitations", get(list))
@@ -22,7 +29,7 @@ async fn own(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>> {
+) -> Result<Json<organization::InvitationView>> {
     let actor = actor(&server, &principal).await?;
     read(&server, &principal, id, actor, actor).await
 }
@@ -30,7 +37,7 @@ async fn offer(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((id, recipient)): Path<(Uuid, Uuid)>,
-) -> Result<Json<Value>> {
+) -> Result<Json<organization::InvitationView>> {
     let actor = actor(&server, &principal).await?;
     read(&server, &principal, id, actor, recipient).await
 }
@@ -40,7 +47,7 @@ async fn read(
     id: Uuid,
     actor: Uuid,
     recipient: Uuid,
-) -> Result<Json<Value>> {
+) -> Result<Json<organization::InvitationView>> {
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let view = cells
         .query::<GetInvitation>(
@@ -56,7 +63,7 @@ async fn read(
         .output
         .ok_or(Error::NotFound)?;
     app::account(principal)?;
-    Ok(Json(serde_json::to_value(view)?))
+    Ok(Json(view))
 }
 async fn invite(
     State(server): State<Arc<Server>>,
@@ -159,7 +166,7 @@ async fn list(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
     Query(params): Query<MemberParameters>,
-) -> Result<Json<Value>> {
+) -> Result<Json<OrganizationPage<InvitationOffer>>> {
     let actor = actor(&server, &principal).await?;
     let after = params.after.as_deref().map(decode).transpose()?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
@@ -213,12 +220,19 @@ async fn list(
     let items = items
         .into_iter()
         .zip(profiles)
-        .map(|(value, profile)| json!({"invitation":value,"profile":profile}))
+        .map(|(invitation, profile)| InvitationOffer {
+            invitation,
+            profile,
+        })
         .collect::<Vec<_>>();
     let next = next
         .map(|cursor| serde_json::to_vec(&cursor).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
         .transpose()?;
-    Ok(Json(json!({"items":items,"next":next,"revision":revision})))
+    Ok(Json(OrganizationPage {
+        items,
+        next,
+        revision,
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

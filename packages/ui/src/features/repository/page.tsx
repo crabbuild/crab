@@ -4,6 +4,7 @@ import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DiscussionWorkspace } from "@/components/discussion/workspace";
+import type { Session } from "@/lib/contracts";
 import {
   displayHex,
   endpoint,
@@ -14,7 +15,6 @@ import {
   type Ref,
   type Refs,
   type Repository,
-  type Session,
 } from "@/lib/api";
 import { type CodeThemes } from "@/lib/code-theme";
 import {
