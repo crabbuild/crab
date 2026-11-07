@@ -719,8 +719,11 @@ async fn commit_prepared(
 fn dependency_limits() -> DependencyProofLimits {
     DependencyProofLimits {
         max_dependencies: 1024,
-        max_total_file_bytes: 2 * 1024 * 1024 * 1024,
-        max_duration: Duration::from_secs(120),
+        // Content is streamed; logical file sizes do not measure retained
+        // memory or repository capacity. Bound metadata, workers and elapsed
+        // time instead, while preserving full origin verification.
+        max_total_file_bytes: u64::MAX,
+        max_duration: super::REQUEST_BUDGET,
         lookup: crab_metadata::file_index_lookup::FileIndexLookupLimits {
             max_files: 1024,
             max_shard_visits: 4096,
@@ -728,12 +731,12 @@ fn dependency_limits() -> DependencyProofLimits {
             max_recipe_entries: 1_000_000,
         },
         content: PointerProofLimits {
-            max_file_bytes: crate::server::MAX_DEPENDENCY_FILE_BYTES,
+            max_file_bytes: u64::MAX,
             max_shard_bytes: 128 * 1024 * 1024,
             max_xorb_bytes: 128 * 1024 * 1024,
-            max_read_bytes: 2 * 1024 * 1024 * 1024,
+            max_read_bytes: u64::MAX,
             max_chunks: 1_000_000,
-            max_duration: Duration::from_secs(60),
+            max_duration: super::REQUEST_BUDGET,
         },
     }
 }

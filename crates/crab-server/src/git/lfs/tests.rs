@@ -19,6 +19,54 @@ use crate::git::lfs::{Error as LfsHttpError, parse_byte_range, requested_range};
 const HELLO: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 const BATCH: &str = "/git/team/repo.git/info/lfs/objects/batch";
 
+#[tokio::test]
+async fn lfs_batch_admits_large_objects_within_the_provider_limit() {
+    let server = fixtures::fixture().await;
+    let maximum = crab_storage::multipart::upload_limits(crab_storage::StorageProviderKind::S3)
+        .max_object_size;
+    for size in [3 * 1024_u64.pow(3), 1024_u64.pow(4), maximum] {
+        let response = request(
+            &server,
+            "POST",
+            BATCH,
+            Body::from(
+                json!({"operation":"upload","objects":[{"oid":HELLO,"size":size}]}).to_string(),
+            ),
+        )
+        .await;
+        let body = value(response).await;
+        let object = &body["objects"][0];
+        let expected =
+            format!("http://localhost:8788/git/team/repo.git/info/lfs/objects/{HELLO}?size={size}");
+        assert_eq!(
+            (
+                object["size"].as_u64(),
+                object["actions"]["upload"]["href"].as_str()
+            ),
+            (Some(size), Some(expected.as_str())),
+        );
+    }
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test]
+async fn lfs_batch_rejects_objects_exceeding_the_provider_limit() {
+    let server = fixtures::fixture().await;
+    let maximum = crab_storage::multipart::upload_limits(crab_storage::StorageProviderKind::S3)
+        .max_object_size;
+    let response = request(
+        &server,
+        "POST",
+        BATCH,
+        Body::from(
+            json!({"operation":"upload","objects":[{"oid":HELLO,"size":maximum + 1}]}).to_string(),
+        ),
+    )
+    .await;
+    server.shutdown_runtimes().await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 async fn request(
     server: &Arc<Server>,
     method: &str,
@@ -674,7 +722,6 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
         json!({"operation":"upload","hash_algo":"sha1","objects":[]}),
         json!({"operation":"upload","transfers":["tus"],"objects":[]}),
         json!({"operation":"upload","objects":[{"oid":"invalid","size":5}]}),
-        json!({"operation":"upload","objects":[{"oid":HELLO,"size":2147483649_u64}]}),
     ] {
         assert!(
             request(&server, "POST", BATCH, Body::from(body.to_string()))

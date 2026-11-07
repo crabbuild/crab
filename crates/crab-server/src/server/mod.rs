@@ -23,7 +23,7 @@ pub(crate) mod http;
 pub(crate) mod management;
 pub(crate) mod storage;
 
-pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 const READ_ADMISSION_CAPACITY: usize = 16;
 const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;

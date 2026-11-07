@@ -24,7 +24,7 @@ mod validate;
 const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const INITIAL_RECEIVE_RESERVATION: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const IMPORT_RECEIVE_INITIAL_RESERVATION: u64 = 64 * 1024 * 1024;
-const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
+pub(crate) const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
 const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
 const CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
 

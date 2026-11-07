@@ -630,8 +630,7 @@ Graph validation returns valid Crab and LFS pointer dependencies. `crab-read::de
 Before storage input/output, the verifier rejects:
 
 - More than 1,024 dependencies
-- Any dependency larger than 512 MiB
-- More than 2 GiB of aggregate file content
+- Dependencies exceeding their pointer-format or provider object limits
 - Unrecognized pointer shapes
 - Conflicting sizes for one content identity
 
@@ -976,8 +975,8 @@ The receive path layers independent bounds so one generous resource does not byp
 | Graph steps | 1,000,000 |
 | Remote graph bytes | 512 MiB |
 | Pointer dependencies | 1,024 |
-| One dependency | 512 MiB |
-| Aggregate dependency bytes | 2 GiB |
+| One dependency | Pointer-format and provider limits |
+| Aggregate dependency bytes | No separate logical-byte cap |
 | Dependency batch | 120s |
 | Shard visits | 4,096 |
 | Shard or xorb body | 128 MiB |

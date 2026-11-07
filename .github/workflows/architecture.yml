@@ -228,6 +228,12 @@ jobs:
         with:
           key: cell-runtime-rustfs
 
+      - name: Verify multi-GiB deduplicated Xet content
+        run: >-
+          cargo test -p crab-read --locked --lib
+          pointer_proof::tests::verifies_multi_gib_deduplicated_file_without_materializing_it
+          -- --exact --ignored
+
       - name: Start isolated RustFS
         run: |
           set -euo pipefail

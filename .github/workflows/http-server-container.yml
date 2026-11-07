@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: boolean
+      large_file_bytes:
+        description: "Exact stock Git LFS object size to qualify; zero skips the large-object case"
+        required: false
+        default: "0"
+        type: string
   pull_request:
     paths:
       - ".dockerignore"
@@ -31,6 +36,11 @@ on:
       - "packages/ui/**"
   workflow_dispatch:
     inputs:
+      large_file_bytes:
+        description: "Exact stock Git LFS object size to qualify; zero skips the large-object case"
+        required: false
+        default: "0"
+        type: string
       arm64:
         description: "Build and qualify on a native Linux ARM64 runner"
         required: false
@@ -53,6 +63,7 @@ jobs:
     env:
       # The ARM runner is native; the repository's cross-linker is absent there.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: cc
+      LARGE_FILE_BYTES: ${{ inputs.large_file_bytes || '0' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -713,6 +724,7 @@ jobs:
         run: |
           python3 crates/crab-server/tests/qualify_cellar_process.py \
             --image crab-server:test \
+            --large-file-bytes "$LARGE_FILE_BYTES" \
             --artifacts "${RUNNER_TEMP}/crab-cellar-process-proof"
       - name: Bind native process evidence to the checked source and image
         env:
@@ -738,6 +750,13 @@ jobs:
                            "activity_restart", "activity_replay", "linked_work_restart", "linked_work_retry",
                            "draft_restart", "draft_merge_blocked", "ready_merge"])):
               raise SystemExit("native process proof is incomplete")
+          large_bytes = int(os.environ["LARGE_FILE_BYTES"])
+          if large_bytes:
+              large = receipt.get("large_file", {})
+              if not (large.get("bytes") == large_bytes
+                      and all(large.get(key) is True for key in
+                              ["stock_git_lfs", "native_push_origin_verification", "range_resume", "process_restart"])):
+                  raise SystemExit("large-file process proof is incomplete")
           target = root / "crab-cellar-process-qualification/native-process-receipt.json"
           target.write_text(json.dumps(receipt, indent=2))
           PY

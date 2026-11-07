@@ -86,6 +86,9 @@ qualify those affected consumers separately.
 ## Verification
 
 Inline `crates/crab-read/src/fetch_admission.rs` tests cover hidden-ref and non-tip rejection; hydration tests live with `crates/crab-read/src/hydrator.rs` and its adjacent modules.
+`pointer_proof::tests::verifies_multi_gib_deduplicated_file_without_materializing_it`
+is an explicit ignored qualification for large logical Xet content; architecture
+CI runs it with `--exact --ignored`.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify
