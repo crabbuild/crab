@@ -336,14 +336,15 @@ supply its supposedly corrupted header; its original assertions remain.
 Strict combined-feature all-target Clippy also passes. Native-platform coverage
 and the failed 1,024-file push rerun remain required.
 
-The native Cellar 0.1.0 dependency requires rusqlite 0.31, which links bundled
-SQLite 3.45.0 through libsqlite3-sys 0.28. The former dependency backport is no
-longer part of this build. The historical combined-suite evidence above does
-not qualify this linked SQLite version; the matching cache, private-VFS,
-affected-consumer, and native workflow gates remain required before release.
+The native Cellar 0.1.1 dependency pins rusqlite 0.40.2, which links bundled
+SQLite 3.53.2 through libsqlite3-sys 0.38.2. The workspace disables rusqlite's
+default features and explicitly retains statement caching and checked unsigned
+integer conversions. Inspection propagates the fallible progress-handler setup
+before starting its bounded read transaction.
 
-SQLite 3.45.0 predates the upstream
-[WAL-reset fix](https://www.sqlite.org/wal.html#walreset). The race can corrupt a
-WAL database when separate connections write and checkpoint concurrently.
-A matched dependency upgrade carrying that fix remains a release blocker.
-See the [native runtime contract](../crab-server/CELLAR.md).
+SQLite 3.53.2 includes the upstream
+[WAL-reset fix](https://www.sqlite.org/wal.html#walreset), removing the old
+SQLite dependency blocker. Historical combined-suite evidence above does not
+qualify the new dependency: matching cache, private-VFS, affected-consumer and
+native workflow gates remain required before release. See the
+[native runtime contract](../crab-server/CELLAR.md).

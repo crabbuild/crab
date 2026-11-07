@@ -2079,7 +2079,11 @@ WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
     "futures-util": "0.3",
     "object_store": {"version": "0.14.1", "default-features": False},
     "reqwest": {"version": "0.12", "default-features": False},
-    "rusqlite": {"version": "0.31", "features": ["bundled"]},
+    "rusqlite": {
+        "version": "=0.40.2",
+        "default-features": False,
+        "features": ["bundled", "cache", "fallible_uint"],
+    },
     "schemars": "0.8",
     "serde": {"version": "1", "features": ["derive"]},
     "serde_json": "1",

@@ -81,7 +81,7 @@ async fn cell_status(
         let state = cell.client.query::<crate::cells::repository::GetRepositoryLifecycle>(&repository.id, None, ()).await?;
         let projects = cell.client.query::<crate::cells::repository::projects::preparation::GetState>(&repository.id, None, ()).await?;
         let projection = cell.client.query::<crate::cells::repository::projection::preparation::GetState>(&repository.id, None, ()).await?;
-        Ok(json!({"runtime": "cellar", "version": "0.1.0", "repository": repository.id, "revision": state.receipt.revision, "lifecycle": state.output, "projects":projects.output, "projection":projection.output, "elapsed_ms":started.elapsed().as_millis()}))
+        Ok(json!({"runtime": "cellar", "version": "0.1.1", "repository": repository.id, "revision": state.receipt.revision, "lifecycle": state.output, "projects":projects.output, "projection":projection.output, "elapsed_ms":started.elapsed().as_millis()}))
     }.await;
     match result {
         Ok(value) => Json(value).into_response(),

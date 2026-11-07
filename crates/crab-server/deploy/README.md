@@ -1,6 +1,6 @@
 # Deployment profiles
 
-The server embeds Cellar 0.1.0. Native process smoke and peer handoff have been
+The server embeds Cellar 0.1.1. Native process smoke and peer handoff have been
 verified locally; provider, fault, restore, scale, and upgrade qualification are
 required before release. See [the runtime contract](../CELLAR.md).
 

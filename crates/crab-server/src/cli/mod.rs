@@ -411,7 +411,7 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
             rebuild_search(config, &owner, &name).await?
         }
         CellsCommand::Runtime => {
-            serde_json::to_vec(&serde_json::json!({"runtime": "cellar", "version": "0.1.0"}))?
+            serde_json::to_vec(&serde_json::json!({"runtime": "cellar", "version": "0.1.1"}))?
         }
     };
     let mut stdout = std::io::stdout().lock();
