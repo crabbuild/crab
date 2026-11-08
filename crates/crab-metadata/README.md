@@ -759,6 +759,13 @@ after SlateDB makes the checkpoint durable.
 `GitObjectLocatorSession::latest_published_identity` reads that marker without
 opening the large catalog.
 
+SlateDB consumers select its Moka memory cache through the workspace dependency.
+Locator sessions retain a 16 MiB weighted cache, and the CLI's shared metadb
+cache retains its 256 MiB capacity. This excludes Foyer storage's Linux x86 TSC
+calibration constructor from products that never open that optional backend.
+Checkpoint identity, database durability and explicit reader/writer close
+ownership remain unchanged.
+
 Callers may use the identity only after proving its immutable pack inventory is
 covered by their pinned repository snapshot, then open the named checkpoint for
 the actual lookup. A missing marker means publication is incomplete; malformed
