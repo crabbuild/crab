@@ -37,8 +37,10 @@ jobs:
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-push-cpu-target" >> "$GITHUB_ENV"
-          perf_bin="$(find /usr/lib/linux-tools -mindepth 2 -type f -name perf | sort -V | tail -1)"
+          # Ubuntu's versioned perf entries link into a separate package directory.
+          perf_bin="$(find -L /usr/lib/linux-tools -mindepth 2 -type f -name perf | sort -V | tail -1)"
           test -x "$perf_bin"
+          "$perf_bin" version
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
           sudo sysctl -w kernel.perf_event_paranoid=-1
           "$perf_bin" record --quiet -e cpu-clock:u -F 99 --call-graph dwarf,16384 \
