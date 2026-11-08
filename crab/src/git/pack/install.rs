@@ -50,33 +50,50 @@ pub async fn install_pack_file_locally_with_timeout(
     .await
 }
 
-pub(crate) async fn install_generated_pack_file(
-    directory: Arc<tempfile::TempDir>,
+pub(crate) async fn verify_generated_pack_file(
+    git_dir: &Path,
     pack: Arc<PackedFileData>,
     max_input_size: u64,
 ) -> Result<InstalledPack> {
-    let git_sha1 = gix_hash::ObjectId::from_hex(pack.git_sha1.as_bytes()).map_err(|error| {
-        CrabError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    })?;
-    let identity = crab_git::pack::VerifiedPackIdentity {
-        git_sha1: git_sha1.as_bytes().try_into().map_err(|error| {
-            CrabError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        })?,
-        content_hash: pack.pack_blake3,
-    };
+    let git_dir = git_dir.to_owned();
     let error_pack_id = pack.pack_blake3_hex.clone();
-    // Generation already checked both hashes. Retain its private source and
-    // output directory through cancellation, so linking the source is safe.
+    // File-set generation owns a private pack and index and has checked both
+    // pack hashes. Verify object bodies and the existing index without rewriting
+    // it; retain the whole generation directory until the supervised child exits.
     run_install(Some(INDEX_PACK_TIMEOUT), error_pack_id, move |cancel| {
-        crab_git::pack::install_pack_file_from_path_with_indexer(
-            directory.path(),
-            pack.pack_path.as_ref(),
-            &pack.pack_blake3_hex,
-            max_input_size,
-            true,
-            Some(identity),
-            |command, input| run_indexer(command, input, &cancel),
-        )
+        if max_input_size > 0 && pack.pack_size > max_input_size {
+            return Err(crab_git::pack::PackError::PackTooLarge {
+                size: pack.pack_size,
+                limit: max_input_size,
+            });
+        }
+        let idx_path = pack.pack_path.with_extension("idx");
+        let rev_path = pack.pack_path.with_extension("rev");
+        let mut command = Command::new("git");
+        command
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["index-pack", "--verify", "--fsck-objects", "-o"])
+            .arg(&idx_path)
+            .arg(pack.pack_path.as_ref() as &Path);
+        let output = run_indexer(command, None, &cancel)?;
+        if !output.status.success() {
+            return Err(crab_git::pack::PackError::ObjectFsckFailed {
+                git_sha1: pack.git_sha1.clone(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        // Git 2.30 predates optional reverse indexes. Generate one when absent;
+        // the caller verifies either sidecar against the pack before using it.
+        if !rev_path.exists() {
+            crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)?;
+        }
+        Ok(InstalledPack {
+            pack_path: pack.pack_path.to_path_buf(),
+            idx_path,
+            rev_path,
+            git_sha1: pack.git_sha1.clone(),
+        })
     })
     .await
 }

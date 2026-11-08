@@ -15,7 +15,7 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
 use crate::git::pack::{
     PushPackConfig, RemotePackExclusions, generate_push_pack_files_with_exclusions,
-    install_generated_pack_file,
+    verify_generated_pack_file,
 };
 use crate::git::push::{
     PushConfig, PushRejectReason, PushResult, PushTransferStats, RefPushOutcome, RefUpdate,
@@ -1242,11 +1242,6 @@ async fn prepare_generated_git_packs(
     max_input_size: u64,
     exact_ref_delta: bool,
 ) -> Result<PreparedGitPush> {
-    let evidence_dir = Arc::new(
-        tempfile::Builder::new()
-            .prefix(".crab-v2-push-evidence-")
-            .tempdir_in(git_dir.join("objects"))?,
-    );
     let mut packs = Vec::with_capacity(generated.len());
     let mut pointers = Vec::new();
     let mut visibility_objects = exact_ref_delta.then(Vec::new);
@@ -1258,11 +1253,9 @@ async fn prepare_generated_git_packs(
         if generated.object_count == 0 {
             continue;
         }
-        let directory = Arc::clone(&evidence_dir);
-        let installed =
-            install_generated_pack_file(directory, Arc::clone(&generated), max_input_size)
-                .await
-                .map_err(map_push_pack_error)?;
+        let installed = verify_generated_pack_file(git_dir, Arc::clone(&generated), max_input_size)
+            .await
+            .map_err(map_push_pack_error)?;
         let mut locations = crab_git::pack_locator::PackLocationIter::open(
             &installed.idx_path,
             &installed.rev_path,
