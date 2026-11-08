@@ -705,6 +705,7 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 | `file-index-reader` | Read-only file-index lookup sessions |
 | `local-index` | SQLite-backed local chunk index |
 | `remote-index` | SlateDB remote index readers and writers |
+| `slatedb-cache` | Byte-bounded SlateDB caches with coalesced concurrent loads |
 
 ## Reader and writer ownership
 
@@ -759,12 +760,15 @@ after SlateDB makes the checkpoint durable.
 `GitObjectLocatorSession::latest_published_identity` reads that marker without
 opening the large catalog.
 
-SlateDB consumers select its Moka memory cache through the workspace dependency.
-Locator sessions retain a 16 MiB weighted cache, and the CLI's shared metadb
-cache retains its 256 MiB capacity. This excludes Foyer storage's Linux x86 TSC
-calibration constructor from products that never open that optional backend.
-Checkpoint identity, database durability and explicit reader/writer close
-ownership remain unchanged.
+SlateDB consumers use `slatedb_cache` and `default_slatedb_cache`, backed by
+Moka's coalesced loading API. Concurrent cold requests for one block share one
+origin read; the built-in Moka adapter does not provide that behavior. Locator
+sessions retain a 16 MiB weighted cache, the CLI's shared metadb cache retains
+256 MiB, and default adapters retain separate 512 MiB block and 128 MiB metadata
+caches. This excludes Foyer storage's Linux x86 TSC calibration constructor.
+Shared load failures preserve their source chain and remain unavailable errors,
+matching the previous cache. Checkpoint identity, database durability and
+explicit reader/writer close ownership remain unchanged.
 
 Callers may use the identity only after proving its immutable pack inventory is
 covered by their pinned repository snapshot, then open the named checkpoint for

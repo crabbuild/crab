@@ -14,12 +14,14 @@ path = "src/lib.rs"
 
 [features]
 default = []
-file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio", "dep:tokio-util"]
+file-index-reader = ["storage", "slatedb-cache", "dep:futures-util", "dep:object_store", "dep:tokio", "dep:tokio-util"]
 local-index = ["dep:rusqlite"]
-remote-index = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb"]
+remote-index = ["storage", "slatedb-cache", "dep:futures-util", "dep:object_store"]
+slatedb-cache = ["dep:async-trait", "dep:moka", "dep:slatedb"]
 storage = ["dep:base64", "dep:crab-storage", "dep:futures-util", "dep:object_store", "dep:tokio"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 blake3 = { workspace = true }
 bstr = { version = "1", default-features = false, features = ["std"] }
@@ -30,6 +32,7 @@ flate2 = { workspace = true }
 futures-util = { workspace = true, optional = true }
 gix-validate = { workspace = true }
 object_store = { workspace = true, optional = true }
+moka = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
