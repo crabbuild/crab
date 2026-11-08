@@ -580,6 +580,8 @@ CACHE_STORE_SOURCE_FORBIDDEN_PATTERNS = {
 }
 CACHE_STORE_SCAN_PATHS = ("crates/crab-cache-store/src",)
 METADATA_DEFAULT_FORBIDDEN_PACKAGES = {
+    "async-trait",
+    "moka",
     "crab-storage",
     "futures-util",
     "object_store",
@@ -1838,6 +1840,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-auth-store",
             "crab-cache",
             "crab-git",
+            "crab-metadata",
             "crab-sdk",
             "crab-storage",
             "crab-workflow",
@@ -3576,7 +3579,7 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
             "file-index-reader": [
                 "dep:futures-util",
                 "dep:object_store",
-                "dep:slatedb",
+                "slatedb-cache",
                 "dep:tokio",
                 "dep:tokio-util",
                 "storage",
@@ -3585,9 +3588,10 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
             "remote-index": [
                 "dep:futures-util",
                 "dep:object_store",
-                "dep:slatedb",
+                "slatedb-cache",
                 "storage",
             ],
+            "slatedb-cache": ["dep:async-trait", "dep:moka", "dep:slatedb"],
             "storage": [
                 "dep:base64",
                 "dep:crab-storage",
@@ -3599,6 +3603,8 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
     )
 
     for name in (
+        "async-trait",
+        "moka",
         "base64",
         "crab-storage",
         "futures-util",
@@ -3613,6 +3619,22 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
             violations.append(f"crab-metadata: {name} must stay optional")
 
     checks = [
+        check_tree_packages(
+            root,
+            cargo,
+            "crab-metadata/slatedb-cache isolates the coalescing memory cache",
+            [
+                "-p",
+                "crab-metadata",
+                "--no-default-features",
+                "--features",
+                "slatedb-cache",
+                "--edges",
+                "normal",
+            ],
+            required={"moka", "slatedb"},
+            forbidden={"crab-storage", "fastant", "foyer", "rusqlite"},
+        ),
         check_tree_packages(
             root,
             cargo,
