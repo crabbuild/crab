@@ -7,7 +7,7 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::DbReaderMode;
 use slatedb::config::{DbReaderOptions, ScanOptions};
-use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 
 use super::format::{
     METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_BINDINGS_KEY,
@@ -61,7 +61,6 @@ const ORDINAL_SCAN_FETCH_TASKS: usize = 8;
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
 const SESSION_CACHE_BYTES: u64 = 16 * 1024 * 1024;
-const SESSION_CACHE_SHARDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LookupStrategy {
@@ -264,9 +263,9 @@ impl GitObjectLocatorSession {
             builder = builder.with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id));
         }
         let reader = match builder
-            .with_db_cache(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            .with_db_cache(Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
                 max_capacity: SESSION_CACHE_BYTES,
-                shards: SESSION_CACHE_SHARDS,
+                ..MokaCacheOptions::default()
             })))
             .build()
             .await
