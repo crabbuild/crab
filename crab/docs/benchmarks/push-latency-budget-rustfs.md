@@ -180,6 +180,13 @@ with persistent connections and no retries. Resource samples, Git Trace2 and
 existing publication-phase logs distinguish backend waiting from client work.
 Diagnostic timings do not replace the default-logging median gate.
 
+The diagnostic also runs 100 calls per probe at 1, 10 and 50 clients: process
+launch only, `crab version`, local dry-run push and unchanged-ref push. It uses
+the already qualified writer worktrees, checks their tips against the remote,
+binds the helper to the measured executable, and verifies final refs are
+unchanged. CPU counters and command distributions isolate setup from pack
+generation and publication. These controls never replace real-update samples.
+
 ## Linux client-cost isolation
 
 [The November 8 qualification](https://github.com/crabbuild/crab/actions/runs/42450566786)
