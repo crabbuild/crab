@@ -816,3 +816,89 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  kubernetes:
+    name: Qualify native recovery on three Kubernetes nodes
+    needs: image
+    runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      LARGE_FILE_BYTES: ${{ inputs.large_file_bytes || '3221225472' }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: http-server-image-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-server-qualified-image
+      - name: Load the exact image from process qualification
+        run: |
+          set -euo pipefail
+          image_dir="${RUNNER_TEMP}/crab-server-qualified-image"
+          test "$(cat "$image_dir/source-revision")" = "$(git rev-parse HEAD)"
+          (cd "$image_dir" && sha256sum --check image.sha256)
+          gzip --decompress --stdout "$image_dir/image.tar.gz" | docker image load
+          test "$(docker image inspect crab-server:test --format '{{.Id}}')" = "$(cat "$image_dir/image-id")"
+      - name: Install pinned local-cluster tools
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/crab-kubernetes-tools"
+          mkdir -p "$tools"
+          arch=amd64
+          [ "$(uname -m)" != aarch64 ] || arch=arm64
+          if [ "$arch" = amd64 ]; then
+            kind_sha=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+            helm_sha=a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496
+          else
+            kind_sha=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
+            helm_sha=440cf7add0aee27ebc93fada965523c1dc2e0ab340d4348da2215737fc0d76ad
+          fi
+          curl --fail --location "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-${arch}" --output "$tools/kind"
+          printf '%s  %s\n' "$kind_sha" "$tools/kind" | sha256sum --check
+          chmod +x "$tools/kind"
+          curl --fail --location "https://get.helm.sh/helm-v3.19.0-linux-${arch}.tar.gz" --output "$tools/helm.tar.gz"
+          printf '%s  %s\n' "$helm_sha" "$tools/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$tools/helm.tar.gz" --directory "$tools" "linux-${arch}/helm"
+          echo "$tools" >> "$GITHUB_PATH"
+          echo "$tools/linux-${arch}" >> "$GITHUB_PATH"
+          python3 -m venv "${RUNNER_TEMP}/crab-process-tools"
+          "${RUNNER_TEMP}/crab-process-tools/bin/python" -m pip install --requirement crates/crab-server/tests/process-requirements.txt
+          echo "${RUNNER_TEMP}/crab-process-tools/bin" >> "$GITHUB_PATH"
+          echo "KUBECONFIG=${RUNNER_TEMP}/crab-kind-kubeconfig" >> "$GITHUB_ENV"
+      - name: Create isolated three-node Kubernetes cluster
+        run: |
+          docker run --rm --user 0 --network none --read-only \
+            --volume /tmp/crab-kubernetes-objectstore:/prepare \
+            --entrypoint /usr/bin/chown crab-server:test 10001:10001 /prepare
+          kind create cluster --name crab-qualification \
+            --config crates/crab-server/tests/kind.yaml \
+            --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5 \
+            --wait 120s
+          kubectl taint node crab-qualification-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
+      - name: Qualify image, SIGKILL, large LFS and complete-root restoration
+        run: |
+          set -euo pipefail
+          if [ "$LARGE_FILE_BYTES" = 0 ]; then LARGE_FILE_BYTES=3221225472; fi
+          python3 crates/crab-server/tests/qualify_cellar_kubernetes.py \
+            --kubeconfig "$KUBECONFIG" --cluster crab-qualification \
+            --image crab-server:test --source-revision "$(git rev-parse HEAD)" \
+            --large-file-bytes "$LARGE_FILE_BYTES" \
+            --artifacts "${RUNNER_TEMP}/crab-kubernetes-proof"
+      - name: Retain Kubernetes receipts and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cellar-kubernetes-qualification-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/crab-kubernetes-proof/**/receipt.json
+            ${{ runner.temp }}/crab-kubernetes-proof/**/*.log
+            ${{ runner.temp }}/crab-kubernetes-proof/**/events.json
+            ${{ runner.temp }}/crab-kubernetes-proof/**/issue*.json
+            ${{ runner.temp }}/crab-kubernetes-proof/**/root-copy-proof.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove only the qualification cluster
+        if: always()
+        run: kind delete cluster --name crab-qualification

@@ -228,6 +228,11 @@ separate overlay. The chart accepts exactly one configuration source. Its
 `cells.local_disk_limit_bytes` must equal `scratch.sizeBytes`; live
 qualification rejects a mismatch.
 
+The scratch volume hides the image's pre-created directories. An unprivileged
+init container uses the same immutable server image to create its private
+`/var/lib/crab/tmp` before Git reads and readiness checks run. Cellar starts in
+the application container after this filesystem preparation.
+
 ## Create the application and peer Secrets
 
 Write the OIDC client secret and a stable random state key to private files. Keep the state key unchanged across replicas and rollouts.
