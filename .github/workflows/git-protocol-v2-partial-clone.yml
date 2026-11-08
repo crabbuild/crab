@@ -26,6 +26,22 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y libfuse3-dev binutils strace time gdb
+      - name: Verify pinned rollback release through GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rollback="$RUNNER_TEMP/rollback-download"
+          mkdir -p "$rollback"
+          asset_id="$(gh api repos/crabbuild/crab/releases/tags/v1.0.1 \
+            --jq '.assets[] | select(.name == "crab-linux-x86_64.tar.gz") | .id')"
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/crabbuild/crab/releases/assets/$asset_id" \
+            > "$rollback/crab-linux-x86_64.tar.gz"
+          (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
+          tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
+          "$rollback/crab" version
       - uses: actions/download-artifact@v4
         with:
           name: crab-protocol-v2-linux-x86_64-${{ inputs.control_run }}
