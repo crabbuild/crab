@@ -632,7 +632,7 @@ fn generate_pack_files_via_git(
     let mut command = crab_git::raw_object_command(&output_root);
     // These packs and indexes are disposable upload scratch, not local Git
     // history. The verified remote write owns durability; hardening scratch
-    // adds device flushes that compete with concurrent publication writes.
+    // adds sync work that competes with concurrent publication writes.
     command.args(["-c", "core.fsync=none", "pack-objects", "--quiet"]);
     if revisions {
         command.arg("--revs");

@@ -844,8 +844,9 @@ jobs:
               if report["workload"]["update_payload_bytes"] != 4096:
                   raise SystemExit("latency qualification requires 4 KiB update payloads")
               timings = sorted(row["command"]["duration_ms"] for row in report["branch_updates"])
-              if not timings:
-                  raise SystemExit(f"{actors}-writer measurement has no update samples")
+              expected_samples = 350 if actors == 50 else 100
+              if len(timings) != expected_samples:
+                  raise SystemExit(f"{actors}-writer measurement requires {expected_samples} update samples")
               results.append({"actors": actors, "samples": len(timings),
                               "p50_ms": timings[math.ceil(len(timings) * 0.5) - 1],
                               "p95_ms": timings[math.ceil(len(timings) * 0.95) - 1],
