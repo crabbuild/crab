@@ -124,3 +124,58 @@ lifecycle/byte-preservation tests, incremental push round-trip/request bounds,
 envelopes, formatting and Actionlint. The 500 ms target remains unmet. Further
 experiments must use a control and candidate on the same runner with identical
 prepared commits, alternating trial order and intact integrity checks.
+
+## Rejected LFS proof-reuse experiment
+
+A second experiment retained bounded identities from inspected LFS-free packs.
+When those identities covered every visibility addition, it skipped a duplicate
+LFS range scan. Uncovered sibling objects and positive LFS pointers retained
+publication admission. Pack exclusions and the immutable-upload/ref-CAS/epoch
+sequence were unchanged. The production change was removed because the paired
+measurements did not establish a reliable end-to-end gain.
+
+Control: `3b733753c5af7235d8126e8fd23637319c29a02f`. The candidate was built
+from that source plus archived patch SHA-256
+`304a1a928bf7b141d4f40d9455ecbcc9e68c14c70ff6b47ac8c35a3080194a2e`.
+Both measured executables matched their Cargo artifacts, compiler, release
+profile and full non-FUSE feature set including `gix-transport`.
+
+Normal Git pushes ran in control/candidate/candidate/control order on the same
+macOS/RustFS fixture described above, with default product logging. Each trial
+used fresh private backend data but the same endpoint, bucket, run IDs and Git
+dates. Independent cold consumers proved identical Git plans and final refs
+across all four trials. Each trial measured 350 updates at 50 clients and 100
+updates at both 10 and 1 clients. All 12 reports and 2,200 timed updates passed
+their integrity checks. Setup, commit preparation and verification were outside
+command timing.
+
+| Trial | Variant | 1-client p50 ms | 10-client p50 ms | 50-client p50 ms | 50-client pushes/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1 | Control | 166 | 674 | 2,770 | 12.34 |
+| B1 | Candidate | 149 | 738 | 3,187 | 11.22 |
+| B2 | Candidate | 179 | 814 | 3,319 | 10.45 |
+| A2 | Control | 170 | 775 | 3,871 | 9.36 |
+
+The 50-client control median drifted by about 40%. Pooled 50-client numbers
+show only a small apparent improvement, while pooled 1- and 10-client medians
+and throughput regress. These measurements establish neither a causal speedup
+nor a causal regression. They do not justify retaining the optimization.
+Queue-plus-service distributions and per-wave throughput were retained with
+the individual reports; no client concurrency was reduced to hide waiting.
+
+The independent sibling/LFS regression remains: fast-forward to data excluded
+through another advertised ref, remove that ref, checkpoint, then verify exact
+Git blob bytes and out-of-band LFS bytes in a cold consumer. A missing remote
+LFS payload must be restored before the new ref becomes visible.
+
+A separate local Git commit-graph probe found no consistent throughput or CPU
+improvement across 1, 10 and 50 workers, so it produced no product change.
+Native CLI startup/preflight isolation measured approximately 8 ms p50 for
+`version` and 17.5 ms for a local dry-run push; these are not storage timings.
+
+Manual Linux qualification now runs storage-only controls and a separate
+instrumented 50-client diagnostic after its ordinary latency cohorts. The
+controls verify stale conditional-write rejection and all uploaded bytes,
+with persistent connections and no retries. Resource samples, Git Trace2 and
+existing publication-phase logs distinguish backend waiting from client work.
+Diagnostic timings do not replace the default-logging median gate.
