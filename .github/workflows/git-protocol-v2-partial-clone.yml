@@ -39,6 +39,7 @@ on:
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -103,6 +104,7 @@ on:
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -236,6 +238,7 @@ jobs:
         run: |
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_concurrent_push_smoke.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_existing_ref_push_rustfs.py
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py --help > /dev/null
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_mixed_team_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_lfs_qualification.py
           python3 crab/scripts/verify_git_capability_matrix.py
@@ -768,7 +771,7 @@ jobs:
         run: |
           echo "CRAB_PERF_ROOT=$RUNNER_TEMP/crab-existing-ref-${{ matrix.client }}" >> "$GITHUB_ENV"
           sudo apt-get update -y
-          sudo apt-get install -y curl libfuse3-dev pipx
+          sudo apt-get install -y curl libfuse3-dev pipx sysstat
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -794,6 +797,7 @@ jobs:
           git -C "$curl_source" status --porcelain
 
       - name: Start RustFS
+        id: performance-store
         run: |
           mkdir -p "$CRAB_PERF_ROOT/rustfs-data"
           sudo chown 10001:10001 "$CRAB_PERF_ROOT/rustfs-data"
@@ -858,6 +862,27 @@ jobs:
               raise SystemExit("native push p50 must be below 500 ms at every measured concurrency")
           PY
 
+      - name: Isolate storage and client costs after latency qualification
+        if: always() && steps.performance-store.outcome == 'success'
+        run: |
+          pidstat -h -u -r -d -p ALL 1 > "$CRAB_PERF_ROOT/profile-resources.txt" &
+          profile_sampler_pid=$!
+          trap 'kill "$profile_sampler_pid" 2>/dev/null || true; wait "$profile_sampler_pid" 2>/dev/null || true' EXIT
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --output "$CRAB_PERF_ROOT/profile-storage.json"
+          CRAB_LOG=crab_write::capsule_protocol=info,crab::git::capsule_push=debug,crab::cmd::push=info \
+          GIT_TRACE2_EVENT="$CRAB_PERF_ROOT/profile-git-trace.jsonl" \
+            python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+              --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+              --source "$RUNNER_TEMP/Github/curl/curl" \
+              --root "$CRAB_PERF_ROOT" --run-id profile-writers-50 \
+              --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+              --push-client "${{ matrix.client }}" \
+              --agents 50 --branch-update-rounds 2 --max-parallel-pushes 50 \
+              --consumer-mode cold-final --skip-same-branch --no-request-capture \
+              --timeout 600 --push-timeout 600
+
       - name: Capture RustFS logs and stop fixture
         if: always()
         run: |
@@ -873,6 +898,11 @@ jobs:
           path: |
             ${{ env.CRAB_PERF_ROOT }}/writers-*/artifacts/**
             ${{ env.CRAB_PERF_ROOT }}/writers-*/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.json
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.jsonl
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.txt
             ${{ env.CRAB_PERF_ROOT }}/latency.json
             ${{ env.CRAB_PERF_ROOT }}/rustfs.log
             ${{ env.CRAB_PERF_ROOT }}/rustfs-image.json
