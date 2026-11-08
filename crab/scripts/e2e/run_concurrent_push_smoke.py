@@ -50,6 +50,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from itertools import repeat
 from pathlib import Path
 from typing import Any
 
@@ -2318,27 +2319,24 @@ class ConcurrentPushSmoke:
             successful_pushes=len(results),
         )
 
+    def prepare_branch_update(self, index: int, round_index: int) -> tuple[str, str, Path, str]:
+        repo = self.branch_agents / f"branch-agent-{index:03d}"
+        branch = f"refs/heads/agent-{index:03d}"
+        path = repo / "agents" / f"agent-{index:03d}.txt"
+        with path.open("a", encoding="utf-8") as payload:
+            payload.write(f"update round {round_index}\n")
+        self.run_git(repo, ["add", str(path.relative_to(repo))])
+        self.run_git(repo, ["commit", "-m", f"agent {index:03d} update {round_index}"])
+        return f"branch-agent-{index:03d}-update-{round_index}", branch, repo, f"HEAD:{branch}"
+
     def run_branch_updates(self) -> None:
         request_before = self.request_proxy.snapshot() if self.request_proxy else None
         updates: list[dict[str, Any]] = []
         for round_index in range(1, self.args.branch_update_rounds + 1):
             started = time.monotonic()
 
-            def prepare(index: int) -> tuple[str, str, Path, str]:
-                repo = self.branch_agents / f"branch-agent-{index:03d}"
-                branch = f"refs/heads/agent-{index:03d}"
-                path = repo / "agents" / f"agent-{index:03d}.txt"
-                with path.open("a", encoding="utf-8") as payload:
-                    payload.write(f"update round {round_index}\n")
-                self.run_git(repo, ["add", str(path.relative_to(repo))])
-                self.run_git(
-                    repo,
-                    ["commit", "-m", f"agent {index:03d} update {round_index}"],
-                )
-                return f"branch-agent-{index:03d}-update-{round_index}", branch, repo, f"HEAD:{branch}"
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.max_parallel_pushes) as pool:
-                jobs = list(pool.map(prepare, range(self.args.agents)))
+                jobs = list(pool.map(self.prepare_branch_update, range(self.args.agents), repeat(round_index)))
             preparation_ms = int((time.monotonic() - started) * 1000)
             results = self.push_concurrently(jobs)
             self.report.push_batches[-1]["preparation_ms"] = preparation_ms
