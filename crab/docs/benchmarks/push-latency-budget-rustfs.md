@@ -179,3 +179,48 @@ controls verify stale conditional-write rejection and all uploaded bytes,
 with persistent connections and no retries. Resource samples, Git Trace2 and
 existing publication-phase logs distinguish backend waiting from client work.
 Diagnostic timings do not replace the default-logging median gate.
+
+## Linux client-cost isolation
+
+[The November 8 qualification](https://github.com/crabbuild/crab/actions/runs/42450566786)
+built source `ecca7202bf76c269e5cb4a83f02a99c5b3fbf5d2`, with the scratch-sync
+and LFS proof-reuse experiments absent. Both client jobs used four-CPU Linux
+runners, Rust 1.99.1, Git 2.56.0, default product logging for the ordinary
+cohorts, and the same pinned RustFS image digest:
+`sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66`.
+These remain independent hosts, not a paired native-versus-Git experiment.
+
+| Clients | Samples per client mode | Native p50 / p95 ms | Git p50 / p95 ms |
+| ---: | ---: | ---: | ---: |
+| 1 | 100 | 56 / 70 | 77 / 93 |
+| 10 | 100 | 154 / 199 | 269 / 312 |
+| 50 | 350 | 648 / 925 | 2,258 / 3,225 |
+
+At 50 clients, measured-wave throughput was 57.50 native pushes/s and 15.22
+Git pushes/s. All 1,100 timed updates passed the complete integrity checks.
+The native median gate failed at 50 clients; all other jobs in the manual run,
+including Windows/macOS contracts and the Git 2.30/2.40/2.45/current lifecycle
+matrix, passed. Those checks qualify this baseline, not a later experiment.
+
+The later storage-only publication chain measured 55.84 ms p50 on the native
+job's host and 59.48 ms on the Git job's host at 50 actors. Each control
+verified all bytes and conditional-write rejection, without retries. These
+observations do not support importing the macOS USB storage diagnosis into
+the Linux deployment or treating the backend as the sole remaining bottleneck.
+
+Separate instrumented 50-client pushes retained all integrity checks. Native
+command p50 was 644 ms; upload and ref-CAS phase medians were 14.19 ms and
+8.32 ms. Per-command subtraction left a 620.12 ms median outside those two
+phases. The interval from the native start log to prepared Git payload had a
+341.21 ms median. Command duration minus the CLI's reported attempt duration
+had a 211 ms median, locating additional cost outside the attempt. These
+paired residuals do not identify one function, and phase medians are not an
+additive decomposition of the command median.
+
+Git's instrumented command p50 was 2,362 ms, with a 2,348.86 ms median outside
+upload and ref CAS. Source inspection still distinguishes its whole-ref
+stable advertisement from native selected-ref admission. The resource sample
+also records substantial scheduling wait among live Crab processes. Follow-up
+work should measure client preparation, process/runtime overhead and ref
+discovery; it must retain publication CAS, transaction-consistent captures,
+object fsck, epoch confirmation and durability.
