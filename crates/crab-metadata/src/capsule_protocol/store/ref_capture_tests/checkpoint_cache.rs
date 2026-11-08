@@ -172,6 +172,45 @@ async fn checkpoint_cache_reuses_only_identified_heads_and_still_lists_twice() {
 }
 
 #[tokio::test]
+async fn push_inventory_reuses_only_version_bound_checkpoint_heads() {
+    for identity in [
+        Identity::ETag,
+        Identity::Version,
+        Identity::WeakETag,
+        Identity::Absent,
+    ] {
+        let (layout, root, store) = fixture(identity, false, false).await;
+        store.replacements.lock().unwrap().clear();
+        let layout = StoreLayout::new(
+            layout.store().clone().with_target_identity([1; 32]),
+            layout.repo_prefix().to_owned(),
+        );
+        let (root, _) = checkpoint_heads(&layout, &root).await;
+        store.reads.lock().unwrap().clear();
+        store.lists.store(0, Ordering::SeqCst);
+        let heads = load_ref_heads_for_push(&layout, &root).await.unwrap();
+        let reads: usize = store
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.starts_with(layout.capsule_ref_heads_prefix().as_ref()))
+            .map(|(_, count)| count)
+            .sum();
+        let expected_reads = if matches!(identity, Identity::ETag | Identity::Version) {
+            0
+        } else {
+            2
+        };
+        assert_eq!(
+            (heads.len(), store.lists.load(Ordering::SeqCst), reads),
+            (2, 1, expected_reads),
+            "{identity:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn checkpoint_cache_does_not_cross_physical_targets() {
     let (layout, root, store) = fixture(Identity::ETag, false, false).await;
     store.replacements.lock().unwrap().clear();

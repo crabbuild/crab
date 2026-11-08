@@ -566,6 +566,24 @@ pub async fn capture_ref_heads(
     Ok((snapshot.heads, snapshot.active))
 }
 
+/// Load individually observed ref heads for push discovery.
+///
+/// This is not a stable reader snapshot. Publishers must resolve activations,
+/// re-read edited heads, validate expected old values and publish through CAS.
+pub async fn load_ref_heads_for_push(
+    router: &StoreLayout<Store>,
+    root: &super::RepositoryRoot,
+) -> Result<Vec<CapsuleRefHead>> {
+    let origin = super::ref_head::cache::origin(router);
+    let cached = load_checkpoint_ref_heads(router, root, origin.as_deref()).await?;
+    let objects = list_ref_head_objects(router).await?;
+    Ok(load_ref_head_bodies(router, &objects, &cached)
+        .await?
+        .into_iter()
+        .map(|(_, head, _)| head)
+        .collect())
+}
+
 /// Stable ref-head bodies and provider tokens; activation outcomes are never persisted.
 pub struct RefHeadSnapshot {
     heads: Vec<CapsuleRefHead>,
@@ -618,28 +636,7 @@ pub async fn capture_ref_head_snapshot(
     // and S3's mutable null version do not identify content; always GET those
     // bodies again unless an ETag identifies them. Activations are never cached.
     let origin = super::ref_head::cache::origin(router);
-    let mut previous = match (
-        root.checkpoint()
-            .and_then(|pointer| pointer.ref_heads.as_ref()),
-        &origin,
-    ) {
-        (Some(cache), Some(origin)) if &cache.origin == origin => {
-            let checkpoint = root
-                .checkpoint()
-                .ok_or_else(|| contract_error("ref-head cache has no checkpoint"))?;
-            cache.validate(checkpoint.control_offset())?;
-            let range = &cache.range;
-            let bytes = router
-                .store()
-                .range_get(
-                    &router.capsule_checkpoint_path(checkpoint.hash()),
-                    range.offset()..range.offset() + range.length(),
-                )
-                .await?;
-            cache.verify(bytes)?.heads(router, root)?
-        }
-        _ => BTreeMap::new(),
-    };
+    let mut previous = load_checkpoint_ref_heads(router, root, origin.as_deref()).await?;
     let mut before = list_ref_head_objects(router).await?;
     for attempt in 0_u32..32 {
         // Independent writers need not settle within eight short probes. Keep
@@ -649,42 +646,7 @@ pub async fn capture_ref_head_snapshot(
             let delay = std::time::Duration::from_millis(10_u64 << (attempt - 1).min(4));
             tokio::time::sleep(delay).await;
         }
-        let head_router = router.clone();
-        let cached_heads = &previous;
-        let loaded = futures_util::stream::iter(before.iter().cloned().map(move |object| {
-            let router = head_router.clone();
-            let cached = cached_heads
-                .get(&object.location)
-                .filter(|(_, etag)| {
-                    super::ref_head::cache::identifies_body(
-                        object.e_tag.as_deref(),
-                        object.version.as_deref(),
-                    ) && listed_version_matches(&object, etag)
-                })
-                .cloned();
-            async move {
-                let (head, etag) = match cached {
-                    Some(cached) => cached,
-                    None => {
-                        let (bytes, etag) = router.store().get_with_etag(&object.location).await?;
-                        let head = CapsuleRefHead::decode(&bytes)?;
-                        if router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name()))
-                            != object.location
-                        {
-                            return Err(corrupt(
-                                &object.location,
-                                "capsule ref-head key does not match its ref name",
-                            ));
-                        }
-                        (head, etag)
-                    }
-                };
-                Ok::<_, MetadataError>((object, head, etag))
-            }
-        }))
-        .buffer_unordered(32)
-        .try_collect::<Vec<_>>()
-        .await?;
+        let loaded = load_ref_head_bodies(router, &before, &previous).await?;
         let matched = loaded
             .iter()
             .all(|(object, _, etag)| listed_version_matches(object, etag));
@@ -743,6 +705,78 @@ pub async fn capture_ref_head_snapshot(
     Err(contract_error(
         "capsule ref snapshot changed during every bounded capture attempt",
     ))
+}
+
+type RefHeadBodies = BTreeMap<object_store::path::Path, (CapsuleRefHead, ETag)>;
+
+async fn load_checkpoint_ref_heads(
+    router: &StoreLayout<Store>,
+    root: &super::RepositoryRoot,
+    origin: Option<&str>,
+) -> Result<RefHeadBodies> {
+    let cached = match (
+        root.checkpoint()
+            .and_then(|pointer| pointer.ref_heads.as_ref()),
+        origin,
+    ) {
+        (Some(cache), Some(origin)) if cache.origin == origin => {
+            let checkpoint = root
+                .checkpoint()
+                .ok_or_else(|| contract_error("ref-head cache has no checkpoint"))?;
+            cache.validate(checkpoint.control_offset())?;
+            let range = &cache.range;
+            let bytes = router
+                .store()
+                .range_get(
+                    &router.capsule_checkpoint_path(checkpoint.hash()),
+                    range.offset()..range.offset() + range.length(),
+                )
+                .await?;
+            cache.verify(bytes)?.heads(router, root)?
+        }
+        _ => BTreeMap::new(),
+    };
+    Ok(cached)
+}
+
+async fn load_ref_head_bodies(
+    router: &StoreLayout<Store>,
+    objects: &[ObjectMeta],
+    cached: &RefHeadBodies,
+) -> Result<Vec<(ObjectMeta, CapsuleRefHead, ETag)>> {
+    futures_util::stream::iter(objects.iter().cloned().map(|object| {
+        let cached = cached
+            .get(&object.location)
+            .filter(|(_, etag)| {
+                super::ref_head::cache::identifies_body(
+                    object.e_tag.as_deref(),
+                    object.version.as_deref(),
+                ) && listed_version_matches(&object, etag)
+            })
+            .cloned();
+        async move {
+            let (head, etag) = match cached {
+                Some(cached) => cached,
+                None => {
+                    let (bytes, etag) = router.store().get_with_etag(&object.location).await?;
+                    let head = CapsuleRefHead::decode(&bytes)?;
+                    if router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name()))
+                        != object.location
+                    {
+                        return Err(corrupt(
+                            &object.location,
+                            "capsule ref-head key does not match its ref name",
+                        ));
+                    }
+                    (head, etag)
+                }
+            };
+            Ok((object, head, etag))
+        }
+    }))
+    .buffer_unordered(32)
+    .try_collect()
+    .await
 }
 
 async fn list_ref_head_objects(router: &StoreLayout<Store>) -> Result<Vec<ObjectMeta>> {

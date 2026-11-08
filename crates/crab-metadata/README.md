@@ -124,6 +124,12 @@ not widen that retry window. Current-state catalog lookups reuse that owner toge
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
+`load_ref_heads_for_push` performs one inventory for write-only discovery. It
+returns individually observed heads, not a stable reader snapshot. Callers
+resolve fresh activation records; publication re-reads edited heads, validates
+expected old OIDs and uses conditional writes. Unrelated ref movement therefore
+does not restart push discovery. Fetch and other reads retain stable captures.
+
 Checkpoint format 1 (`CRBCKP01`) includes an optional authenticated ref-head cache
 inside the existing checkpoint body. `capture_ref_head_snapshot` retains the
 exact committed/prepared heads and provider tokens for complete-view owners;
@@ -139,7 +145,8 @@ Writers require at least two identified heads: caching one head cannot save a
 request and would add a read after that head changes.
 
 Reuse requires the same resolved transport, ref prefix, repository and epoch,
-fresh matching strong ETags or non-null versions, and stable before/after LISTs.
+and fresh matching strong ETags or non-null versions. Stable reader captures
+also verify before/after LISTs; write-only discovery does not establish a snapshot.
 Scoped read/staging routes without prefix-wide target proof disable reuse.
 Activations are always read afresh, including for unchanged prepared heads.
 Selected missing/corrupt cache bytes remain errors. Restore filters retired
