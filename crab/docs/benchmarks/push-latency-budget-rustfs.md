@@ -224,3 +224,70 @@ also records substantial scheduling wait among live Crab processes. Follow-up
 work should measure client preparation, process/runtime overhead and ref
 discovery; it must retain publication CAS, transaction-consistent captures,
 object fsck, epoch confirmation and durability.
+
+## Rejected generated-index reuse
+
+The next experiment verified Git's generated index in place instead of
+creating a second scratch index. Strict object fsck, index/reverse-index
+validation and supervised child cleanup remained enabled. It was removed
+after the [controlled Linux comparison](https://github.com/crabbuild/crab/actions/runs/42454090494)
+failed to establish a repeatable end-to-end gain.
+
+Control source: `ecca7202bf76c269e5cb4a83f02a99c5b3fbf5d2`.
+Candidate source: `e8dd08bdfc8fb016fe0b8edbb16e031f9b006e34`.
+Each client mode compared both release artifacts on one runner in
+control/candidate/candidate/control order. Fresh private RustFS data, fixed Git
+dates and identical prepared commits/final refs prevented workload differences.
+Compiler, features, executable hashes and image digest were recorded. Each
+trial included 350 updates at 50 clients and 100 at both 10 and 1 clients.
+All 24 reports and 4,400 timed updates passed cold readback and integrity checks.
+
+| Client | Trial | Variant | 50-client p50 / p95 ms | Pushes/s |
+| --- | --- | --- | ---: | ---: |
+| Native | A1 | Control | 523 / 756 | 70.07 |
+| Native | B1 | Candidate | 504 / 746 | 71.84 |
+| Native | B2 | Candidate | 499 / 742 | 72.40 |
+| Native | A2 | Control | 505 / 777 | 70.13 |
+| Git | A1 | Control | 2,178 / 3,414 | 15.05 |
+| Git | B1 | Candidate | 2,252 / 3,211 | 16.22 |
+| Git | B2 | Candidate | 2,125 / 3,156 | 15.48 |
+| Git | A2 | Control | 2,245 / 2,984 | 16.48 |
+
+Native candidate medians at 1/10 clients were 51/122 ms and 51/129 ms.
+The 50-client native budget failed in B1. Including launch queueing, native
+candidate p50 was 591 ms in both trials, versus 624/607 ms for the controls.
+Wave-cluster resampling with 5,000 replicates left both latency and throughput
+differences compatible with no gain. This within-job calculation does not
+eliminate host drift. The separate macOS ABBA comparison was also inconclusive.
+Neither environment supports retaining the extra index-reuse path.
+
+## Independent refs still share resources
+
+Existing-ref publication in `crab/src/git/capsule_push.rs` bypasses namespace
+locks and conditionally updates its own ref head. Ordinary Git-only pushes do
+not acquire the Xet GC writer lease. Independent refs therefore avoid those
+serialization points, while still sharing client CPU, process launches,
+filesystem work, network capacity and backend resources.
+
+The helper's `read_remote_refs_for_push_with_snapshot` still captures all refs.
+Its metadata capture validates a complete inventory around activation resolution
+and retries when unrelated heads move. Native `crab push` already admits only
+selected refs. A future push-advertisement optimization must preserve primary
+authority, exclusion correctness, multi-ref transaction semantics and final
+publication CAS; weakening general reader snapshots is not qualified by these
+measurements.
+
+Priority measurements are narrower push discovery, repeated Git/client setup
+and shared-host scheduling. Small setup probes on macOS found low Clap/runtime
+construction and shutdown costs, so they do not justify attributing Linux's
+outside-attempt residual entirely to runtime startup. Pack subprocesses remain
+measurable, but deleting verified integrity or durability work is not an
+acceptable latency optimization.
+
+The concurrent lifecycle also exposed a separate same-ref preparation race:
+foreground compaction can lose a mutable source-retention head CAS before any
+ref visibility write. The writer now reports that as `RefChanged`, allowing
+the CLI's integration retry mode to refresh admission and rebase as needed.
+Conflicting immutable source-segment bytes remain terminal errors; uncertain
+visibility commits retain their existing reconciliation contract. Regression
+tests cover both boundaries. This correction is not a measured latency gain.
