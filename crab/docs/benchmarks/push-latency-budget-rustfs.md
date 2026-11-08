@@ -276,13 +276,11 @@ not acquire the Xet GC writer lease. Independent refs therefore avoid those
 serialization points, while still sharing client CPU, process launches,
 filesystem work, network capacity and backend resources.
 
-The helper's `read_remote_refs_for_push_with_snapshot` still captures all refs.
-Its metadata capture validates a complete inventory around activation resolution
-and retries when unrelated heads move. Native `crab push` already admits only
-selected refs. A future push-advertisement optimization must preserve primary
-authority, exclusion correctness, multi-ref transaction semantics and final
-publication CAS; weakening general reader snapshots is not qualified by these
-measurements.
+The baseline helper's `read_remote_refs_for_push_with_snapshot` captured all refs
+through a stable inventory and retried when unrelated heads moved. Native
+`crab push` already admitted only selected refs. The qualified push-only path
+below retains ref discovery while freshly revalidating edited heads before
+publication. General reader captures retain their stability checks.
 
 Priority measurements are narrower push discovery, repeated Git/client setup
 and shared-host scheduling. Small setup probes on macOS found low Clap/runtime
@@ -298,3 +296,40 @@ the CLI's integration retry mode to refresh admission and rebase as needed.
 Conflicting immutable source-segment bytes remain terminal errors; uncertain
 visibility commits retain their existing reconciliation contract. Regression
 tests cover both boundaries. This correction is not a measured latency gain.
+
+## Verified push-only discovery
+
+[The controlled Linux comparison](https://github.com/crabbuild/crab/actions/runs/42466800431)
+compared control `d6a5c8d12073740b31831365eed26314c0ef7d2a` with candidate
+`7a71e68537b63bab689ad1fb7d232f8d5dc8b6ce`. Both release archives and executable
+hashes were independently verified. Both use Rust 1.99.1 and
+`default,gix-transport`. Each client mode ran control/candidate/candidate/control
+on one runner, with fresh pinned RustFS data and identical prepared Git plans.
+All 24 reports and 4,400 timed updates passed cold readback and integrity checks.
+
+| Git trial | Variant | 50-client p50 / p95 ms | Pushes/s |
+| --- | --- | ---: | ---: |
+| A1 | Control | 2,257 / 3,144 | 15.31 |
+| B1 | Candidate | 1,971 / 2,431 | 21.82 |
+| B2 | Candidate | 1,900 / 2,258 | 22.68 |
+| A2 | Control | 2,336 / 3,243 | 14.94 |
+
+Combining measured waves gives 22.24 candidate pushes/s versus 15.12 for the
+control, a 47.1% increase. A 5,000-replicate wave-cluster bootstrap puts the
+50-client p50 difference at -457 to -246 ms and throughput gain at 39.15% to
+55.06% (95% intervals). This calculation is conditional on these hosts and
+trials; it does not eliminate host drift. Git candidate p50 at 1/10 clients
+was 79/254 ms and 78/251 ms, versus control 84/288 ms and 79/270 ms.
+
+Native push showed no attributable gain: 50-client control p50 was 401/464 ms
+and candidate 422/444 ms, with latency and throughput intervals including zero.
+The separate ordinary native job measured 560 ms at 50 clients, so the original
+500 ms target is not established across these runs. The macOS comparison also
+completed 12 reports and 2,200 updates without a repeatable gain. Retention of
+the discovery change is supported by the paired Linux Git result.
+
+The helper's `list for-push` and native `--follow-tags` publication now use one
+inventory of individually observed heads with fresh activation checks. Edited
+refs are re-read and their expected old OIDs checked before CAS. Read-only
+advertisements, fetch admission and dry-run previews retain stable captures;
+multi-ref publication and payload integrity checks are unchanged.
