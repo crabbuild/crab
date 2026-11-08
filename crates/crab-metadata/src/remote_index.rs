@@ -514,6 +514,7 @@ async fn open_writer(
     };
     let writer = slatedb::Db::builder(ObjectPath::from(path), store)
         .with_settings(settings)
+        .with_db_cache(crate::default_slatedb_cache())
         .build()
         .await
         .map_err(|source| MetadataError::SlateDbOpen {
@@ -583,6 +584,7 @@ async fn open_reader(
     db: &'static str,
 ) -> Result<Option<slatedb::DbReader>> {
     match slatedb::DbReader::builder(ObjectPath::from(path), store)
+        .with_db_cache(crate::default_slatedb_cache())
         .build()
         .await
     {

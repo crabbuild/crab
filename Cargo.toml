@@ -135,6 +135,7 @@ futures-util = "0.3"
 flate2 = "1"
 globset = "0.4"
 object_store = { version = "0.14.1", default-features = false }
+moka = { version = "=0.12.15", default-features = false, features = ["future"] }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false }
 # Match Cellar's native SQLite binding; retain cached statements and checked
@@ -144,8 +145,8 @@ schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-# Moka avoids linking Foyer storage's eager TSC calibration into every product.
-slatedb = { version = "=0.15.0", default-features = false, features = ["aws", "moka"] }
+# Metadata supplies its coalescing cache without Foyer's eager TSC calibration.
+slatedb = { version = "=0.15.0", default-features = false, features = ["aws"] }
 secrecy = { version = "=0.10.3" }
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "macros", "migrate", "uuid", "time", "json"] }
 tempfile = "3"

@@ -71,7 +71,7 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
 
 ## Features and platform
 
-Empty default. `storage` adds object-store helpers; `file-index-reader` and `remote-index` also enable storage and SlateDB paths; `local-index` adds SQLite. Inspect locked SlateDB session/writer close contracts before changing lifecycle. Payload-only checks must remain a separate slice.
+Empty default. `storage` adds object-store helpers; `file-index-reader` and `remote-index` also enable storage and SlateDB paths; `local-index` adds SQLite. `slatedb-cache` supplies shared byte-bounded caches without enabling either index API. Use its coalesced load path for cache-enabled adapters; concurrent cold misses must share origin reads. Inspect locked SlateDB session/writer close contracts before changing lifecycle. Payload-only checks must remain a separate slice.
 
 ## Verification
 

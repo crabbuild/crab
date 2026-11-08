@@ -12,6 +12,8 @@ pub mod bloom_prefilter;
 pub mod capsule_protocol;
 pub mod chunk_index;
 pub mod commit_graph;
+#[cfg(feature = "slatedb-cache")]
+mod db_cache;
 #[cfg(feature = "storage")]
 mod derived_index;
 pub mod error;
@@ -22,6 +24,8 @@ pub mod git_object_locator;
 pub mod git_visibility;
 pub mod key_codec;
 pub mod layout_descriptor;
+#[cfg(feature = "slatedb-cache")]
+pub use db_cache::{default_slatedb_cache, slatedb_cache};
 #[cfg(feature = "storage")]
 pub mod manifest_store;
 pub mod manifests;
