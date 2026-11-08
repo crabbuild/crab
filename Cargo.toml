@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/nfs3_server", "vendor/rustls-pki-types"]
+exclude = ["vendor/nfs3_server"]
 members = [
     "crates/crab-auth",
     "crates/crab-auth-store",
@@ -173,4 +173,3 @@ debug = true
 
 [patch.crates-io]
 nfs3_server = { path = "vendor/nfs3_server" }
-rustls-pki-types = { path = "vendor/rustls-pki-types" }
