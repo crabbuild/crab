@@ -523,6 +523,38 @@ fn missing_remote_tip_requests_refresh_instead_of_internal_failure() {
 }
 
 #[test]
+fn remote_tip_exclusions_find_packed_tips_among_missing_refs() {
+    let source = tempfile::tempdir().expect("source repository");
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let tip = commit(source.path(), "packed tip");
+    git(source.path(), &["repack", "-ad"]);
+    git(source.path(), &["prune-packed"]);
+    let git_dir = source.path().join(".git");
+    assert!(
+        !git_dir
+            .join("objects")
+            .join(&tip[..2])
+            .join(&tip[2..])
+            .exists(),
+        "fixture tip must be available only from a pack"
+    );
+    let refs = BTreeMap::from([
+        ("refs/heads/absent".to_owned(), "f".repeat(40)),
+        ("refs/heads/main".to_owned(), tip.clone()),
+    ]);
+
+    assert_eq!(
+        locally_available_remote_tips(&git_dir, &refs).expect("select available remote tips"),
+        [tip]
+    );
+}
+
+#[test]
 fn direct_parent_proves_fast_forward() {
     let source = tempfile::tempdir().expect("source repository");
     git(source.path(), &["init", "--initial-branch=main"]);

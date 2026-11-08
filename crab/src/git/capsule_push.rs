@@ -1324,9 +1324,12 @@ fn locally_available_remote_tips(
     git_dir: &Path,
     remote_refs: &BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
-    let objects = gix_odb::at(git_dir.join("objects")).map_err(|error| {
+    let mut objects = gix_odb::at(git_dir.join("objects")).map_err(|error| {
         CrabError::Internal(format!("failed to open local Git object database: {error}"))
     })?;
+    // Availability selects exclusions or complete visibility reconstruction.
+    // One pack snapshot avoids directory rescans for every absent remote tip.
+    objects.refresh_never();
     Ok(remote_refs
         .values()
         .filter_map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).ok())
