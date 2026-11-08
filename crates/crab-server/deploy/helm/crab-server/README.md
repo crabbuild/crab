@@ -296,9 +296,9 @@ kubectl --namespace crab create secret generic crab-server-peer \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Keep the CA key offline. Rotate a leaf signed by the same CA through a
-one-Pod-at-a-time rollout; signed advertisements make peers pin each live
-process's exact replacement leaf. A CA rotation requires one reviewed trust
+Keep the CA key offline. Rotate a leaf signed by the same CA through the
+coordinated replacement procedure; signed advertisements make peers pin each
+live process's exact replacement leaf. A CA rotation requires one reviewed trust
 bundle on every Pod before any certificate starts using the new CA.
 
 ## Install the server
@@ -311,7 +311,7 @@ helm upgrade --install crab-server \
   --namespace crab --create-namespace \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
-  --atomic --history-max 10 --timeout 15m
+  --wait --history-max 10 --timeout 15m
 ```
 
 When installing without a source checkout, replace the local chart path with
@@ -320,8 +320,12 @@ the verified package returned by
 downloaded file avoids resolving a mutable registry version between
 verification and rollout.
 
-Pods start the native Cellar runtime directly. Mixed-version rollout and rollback
-must be qualified before release. See [the runtime contract](../../../CELLAR.md).
+Pods start the native Cellar runtime directly. The Deployment uses `Recreate`
+so its replacement pods start after its old pods terminate. Plan a service
+interruption and follow [coordinated replacement and restore](../../operations.md#replace-a-version-or-restore-a-deployment).
+Mixed-version rolling upgrades and rollback against newly written state remain
+unqualified. Do not add Helm `--atomic`: an automatic image rollback cannot undo
+object-store or native schema writes. See [the runtime contract](../../../CELLAR.md).
 
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm
@@ -576,7 +580,7 @@ source across namespaces.
 
 ## Roll out configuration and secret changes
 
-The chart hashes its generated server configuration, so a typed configuration change starts a rolling replacement. Externally managed ConfigMaps and Secrets don’t change the pod template automatically.
+The chart hashes its generated server configuration, so a typed configuration change starts a coordinated replacement. Externally managed ConfigMaps and Secrets don’t change the pod template automatically.
 
 Set a new rollout token after rotating an external input:
 
@@ -587,14 +591,14 @@ helm upgrade crab-server \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
   --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
-  --atomic --history-max 10 --timeout 15m
+  --wait --history-max 10 --timeout 15m
 ```
 
 Rotate the OIDC client secret without changing the state key. Changing the state key invalidates browser sessions and in-flight OIDC transactions.
 
 ## Production boundaries
 
-The chart is portable deployment evidence, not provider qualification. Before production use, run a dedicated live test for push, fetch, LFS upload/download, OIDC callback routing across replicas, rolling replacement, and object-store restore.
+The chart is portable deployment evidence, not provider qualification. Before production use, run a dedicated live test for push, fetch, LFS upload/download, OIDC callback routing across replicas, coordinated replacement, and object-store restore.
 
 The current server still lacks complete abrupt-process-crash qualification,
 provider-scale admission and throughput evidence, and a

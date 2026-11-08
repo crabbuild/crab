@@ -348,7 +348,7 @@ def main():
             if successor_cache.exists():
                 shutil.rmtree(successor_cache)
             started = time.monotonic()
-            storage, proof, cleanup_backup = copy_root(config["storage"]["url"], artifacts)
+            storage, proof, cleanup_backup = copy_root(config["storage"]["url"], artifacts, os.environ)
             start(successor_config("restored", storage))
             forward_ui()
             recovered("backup", artifacts, pending, before, started, root=proof)

@@ -251,6 +251,11 @@ jobs:
                 > "${rendered}"
             grep -F 'port: management' "${rendered}"
             grep -F 'terminationGracePeriodSeconds: 630' "${rendered}"
+            grep -F 'type: Recreate' "${rendered}"
+            if grep -Fq 'type: RollingUpdate' "${rendered}"; then
+              echo 'mixed-version server rollout is not qualified' >&2
+              exit 1
+            fi
             grep -F 'unhealthyPodEvictionPolicy: AlwaysAllow' "${rendered}"
             grep -F -- '- /usr/bin/sleep' "${rendered}"
             grep -F -- '- "15"' "${rendered}"
@@ -718,12 +723,15 @@ jobs:
           git --version
           openssl version
           python3 --version
-          pipx install awscli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python3 -m venv "${RUNNER_TEMP}/crab-process-tools"
+          "${RUNNER_TEMP}/crab-process-tools/bin/python" -m pip install \
+            --requirement crates/crab-server/tests/process-requirements.txt
+          echo "${RUNNER_TEMP}/crab-process-tools/bin" >> "$GITHUB_PATH"
       - name: Qualify the native image against RustFS and process restart
         run: |
           python3 crates/crab-server/tests/qualify_cellar_process.py \
             --image crab-server:test \
+            --recovery \
             --large-file-bytes "$LARGE_FILE_BYTES" \
             --artifacts "${RUNNER_TEMP}/crab-cellar-process-proof"
       - name: Bind native process evidence to the checked source and image
@@ -757,6 +765,14 @@ jobs:
                       and all(large.get(key) is True for key in
                               ["stock_git_lfs", "native_push_origin_verification", "range_resume", "process_restart"])):
                   raise SystemExit("large-file process proof is incomplete")
+          recovery = receipt.get("recovery", {})
+          if not (all(recovery.get(key) is True for key in
+                      ["abrupt_process_restart", "restored_into_empty_cache",
+                       "application_state_verified", "git_refs_verified"])
+                  and recovery.get("forced_exit_status", 0) != 0
+                  and recovery.get("root_copy", {}).get("sha256_and_metadata_verified") is True
+                  and (not large_bytes or recovery.get("large_file_verified") is True)):
+              raise SystemExit("native recovery proof is incomplete")
           target = root / "crab-cellar-process-qualification/native-process-receipt.json"
           target.write_text(json.dumps(receipt, indent=2))
           PY

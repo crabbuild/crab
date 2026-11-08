@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
-import os
 import shutil
 import tempfile
 import time
@@ -11,12 +10,12 @@ import urllib.parse
 import uuid
 
 
-def copy_root(storage_url, artifacts):
+def copy_root(storage_url, artifacts, environment):
     import boto3
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
 
-    endpoint = os.environ["AWS_ENDPOINT_URL_S3"].rstrip("/")
+    endpoint = environment["AWS_ENDPOINT_URL_S3"].rstrip("/")
     assert urllib.parse.urlsplit(endpoint).hostname in ["127.0.0.1", "localhost"]
     source = urllib.parse.urlsplit(storage_url)
     assert source.scheme == "s3" and source.netloc and source.path.strip("/")
@@ -24,10 +23,10 @@ def copy_root(storage_url, artifacts):
     prefix = source.path.strip("/") + "/"
     destination = "crab-project-restore-" + uuid.uuid4().hex
     client = boto3.client(
-        "s3", endpoint_url=endpoint, region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+        "s3", endpoint_url=endpoint, region_name=environment.get("AWS_REGION", "us-east-1"),
+        aws_access_key_id=environment["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=environment["AWS_SECRET_ACCESS_KEY"],
+        aws_session_token=environment.get("AWS_SESSION_TOKEN"),
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
                       proxies={}, connect_timeout=10, read_timeout=90, max_pool_connections=32,
                       retries={"total_max_attempts": 3, "mode": "standard"},
