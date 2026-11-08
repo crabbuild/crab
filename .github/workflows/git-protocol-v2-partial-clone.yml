@@ -25,7 +25,7 @@ jobs:
       - name: Install diagnostic tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y libfuse3-dev binutils strace time
+          sudo apt-get install -y libfuse3-dev binutils strace time gdb
       - uses: actions/download-artifact@v4
         with:
           name: crab-protocol-v2-linux-x86_64-${{ inputs.control_run }}
@@ -148,6 +148,71 @@ jobs:
           output={'scope':'LD_AUDIT diagnostic only; not a push benchmark; phase medians are not additive','clock':clock.implementation,'cohorts':summary,'raw':raw}
           (root/'evidence/startup-audit.json').write_text(json.dumps(output,indent=2)+'\n')
           PY
+      - name: Time executable initializers without changing the binary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os,re,subprocess
+          from pathlib import Path
+          root=Path(os.environ['STARTUP_ROOT']);binary=root/'bin/crab'
+          sections=subprocess.check_output(['readelf','-SW',str(binary)],text=True)
+          match=re.search(r'\[\s*\d+\]\s+\.init_array\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)',sections)
+          assert match
+          address,offset,size=[int(v,16) for v in match.groups()]
+          relocations=subprocess.check_output(['readelf','-rW',str(binary)],text=True)
+          pointers={}
+          for line in relocations.splitlines():
+              fields=line.split()
+              if len(fields)<4 or not re.fullmatch('[0-9a-f]+',fields[0]):continue
+              target=int(fields[0],16)
+              if address<=target<address+size:
+                  assert fields[2]=='R_X86_64_RELATIVE',fields
+                  pointers[target]=int(fields[3],16)
+          assert len(pointers)==size//8 and pointers
+          entries=[pointers[address+i] for i in range(0,size,8)]
+          (root/'evidence/initializers.json').write_text(json.dumps({'binary':str(binary),'entries':entries},indent=2)+'\n')
+          PY
+          cat > "$STARTUP_ROOT/evidence/time-initializers.py" <<'PY'
+          import gdb,json,os,time
+          from pathlib import Path
+          root=Path(os.environ['STARTUP_ROOT'])
+          spec=json.loads((root/'evidence/initializers.json').read_text())
+          gdb.execute('set pagination off')
+          gdb.execute('set confirm off')
+          gdb.execute('set disable-randomization off')
+          gdb.execute('set startup-with-shell off')
+          gdb.execute('starti',to_string=True)
+          pid=gdb.selected_inferior().pid
+          mappings=Path(f'/proc/{pid}/maps').read_text().splitlines()
+          bases=[int(line.split()[0].split('-')[0],16) for line in mappings if line.split()[-1]==spec['binary'] and int(line.split()[2],16)==0]
+          assert len(bases)==1,bases
+          base=bases[0]
+          addresses=[base+entry for entry in spec['entries']]
+          breakpoints=[gdb.Breakpoint('*'+hex(address),internal=True) for address in dict.fromkeys(addresses)]
+          rows=[];before=time.perf_counter_ns()
+          for index,address in enumerate(addresses):
+              gdb.execute('continue',to_string=True)
+              arrived=time.perf_counter_ns();assert int(gdb.parse_and_eval('$pc'))==address
+              return_address=int(gdb.parse_and_eval('*(unsigned long*)$rsp'))
+              for bp in breakpoints:bp.enabled=False
+              gdb.Breakpoint('*'+hex(return_address),temporary=True,internal=True)
+              started=time.perf_counter_ns();gdb.execute('continue',to_string=True);finished=time.perf_counter_ns()
+              assert int(gdb.parse_and_eval('$pc'))==return_address
+              rows.append({'index':index,'offset':hex(address-base),'gap_before_ms':(arrived-before)/1e6,'duration_including_debugger_ms':(finished-started)/1e6,'instructions':gdb.execute('x/32i '+hex(address),to_string=True)})
+              for bp in breakpoints:bp.enabled=True
+              before=time.perf_counter_ns()
+          for bp in breakpoints:bp.delete()
+          exits=[]
+          gdb.events.exited.connect(lambda event:exits.append(event.exit_code))
+          gdb.execute('continue',to_string=True)
+          assert exits==[0],exits
+          result={'scope':'debugger diagnostic only; per-initializer durations include debugger overhead, ASLR preserved, binary unchanged','initializers':rows}
+          (root/'evidence/initializer-timings.json').write_text(json.dumps(result,indent=2)+'\n')
+          print(json.dumps([{k:v for k,v in row.items() if k!='instructions'} for row in rows]))
+          PY
+          cd "$STARTUP_ROOT/repo"
+          gdb --batch -q -nx -nh -x "$STARTUP_ROOT/evidence/time-initializers.py" --args "$STARTUP_ROOT/bin/crab" version > "$STARTUP_ROOT/evidence/gdb.txt" 2>&1
+          cat "$STARTUP_ROOT/evidence/gdb.txt"
       - name: Inspect ELF loader and system-call work
         run: |
           set -euo pipefail
