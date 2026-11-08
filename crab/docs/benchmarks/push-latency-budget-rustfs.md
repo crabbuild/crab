@@ -1,8 +1,8 @@
 # RustFS push latency budget
 
-Qualification date: November 7, 2026. The 500 ms median budget at 50 clients
-has **not** been demonstrated. The scratch-sync experiment was removed after
-the completed Linux trials failed to establish an end-to-end speedup.
+Qualification updated November 8, 2026. The 500 ms median budget at 50 clients
+has **not** been demonstrated consistently. Push discovery and cache startup
+have verified gains below; experiments without a verified gain were removed.
 
 ## Rejected scratch-sync experiment
 
@@ -333,3 +333,74 @@ inventory of individually observed heads with fresh activation checks. Edited
 refs are re-read and their expected old OIDs checked before CAS. Read-only
 advertisements, fetch admission and dry-run previews retain stable captures;
 multi-ref publication and payload integrity checks are unchanged.
+
+## Verified cache startup improvement
+
+[The next paired Linux comparison](https://github.com/crabbuild/crab/actions/runs/42479567473)
+uses discovery candidate `7a71e68537b63bab689ad1fb7d232f8d5dc8b6ce` as its
+control and `17481e2a642095b357bba32d9113b9a9c58a895b` as its candidate. Release
+hashes, Rust 1.99.1, features, identical prepared Git plans and all 12 native
+reports were independently verified. All 2,200 timed native updates passed
+cold readback, strict Git fsck and Crab fsck without repairs.
+
+| Native trial | Variant | 50-client p50 / p95 ms | Pushes/s | Queue + command p50 ms |
+| --- | --- | ---: | ---: | ---: |
+| A1 | Control | 633 / 899 | 60.05 | 722 |
+| B1 | Candidate | 512 / 755 | 69.17 | 619 |
+| B2 | Candidate | 523 / 808 | 67.80 | 630 |
+| A2 | Control | 633 / 886 | 60.29 | 728 |
+
+Combined native throughput rose from 60.17 to 68.48 pushes/s, a 13.8% gain.
+A 5,000-replicate wave-cluster bootstrap gives a 95% interval of 2.60% to
+25.53% for throughput gain and -173 to -46 ms for the p50 difference. These
+intervals are conditional on this runner and these trials. Candidate p50 at
+1/10 clients was 37/121 ms and 38/120 ms, against 57/158 ms and 57/148 ms.
+Both candidate 50-client medians still fail the unchanged 500 ms gate.
+
+The separate ordinary candidate run measured native p50 35/104/450 ms at
+1/10/50 clients. Its 50-client p95/max was 699/757 ms and throughput 80.65
+pushes/s. Including launch queue time raises that p50 to 534 ms. That passing
+command median does not override the failed paired gate.
+
+The 12 paired Git reports also passed, bringing this comparison to 24 reports
+and 4,400 timed updates with independently verified identical plans. Candidate
+50-client p50 was 1,085/1,080 ms versus control 1,151/1,153 ms. The p50
+difference interval was -140 to -10 ms; the throughput interval included zero
+(-5.81% to +13.60%). This supports lower Git latency in these trials, without
+establishing another Git throughput gain. Retention is supported by the native
+throughput result above.
+
+SlateDB's Foyer dependency links a Linux x86 TSC calibration initializer even
+when Crab only uses its memory cache. Loader/debugger diagnostics attributed
+approximately 20 ms of pre-main CPU work to that initializer. The candidate
+uses SlateDB's supported custom-cache boundary and Moka, retaining byte limits,
+shared cold-load coalescing, source error chains and explicit database closure.
+No dependency source patch, durability setting or storage format changed.
+
+The built-in SlateDB Moka adapter was rejected: 32 simultaneous cold lookup
+batches issued 32 SST reads where Foyer issued one. The canonical adapter uses
+Moka's shared initialization path; the same regression now passes with one
+origin read. Locator, file-index, remote-index, CLI metadata and desktop index
+consumers use that adapter. The 1,000-publication stress test, metadata Clippy,
+minimal/cache-only feature checks, desktop compilation, SDK platform suites,
+SDK RustFS end-to-end and 1 GiB read qualification pass. The SDK read comparison
+uses the same cache backend in both readers; it alone cannot prove preservation
+of Foyer's coalescing behavior.
+
+One earlier experimental 1,000-publication run exceeded the unchanged layer
+bound; subsequent control and candidate runs, including the final candidate,
+passed. The cause of that earlier failure remains unproven.
+
+[Diagnostics of the exact candidate executable](https://github.com/crabbuild/crab/actions/runs/42481791322)
+confirm all three initializers finish below 0.34 ms including debugger overhead.
+Version-command p50 was 7.94 ms alone and 112.78 ms at 50 clients. These are
+startup diagnostics, not an additional end-to-end push speedup claim.
+
+Separate native push traces matched one `pack-objects` and one strict
+`index-pack` per timed update, with p50 wall times of 88.46 and 32.01 ms under
+50-client load. Start-of-push to prepared payload measured 230.71 ms p50;
+upload and ref CAS measured 9.19 and 7.29 ms separately. Phase medians are not
+additive. All clients and RustFS share four CPUs: these observations cannot
+establish latency for agents on separate machines. The next qualification must
+separate client-host saturation from shared-backend contention and preserve
+per-ref CAS, epoch checks, upload durability and exact cold readback.
