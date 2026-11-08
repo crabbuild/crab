@@ -1152,13 +1152,18 @@ jobs:
           test -x "$RUNNER_TEMP/protocol-v2-release-bin/crab"
 
       - name: Fetch pinned previous release for rollback qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/protocol-v2-rollback"
           cd "$RUNNER_TEMP/protocol-v2-rollback"
-          curl --fail --location --silent --show-error --retry 3 \
-            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
-            --output crab-linux-x86_64.tar.gz
+          asset_id="$(gh api repos/crabbuild/crab/releases/tags/v1.0.1 \
+            --jq '.assets[] | select(.name == "crab-linux-x86_64.tar.gz") | .id')"
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/crabbuild/crab/releases/assets/$asset_id" \
+            > crab-linux-x86_64.tar.gz
           echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict
           tar -xzf crab-linux-x86_64.tar.gz
           test -x crab
