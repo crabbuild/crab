@@ -21,7 +21,7 @@ pub use crab_git::pack::InstalledPack;
 use crab_metadata::manifests::PackManifestEntry;
 
 mod install;
-pub(crate) use install::verify_generated_pack_file;
+pub(crate) use install::install_generated_pack_file;
 pub use install::{
     install_pack_file_locally, install_pack_file_locally_with_timeout,
     install_thin_pack_file_locally_with_timeout,
