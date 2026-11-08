@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from run_concurrent_push_smoke import rustfs_env
+
 
 def cpu(who):
     usage = resource.getrusage(who)
@@ -29,11 +31,13 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    args.root = args.root.resolve()
     binary = args.crab_bin.resolve()
     helper = args.root / "bin/git-remote-crab"
     assert helper.resolve(strict=True) == binary, "control and fixture helpers must match"
-    env = os.environ | {"PATH": str(helper.parent.resolve()) + os.pathsep + os.environ["PATH"]}
     report = json.loads((args.root / "artifacts/report.json").read_text())
+    env = rustfs_env(args.root, report["endpoint_url"], os.environ["AWS_ACCESS_KEY_ID"],
+                     os.environ["AWS_SECRET_ACCESS_KEY"], report["env"]["AWS_REGION"])
     assert report["status"] == "ok" and all(c["ok"] for c in report["checks"])
     latest = {row["branch"]: row for row in sorted(report["branch_updates"], key=lambda r: r["round"])}
     assert len(latest) == 50, "preflight control requires 50 qualified writer worktrees"

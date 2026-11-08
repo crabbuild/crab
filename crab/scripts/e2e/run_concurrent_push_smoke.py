@@ -813,6 +813,31 @@ def push_failure_stages(audit_path: Path, start_offset: int) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def rustfs_env(run_root: Path, endpoint_url: str, access_key: str, secret_key: str, region: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "AWS_ACCESS_KEY_ID": access_key,
+            "AWS_SECRET_ACCESS_KEY": secret_key,
+            "AWS_REGION": region,
+            "AWS_ENDPOINT_URL": endpoint_url,
+            "AWS_ENDPOINT_URL_S3": endpoint_url,
+            "AWS_ALLOW_HTTP": "true",
+            "AWS_EC2_METADATA_DISABLED": "true",
+            "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_MERGE_AUTOEDIT": "no",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "CRAB_CACHE_DIR": str(run_root / "cache"),
+            "TMPDIR": str(run_root / "tmp"),
+        }
+    )
+    env["PATH"] = str(run_root / "bin") + os.pathsep + env.get("PATH", "")
+    return env
+
+
 class ConcurrentPushSmoke:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -869,31 +894,8 @@ class ConcurrentPushSmoke:
         )
 
     def build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        endpoint_url = (
-            self.request_proxy.url if self.request_proxy is not None else self.args.endpoint_url
-        )
-        env.update(
-            {
-                "AWS_ACCESS_KEY_ID": self.args.access_key,
-                "AWS_SECRET_ACCESS_KEY": self.args.secret_key,
-                "AWS_REGION": self.args.region,
-                "AWS_ENDPOINT_URL": endpoint_url,
-                "AWS_ENDPOINT_URL_S3": endpoint_url,
-                "AWS_ALLOW_HTTP": "true",
-                "AWS_EC2_METADATA_DISABLED": "true",
-                "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_MERGE_AUTOEDIT": "no",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_OPTIONAL_LOCKS": "0",
-                "CRAB_CACHE_DIR": str(self.run_root / "cache"),
-                "TMPDIR": str(self.run_root / "tmp"),
-            }
-        )
-        env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
-        return env
+        endpoint_url = self.request_proxy.url if self.request_proxy is not None else self.args.endpoint_url
+        return rustfs_env(self.run_root, endpoint_url, self.args.access_key, self.args.secret_key, self.args.region)
 
     def write_report(self, *, force: bool = False) -> None:
         with self.report_lock:
