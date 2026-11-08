@@ -91,6 +91,63 @@ jobs:
           output={'scope':'startup diagnostic only; no push performance qualification or storage operations','binary_sha256':hashlib.file_digest(binary.open('rb'),'sha256').hexdigest(),'cohorts':rows}
           (root/'evidence/startup.json').write_text(json.dumps(output,indent=2)+'\n')
           PY
+      - name: Separate pre-main and application time with loader auditing
+        run: |
+          set -euo pipefail
+          cat > "$STARTUP_ROOT/evidence/startup-audit.c" <<'C'
+          #define _GNU_SOURCE
+          #include <link.h>
+          #include <stdio.h>
+          #include <time.h>
+          #include <unistd.h>
+          static void emit(const char *phase) {
+              struct timespec now;
+              if (clock_gettime(CLOCK_MONOTONIC, &now)) _exit(126);
+              unsigned long long ns = (unsigned long long)now.tv_sec * 1000000000ULL + (unsigned long long)now.tv_nsec;
+              dprintf(2, "[startup-audit] pid=%ld phase=%s ns=%llu\n", (long)getpid(), phase, ns);
+          }
+          unsigned int la_version(unsigned int version) {
+              emit("loader");
+              return version >= LAV_CURRENT ? LAV_CURRENT : 0;
+          }
+          void la_preinit(uintptr_t *cookie) {
+              (void)cookie;
+              emit("preinit");
+          }
+          C
+          gcc -shared -fPIC -O2 -Wall -Wextra -Werror "$STARTUP_ROOT/evidence/startup-audit.c" -o "$STARTUP_ROOT/bin/startup-audit.so"
+          python3 - <<'PY'
+          import concurrent.futures,json,os,re,subprocess,threading,time
+          from pathlib import Path
+          root=Path(os.environ['STARTUP_ROOT']);binary=root/'bin/crab'
+          clock=time.get_clock_info('perf_counter')
+          assert 'CLOCK_MONOTONIC' in clock.implementation,clock
+          env=os.environ|{'LD_AUDIT':str(root/'bin/startup-audit.so'),'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':os.devnull}
+          cases={'version':[str(binary),'version'],'version-flag':[str(binary),'--version'],'root-help':[str(binary),'--help']}
+          summary=[];raw=[]
+          for actors in [1,50]:
+              for name,argv in cases.items():
+                  values=[]
+                  for _ in range(100//actors):
+                      barrier=threading.Barrier(actors)
+                      def run(_):
+                          barrier.wait(timeout=30);start=time.perf_counter_ns()
+                          child=subprocess.Popen(argv,cwd=root/'repo',env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                          _,stderr=child.communicate(timeout=60);end=time.perf_counter_ns()
+                          assert child.returncode==0
+                          phases={phase.decode():int(ns) for pid,phase,ns in re.findall(rb'\[startup-audit\] pid=(\d+) phase=(loader|preinit) ns=(\d+)',stderr) if int(pid)==child.pid}
+                          assert set(phases)=={'loader','preinit'}
+                          assert start<=phases['loader']<=phases['preinit']<=end
+                          return {'start_to_preinit_ms':(phases['preinit']-start)/1e6,'loader_to_preinit_ms':(phases['preinit']-phases['loader'])/1e6,'preinit_to_exit_ms':(end-phases['preinit'])/1e6,'total_ms':(end-start)/1e6}
+                      with concurrent.futures.ThreadPoolExecutor(max_workers=actors) as pool:values.extend(pool.map(run,range(actors)))
+                  assert len(values)==100
+                  stats={}
+                  for key in values[0]:
+                      v=sorted(row[key] for row in values);stats[key]={'p50_ms':v[49],'p95_ms':v[94],'max_ms':v[-1]}
+                  row={'actors':actors,'probe':name,'samples':100,'phases':stats};summary.append(row);raw.append({'actors':actors,'probe':name,'values':values});print(json.dumps(row),flush=True)
+          output={'scope':'LD_AUDIT diagnostic only; not a push benchmark; phase medians are not additive','clock':clock.implementation,'cohorts':summary,'raw':raw}
+          (root/'evidence/startup-audit.json').write_text(json.dumps(output,indent=2)+'\n')
+          PY
       - name: Inspect ELF loader and system-call work
         run: |
           set -euo pipefail
