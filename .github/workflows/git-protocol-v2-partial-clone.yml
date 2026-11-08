@@ -40,6 +40,7 @@ on:
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
       - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
@@ -106,6 +107,7 @@ on:
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
       - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
@@ -902,6 +904,10 @@ jobs:
               --agents 50 --branch-update-rounds 2 --max-parallel-pushes 50 \
               --consumer-mode cold-final --skip-same-branch --no-request-capture \
               --timeout 600 --push-timeout 600
+          python3 crab/scripts/e2e/run_push_preflight_control.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --root "$CRAB_PERF_ROOT/profile-writers-50" \
+            --output "$CRAB_PERF_ROOT/profile-preflight.json"
 
       - name: Capture RustFS logs and stop fixture
         if: always()
