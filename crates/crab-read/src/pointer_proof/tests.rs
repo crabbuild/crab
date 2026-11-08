@@ -38,6 +38,10 @@ impl Fixture {
             ]
         };
         let order: &[usize] = if empty { &[] } else { &[0, 1, 0] };
+        Self::with_chunks(chunks, order, forged_hash)
+    }
+
+    fn with_chunks(chunks: Vec<Chunk>, order: &[usize], forged_hash: bool) -> Self {
         let mut hasher = blake3::Hasher::new();
         for &index in order {
             hasher.update(&chunks[index].data);
@@ -157,6 +161,29 @@ fn limits() -> PointerProofLimits {
 
 fn memory() -> StoreLayout<Store> {
     StoreLayout::new(Store::new(Arc::new(InMemory::new())), "proof".to_owned())
+}
+
+#[tokio::test]
+#[ignore = "multi-GiB content qualification; run explicitly on dedicated test storage"]
+async fn verifies_multi_gib_deduplicated_file_without_materializing_it() {
+    let chunks = vec![Chunk::new(Bytes::from(vec![b'x'; 1024 * 1024]))];
+    let order = vec![0; 3 * 1024];
+    let fixture = Fixture::with_chunks(chunks, &order, false);
+    let layout = memory();
+    fixture.upload(&layout).await;
+    let recipe = fixture
+        .verify(
+            &layout,
+            PointerProofLimits {
+                max_file_bytes: fixture.pointer.size,
+                max_chunks: order.len(),
+                max_duration: Duration::from_secs(30 * 60),
+                ..limits()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recipe.chunks, fixture.chunks);
 }
 
 #[tokio::test]

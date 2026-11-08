@@ -1058,6 +1058,22 @@ python3 crates/crab-server/tests/verify_git_transport.py \
 
 The work directory must already exist on the mounted workspace volume. The verifier leaves two native Git client repositories for inspection.
 
+The isolated native process harness can also publish an exact-size object with
+stock Git LFS, resume a byte-range download, restart the server and verify a
+fresh clone's bytes:
+
+```sh
+python3 crates/crab-server/tests/qualify_cellar_process.py \
+  --binary "$CARGO_TARGET_DIR/debug/crab-server" \
+  --large-file-bytes 3221225472 \
+  --artifacts "$CARGO_TARGET_DIR/large-file-process-proof"
+```
+
+The byte count is a qualification input, not a product limit. The harness checks
+scratch capacity before generating data and uses its own disk-backed Docker
+volume, which it removes on exit. The reusable container workflow accepts the
+same `large_file_bytes` input and requires matching completed evidence.
+
 ## Git LFS transfers
 
 Git discovers LFS at `/git/{owner}/{name}.git/info/lfs/objects/batch`. No separate `lfs.url` is required.
@@ -1093,12 +1109,27 @@ Already verified objects omit upload actions. Missing or corrupt downloads retur
 | Batch objects | 200 |
 | Batch JSON | 64 KiB |
 | Batch body budget | 30s |
-| One object | 512 MiB |
-| Dependencies in one push | 2 GiB |
-| Verification or byte transfer | 5 minutes |
+| One LFS object | Storage-provider multipart object limit |
+| Aggregate dependency content | No separate logical-byte cap; bounded receive work |
+| Verification or byte transfer | 30 minutes |
 | Shared Git and LFS transfers | 4 per process |
 
-A started multipart operation keeps its permit and temporary file while it completes or aborts. This drain can extend beyond the five-minute request budget and server shutdown.
+Repository capacity and individual transfers are separate. Crab does not impose a
+10 GiB file limit or a TB/PB repository byte limit. LFS objects follow the selected
+provider's multipart profile; S3-compatible implementations may impose a lower
+ceiling than AWS S3. Xet files span bounded xorbs and retain the existing shard,
+recipe and chunk-count bounds. Every pointer still receives full origin content
+verification before Git publication; a matching receipt cannot replace that proof.
+
+Large-object uploads currently reserve and spool the complete body on node-local
+staging before multipart publication. A node must have sufficient admitted disk
+capacity for that object, and transfer concurrency and thirty-minute operation
+budgets still apply. These are resource and operation limits, not repository-size
+limits. Multi-TB/PB production scale needs representative object-count, metadata,
+throughput, recovery and provider qualification; passing a multi-GB transfer does
+not establish that scale. Release assets retain their independent 512 MiB limit.
+
+A started multipart operation keeps its permit and temporary file while it completes or aborts. This drain can extend beyond the thirty-minute request budget and server shutdown.
 
 LFS object `GET` supports one RFC 9110 byte range in closed (`bytes=0-99`),
 open (`bytes=100-`), or suffix (`bytes=-100`) form. A partial response returns
@@ -1251,8 +1282,8 @@ The server acquires sorted ref leases, the shared namespace lease for creates or
 | Existing logical objects inspected while validating receive | 5,000,000 |
 | Existing object-store requests while validating receive | 6,000,000 |
 | Dependency pointers | 1,024 |
-| One dependency file | 512 MiB |
-| Aggregate dependency content | 2 GiB |
+| One dependency file | Pointer format and storage-provider limits |
+| Aggregate dependency content | No separate logical-byte cap |
 | Publication lease lifetime | 5 minutes, renewed while owned work drains |
 
 Receive staging shares the Cell local-disk budget. Admission covers the received

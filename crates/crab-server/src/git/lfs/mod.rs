@@ -22,7 +22,7 @@ use tokio::io::AsyncWriteExt;
 use crate::{app, auth::Principal, repository::Repository, server::Server};
 
 const CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
-const BUDGET: Duration = Duration::from_secs(5 * 60);
+const BUDGET: Duration = super::receive::REQUEST_BUDGET;
 type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) use locking::{create_lock, list_locks, unlock_lock, verify_locks};
@@ -137,7 +137,7 @@ impl IntoResponse for Error {
             ),
             Self::TooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "LFS allows at most 200 objects per batch and 512 MiB per object",
+                "LFS request exceeds the batch or storage-provider object limit",
             ),
             Self::Staging(crate::local_disk::Error::TooLarge) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -205,8 +205,9 @@ pub(crate) struct Size {
     size: u64,
 }
 
-fn pointer(oid: &str, size: u64) -> Result<LfsPointer> {
-    if size > crate::server::MAX_DEPENDENCY_FILE_BYTES {
+fn pointer(oid: &str, size: u64, store: &crab_storage::Store) -> Result<LfsPointer> {
+    if size > crab_storage::multipart::upload_limits(store.bucket_identity().cloud).max_object_size
+    {
         return Err(Error::TooLarge);
     }
     if oid.len() != 64 {
@@ -293,7 +294,7 @@ pub(crate) async fn batch(
     let objects = batch
         .objects
         .iter()
-        .map(|object| pointer(&object.oid, object.size))
+        .map(|object| pointer(&object.oid, object.size, &entry.store))
         .collect::<Result<Vec<_>>>()?;
     if upload {
         ensure_active(&server, &principal, &entry).await?;
@@ -363,7 +364,7 @@ pub(crate) async fn download(
     headers: HeaderMap,
 ) -> Result<Response> {
     let entry = repository(&server, &principal, &owner, &name, false)?;
-    let pointer = pointer(&oid, size.size)?;
+    let pointer = pointer(&oid, size.size, &entry.store)?;
     let etag = format!("\"{}\"", crab_git::lfs_pointer::hex_encode(&pointer.oid));
     let range = if method == Method::GET {
         requested_range(&headers, pointer.size, &etag)?
@@ -506,13 +507,9 @@ pub(crate) async fn upload(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response> {
-    ensure_active(
-        &server,
-        &principal,
-        repository(&server, &principal, &owner, &name, true)?.as_ref(),
-    )
-    .await?;
-    let pointer = pointer(&oid, size.size)?;
+    let entry = repository(&server, &principal, &owner, &name, true)?;
+    ensure_active(&server, &principal, &entry).await?;
+    let pointer = pointer(&oid, size.size, &entry.store)?;
     if headers
         .get(header::CONTENT_ENCODING)
         .is_some_and(|value| value != "identity")

@@ -62,7 +62,7 @@ pub(super) fn validate_reservation(value: &ReleaseAssetReservation) -> crate::ce
 }
 
 pub(super) fn validate_asset_result(size: u64, digest: &str) -> crate::cells::Result<()> {
-    if size > crate::server::MAX_DEPENDENCY_FILE_BYTES
+    if size > crate::server::MAX_RELEASE_ASSET_BYTES
         || digest.len() != 64
         || !digest
             .bytes()

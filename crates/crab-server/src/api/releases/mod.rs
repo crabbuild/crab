@@ -508,8 +508,8 @@ async fn upload_asset(
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(crate::server::MAX_DEPENDENCY_FILE_BYTES);
-    if staging_bytes > crate::server::MAX_DEPENDENCY_FILE_BYTES {
+        .unwrap_or(crate::server::MAX_RELEASE_ASSET_BYTES);
+    if staging_bytes > crate::server::MAX_RELEASE_ASSET_BYTES {
         return Err(Error::ReleaseAssetTooLarge);
     }
     let reservation = storage::AssetReservation {
@@ -558,7 +558,7 @@ async fn upload_asset(
                 let chunk = chunk.map_err(Error::ReleaseAssetBody)?;
                 size = size
                     .checked_add(chunk.len() as u64)
-                    .filter(|size| *size <= crate::server::MAX_DEPENDENCY_FILE_BYTES)
+                    .filter(|size| *size <= crate::server::MAX_RELEASE_ASSET_BYTES)
                     .ok_or(Error::ReleaseAssetTooLarge)?;
                 sha256.update(&chunk);
                 blake3.update(&chunk);

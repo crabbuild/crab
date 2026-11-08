@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import socket
 import ssl
 import subprocess
@@ -18,20 +19,32 @@ import urllib.request
 import urllib.parse
 import uuid
 
+import large_files
+
 parser = argparse.ArgumentParser(description=__doc__)
 executable = parser.add_mutually_exclusive_group(required=True)
 executable.add_argument("--binary", type=pathlib.Path)
 executable.add_argument("--image", help="Linux image to run using host networking")
 parser.add_argument("--artifacts", required=True, type=pathlib.Path)
+parser.add_argument("--large-file-bytes", type=int, default=0,
+                    help="Also qualify a stock Git LFS object of this exact size")
 args = parser.parse_args()
+if args.large_file_bytes < 0 or args.large_file_bytes == 1:
+    parser.error("--large-file-bytes must be zero or at least two")
 root = args.artifacts.resolve()
 root.mkdir(parents=True, exist_ok=True)
 run = root / str(uuid.uuid4())
 run.mkdir()
+if args.large_file_bytes:
+    required = args.large_file_bytes * 6 + 8 * 1024**3
+    if shutil.disk_usage(run).free < required:
+        parser.error(f"large-file qualification requires at least {required} free bytes")
 binary = args.binary.resolve() if args.binary else None
 object_store_image = "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858"
 name = "crab-cellar-process-" + uuid.uuid4().hex[:8]
+storage_volume = name + "-data"
 server = None
+large_file = None
 with open(run / "commands.log", "w") as log:
 
     def cmd(args, **kw):
@@ -145,6 +158,11 @@ with open(run / "commands.log", "w") as log:
             raise RuntimeError("server shutdown failed: " + str(result))
 
     try:
+        # Docker may use a different host filesystem. Initialize only this
+        # fixture's volume, then run RustFS with its ordinary unprivileged UID.
+        cmd(["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "/bin/sh",
+             "--volume", storage_volume + ":/data", object_store_image,
+             "-c", "chown 10001:10001 /data"])
         cmd(
             [
                 "docker",
@@ -160,8 +178,8 @@ with open(run / "commands.log", "w") as log:
                 "RUSTFS_SECRET_KEY=crab-local-secret-key",
                 "--env",
                 "RUSTFS_CONSOLE_ENABLE=false",
-                "--tmpfs",
-                "/data:rw,size=1g,mode=0777",
+                "--volume",
+                storage_volume + ":/data",
                 object_store_image,
             ]
         )
@@ -303,6 +321,9 @@ with open(run / "commands.log", "w") as log:
             env=env,
         )
         cmd(server_command("storage-probe"), env=env)
+        if args.large_file_bytes:
+            cmd(server_command("repository", "create", "--owner", "team", "--name", "large-files",
+                               "--prefix", "team/large-files"), env=env)
         server = start()
         wait()
         cmd(server_command("cells", "initialize-directory"), env=env)
@@ -711,10 +732,16 @@ with open(run / "commands.log", "w") as log:
         assert lifecycle_saved[state_pull_path]["closed_at"] is None
         assert lifecycle_saved[state_pull_path]["merged_at"] is None
 
+        if args.large_file_bytes:
+            large_file = large_files.prepare(cmd, run, origin, args.large_file_bytes, env)
+            large_files.verify_resume(run, origin, large_file)
+
         # State submissions recover after a complete process restart.
         stop()
         server = start()
         wait()
+        if large_file:
+            large_files.verify(cmd, run, origin, large_file, "restart", env)
         for path, body, comment, expected_count in state_actions:
             recovered = request(path + "/state", body)
             assert recovered["comment"]["number"] == comment
@@ -808,6 +835,14 @@ with open(run / "commands.log", "w") as log:
             "durable_objects": int(count),
             "artifacts": str(run),
         }
+        if large_file:
+            report["large_file"] = {
+                **large_file,
+                "stock_git_lfs": True,
+                "native_push_origin_verification": True,
+                "range_resume": True,
+                "process_restart": True,
+            }
         (run / "receipt.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
     finally:
@@ -825,6 +860,11 @@ with open(run / "commands.log", "w") as log:
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()
+        with (run / "object-store.log").open("w") as object_log:
+            subprocess.run(["docker", "logs", name], check=False,
+                           stdout=object_log, stderr=subprocess.STDOUT)
         subprocess.run(
             ["docker", "rm", "--force", name], check=False, stdout=log, stderr=log
         )
+        subprocess.run(["docker", "volume", "rm", storage_volume], check=False,
+                       stdout=log, stderr=log)
