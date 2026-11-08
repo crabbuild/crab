@@ -654,24 +654,35 @@ async fn run_push_once(
         .iter()
         .map(|spec| spec.dst.clone())
         .collect::<BTreeSet<_>>();
-    let capsule_view = if args.follow_tags {
-        crab_read::capsule_protocol::open_ref_view_from_root(&capsule_layout, root).await?
-    } else if args.dry_run {
-        crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
-            &capsule_layout,
-            root,
-            &requested_refs,
-        )
-        .await?
-    } else {
-        // A real publisher re-reads each selected head and conditionally updates
-        // its ETag; only dry-run needs a reader-side stability probe.
-        crab_read::capsule_protocol::open_ref_view_from_root_for_push(
-            &capsule_layout,
-            root,
-            &requested_refs,
-        )
-        .await?
+    // Read-only previews retain stable captures. Publishers freshly revalidate
+    // edited heads, so unrelated ref movement need not restart tag discovery.
+    let capsule_view = match (args.follow_tags, args.dry_run) {
+        (true, false) => {
+            crab_read::capsule_protocol::open_ref_view_from_root_for_push_discovery(
+                &capsule_layout,
+                root,
+            )
+            .await?
+        }
+        (true, true) => {
+            crab_read::capsule_protocol::open_ref_view_from_root(&capsule_layout, root).await?
+        }
+        (false, true) => {
+            crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+                &capsule_layout,
+                root,
+                &requested_refs,
+            )
+            .await?
+        }
+        (false, false) => {
+            crab_read::capsule_protocol::open_ref_view_from_root_for_push(
+                &capsule_layout,
+                root,
+                &requested_refs,
+            )
+            .await?
+        }
     };
     if args.follow_tags {
         retain_missing_follow_tags(&mut specs, &explicit_destinations, capsule_view.refs());
