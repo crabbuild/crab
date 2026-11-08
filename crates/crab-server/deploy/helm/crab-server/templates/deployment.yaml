@@ -62,6 +62,22 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # The volume hides the image's TMPDIR; Git reads need it before readiness.
+      initContainers:
+        - name: prepare-scratch
+          image: {{ include "crab-server.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/usr/bin/mkdir, --parents, --mode=0700, /var/lib/crab/tmp]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /var/lib/crab
       containers:
         - name: crab-server
           image: {{ include "crab-server.image" . | quote }}

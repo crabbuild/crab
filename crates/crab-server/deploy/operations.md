@@ -172,7 +172,68 @@ offline copy/restore time. It qualifies the tested image's recovery mechanics,
 not compatibility with a different runtime or application version. Production
 upgrade qualification must exercise the exact previous/candidate version pair.
 
+For large LFS files on slow storage, align the client's inactivity timeout with
+the server's existing 30-minute transfer/verification budget:
+
+```sh
+git config --local lfs.activitytimeout 1800
+git -c lfs.activitytimeout=1800 clone https://YOUR_SERVER/git/OWNER/REPO.git
+```
+
+Git LFS normally allows only [30 seconds without socket activity](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-config.adoc).
+Crab acknowledges an upload after verified object publication; that work can
+continue after the client finishes sending bytes. A shorter client timeout can
+start overlapping retries while the original publication still drains. The
+qualification receipt records the selected client timeout.
+
 ## Qualify changes
+
+For local Kubernetes, use the disposable three-node Kind fixture. Install Kind
+0.33.0, Helm 3.19.0, kubectl, Git LFS, OpenSSL and the pinned Python tools from
+`tests/process-requirements.txt`. Build the Linux image with its source label,
+or load the image artifact from `http-server-container.yml`. Keep VM disks and
+artifacts on the workspace volume. Then run:
+
+```sh
+docker run --rm --user 0 --network none --read-only \
+  --volume /tmp/crab-kubernetes-objectstore:/prepare \
+  --entrypoint /usr/bin/chown crab-server:test 10001:10001 /prepare
+kind create cluster --name crab-local \
+  --kubeconfig "$CARGO_TARGET_DIR/kind-kubeconfig" \
+  --config crates/crab-server/tests/kind.yaml \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+kubectl --kubeconfig "$CARGO_TARGET_DIR/kind-kubeconfig" \
+  taint node crab-local-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
+python crates/crab-server/tests/qualify_cellar_kubernetes.py \
+  --kubeconfig "$CARGO_TARGET_DIR/kind-kubeconfig" --cluster crab-local \
+  --image crab-server:test --source-revision "$(git rev-parse HEAD)" \
+  --large-file-bytes 3221225472 \
+  --artifacts "$CARGO_TARGET_DIR/kubernetes-proof"
+kind delete cluster --name crab-local
+```
+
+The harness requires exactly the selected Kind nodes and checks their Docker
+cluster labels before creating its own namespace. It runs the actual Helm chart
+with an immutable image manifest, three native server pods and isolated RustFS.
+Public listeners remain loopback-only and clients use port forwarding. Synthetic
+storage credentials are injected only by the fixture renderer; production chart
+workload-identity restrictions remain enforced. The receipt binds source, image
+ID/manifest, platform, runtime and harness hash to actual cross-pod submission
+replay, container SIGKILL, large-file clones/ranges and full-root restoration
+into replacement pods with empty caches. CI consumes the process-qualified
+image artifact and runs this drill with a 3 GiB file unless a size is selected.
+
+All three local nodes share one machine and the zone labels are synthetic.
+The object-store fixture uses its own namespaced directory in the Kind worker's
+`/crab-objectstore` mount. Back the Docker host's
+`/tmp/crab-kubernetes-objectstore` with adequate disk outside the node-staging
+filesystem. Bulk staging on the same filesystem can delay object-store lease
+updates and correctly fence a native node. The receipt records both filesystem
+IDs so the tested layout is visible; it does not weaken lease fencing.
+This qualifies local Kubernetes wiring and recovery, not independent failure
+domains, production ingress/OIDC, NetworkPolicy enforcement, cloud workload
+identity, provider faults or TB/PB scale. The harness deletes only its own
+namespace/registry; its caller owns cluster creation and removal.
 
 Run the isolated native process smoke described in
 [CELLAR.md](../CELLAR.md#verification). It exercises issue mutation/replay, Git

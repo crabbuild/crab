@@ -257,6 +257,10 @@ Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding 
 built embedded UI assets; it drives two real OIDC sessions through invitation,
 consent and removal against isolated native Cells.
 
+`tests/qualify_cellar_kubernetes.py` runs the Helm chart, container SIGKILL,
+large-file transfer and complete-root restore on an explicitly selected
+three-node Kind cluster. Local setup and proof limits live in `deploy/operations.md`.
+
 Update this guide when entry points, ownership, invariants, features, or test
 routes change. Keep detailed API preconditions in rustdoc rather than copying
 them into a second specification.

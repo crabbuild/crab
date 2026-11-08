@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import urllib.request
 
+ACTIVITY_TIMEOUT_SECONDS = 30 * 60
+
 
 def digest(path):
     result = hashlib.sha256()
@@ -27,6 +29,9 @@ def prepare(cmd, root, origin, size, env):
     git("config", "user.name", "Large file qualification")
     git("config", "user.email", "large-file@example.invalid")
     git("lfs", "install", "--local")
+    # Publication can continue after the body is received. Match the server's
+    # verification budget so a slow store does not trigger overlapping retries.
+    git("config", "lfs.activitytimeout", str(ACTIVITY_TIMEOUT_SECONDS))
     git("lfs", "track", "*.bin")
     git("remote", "add", "origin", origin + "/git/team/large-files.git")
     path = source / "large.bin"
@@ -50,7 +55,7 @@ def prepare(cmd, root, origin, size, env):
     )
     assert f"oid sha256:{oid}\nsize {size}\n" in pointer
     git("push", "origin", "main")
-    return {"bytes": size, "sha256": oid}
+    return {"bytes": size, "sha256": oid, "activity_timeout_seconds": ACTIVITY_TIMEOUT_SECONDS}
 
 
 def verify(cmd, root, origin, content, phase, env):
@@ -60,6 +65,7 @@ def verify(cmd, root, origin, content, phase, env):
     cmd(
         [
             "git", "-c", "protocol.version=2",
+            "-c", f"lfs.activitytimeout={ACTIVITY_TIMEOUT_SECONDS}",
             "-c", "filter.lfs.process=git-lfs filter-process",
             "-c", "filter.lfs.required=true",
             "clone", origin + "/git/team/large-files.git", destination,
