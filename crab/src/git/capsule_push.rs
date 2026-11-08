@@ -154,6 +154,12 @@ async fn run_inner(
     PushResult,
     Option<crab_read::capsule_protocol::CapsuleRefView>,
 )> {
+    let diagnostic_start = std::time::Instant::now();
+    tracing::debug!(
+        phase = "capsule_entry",
+        elapsed_ms = 0.0,
+        "push preparation diagnostic"
+    );
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
     }
@@ -373,6 +379,11 @@ async fn run_inner(
         .await?;
         pack_refs.extend(published_base.refs().clone());
     }
+    tracing::debug!(
+        phase = "pack_start",
+        elapsed_ms = diagnostic_start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     let prepared = prepare_git_packs(
         &common_git_dir,
         &pack_refs,
@@ -381,6 +392,11 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
+    tracing::debug!(
+        phase = "pack_ready",
+        elapsed_ms = diagnostic_start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     if let Some(progress) = &config.progress {
         let bytes = prepared.pointers.iter().map(|pointer| pointer.size).sum();
         progress.set_pack_totals(prepared.pointers.len() as u64, bytes);
@@ -425,6 +441,11 @@ async fn run_inner(
     .map_err(|error| {
         CrabError::Internal(format!("Git visibility preparation worker failed: {error}"))
     })??;
+    tracing::debug!(
+        phase = "visibility_ready",
+        elapsed_ms = diagnostic_start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -544,6 +565,11 @@ async fn run_inner(
                 prepared.packs,
                 sections,
             )?;
+            tracing::debug!(
+                phase = "publication_ready",
+                elapsed_ms = diagnostic_start.elapsed().as_secs_f64() * 1000.0,
+                "push preparation diagnostic"
+            );
             let capsule_size = capsule.bytes().len() as u64;
             if let Some(progress) = &config.progress {
                 progress.set_git_upload_totals(1, 0, capsule.bytes().len() as u64);

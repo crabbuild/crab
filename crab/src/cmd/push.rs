@@ -434,6 +434,11 @@ async fn run_push_once(
     prepared_expected_refs: Option<&BTreeMap<String, Option<String>>>,
 ) -> Result<PushAttempt> {
     let start = Instant::now();
+    debug!(
+        phase = "attempt_entry",
+        elapsed_ms = 0.0,
+        "push preparation diagnostic"
+    );
     let mode = OutputMode::from_flags(args.json, args.jsonl);
 
     // Discover the shared Crab state root. The current worktree root is
@@ -465,6 +470,11 @@ async fn run_push_once(
         crate::core::config::Config::resolve_local()?
     };
 
+    debug!(
+        phase = "config_resolved",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     // Resolve refspecs.
     let mut specs = resolve_push_specs(&args.refspecs, &remote_name, args.force)?;
     if specs.is_empty() {
@@ -592,6 +602,11 @@ async fn run_push_once(
             start.elapsed(),
         );
     }
+    debug!(
+        phase = "coordinator_ready",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     let (read_store, router, root) = if config.auth.provider
         == crate::core::config::AuthProvider::CrabAuth
     {
@@ -636,6 +651,11 @@ async fn run_push_once(
         };
         (selection.store, selection.router, selection.capsule_root)
     };
+    debug!(
+        phase = "store_ready",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     let caching_store = match crab_cache_store::CachingStore::new(read_store.clone(), &config.cache)
     {
         Ok(cache) => Some(cache),
@@ -684,6 +704,11 @@ async fn run_push_once(
             .await?
         }
     };
+    debug!(
+        phase = "view_ready",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     if args.follow_tags {
         retain_missing_follow_tags(&mut specs, &explicit_destinations, capsule_view.refs());
     }
@@ -730,6 +755,11 @@ async fn run_push_once(
         } else {
             (read_store.clone(), router.clone())
         };
+    debug!(
+        phase = "staging_publish_store_ready",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     let result = match crate::git::capsule_push::run(
         &push_config,
         &specs,
@@ -751,6 +781,11 @@ async fn run_push_once(
         }
     };
 
+    debug!(
+        phase = "capsule_done",
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+        "push preparation diagnostic"
+    );
     if result.all_ok() {
         if let Err(err) = record_push_audit_event(
             &repo_root.join(default_log_path()),
@@ -762,6 +797,11 @@ async fn run_push_once(
         ) {
             warn!(%err, "failed to append push audit event");
         }
+        debug!(
+            phase = "audit_done",
+            elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+            "push preparation diagnostic"
+        );
         let elapsed = start.elapsed();
         let integration =
             push_integration_summary(args, integration_retries, integration_retry_stages);
