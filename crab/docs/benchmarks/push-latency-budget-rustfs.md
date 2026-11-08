@@ -1,13 +1,13 @@
 # RustFS push latency budget
 
 Qualification date: November 7, 2026. The 500 ms median budget at 50 clients
-has **not** been demonstrated. The retained patch removes redundant scratch
-sync work; these local measurements do not establish an end-to-end speedup.
+has **not** been demonstrated. The scratch-sync experiment was removed after
+the completed Linux trials failed to establish an end-to-end speedup.
 
-## Retained change and safety boundary
+## Rejected scratch-sync experiment
 
-`crab/src/git/pack.rs::generate_pack_files_via_git` passes command-scoped
-`core.fsync=none` to `git pack-objects` for its private temporary pack set.
+The experiment passed command-scoped `core.fsync=none` to `git pack-objects`
+in `crab/src/git/pack.rs::generate_pack_files_via_git` for its temporary pack set.
 Those files are upload scratch, outside Git's persistent object database.
 Original local objects, strict indexing, object authentication, verified
 immutable upload, ref CAS and epoch confirmation retain their existing paths.
@@ -17,8 +17,9 @@ stdout pack generator does not ask Git to harden an output file.
 [Git's fsync contract](https://git-scm.com/docs/git-config#Documentation/git-config.txt-corefsync)
 allows disabling hardening for selected command output. On Apple Git 2.50.1,
 a direct probe produced byte-identical pack and index files while fsync
-writeout counters changed from three operations to none. That proves removal
-of scratch sync work, not a latency improvement under contention.
+writeout counters changed from three operations to none. That proved removal
+of scratch sync work, not a latency improvement. The command now retains Git's
+normal sync behavior because the experiment did not meet its performance gate.
 
 The proposed two-worker native push runtime budget was removed. Earlier
 [runtime qualification](concurrent-helper-runtime-rustfs.md) and the new
@@ -77,10 +78,28 @@ See the earlier [backend diagnosis](concurrent-push-bottleneck-rustfs.md).
 The final candidate and stock control differ only in `crab/src/git/pack.rs`;
 their workflow and benchmark code are identical. These Linux jobs use the
 existing pinned RustFS 1.0.0-beta.8-glibc image, so their environment must be
-reported separately from the local macOS observations. Qualification is pending:
+reported separately from the local macOS observations. Both performance
+matrices completed:
 
 - [Stock control c40100d067c](https://github.com/crabbuild/crab/actions/runs/42425056610).
 - [Scratch-only candidate 907d6a97fcf](https://github.com/crabbuild/crab/actions/runs/42430634932).
+
+At 50 clients, each case contains 350 real 4 KiB updates:
+
+| Client / variant | p50 ms | p95 ms | Maximum ms | Pushes/s during measured waves |
+| --- | ---: | ---: | ---: | ---: |
+| Native / stock | 506 | 767 | 845 | 72.06 |
+| Native / scratch-sync experiment | 610 | 915 | 984 | 60.48 |
+| Git / stock | 2,164 | 3,033 | 3,675 | 16.51 |
+| Git / scratch-sync experiment | 2,035 | 2,652 | 3,023 | 16.76 |
+
+Wave throughput divides 350 completed updates by the sum of the seven push
+batch wall times; it excludes commit preparation. All 12 cohort reports passed
+their integrity checks and expected update counts, totaling 2,200 timed pushes.
+Both native jobs failed the 500 ms budget at 50 clients. The RustFS image
+digest matched across all four jobs. Independent hosted runners and different
+commit identities prevent interpreting these as a controlled causal speedup.
+There is no verified performance gain that supports retaining the experiment.
 
 The manual performance job measures 350 updates at 50 clients, then 100 at
 10 and 100 at 1, with default product logging. Native p50 must be strictly
@@ -102,5 +121,6 @@ python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
 Completed scoped proof: release builds, four bounded pack tests, three indexer
 lifecycle/byte-preservation tests, incremental push round-trip/request bounds,
 38 Python harness tests, native/Git reader-mode live smokes, CLI help/error
-envelopes, formatting and Actionlint. Full isolated performance proof remains
-required before claiming the 500 ms target or an improvement over stock.
+envelopes, formatting and Actionlint. The 500 ms target remains unmet. Further
+experiments must use a control and candidate on the same runner with identical
+prepared commits, alternating trial order and intact integrity checks.
