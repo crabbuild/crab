@@ -200,18 +200,24 @@ def check_release_workflow(root: Path) -> list[str]:
 
     # Rollback reads are qualified against a tagged artifact, never a mutable
     # rebuilt checkout. Keep its identity and verification part of this gate.
-    try:
-        rollback_step = workflow_step_run(text, "Fetch pinned previous release for rollback qualification")
-    except ValueError as error:
-        errors.append(f"release.yml: {error}")
-    else:
-        for needle in (
-            "https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz",
-            "d36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f",
-            "sha256sum --check --strict",
-        ):
-            if needle not in rollback_step:
-                errors.append(f"release.yml rollback artifact: expected {needle!r}")
+    for workflow in ("release.yml", "git-protocol-v2-partial-clone.yml"):
+        workflow_text = read_text(root / ".github" / "workflows" / workflow)
+        try:
+            rollback_step = workflow_step_run(workflow_text, "Fetch pinned previous release for rollback qualification")
+        except ValueError as error:
+            errors.append(f"{workflow}: {error}")
+        else:
+            for needle in (
+                "gh api repos/crabbuild/crab/releases/tags/v1.0.1",
+                'select(.name == "crab-linux-x86_64.tar.gz") | .id',
+                '[[ "$asset_id" =~ ^[0-9]+$ ]]',
+                "gh api -H 'Accept: application/octet-stream'",
+                '"repos/crabbuild/crab/releases/assets/$asset_id"',
+                "d36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f",
+                "sha256sum --check --strict",
+            ):
+                if needle not in rollback_step:
+                    errors.append(f"{workflow} rollback artifact: expected {needle!r}")
     for needle in ('--rollback-crab-bin "$RUNNER_TEMP/protocol-v2-rollback/crab"', '--rollback-crab-tag v1.0.1'):
         if needle not in text:
             errors.append(f"release.yml rollback qualification: expected {needle!r}")
