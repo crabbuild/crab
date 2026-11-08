@@ -40,9 +40,6 @@ use crab::core::error::{CrabError, Result};
 use crab::core::output::{ErrorInfo, JsonlStream, OutputMode, emit_error_json};
 use crab::git::remote_helper::{StdIo, run_remote_helper};
 
-mod deferred_cli;
-use deferred_cli::Deferred;
-
 /// Name Git uses when exec-ing the remote helper for `crab://` URLs.
 const REMOTE_HELPER_STEM: &str = "git-remote-crab";
 
@@ -67,7 +64,7 @@ const CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
     version,
     about = "Serverless Git for large files, datasets, and reproducible workflows"
 )]
-struct Cli<const DEFER: bool = true> {
+struct Cli {
     /// Set the log verbosity level.
     ///
     /// Accepts any `tracing` filter directive: `error`, `warn`, `info`,
@@ -77,11 +74,11 @@ struct Cli<const DEFER: bool = true> {
     log_level: Option<String>,
 
     #[command(subcommand)]
-    cmd: Option<Cmd<DEFER>>,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
-enum Cmd<const DEFER: bool = true> {
+enum Cmd {
     /// Guided cloud, credential, repository, and large-file setup.
     Configure {
         /// Remote URL, or omit it for an interactive prompt.
@@ -241,10 +238,10 @@ enum Cmd<const DEFER: bool = true> {
         jsonl: bool,
     },
     /// Mirror a Git remote into a Crab remote.
-    Mirror(Deferred<crab::cmd::mirror::MirrorArgs, DEFER>),
+    Mirror(crab::cmd::mirror::MirrorArgs),
     /// Publish the frozen ref batch supplied by Git's mirror-mode hook.
     #[command(hide = true)]
-    MirrorPrePush(Deferred<crab::cmd::mirror::MirrorPrePushArgs, DEFER>),
+    MirrorPrePush(crab::cmd::mirror::MirrorPrePushArgs),
     /// Download selected files from a Crab repository without cloning it.
     #[command(visible_alias = "get")]
     Download {
@@ -447,20 +444,20 @@ enum Cmd<const DEFER: bool = true> {
     },
     /// Optimize Crab storage layout, caches, indexes, and replicas.
     #[command(subcommand)]
-    Optimize(Deferred<OptimizeCmd, DEFER>),
+    Optimize(OptimizeCmd),
     /// Manage lifecycle tiering rules for the bucket.
     #[command(subcommand)]
-    Tier(Deferred<crab::cmd::tier::TierCommand, DEFER>),
+    Tier(crab::cmd::tier::TierCommand),
     /// Metadata database administration: diagnose, rebuild, compact,
     /// and cache control.
     #[command(subcommand)]
-    Metadb(Deferred<crab::cmd::metadb::MetadbCommand, DEFER>),
+    Metadb(crab::cmd::metadb::MetadbCommand),
     /// Manage the local chunk cache.
     #[command(subcommand)]
-    Cache(Deferred<CacheCmd, DEFER>),
+    Cache(CacheCmd),
     /// Manage the staging area.
     #[command(subcommand)]
-    Staging(Deferred<StagingCmd, DEFER>),
+    Staging(StagingCmd),
     /// Look up a crab error code.
     Errors {
         /// Error code to look up (e.g. `CRAB-E0017`).
@@ -484,16 +481,16 @@ enum Cmd<const DEFER: bool = true> {
     },
     /// List and install the self-contained skills shipped with Crab.
     #[command(subcommand)]
-    Skills(Deferred<crab::cmd::skills::SkillsCommand, DEFER>),
+    Skills(crab::cmd::skills::SkillsCommand),
     /// Upgrade Crab to the latest stable release.
     #[command(after_help = "Examples:\n  crab upgrade\n")]
     Upgrade,
     /// Manage crab configuration.
     #[command(subcommand)]
-    Config(Deferred<ConfigCmd, DEFER>),
+    Config(ConfigCmd),
     /// Manage read replicas for Crab remotes.
     #[command(subcommand)]
-    Replica(Deferred<crab::cmd::replica::ReplicaCommand, DEFER>),
+    Replica(crab::cmd::replica::ReplicaCommand),
     /// Generate shell completion scripts.
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, powershell).
@@ -756,7 +753,7 @@ enum Cmd<const DEFER: bool = true> {
     },
     /// Manage diagnostic log files.
     #[command(subcommand)]
-    Logs(Deferred<LogsCmd, DEFER>),
+    Logs(LogsCmd),
     /// Install the crab filter driver in git config.
     Install {
         /// Install globally (all repos for this user).
@@ -825,12 +822,12 @@ enum Cmd<const DEFER: bool = true> {
     },
     /// Rewrite history to move files into or out of crab tracking.
     #[command(subcommand)]
-    Migrate(Deferred<MigrateCmd, DEFER>),
+    Migrate(MigrateCmd),
     /// Manage immutable workflow artifacts and promotion labels.
     #[command(subcommand)]
-    Artifacts(Deferred<crab::cmd::artifacts::ArtifactsCommand, DEFER>),
+    Artifacts(crab::cmd::artifacts::ArtifactsCommand),
     /// Native concurrent push that bypasses git's serial remote helper protocol.
-    Push(Deferred<crab::cmd::push::PushArgs, DEFER>),
+    Push(crab::cmd::push::PushArgs),
     /// Git pull + automatic hydration of newly-fetched pointer blobs.
     ///
     /// Wraps `git pull` and conditionally hydrates any new pointer files
@@ -942,56 +939,56 @@ enum Cmd<const DEFER: bool = true> {
         json: bool,
     },
     /// Import a raw object-storage prefix into a fresh Crab-backed git repo.
-    Import(Deferred<crab::cmd::import::ImportArgs, DEFER>),
+    Import(crab::cmd::import::ImportArgs),
     /// Manage versioned external data sources and source provenance.
     #[command(subcommand)]
-    Data(Deferred<crab::cmd::data::DataCommand, DEFER>),
+    Data(crab::cmd::data::DataCommand),
     /// Export one Crab snapshot as materialized files into raw object storage.
-    Export(Deferred<crab::cmd::export::ExportArgs, DEFER>),
+    Export(crab::cmd::export::ExportArgs),
     /// Execute a single workflow stage with content-addressed caching.
     ///
     /// Computes a deterministic hash over the command, deps, params and
     /// env, looks it up in the local stage cache, and either replays the
     /// cached outputs or runs the command. Workflows are enabled by default;
     /// `[workflow] enabled = false` is an explicit opt-out.
-    Run(Deferred<crab::cmd::run::RunArgs, DEFER>),
+    Run(crab::cmd::run::RunArgs),
     /// DVC-compatible spelling for `crab run`.
     ///
     /// Reproduces complete or partial workflows using the same target
     /// selection, cache, lockfile, and output behavior as `crab run`.
-    Repro(Deferred<crab::cmd::run::RunArgs, DEFER>),
+    Repro(crab::cmd::run::RunArgs),
     /// DVC-style workflow stage helper commands.
     #[command(subcommand)]
-    Stage(Deferred<StageCmd, DEFER>),
+    Stage(StageCmd),
     /// Freeze workflow stages so `crab run` skips them until unfreezing.
-    Freeze(Deferred<crab::cmd::freeze::FreezeArgs, DEFER>),
+    Freeze(crab::cmd::freeze::FreezeArgs),
     /// Unfreeze workflow stages so `crab run` can execute them again.
-    Unfreeze(Deferred<crab::cmd::freeze::FreezeArgs, DEFER>),
+    Unfreeze(crab::cmd::freeze::FreezeArgs),
     /// Experiment management: run, show, diff, promote, gc, ls.
     ///
     /// Each experiment is a DAG run against a throwaway worktree with
     /// optional `--set key=value` parameter overrides. Metadata is
     /// persisted under `.crab/workflow/exp/<uuid>.meta.json`.
     #[command(subcommand)]
-    Exp(Deferred<ExpCmd, DEFER>),
+    Exp(ExpCmd),
     /// DVC-style experiment task queue management.
     #[command(subcommand)]
-    Queue(Deferred<QueueCmd, DEFER>),
+    Queue(QueueCmd),
     /// Workflow-layer administrative commands (lockfile, journal, …).
     #[command(subcommand)]
-    Workflow(Deferred<WorkflowCmd, DEFER>),
+    Workflow(WorkflowCmd),
     /// Read or diff parameter files across git refs.
     #[command(subcommand)]
-    Params(Deferred<ParamsCmd, DEFER>),
+    Params(ParamsCmd),
     /// Read or diff metrics files across git refs.
     #[command(subcommand)]
-    Metrics(Deferred<MetricsCmd, DEFER>),
+    Metrics(MetricsCmd),
     /// DVC-style plot helpers.
     #[command(subcommand)]
-    Plots(Deferred<PlotsCmd, DEFER>),
+    Plots(PlotsCmd),
     /// Git LFS compatibility commands.
     #[command(subcommand)]
-    Lfs(Deferred<crab::cmd::lfs::LfsCmd, DEFER>),
+    Lfs(crab::cmd::lfs::LfsCmd),
     /// Standalone LFS transfer agent (invoked by git-lfs, not users).
     #[command(name = "lfs-transfer-agent", hide = true)]
     LfsTransferAgent,
@@ -1103,28 +1100,28 @@ enum Cmd<const DEFER: bool = true> {
         all: bool,
     },
     /// Manage organizations on the selected Crab service.
-    Organization(Deferred<crab::cmd::managed_admin::OrganizationArgs, DEFER>),
+    Organization(crab::cmd::managed_admin::OrganizationArgs),
     /// Manage logical repositories on the selected Crab service.
-    Repo(Deferred<crab::cmd::managed_admin::RepositoryArgs, DEFER>),
+    Repo(crab::cmd::managed_admin::RepositoryArgs),
     /// Manage organization memberships on the selected Crab service.
-    Member(Deferred<crab::cmd::managed_admin::MemberArgs, DEFER>),
+    Member(crab::cmd::managed_admin::MemberArgs),
     /// Manage service accounts on the selected Crab service.
-    ServiceAccount(Deferred<crab::cmd::managed_admin::ServiceAccountArgs, DEFER>),
+    ServiceAccount(crab::cmd::managed_admin::ServiceAccountArgs),
     /// Authentication management.
     #[command(subcommand)]
-    Auth(Deferred<AuthCmd, DEFER>),
+    Auth(AuthCmd),
     /// Inspect and verify Crab audit events.
     #[command(subcommand)]
-    Audit(Deferred<crab::cmd::audit::AuditCmd, DEFER>),
+    Audit(crab::cmd::audit::AuditCmd),
     /// Create and verify dataset release manifests.
     #[command(subcommand)]
-    Release(Deferred<crab::cmd::release::ReleaseCmd, DEFER>),
+    Release(crab::cmd::release::ReleaseCmd),
     /// Plan and apply repository recovery.
     #[command(subcommand)]
-    Recover(Deferred<crab::cmd::recover::RecoverCmd, DEFER>),
+    Recover(crab::cmd::recover::RecoverCmd),
     /// Internal coordinator management (hidden).
     #[command(subcommand, hide = true)]
-    Coordinator(Deferred<crab::cmd::coordinator::CoordinatorCmd, DEFER>),
+    Coordinator(crab::cmd::coordinator::CoordinatorCmd),
     /// Git clean/smudge filter driver (invoked by Git, not users).
     #[command(hide = true)]
     FilterProcess,
@@ -2093,7 +2090,7 @@ impl Cmd {
             | Self::Version { json, .. }
             | Self::SdkCapabilities { json }
             | Self::Track { json, .. } => OutputMode::from_flags(*json, false),
-            Self::Skills(Deferred(command)) => command.output_mode(),
+            Self::Skills(command) => command.output_mode(),
             Self::Stat {
                 json,
                 sub:
@@ -2114,10 +2111,10 @@ impl Cmd {
             | Self::Fsck { json, jsonl, .. }
             | Self::Repack { json, jsonl, .. }
             | Self::Prune { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
-            Self::Optimize(Deferred(command)) => command.output_mode(),
-            Self::Cache(Deferred(CacheCmd::Stats { json })) => OutputMode::from_flags(*json, false),
-            Self::Mirror(Deferred(args)) => args.output_mode(),
-            Self::Push(Deferred(args)) => OutputMode::from_flags(args.json, args.jsonl),
+            Self::Optimize(command) => command.output_mode(),
+            Self::Cache(CacheCmd::Stats { json }) => OutputMode::from_flags(*json, false),
+            Self::Mirror(args) => args.output_mode(),
+            Self::Push(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Ship { json, .. } => OutputMode::from_flags(*json, false),
             Self::Init { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
             Self::Setup { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
@@ -2125,134 +2122,110 @@ impl Cmd {
             Self::Unadopt { json, .. } => OutputMode::from_flags(*json, false),
             Self::Undo { json, .. } => OutputMode::from_flags(*json, false),
             Self::Why { json, .. } => OutputMode::from_flags(*json, false),
-            Self::Import(Deferred(args)) => args.output_mode(),
-            Self::Data(Deferred(command)) => command.output_mode(),
-            Self::Export(Deferred(args)) => args.output_mode(),
-            Self::Migrate(Deferred(command)) => command.output_mode(),
-            Self::Artifacts(Deferred(command)) => command.output_mode(),
-            Self::Run(Deferred(args)) | Self::Repro(Deferred(args)) => {
-                OutputMode::from_flags(args.json, args.jsonl)
-            }
-            Self::Stage(Deferred(StageCmd::Add(args))) => OutputMode::from_flags(args.json, false),
-            Self::Stage(Deferred(StageCmd::List(args))) => OutputMode::from_flags(args.json, false),
-            Self::Freeze(Deferred(args)) => OutputMode::from_flags(args.json, false),
-            Self::Unfreeze(Deferred(args)) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Run(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Show(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Diff(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Ls(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Promote(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Apply(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Reset(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Save(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Rename(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Push(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Pull(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Remove(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Clean(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Gc(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Queue(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Start(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Status(args))) => OutputMode::from_flags(args.json, false),
-            Self::Exp(Deferred(ExpCmd::Stop(args))) => OutputMode::from_flags(args.json, false),
-            Self::Queue(Deferred(QueueCmd::Start(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Queue(Deferred(QueueCmd::Status(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Queue(Deferred(QueueCmd::Logs(args))) => OutputMode::from_flags(args.json, false),
-            Self::Queue(Deferred(QueueCmd::Kill(args))) => OutputMode::from_flags(args.json, false),
-            Self::Queue(Deferred(QueueCmd::Remove(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Queue(Deferred(QueueCmd::Stop(args))) => OutputMode::from_flags(args.json, false),
-            Self::Params(Deferred(ParamsCmd::Show(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Params(Deferred(ParamsCmd::Diff(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Metrics(Deferred(MetricsCmd::Show(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Metrics(Deferred(MetricsCmd::Diff(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Metrics(Deferred(MetricsCmd::Plot(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Plots(Deferred(PlotsCmd::Show(args))) => OutputMode::from_flags(args.json, false),
-            Self::Plots(Deferred(PlotsCmd::Diff(args))) => OutputMode::from_flags(args.json, false),
-            Self::Plots(Deferred(PlotsCmd::Templates(args))) => {
-                OutputMode::from_flags(args.json, false)
-            }
-            Self::Workflow(Deferred(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Resolve(args)))) => {
+            Self::Import(args) => args.output_mode(),
+            Self::Data(command) => command.output_mode(),
+            Self::Export(args) => args.output_mode(),
+            Self::Migrate(command) => command.output_mode(),
+            Self::Artifacts(command) => command.output_mode(),
+            Self::Run(args) | Self::Repro(args) => OutputMode::from_flags(args.json, args.jsonl),
+            Self::Stage(StageCmd::Add(args)) => OutputMode::from_flags(args.json, false),
+            Self::Stage(StageCmd::List(args)) => OutputMode::from_flags(args.json, false),
+            Self::Freeze(args) => OutputMode::from_flags(args.json, false),
+            Self::Unfreeze(args) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Run(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Show(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Diff(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Ls(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Promote(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Apply(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Reset(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Save(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Rename(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Push(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Pull(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Remove(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Clean(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Gc(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Queue(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Start(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Status(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Stop(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Start(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Status(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Logs(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Kill(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Remove(args)) => OutputMode::from_flags(args.json, false),
+            Self::Queue(QueueCmd::Stop(args)) => OutputMode::from_flags(args.json, false),
+            Self::Params(ParamsCmd::Show(args)) => OutputMode::from_flags(args.json, false),
+            Self::Params(ParamsCmd::Diff(args)) => OutputMode::from_flags(args.json, false),
+            Self::Metrics(MetricsCmd::Show(args)) => OutputMode::from_flags(args.json, false),
+            Self::Metrics(MetricsCmd::Diff(args)) => OutputMode::from_flags(args.json, false),
+            Self::Metrics(MetricsCmd::Plot(args)) => OutputMode::from_flags(args.json, false),
+            Self::Plots(PlotsCmd::Show(args)) => OutputMode::from_flags(args.json, false),
+            Self::Plots(PlotsCmd::Diff(args)) => OutputMode::from_flags(args.json, false),
+            Self::Plots(PlotsCmd::Templates(args)) => OutputMode::from_flags(args.json, false),
+            Self::Workflow(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Resolve(args))) => {
                 args.output_mode()
             }
-            Self::Workflow(Deferred(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Split(args)))) => {
+            Self::Workflow(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Split(args))) => {
                 args.output_mode()
             }
-            Self::Workflow(Deferred(WorkflowCmd::Status(args))) => args.output_mode(),
-            Self::Workflow(Deferred(WorkflowCmd::Dag(args))) => args.output_mode(),
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Show(args)))) => {
+            Self::Workflow(WorkflowCmd::Status(args)) => args.output_mode(),
+            Self::Workflow(WorkflowCmd::Dag(args)) => args.output_mode(),
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Show(args))) => {
                 args.output_mode()
             }
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Ls(args)))) => {
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Ls(args))) => {
                 args.output_mode()
             }
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Gc(args)))) => {
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Gc(args))) => {
                 args.output_mode()
             }
-            Self::Workflow(Deferred(WorkflowCmd::PushCache(args))) => args.output_mode(),
-            Self::Workflow(Deferred(WorkflowCmd::Checkpoint(args))) => args.output_mode(),
-            Self::Auth(Deferred(AuthCmd::Status { json })) => OutputMode::from_flags(*json, false),
-            Self::Organization(Deferred(args)) => args.output_mode(),
-            Self::Repo(Deferred(args)) => args.output_mode(),
-            Self::Member(Deferred(args)) => args.output_mode(),
-            Self::ServiceAccount(Deferred(args)) => args.output_mode(),
-            Self::Audit(Deferred(command)) => command.output_mode(),
-            Self::Release(Deferred(command)) => command.output_mode(),
-            Self::Recover(Deferred(command)) => command.output_mode(),
-            Self::Config(Deferred(ConfigCmd::Get { json, .. })) => {
-                OutputMode::from_flags(*json, false)
-            }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Add(args))) => {
+            Self::Workflow(WorkflowCmd::PushCache(args)) => args.output_mode(),
+            Self::Workflow(WorkflowCmd::Checkpoint(args)) => args.output_mode(),
+            Self::Auth(AuthCmd::Status { json }) => OutputMode::from_flags(*json, false),
+            Self::Organization(args) => args.output_mode(),
+            Self::Repo(args) => args.output_mode(),
+            Self::Member(args) => args.output_mode(),
+            Self::ServiceAccount(args) => args.output_mode(),
+            Self::Audit(command) => command.output_mode(),
+            Self::Release(command) => command.output_mode(),
+            Self::Recover(command) => command.output_mode(),
+            Self::Config(ConfigCmd::Get { json, .. }) => OutputMode::from_flags(*json, false),
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Add(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Export(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Export(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Wait(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Wait(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Verify(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Verify(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Backfill(
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Backfill(
                 crab::cmd::replica::BackfillCommand::Status(args),
-            ))) => OutputMode::from_flags(args.json, false),
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Enable(args))) => {
+            )) => OutputMode::from_flags(args.json, false),
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Enable(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Disable(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Disable(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Mode(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Mode(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Writers(command))) => {
-                match command {
-                    crab::cmd::replica::WritersCommand::Status(args) => {
-                        OutputMode::from_flags(args.json, false)
-                    }
-                    crab::cmd::replica::WritersCommand::Enable(args)
-                    | crab::cmd::replica::WritersCommand::Disable(args) => {
-                        OutputMode::from_flags(args.json, false)
-                    }
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Writers(command)) => match command {
+                crab::cmd::replica::WritersCommand::Status(args) => {
+                    OutputMode::from_flags(args.json, false)
                 }
-            }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Coordinator(command))) => {
+                crab::cmd::replica::WritersCommand::Enable(args)
+                | crab::cmd::replica::WritersCommand::Disable(args) => {
+                    OutputMode::from_flags(args.json, false)
+                }
+            },
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Coordinator(command)) => {
                 match command {
                     crab::cmd::replica::CoordinatorCommand::Add(args) => {
                         OutputMode::from_flags(args.json, false)
@@ -2265,22 +2238,22 @@ impl Cmd {
                     }
                 }
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Failover(
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Failover(
                 crab::cmd::replica::FailoverCommand::Status(args),
-            ))) => OutputMode::from_flags(args.json, false),
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Repair(args))) => {
+            )) => OutputMode::from_flags(args.json, false),
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Repair(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Promote(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Promote(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Status(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Status(args)) => {
                 OutputMode::from_flags(args.json, args.jsonl)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Doctor(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Doctor(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
-            Self::Replica(Deferred(crab::cmd::replica::ReplicaCommand::Remove(args))) => {
+            Self::Replica(crab::cmd::replica::ReplicaCommand::Remove(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
             Self::Worktree {
@@ -2288,9 +2261,7 @@ impl Cmd {
                 command: crab::cmd::worktree::WorktreeCommand::List(args),
             } => OutputMode::from_flags(*json || args.json, false),
             Self::Worktree { json, .. } => OutputMode::from_flags(*json, false),
-            Self::Staging(Deferred(StagingCmd::Stats { json })) => {
-                OutputMode::from_flags(*json, false)
-            }
+            Self::Staging(StagingCmd::Stats { json }) => OutputMode::from_flags(*json, false),
             Self::Daemon {
                 sub: Some(DaemonCmd::List { json }),
                 ..
@@ -2299,7 +2270,7 @@ impl Cmd {
                 sub: Some(DaemonCmd::Status { json, .. }),
                 ..
             } => OutputMode::from_flags(*json, false),
-            Self::Tier(Deferred(sub)) => match sub {
+            Self::Tier(sub) => match sub {
                 crab::cmd::tier::TierCommand::Plan { json, jsonl, .. } => {
                     OutputMode::from_flags(*json, *jsonl)
                 }
@@ -2320,8 +2291,8 @@ impl Cmd {
             Self::Add { .. } => "add",
             Self::Reset { .. } => "reset",
             Self::Clone { .. } => "clone",
-            Self::Mirror(Deferred(_)) => "mirror",
-            Self::MirrorPrePush(Deferred(_)) => "mirror.pre-push",
+            Self::Mirror(_) => "mirror",
+            Self::MirrorPrePush(_) => "mirror.pre-push",
             Self::Download { .. } => "download",
             Self::Worktree {
                 command: crab::cmd::worktree::WorktreeCommand::Add(_),
@@ -2376,18 +2347,18 @@ impl Cmd {
             Self::Compact { .. } => "compact",
             Self::Fsck { .. } => "fsck",
             Self::Repack { .. } => "repack",
-            Self::Optimize(Deferred(command)) => command.schema_name(),
-            Self::Tier(Deferred(..)) => "tier",
-            Self::Metadb(Deferred(..)) => "metadb",
-            Self::Cache(Deferred(CacheCmd::Stats { .. })) => "cache.stats",
-            Self::Cache(Deferred(CacheCmd::Verify)) => "cache.verify",
-            Self::Cache(Deferred(CacheCmd::Clean)) => "cache.clean",
-            Self::Config(Deferred(ConfigCmd::Get { .. })) => "config.get",
-            Self::Config(Deferred(ConfigCmd::Set { .. })) => "config.set",
-            Self::Replica(Deferred(_)) => "replica",
-            Self::Staging(Deferred(StagingCmd::Stats { .. })) => "staging.stats",
-            Self::Staging(Deferred(StagingCmd::Verify)) => "staging.verify",
-            Self::Staging(Deferred(StagingCmd::Clean { .. })) => "staging.clean",
+            Self::Optimize(command) => command.schema_name(),
+            Self::Tier(..) => "tier",
+            Self::Metadb(..) => "metadb",
+            Self::Cache(CacheCmd::Stats { .. }) => "cache.stats",
+            Self::Cache(CacheCmd::Verify) => "cache.verify",
+            Self::Cache(CacheCmd::Clean) => "cache.clean",
+            Self::Config(ConfigCmd::Get { .. }) => "config.get",
+            Self::Config(ConfigCmd::Set { .. }) => "config.set",
+            Self::Replica(_) => "replica",
+            Self::Staging(StagingCmd::Stats { .. }) => "staging.stats",
+            Self::Staging(StagingCmd::Verify) => "staging.verify",
+            Self::Staging(StagingCmd::Clean { .. }) => "staging.clean",
             Self::Errors { .. } => "errors",
             Self::Status { workflow: true, .. } => {
                 crab::cmd::status_workflow::WORKFLOW_STATUS_SCHEMA
@@ -2402,92 +2373,86 @@ impl Cmd {
             Self::LsFiles { .. } => "ls-files",
             Self::Fetch { .. } => "fetch",
             Self::Prune { .. } => "prune",
-            Self::Logs(Deferred(_)) => "logs",
+            Self::Logs(_) => "logs",
             Self::Install { .. } => "install",
             Self::Uninstall { .. } => "uninstall",
             Self::Lock { .. } => "lock",
             Self::Unlock { .. } => "unlock",
             Self::Locks { .. } => "locks",
-            Self::Migrate(Deferred(MigrateCmd::FromDvc { .. })) => {
-                crab::cmd::migrate::DVC_MIGRATION_SCHEMA
-            }
-            Self::Migrate(Deferred(_)) => "migrate",
-            Self::Artifacts(Deferred(command)) => command.schema_name(),
-            Self::Push(Deferred(_)) => "push",
+            Self::Migrate(MigrateCmd::FromDvc { .. }) => crab::cmd::migrate::DVC_MIGRATION_SCHEMA,
+            Self::Migrate(_) => "migrate",
+            Self::Artifacts(command) => command.schema_name(),
+            Self::Push(_) => "push",
             Self::Ship { .. } => "ship",
             Self::Adopt { .. } => "adopt",
             Self::Unadopt { .. } => crab::cmd::unadopt::UNADOPT_SCHEMA,
             Self::Undo { .. } => crab::cmd::undo::UNDO_SCHEMA,
-            Self::Import(Deferred(_)) => "import",
-            Self::Data(Deferred(_)) => crab::cmd::data::DATA_SCHEMA,
-            Self::Export(Deferred(_)) => "export.summary",
-            Self::Run(Deferred(_)) | Self::Repro(Deferred(_)) => "workflow.stage_result",
-            Self::Stage(Deferred(StageCmd::Add(_))) => crab::cmd::stage::STAGE_ADD_SCHEMA,
-            Self::Stage(Deferred(StageCmd::List(_))) => crab::cmd::stage::STAGE_LIST_SCHEMA,
-            Self::Freeze(Deferred(_)) => crab::cmd::freeze::FREEZE_SCHEMA,
-            Self::Unfreeze(Deferred(_)) => crab::cmd::freeze::UNFREEZE_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Run(_))) => crab::cmd::exp::EXP_RUN_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Show(_))) => crab::cmd::exp::EXP_SHOW_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Diff(_))) => crab::cmd::exp::EXP_DIFF_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Ls(_))) => crab::cmd::exp::EXP_LS_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Promote(_))) => crab::cmd::exp::EXP_PROMOTE_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Apply(_))) => crab::cmd::exp::EXP_APPLY_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Reset(_))) => crab::cmd::exp::EXP_RESET_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Save(_))) => crab::cmd::exp::EXP_SAVE_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Rename(_))) => crab::cmd::exp::EXP_RENAME_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Push(_))) => crab::cmd::exp::EXP_PUSH_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Pull(_))) => crab::cmd::exp::EXP_PULL_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Remove(_))) => crab::cmd::exp::EXP_REMOVE_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Clean(_))) => crab::cmd::exp::EXP_CLEAN_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Gc(_))) => crab::cmd::exp::EXP_GC_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Queue(_))) => crab::cmd::exp_queue::EXP_QUEUE_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Start(_))) => crab::cmd::exp_queue::EXP_START_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Status(_))) => crab::cmd::exp_queue::EXP_STATUS_SCHEMA,
-            Self::Exp(Deferred(ExpCmd::Stop(_))) => crab::cmd::exp_queue::EXP_STOP_SCHEMA,
-            Self::Queue(Deferred(QueueCmd::Start(_))) => crab::cmd::exp_queue::EXP_START_SCHEMA,
-            Self::Queue(Deferred(QueueCmd::Status(_))) => crab::cmd::exp_queue::EXP_STATUS_SCHEMA,
-            Self::Queue(Deferred(QueueCmd::Logs(_))) => crab::cmd::exp_queue::EXP_QUEUE_LOGS_SCHEMA,
-            Self::Queue(Deferred(QueueCmd::Kill(_))) => crab::cmd::exp_queue::EXP_QUEUE_KILL_SCHEMA,
-            Self::Queue(Deferred(QueueCmd::Remove(_))) => {
-                crab::cmd::exp_queue::EXP_QUEUE_REMOVE_SCHEMA
-            }
-            Self::Queue(Deferred(QueueCmd::Stop(_))) => crab::cmd::exp_queue::EXP_STOP_SCHEMA,
-            Self::Params(Deferred(ParamsCmd::Show(_))) => "params.show",
-            Self::Params(Deferred(ParamsCmd::Diff(_))) => "params.diff",
-            Self::Metrics(Deferred(MetricsCmd::Show(_))) => "metrics.show",
-            Self::Metrics(Deferred(MetricsCmd::Diff(_))) => "metrics.diff",
-            Self::Metrics(Deferred(MetricsCmd::Plot(_))) => "metrics.plot",
-            Self::Plots(Deferred(PlotsCmd::Show(_))) => "metrics.plot",
-            Self::Plots(Deferred(PlotsCmd::Diff(_))) => "metrics.plot",
-            Self::Plots(Deferred(PlotsCmd::Templates(_))) => {
-                crab::cmd::metrics::SCHEMA_PLOT_TEMPLATES
-            }
-            Self::Workflow(Deferred(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Resolve(_)))) => {
+            Self::Import(_) => "import",
+            Self::Data(_) => crab::cmd::data::DATA_SCHEMA,
+            Self::Export(_) => "export.summary",
+            Self::Run(_) | Self::Repro(_) => "workflow.stage_result",
+            Self::Stage(StageCmd::Add(_)) => crab::cmd::stage::STAGE_ADD_SCHEMA,
+            Self::Stage(StageCmd::List(_)) => crab::cmd::stage::STAGE_LIST_SCHEMA,
+            Self::Freeze(_) => crab::cmd::freeze::FREEZE_SCHEMA,
+            Self::Unfreeze(_) => crab::cmd::freeze::UNFREEZE_SCHEMA,
+            Self::Exp(ExpCmd::Run(_)) => crab::cmd::exp::EXP_RUN_SCHEMA,
+            Self::Exp(ExpCmd::Show(_)) => crab::cmd::exp::EXP_SHOW_SCHEMA,
+            Self::Exp(ExpCmd::Diff(_)) => crab::cmd::exp::EXP_DIFF_SCHEMA,
+            Self::Exp(ExpCmd::Ls(_)) => crab::cmd::exp::EXP_LS_SCHEMA,
+            Self::Exp(ExpCmd::Promote(_)) => crab::cmd::exp::EXP_PROMOTE_SCHEMA,
+            Self::Exp(ExpCmd::Apply(_)) => crab::cmd::exp::EXP_APPLY_SCHEMA,
+            Self::Exp(ExpCmd::Reset(_)) => crab::cmd::exp::EXP_RESET_SCHEMA,
+            Self::Exp(ExpCmd::Save(_)) => crab::cmd::exp::EXP_SAVE_SCHEMA,
+            Self::Exp(ExpCmd::Rename(_)) => crab::cmd::exp::EXP_RENAME_SCHEMA,
+            Self::Exp(ExpCmd::Push(_)) => crab::cmd::exp::EXP_PUSH_SCHEMA,
+            Self::Exp(ExpCmd::Pull(_)) => crab::cmd::exp::EXP_PULL_SCHEMA,
+            Self::Exp(ExpCmd::Remove(_)) => crab::cmd::exp::EXP_REMOVE_SCHEMA,
+            Self::Exp(ExpCmd::Clean(_)) => crab::cmd::exp::EXP_CLEAN_SCHEMA,
+            Self::Exp(ExpCmd::Gc(_)) => crab::cmd::exp::EXP_GC_SCHEMA,
+            Self::Exp(ExpCmd::Queue(_)) => crab::cmd::exp_queue::EXP_QUEUE_SCHEMA,
+            Self::Exp(ExpCmd::Start(_)) => crab::cmd::exp_queue::EXP_START_SCHEMA,
+            Self::Exp(ExpCmd::Status(_)) => crab::cmd::exp_queue::EXP_STATUS_SCHEMA,
+            Self::Exp(ExpCmd::Stop(_)) => crab::cmd::exp_queue::EXP_STOP_SCHEMA,
+            Self::Queue(QueueCmd::Start(_)) => crab::cmd::exp_queue::EXP_START_SCHEMA,
+            Self::Queue(QueueCmd::Status(_)) => crab::cmd::exp_queue::EXP_STATUS_SCHEMA,
+            Self::Queue(QueueCmd::Logs(_)) => crab::cmd::exp_queue::EXP_QUEUE_LOGS_SCHEMA,
+            Self::Queue(QueueCmd::Kill(_)) => crab::cmd::exp_queue::EXP_QUEUE_KILL_SCHEMA,
+            Self::Queue(QueueCmd::Remove(_)) => crab::cmd::exp_queue::EXP_QUEUE_REMOVE_SCHEMA,
+            Self::Queue(QueueCmd::Stop(_)) => crab::cmd::exp_queue::EXP_STOP_SCHEMA,
+            Self::Params(ParamsCmd::Show(_)) => "params.show",
+            Self::Params(ParamsCmd::Diff(_)) => "params.diff",
+            Self::Metrics(MetricsCmd::Show(_)) => "metrics.show",
+            Self::Metrics(MetricsCmd::Diff(_)) => "metrics.diff",
+            Self::Metrics(MetricsCmd::Plot(_)) => "metrics.plot",
+            Self::Plots(PlotsCmd::Show(_)) => "metrics.plot",
+            Self::Plots(PlotsCmd::Diff(_)) => "metrics.plot",
+            Self::Plots(PlotsCmd::Templates(_)) => crab::cmd::metrics::SCHEMA_PLOT_TEMPLATES,
+            Self::Workflow(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Resolve(_))) => {
                 crab::cmd::workflow_lockfile::WORKFLOW_LOCKFILE_RESOLVE_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Split(_)))) => {
+            Self::Workflow(WorkflowCmd::Lockfile(WorkflowLockfileCmd::Split(_))) => {
                 crab::cmd::workflow_lockfile::WORKFLOW_LOCKFILE_SPLIT_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Status(_))) => {
+            Self::Workflow(WorkflowCmd::Status(_)) => {
                 crab::cmd::status_workflow::WORKFLOW_STATUS_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Dag(_))) => crab::cmd::dag::WORKFLOW_DAG_SCHEMA,
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Show(_)))) => {
+            Self::Workflow(WorkflowCmd::Dag(_)) => crab::cmd::dag::WORKFLOW_DAG_SCHEMA,
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Show(_))) => {
                 crab::cmd::workflow_journal::WORKFLOW_JOURNAL_SHOW_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Ls(_)))) => {
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Ls(_))) => {
                 crab::cmd::workflow_journal::WORKFLOW_JOURNAL_LS_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Journal(WorkflowJournalCmd::Gc(_)))) => {
+            Self::Workflow(WorkflowCmd::Journal(WorkflowJournalCmd::Gc(_))) => {
                 crab::cmd::workflow_journal::WORKFLOW_JOURNAL_GC_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::PushCache(_))) => {
+            Self::Workflow(WorkflowCmd::PushCache(_)) => {
                 crab::cmd::workflow::WORKFLOW_PUSH_CACHE_SCHEMA
             }
-            Self::Workflow(Deferred(WorkflowCmd::Checkpoint(_))) => {
+            Self::Workflow(WorkflowCmd::Checkpoint(_)) => {
                 crab::cmd::workflow_checkpoint::WORKFLOW_CHECKPOINT_SCHEMA
             }
-            Self::Lfs(Deferred(_)) => "lfs",
+            Self::Lfs(_) => "lfs",
             Self::LfsTransferAgent => "lfs-transfer-agent",
             Self::Mount { .. } => "mount",
             Self::Unmount { .. } => "unmount",
@@ -2503,23 +2468,21 @@ impl Cmd {
             Self::FilterProcess => "filter-process",
             Self::Version { .. } => "version",
             Self::SdkCapabilities { .. } => "sdk-capabilities",
-            Self::Skills(Deferred(crab::cmd::skills::SkillsCommand::List { .. })) => "skills.list",
-            Self::Skills(Deferred(crab::cmd::skills::SkillsCommand::Install(_))) => {
-                "skills.install"
-            }
+            Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
+            Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
             Self::Upgrade => "upgrade",
             Self::Login { .. } => "login",
             Self::Logout { .. } => "logout",
-            Self::Organization(Deferred(_)) => "managed.organization",
-            Self::Repo(Deferred(_)) => "managed.repository",
-            Self::Member(Deferred(_)) => "managed.member",
-            Self::ServiceAccount(Deferred(_)) => "managed.service_account",
-            Self::Auth(Deferred(AuthCmd::Status { .. })) => "auth.status",
-            Self::Auth(Deferred(AuthCmd::Refresh)) => "auth.refresh",
-            Self::Audit(Deferred(command)) => command.schema_name(),
-            Self::Release(Deferred(command)) => command.schema_name(),
-            Self::Recover(Deferred(command)) => command.schema_name(),
-            Self::Coordinator(Deferred(_)) => "coordinator",
+            Self::Organization(_) => "managed.organization",
+            Self::Repo(_) => "managed.repository",
+            Self::Member(_) => "managed.member",
+            Self::ServiceAccount(_) => "managed.service_account",
+            Self::Auth(AuthCmd::Status { .. }) => "auth.status",
+            Self::Auth(AuthCmd::Refresh) => "auth.refresh",
+            Self::Audit(command) => command.schema_name(),
+            Self::Release(command) => command.schema_name(),
+            Self::Recover(command) => command.schema_name(),
+            Self::Coordinator(_) => "coordinator",
             Self::Completions { .. } => "completions",
             Self::Pull { .. } => "pull",
         }
@@ -2946,7 +2909,7 @@ fn run(
     if !is_remote_helper && symlink_subcmd.is_none() {
         let args: Vec<OsString> = std::env::args_os().collect();
         if root_help_requested(&args) {
-            crab::cmd::help::print_root_help(&Cli::<true>::command());
+            crab::cmd::help::print_root_help(&Cli::command());
             return Ok(ExitCode::SUCCESS);
         }
     }
@@ -2988,9 +2951,9 @@ fn run(
                 Some(subcmd) => {
                     let mut args = vec![OsString::from("crab"), OsString::from(subcmd)];
                     args.extend(std::env::args_os().skip(1));
-                    Cli::<true>::parse_from(args)
+                    Cli::parse_from(args)
                 }
-                None => Cli::<true>::parse(),
+                None => Cli::parse(),
             };
 
             // Resolve the output mode and schema name before dispatching
@@ -3014,18 +2977,18 @@ fn maybe_run_coordinator_start_standalone()
         return Ok(None);
     }
 
-    let cli = Cli::<true>::parse();
+    let cli = Cli::parse();
     let mode = cli.cmd.as_ref().map_or(OutputMode::Text, Cmd::output_mode);
     let schema = cli.cmd.as_ref().map_or("error", Cmd::schema_name);
 
     crab::core::first_run::maybe_show_welcome(mode);
 
     match cli.cmd {
-        Some(Cmd::Coordinator(Deferred(crab::cmd::coordinator::CoordinatorCmd::Start {
-            foreground,
-        }))) => crab::cmd::coordinator::run_coordinator_start_standalone(foreground)
-            .map(Some)
-            .map_err(|e| (mode, schema, e)),
+        Some(Cmd::Coordinator(crab::cmd::coordinator::CoordinatorCmd::Start { foreground })) => {
+            crab::cmd::coordinator::run_coordinator_start_standalone(foreground)
+                .map(Some)
+                .map_err(|e| (mode, schema, e))
+        }
         _ => Ok(None),
     }
 }
@@ -3259,7 +3222,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             key: "sdk-capabilities output".to_owned(),
             origin: "the versioned SDK handshake requires --json".to_owned(),
         }),
-        Some(Cmd::Skills(Deferred(sub))) => {
+        Some(Cmd::Skills(sub)) => {
             let _span = tracing::info_span!("skills").entered();
             crab::cmd::skills::run(sub)?;
             Ok(ExitCode::SUCCESS)
@@ -3297,31 +3260,31 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::logout::run_logout(service, all, &config).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Organization(Deferred(args))) => {
+        Some(Cmd::Organization(args)) => {
             let _span = tracing::info_span!("managed_organization").entered();
             let config = Config::resolve_local()?;
             crab::cmd::managed_admin::run_organization(args, &config, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Repo(Deferred(args))) => {
+        Some(Cmd::Repo(args)) => {
             let _span = tracing::info_span!("managed_repository_admin").entered();
             let config = Config::resolve_local()?;
             crab::cmd::managed_admin::run_repository(args, &config, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Member(Deferred(args))) => {
+        Some(Cmd::Member(args)) => {
             let _span = tracing::info_span!("managed_member").entered();
             let config = Config::resolve_local()?;
             crab::cmd::managed_admin::run_member(args, &config, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::ServiceAccount(Deferred(args))) => {
+        Some(Cmd::ServiceAccount(args)) => {
             let _span = tracing::info_span!("managed_service_account").entered();
             let config = Config::resolve_local()?;
             crab::cmd::managed_admin::run_service_account(args, &config, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Auth(Deferred(sub))) => {
+        Some(Cmd::Auth(sub)) => {
             let _span = tracing::info_span!("auth").entered();
             let config = Config::resolve_local()?;
             match sub {
@@ -3334,17 +3297,17 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Audit(Deferred(sub))) => {
+        Some(Cmd::Audit(sub)) => {
             let _span = tracing::info_span!("audit").entered();
             crab::cmd::audit::run(&sub)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Release(Deferred(sub))) => {
+        Some(Cmd::Release(sub)) => {
             let _span = tracing::info_span!("release").entered();
             crab::cmd::release::run(&sub).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Recover(Deferred(sub))) => {
+        Some(Cmd::Recover(sub)) => {
             let _span = tracing::info_span!("recover").entered();
             if let crab::cmd::recover::RecoverCmd::History { command } = &sub {
                 let config = Config::resolve_local()?;
@@ -3652,11 +3615,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::MirrorPrePush(Deferred(ref args))) => {
+        Some(Cmd::MirrorPrePush(ref args)) => {
             crab::cmd::mirror::run_mirror_pre_push(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Mirror(Deferred(ref args))) => run_mirror_command(args, &cancel).await,
+        Some(Cmd::Mirror(ref args)) => run_mirror_command(args, &cancel).await,
         Some(Cmd::Download {
             repo,
             paths,
@@ -4248,11 +4211,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             json,
             jsonl,
         }) => run_repack_command(dry_run, json, jsonl, &cancel).await,
-        Some(Cmd::Optimize(Deferred(sub))) => run_optimize_command(sub, &cancel).await,
-        Some(Cmd::Tier(Deferred(sub))) => run_tier_command(sub, &cancel).await,
-        Some(Cmd::Metadb(Deferred(sub))) => run_metadb_command(sub, &cancel).await,
-        Some(Cmd::Cache(Deferred(sub))) => run_cache_command(sub, &cancel).await,
-        Some(Cmd::Config(Deferred(sub))) => {
+        Some(Cmd::Optimize(sub)) => run_optimize_command(sub, &cancel).await,
+        Some(Cmd::Tier(sub)) => run_tier_command(sub, &cancel).await,
+        Some(Cmd::Metadb(sub)) => run_metadb_command(sub, &cancel).await,
+        Some(Cmd::Cache(sub)) => run_cache_command(sub, &cancel).await,
+        Some(Cmd::Config(sub)) => {
             let _span = tracing::info_span!("config").entered();
             match sub {
                 ConfigCmd::Get { key, json } => {
@@ -4265,18 +4228,18 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Replica(Deferred(sub))) => {
+        Some(Cmd::Replica(sub)) => {
             let _span = tracing::info_span!("replica").entered();
             crab::cmd::replica::exec(sub, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Completions { shell, install }) => {
             let _span = tracing::info_span!("completions").entered();
-            let mut cmd = Cli::<false>::command();
+            let mut cmd = Cli::command();
             crab::cmd::completions::run_completions(&mut cmd, &shell, install)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Staging(Deferred(sub))) => {
+        Some(Cmd::Staging(sub)) => {
             let _span = tracing::info_span!("staging").entered();
             match sub {
                 StagingCmd::Stats { json } => {
@@ -4526,7 +4489,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             json,
             jsonl,
         }) => run_prune_command(dry_run, verbose, json, jsonl).await,
-        Some(Cmd::Logs(Deferred(sub))) => {
+        Some(Cmd::Logs(sub)) => {
             let _span = tracing::info_span!("logs").entered();
             match sub {
                 LogsCmd::List => crab::cmd::logs::run_logs_list()?,
@@ -4612,7 +4575,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::lock::run_locks(path.as_deref(), owner.as_deref(), mode, limit).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Migrate(Deferred(sub))) => {
+        Some(Cmd::Migrate(sub)) => {
             let _span = tracing::info_span!("migrate").entered();
             match sub {
                 MigrateCmd::GcFence {
@@ -4673,12 +4636,12 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Artifacts(Deferred(command))) => {
+        Some(Cmd::Artifacts(command)) => {
             let _span = tracing::info_span!("artifacts").entered();
             command.run()?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Push(Deferred(ref args))) => {
+        Some(Cmd::Push(ref args)) => {
             let _span = tracing::info_span!("push").entered();
             crab::cmd::push::run_push(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
@@ -4774,32 +4737,32 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::undo::run_undo(mode, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Import(Deferred(ref args))) => {
+        Some(Cmd::Import(ref args)) => {
             let _span = tracing::info_span!("import").entered();
             crab::cmd::import::run_import(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Data(Deferred(command))) => {
+        Some(Cmd::Data(command)) => {
             let _span = tracing::info_span!("data").entered();
             command.run()?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Export(Deferred(ref args))) => {
+        Some(Cmd::Export(ref args)) => {
             let _span = tracing::info_span!("export").entered();
             crab::cmd::export::run_export(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Run(Deferred(args))) => {
+        Some(Cmd::Run(args)) => {
             let _span = tracing::info_span!("run").entered();
             crab::cmd::run::exec(args).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Repro(Deferred(args))) => {
+        Some(Cmd::Repro(args)) => {
             let _span = tracing::info_span!("repro").entered();
             crab::cmd::run::exec(args).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Stage(Deferred(sub))) => {
+        Some(Cmd::Stage(sub)) => {
             let _span = tracing::info_span!("stage").entered();
             match sub {
                 StageCmd::Add(args) => crab::cmd::stage::exec_add(args).await?,
@@ -4807,17 +4770,17 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Freeze(Deferred(args))) => {
+        Some(Cmd::Freeze(args)) => {
             let _span = tracing::info_span!("freeze").entered();
             crab::cmd::freeze::exec_freeze(args)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Unfreeze(Deferred(args))) => {
+        Some(Cmd::Unfreeze(args)) => {
             let _span = tracing::info_span!("unfreeze").entered();
             crab::cmd::freeze::exec_unfreeze(args)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Exp(Deferred(sub))) => {
+        Some(Cmd::Exp(sub)) => {
             let _span = tracing::info_span!("exp").entered();
             match sub {
                 ExpCmd::Run(args) => crab::cmd::exp::exec_run(args).await?,
@@ -4841,7 +4804,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Queue(Deferred(sub))) => {
+        Some(Cmd::Queue(sub)) => {
             let _span = tracing::info_span!("queue").entered();
             match sub {
                 QueueCmd::Start(args) => crab::cmd::exp_queue::exec_start(args).await?,
@@ -4853,7 +4816,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Workflow(Deferred(sub))) => {
+        Some(Cmd::Workflow(sub)) => {
             let _span = tracing::info_span!("workflow").entered();
             match sub {
                 WorkflowCmd::Lockfile(WorkflowLockfileCmd::Resolve(args)) => {
@@ -4886,7 +4849,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Params(Deferred(sub))) => {
+        Some(Cmd::Params(sub)) => {
             let _span = tracing::info_span!("params").entered();
             match sub {
                 ParamsCmd::Show(args) => crab::cmd::params::exec_show(args)?,
@@ -4894,7 +4857,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Metrics(Deferred(sub))) => {
+        Some(Cmd::Metrics(sub)) => {
             let _span = tracing::info_span!("metrics").entered();
             match sub {
                 MetricsCmd::Show(args) => crab::cmd::metrics::exec_show(args)?,
@@ -4903,7 +4866,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Plots(Deferred(sub))) => {
+        Some(Cmd::Plots(sub)) => {
             let _span = tracing::info_span!("plots").entered();
             match sub {
                 PlotsCmd::Show(args) => crab::cmd::metrics::exec_plot_show(args)?,
@@ -4912,10 +4875,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Lfs(Deferred(sub))) => {
+        Some(Cmd::Lfs(sub)) => {
             let _span = tracing::info_span!("lfs").entered();
             if let crab::cmd::lfs::LfsCmd::Completion { shell } = &sub {
-                let mut cmd = Cli::<false>::command();
+                let mut cmd = Cli::command();
                 return crab::cmd::lfs::completion::run_lfs_completion(shell, &mut cmd);
             }
             let exit = crab::cmd::lfs::run_lfs_with_cancel(&sub, &cancel)?;
@@ -5342,13 +5305,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 Ok(ExitCode::from(1))
             }
         }
-        Some(Cmd::Coordinator(Deferred(sub))) => {
+        Some(Cmd::Coordinator(sub)) => {
             let _span = tracing::info_span!("coordinator").entered();
             crab::cmd::coordinator::run_coordinator(sub).await
         }
         // No subcommand — print help.
         None => {
-            crab::cmd::help::print_root_help(&Cli::<true>::command());
+            crab::cmd::help::print_root_help(&Cli::command());
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -6130,76 +6093,34 @@ mod tests {
     use crab::core::output::OutputMode;
 
     use super::{
-        Cli, Cmd, Deferred, OptimizeCacheCmd, OptimizeCmd, OptimizeIndexesCmd, OptimizeLfsCmd,
+        Cli, Cmd, OptimizeCacheCmd, OptimizeCmd, OptimizeIndexesCmd, OptimizeLfsCmd,
         OptimizeReplicasCmd, OptimizeWorkflowCacheCmd, REMOTE_HELPER_STEM,
         coordinator_start_owns_logging, filter_process_should_wire_remote_smudge,
         resolve_hydrate_remote_url, root_help_requested, symlink_subcommand_for_stem,
     };
 
-    fn with_cli_command<const DEFER: bool>(test: impl FnOnce(clap::Command) + Send + 'static) {
+    fn with_cli_command(test: impl FnOnce(clap::Command) + Send + 'static) {
         std::thread::Builder::new()
             .name("cli-command-test".to_owned())
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || test(Cli::<DEFER>::command()))
+            .spawn(move || test(Cli::command()))
             .unwrap()
             .join()
             .unwrap();
     }
 
     #[test]
-    fn completion_schema_includes_nested_help_commands() {
-        with_cli_command::<false>(|mut command| {
-            command.build();
-            for path in [
-                &["help", "optimize", "plan"][..],
-                &["help", "workflow", "lockfile", "resolve"][..],
-            ] {
-                let selected = path
-                    .iter()
-                    .try_fold(&command, |command, name| command.find_subcommand(name));
-                assert!(selected.is_some(), "missing completion path {path:?}");
-            }
-        });
-    }
-
-    #[test]
-    fn selected_command_help_preserves_variant_descriptions() {
-        with_cli_command::<true>(|mut command| {
-            for name in ["push", "import", "data"] {
-                let selected = command.find_subcommand_mut(name).expect("command");
-                let expected = (
-                    selected.get_about().cloned(),
-                    selected.get_long_about().cloned(),
-                );
-                let _ = selected.render_long_help();
-                assert_eq!(
-                    (
-                        selected.get_about().cloned(),
-                        selected.get_long_about().cloned(),
-                    ),
-                    expected,
-                    "rendering {name} help changed the command's descriptions"
-                );
-            }
-        });
-    }
-
-    #[test]
     fn init_has_one_remote_publication_path() {
         parse_cli_on_large_stack(|| {
-            let parsed = Cli::<true>::try_parse_from(["crab", "init", "crab://bucket/repo"])
+            let parsed = Cli::try_parse_from(["crab", "init", "crab://bucket/repo"])
                 .expect("canonical init syntax should parse");
             assert!(matches!(parsed.cmd, Some(Cmd::Init { .. })));
 
-            let error = match Cli::<true>::try_parse_from([
-                "crab",
-                "init",
-                "--remote",
-                "crab://bucket/repo",
-            ]) {
-                Ok(_) => panic!("retired init selector remained as a compatibility path"),
-                Err(error) => error,
-            };
+            let error =
+                match Cli::try_parse_from(["crab", "init", "--remote", "crab://bucket/repo"]) {
+                    Ok(_) => panic!("retired init selector remained as a compatibility path"),
+                    Err(error) => error,
+                };
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         });
     }
@@ -6207,16 +6128,16 @@ mod tests {
     #[test]
     fn mirror_is_the_only_external_git_import_command() {
         parse_cli_on_large_stack(|| {
-            let parsed = Cli::<true>::try_parse_from([
+            let parsed = Cli::try_parse_from([
                 "crab",
                 "mirror",
                 "https://github.com/org/repo.git",
                 "crab://bucket/repo",
             ])
             .expect("mirror should parse hosted Git sources");
-            assert!(matches!(parsed.cmd, Some(Cmd::Mirror(Deferred(_)))));
+            assert!(matches!(parsed.cmd, Some(Cmd::Mirror(_))));
 
-            let error = match Cli::<true>::try_parse_from([
+            let error = match Cli::try_parse_from([
                 "crab",
                 "github",
                 "import",
@@ -6232,7 +6153,7 @@ mod tests {
 
     #[test]
     fn root_help_groups_every_user_facing_command_once() {
-        with_cli_command::<true>(|command| {
+        with_cli_command(|command| {
             let mut expected: Vec<&str> = command
                 .get_subcommands()
                 .filter(|subcommand| !subcommand.is_hide_set())
@@ -6265,23 +6186,20 @@ mod tests {
                 "--domain",
                 "org/repo",
             ];
-            assert!(Cli::<true>::try_parse_from(args).is_ok());
-            assert!(Cli::<true>::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
-            assert!(
-                Cli::<true>::try_parse_from(args.into_iter().chain(["--apply", "--quiesced"]))
-                    .is_ok()
-            );
+            assert!(Cli::try_parse_from(args).is_ok());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply", "--quiesced"])).is_ok());
         });
     }
 
     #[test]
     fn upgrade_cli_has_a_dedicated_argument_free_help_surface() {
         parse_cli_on_large_stack(|| {
-            let parsed = Cli::<true>::try_parse_from(["crab", "upgrade"])
+            let parsed = Cli::try_parse_from(["crab", "upgrade"])
                 .expect("argument-free upgrade should parse");
             assert!(matches!(parsed.cmd, Some(Cmd::Upgrade)));
 
-            let help = Cli::<true>::try_parse_from(["crab", "upgrade", "--help"])
+            let help = Cli::try_parse_from(["crab", "upgrade", "--help"])
                 .err()
                 .expect("help should stop before command dispatch");
             assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -6289,7 +6207,7 @@ mod tests {
             assert!(rendered.contains("Usage: crab upgrade"));
             assert!(rendered.contains("crab upgrade"));
 
-            let unexpected = Cli::<true>::try_parse_from(["crab", "upgrade", "now"])
+            let unexpected = Cli::try_parse_from(["crab", "upgrade", "now"])
                 .err()
                 .expect("upgrade arguments should be rejected by clap");
             assert_eq!(unexpected.kind(), clap::error::ErrorKind::UnknownArgument);
@@ -6298,7 +6216,7 @@ mod tests {
 
     #[test]
     fn root_help_renders_top_level_commands_in_sections() {
-        with_cli_command::<true>(|command| {
+        with_cli_command(|command| {
             let help = render_root_help(&command);
 
             assert!(help.contains("Get started"));
@@ -6553,7 +6471,7 @@ mod tests {
     #[test]
     fn managed_administration_cli_parses_all_command_trees() {
         parse_cli_on_large_stack(|| {
-            let organization = Cli::<true>::try_parse_from([
+            let organization = Cli::try_parse_from([
                 "crab",
                 "organization",
                 "--service",
@@ -6565,7 +6483,7 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 organization.cmd,
-                Some(Cmd::Organization(Deferred(
+                Some(Cmd::Organization(
                     crab::cmd::managed_admin::OrganizationArgs {
                         service: Some(ref service),
                         json: true,
@@ -6574,10 +6492,10 @@ mod tests {
                                 ref organization
                             },
                     }
-                ))) if service == "cloud.example.com" && organization == "acme"
+                )) if service == "cloud.example.com" && organization == "acme"
             ));
 
-            let repository = Cli::<true>::try_parse_from([
+            let repository = Cli::try_parse_from([
                 "crab",
                 "repo",
                 "rename",
@@ -6589,18 +6507,16 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 repository.cmd,
-                Some(Cmd::Repo(Deferred(
-                    crab::cmd::managed_admin::RepositoryArgs {
-                        command: crab::cmd::managed_admin::RepositoryCommand::Rename {
-                            revision: 4,
-                            ..
-                        },
+                Some(Cmd::Repo(crab::cmd::managed_admin::RepositoryArgs {
+                    command: crab::cmd::managed_admin::RepositoryCommand::Rename {
+                        revision: 4,
                         ..
-                    }
-                )))
+                    },
+                    ..
+                }))
             ));
 
-            let member = Cli::<true>::try_parse_from([
+            let member = Cli::try_parse_from([
                 "crab",
                 "member",
                 "add",
@@ -6610,9 +6526,9 @@ mod tests {
                 "writer",
             ])
             .unwrap();
-            assert!(matches!(member.cmd, Some(Cmd::Member(Deferred(_)))));
+            assert!(matches!(member.cmd, Some(Cmd::Member(_))));
 
-            let service_account = Cli::<true>::try_parse_from([
+            let service_account = Cli::try_parse_from([
                 "crab",
                 "service-account",
                 "create-token",
@@ -6625,9 +6541,9 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 service_account.cmd,
-                Some(Cmd::ServiceAccount(Deferred(
+                Some(Cmd::ServiceAccount(
                     crab::cmd::managed_admin::ServiceAccountArgs { json: true, .. }
-                )))
+                ))
             ));
         });
     }
@@ -6635,7 +6551,7 @@ mod tests {
     #[test]
     fn download_cli_parses_hf_shaped_options() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "download",
                 "crab://bucket/org/repo",
@@ -6698,7 +6614,7 @@ mod tests {
     #[test]
     fn get_alias_parses_as_download() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from(["crab", "get", "repo", "file.txt"]).unwrap();
+            let cli = Cli::try_parse_from(["crab", "get", "repo", "file.txt"]).unwrap();
 
             match cli.cmd {
                 Some(Cmd::Download { repo, paths, .. }) => {
@@ -6714,7 +6630,7 @@ mod tests {
     fn pull_machine_errors_keep_the_selected_mode_and_schema() {
         parse_cli_on_large_stack(|| {
             for (flag, mode) in [("--json", OutputMode::Json), ("--jsonl", OutputMode::Jsonl)] {
-                let cli = Cli::<true>::try_parse_from(["crab", "pull", flag]).unwrap();
+                let cli = Cli::try_parse_from(["crab", "pull", flag]).unwrap();
                 let command = cli.cmd.as_ref().unwrap();
                 assert_eq!(
                     (command.output_mode(), command.schema_name()),
@@ -6727,7 +6643,7 @@ mod tests {
     #[test]
     fn workflow_data_and_artifact_commands_keep_dispatch_contracts() {
         parse_cli_on_large_stack(|| {
-            let artifacts = Cli::<true>::try_parse_from([
+            let artifacts = Cli::try_parse_from([
                 "crab",
                 "artifacts",
                 "get",
@@ -6741,13 +6657,13 @@ mod tests {
             assert_eq!(artifact_command.schema_name(), "artifacts");
             assert_eq!(artifact_command.output_mode(), OutputMode::Json);
 
-            let data = Cli::<true>::try_parse_from(["crab", "data", "list", "--jsonl"]).unwrap();
+            let data = Cli::try_parse_from(["crab", "data", "list", "--jsonl"]).unwrap();
             let data_command = data.cmd.as_ref().unwrap();
             assert_eq!(data_command.schema_name(), "data");
             assert_eq!(data_command.output_mode(), OutputMode::Jsonl);
 
             let checkpoint =
-                Cli::<true>::try_parse_from(["crab", "workflow", "checkpoint", "--json"]).unwrap();
+                Cli::try_parse_from(["crab", "workflow", "checkpoint", "--json"]).unwrap();
             let checkpoint_command = checkpoint.cmd.as_ref().unwrap();
             assert_eq!(checkpoint_command.schema_name(), "workflow.checkpoint");
             assert_eq!(checkpoint_command.output_mode(), OutputMode::Json);
@@ -6758,18 +6674,15 @@ mod tests {
     fn recover_history_parses_list_prune_verify_and_explicit_restore() {
         parse_cli_on_large_stack(|| {
             let list =
-                Cli::<true>::try_parse_from(["crab", "recover", "history", "list", "--json"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "recover", "history", "list", "--json"]).unwrap();
             assert!(matches!(
                 list.cmd,
-                Some(Cmd::Recover(Deferred(
-                    crab::cmd::recover::RecoverCmd::History {
-                        command: crab::cmd::history_recovery::HistoryCmd::List(_)
-                    }
-                )))
+                Some(Cmd::Recover(crab::cmd::recover::RecoverCmd::History {
+                    command: crab::cmd::history_recovery::HistoryCmd::List(_)
+                }))
             ));
 
-            let prune = Cli::<true>::try_parse_from([
+            let prune = Cli::try_parse_from([
                 "crab",
                 "recover",
                 "history",
@@ -6782,23 +6695,16 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 prune.cmd,
-                Some(Cmd::Recover(Deferred(crab::cmd::recover::RecoverCmd::History {
+                Some(Cmd::Recover(crab::cmd::recover::RecoverCmd::History {
                     command: crab::cmd::history_recovery::HistoryCmd::Prune(args)
-                }))) if args.keep_last == 10 && args.apply && args.json
+                })) if args.keep_last == 10 && args.apply && args.json
             ));
             assert!(
-                Cli::<true>::try_parse_from([
-                    "crab",
-                    "recover",
-                    "history",
-                    "prune",
-                    "--keep-last",
-                    "0",
-                ])
-                .is_err()
+                Cli::try_parse_from(["crab", "recover", "history", "prune", "--keep-last", "0",])
+                    .is_err()
             );
 
-            let verify = Cli::<true>::try_parse_from([
+            let verify = Cli::try_parse_from([
                 "crab",
                 "recover",
                 "history",
@@ -6810,24 +6716,21 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 verify.cmd,
-                Some(Cmd::Recover(Deferred(
-                    crab::cmd::recover::RecoverCmd::History {
-                        command: crab::cmd::history_recovery::HistoryCmd::Verify(_)
-                    }
-                )))
+                Some(Cmd::Recover(crab::cmd::recover::RecoverCmd::History {
+                    command: crab::cmd::history_recovery::HistoryCmd::Verify(_)
+                }))
             ));
 
-            let restore = Cli::<true>::try_parse_from([
-                "crab", "recover", "history", "restore", "42", "--apply",
-            ])
-            .unwrap();
+            let restore =
+                Cli::try_parse_from(["crab", "recover", "history", "restore", "42", "--apply"])
+                    .unwrap();
             assert!(matches!(
                 restore.cmd,
-                Some(Cmd::Recover(Deferred(
+                Some(Cmd::Recover(
                     crab::cmd::recover::RecoverCmd::History {
                         command: crab::cmd::history_recovery::HistoryCmd::Restore(args)
                     }
-                ))) if args.apply
+                )) if args.apply
             ));
         });
     }
@@ -6835,7 +6738,7 @@ mod tests {
     #[test]
     fn optimize_xorbs_parses_profile_args() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "optimize",
                 "xorbs",
@@ -6847,7 +6750,7 @@ mod tests {
             .unwrap();
 
             match cli.cmd {
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Xorbs(args)))) => {
+                Some(Cmd::Optimize(OptimizeCmd::Xorbs(args))) => {
                     assert_eq!(args.profile.as_deref(), Some("ml"));
                     assert!(args.dry_run);
                     assert!(args.json);
@@ -6860,7 +6763,7 @@ mod tests {
     #[test]
     fn optimize_plan_and_apply_parse_operator_workflow_args() {
         parse_cli_on_large_stack(|| {
-            let plan = Cli::<true>::try_parse_from([
+            let plan = Cli::try_parse_from([
                 "crab",
                 "optimize",
                 "plan",
@@ -6875,7 +6778,7 @@ mod tests {
             ])
             .unwrap();
             match plan.cmd {
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Plan(args)))) => {
+                Some(Cmd::Optimize(OptimizeCmd::Plan(args))) => {
                     assert_eq!(args.inventory_source.as_deref(), Some("live"));
                     assert_eq!(args.sample, Some(0.25));
                     assert!(args.include_xorbs);
@@ -6885,7 +6788,7 @@ mod tests {
                 _ => unreachable!("optimize plan should parse"),
             }
 
-            let apply = Cli::<true>::try_parse_from([
+            let apply = Cli::try_parse_from([
                 "crab",
                 "optimize",
                 "apply",
@@ -6896,7 +6799,7 @@ mod tests {
             ])
             .unwrap();
             match apply.cmd {
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Apply(args)))) => {
+                Some(Cmd::Optimize(OptimizeCmd::Apply(args))) => {
                     assert!(args.skip_tiers);
                     assert!(args.skip_cache);
                     assert!(args.skip_replicas);
@@ -6910,14 +6813,14 @@ mod tests {
     #[test]
     fn legacy_xorb_rewrite_command_is_removed() {
         parse_cli_on_large_stack(|| {
-            assert!(Cli::<true>::try_parse_from(["crab", "restripe", "--dry-run"]).is_err());
+            assert!(Cli::try_parse_from(["crab", "restripe", "--dry-run"]).is_err());
         });
     }
 
     #[test]
     fn metadb_generation_owner_parses_runtime_controls() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "metadb",
                 "owner",
@@ -6929,13 +6832,11 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 cli.cmd,
-                Some(Cmd::Metadb(Deferred(
-                    crab::cmd::metadb::MetadbCommand::Owner {
-                        once: true,
-                        interval: 7,
-                        jsonl: true,
-                    }
-                )))
+                Some(Cmd::Metadb(crab::cmd::metadb::MetadbCommand::Owner {
+                    once: true,
+                    interval: 7,
+                    jsonl: true,
+                }))
             ));
         });
     }
@@ -6944,18 +6845,17 @@ mod tests {
     fn optimize_groups_parse_existing_maintenance_surfaces() {
         parse_cli_on_large_stack(|| {
             let packs =
-                Cli::<true>::try_parse_from(["crab", "optimize", "packs", "--dry-run", "--json"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "packs", "--dry-run", "--json"]).unwrap();
             assert!(matches!(
                 packs.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Packs {
+                Some(Cmd::Optimize(OptimizeCmd::Packs {
                     dry_run: true,
                     json: true,
                     ..
-                })))
+                }))
             ));
 
-            let shards = Cli::<true>::try_parse_from([
+            let shards = Cli::try_parse_from([
                 "crab",
                 "optimize",
                 "shards",
@@ -6968,53 +6868,51 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 shards.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Shards {
+                Some(Cmd::Optimize(OptimizeCmd::Shards {
                     repo,
                     bucket,
                     dry_run: true,
                     ..
-                }))) if repo == "org/models" && bucket == "bucket"
+                })) if repo == "org/models" && bucket == "bucket"
             ));
 
             let tiers =
-                Cli::<true>::try_parse_from(["crab", "optimize", "tiers", "plan", "--dry-run"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "tiers", "plan", "--dry-run"]).unwrap();
             assert!(matches!(
                 tiers.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Tiers { .. })))
+                Some(Cmd::Optimize(OptimizeCmd::Tiers { .. }))
             ));
 
             let cache =
-                Cli::<true>::try_parse_from(["crab", "optimize", "cache", "prune", "--dry-run"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "cache", "prune", "--dry-run"]).unwrap();
             assert!(matches!(
                 cache.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Cache(
-                    OptimizeCacheCmd::Prune { dry_run: true, .. }
-                ))))
+                Some(Cmd::Optimize(OptimizeCmd::Cache(OptimizeCacheCmd::Prune {
+                    dry_run: true,
+                    ..
+                })))
             ));
 
             let indexes =
-                Cli::<true>::try_parse_from(["crab", "optimize", "indexes", "diagnose", "--deep"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "indexes", "diagnose", "--deep"]).unwrap();
             assert!(matches!(
                 indexes.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Indexes(
+                Some(Cmd::Optimize(OptimizeCmd::Indexes(
                     OptimizeIndexesCmd::Diagnose { deep: true, .. }
-                ))))
+                )))
             ));
 
             let lfs =
-                Cli::<true>::try_parse_from(["crab", "optimize", "lfs", "dedup", "--dry-run"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "lfs", "dedup", "--dry-run"]).unwrap();
             assert!(matches!(
                 lfs.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Lfs(
-                    OptimizeLfsCmd::Dedup { dry_run: true, .. }
-                ))))
+                Some(Cmd::Optimize(OptimizeCmd::Lfs(OptimizeLfsCmd::Dedup {
+                    dry_run: true,
+                    ..
+                })))
             ));
 
-            let workflow_cache = Cli::<true>::try_parse_from([
+            let workflow_cache = Cli::try_parse_from([
                 "crab",
                 "optimize",
                 "workflow-cache",
@@ -7024,25 +6922,24 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 workflow_cache.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::WorkflowCache(
+                Some(Cmd::Optimize(OptimizeCmd::WorkflowCache(
                     OptimizeWorkflowCacheCmd::JournalGc(_)
-                ))))
+                )))
             ));
 
             let replicas =
-                Cli::<true>::try_parse_from(["crab", "optimize", "replicas", "status", "--json"])
-                    .unwrap();
+                Cli::try_parse_from(["crab", "optimize", "replicas", "status", "--json"]).unwrap();
             assert!(matches!(
                 replicas.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Replicas(
+                Some(Cmd::Optimize(OptimizeCmd::Replicas(
                     OptimizeReplicasCmd::Status(_)
-                ))))
+                )))
             ));
 
-            let repo = Cli::<true>::try_parse_from(["crab", "optimize", "repo", "--json"]).unwrap();
+            let repo = Cli::try_parse_from(["crab", "optimize", "repo", "--json"]).unwrap();
             assert!(matches!(
                 repo.cmd,
-                Some(Cmd::Optimize(Deferred(OptimizeCmd::Repo(args)))) if args.json
+                Some(Cmd::Optimize(OptimizeCmd::Repo(args))) if args.json
             ));
         });
     }
@@ -7050,7 +6947,7 @@ mod tests {
     #[test]
     fn mount_commit_uses_m_for_message() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "mount",
                 "commit",
@@ -7087,7 +6984,7 @@ mod tests {
     #[test]
     fn daemon_commit_parses_message_push_and_json() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "daemon",
                 "commit",
@@ -7124,7 +7021,7 @@ mod tests {
     #[test]
     fn daemon_add_repo_parses_nfs_backend() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "daemon",
                 "add-repo",
@@ -7152,7 +7049,7 @@ mod tests {
     #[test]
     fn ship_rebase_retry_default_supports_large_swarms() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from([
+            let cli = Cli::try_parse_from([
                 "crab",
                 "ship",
                 ".",
@@ -7219,7 +7116,7 @@ mod tests {
     #[test]
     fn gc_grace_period_uses_config_when_omitted() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from(["crab", "gc"]).unwrap();
+            let cli = Cli::try_parse_from(["crab", "gc"]).unwrap();
             match cli.cmd {
                 Some(Cmd::Gc { grace_period, .. }) => assert_eq!(grace_period, None),
                 _ => unreachable!("gc command should parse"),
@@ -7230,7 +7127,7 @@ mod tests {
     #[test]
     fn gc_grace_period_preserves_explicit_override() {
         parse_cli_on_large_stack(|| {
-            let cli = Cli::<true>::try_parse_from(["crab", "gc", "--grace-period", "2h"]).unwrap();
+            let cli = Cli::try_parse_from(["crab", "gc", "--grace-period", "2h"]).unwrap();
             match cli.cmd {
                 Some(Cmd::Gc { grace_period, .. }) => {
                     assert_eq!(grace_period.as_deref(), Some("2h"));
