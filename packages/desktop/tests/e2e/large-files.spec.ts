@@ -160,7 +160,17 @@ test("packaged desktop previews large pointers and materializes staged Crab cont
     await page.getByRole("button", { name: "Back to preview", exact: true }).click();
     await page.getByRole("button", { name: "File details", exact: true }).click();
     await expect(inspector.getByText("Working file", { exact: true })).toBeVisible();
+    await expect(page.getByText("1 hydrated", { exact: true })).toBeVisible();
+    await expect(page.getByText("/ 3 hydrated", { exact: false })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("materialized-staged-file.png") });
+    await call(page, "close", { repo_id: "large-files" });
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await expect(page.getByText("File status unavailable", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("file-status-unavailable.png") });
+    await call(page, "open_local", { repo_id: "large-files", path: source });
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await expect(page.getByText("1 hydrated", { exact: true })).toBeVisible();
+    await expect(page.getByText("File status unavailable", { exact: true })).toHaveCount(0);
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

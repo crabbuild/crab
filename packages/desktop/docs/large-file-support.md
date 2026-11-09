@@ -398,9 +398,39 @@ replaced with the earlier remote lookup error. No publication authority changes.
   cleanup, then clicked **Hydrate to disk** for a 4 MiB staged Crab file. Its
   bytes matched the fixture, the Git pointer stayed unchanged and reopened
   details displayed **Working file**. The screenshot was inspected; its footer
-  still showed the earlier hydration counts, so status refresh remains open.
+  still showed the earlier hydration counts; the shared-status checkpoint below
+  resolves that observed refresh gap.
   The LFS no-op and complete materialization/repository lifecycle remain open.
   Evidence: `large-files-staged-hydrate-ui-proof`; artifact:
   `desktop-staged-hydrate/mac-arm64/Crab.app` in the external build directory.
 - Reproduction: `hydrate-desktop-repro.yxrf8inq/report.json` in the external build
   directory. Native regression logs use the `large-files-hydrate-` prefix.
+
+
+## Shared hydration status checkpoint
+
+Hydration status has one subscribed owner per repository. The footer, Explorer,
+Large Files and hydration picker share its result and path map instead of
+independent requests. Native hydrate/dehydrate completion invalidates active
+snapshots, including failed operations that may have changed only some files.
+The repository watcher invalidates the same owner for filesystem changes.
+
+An invalidated in-flight result drains before one fresh read starts; it cannot
+replace the post-mutation view. Releasing the last subscriber drops snapshot and
+event ownership, and late replies cannot overwrite a newly opened repository.
+Failures clear measured values and display **File status unavailable**; explicit
+refresh can recover. Per-view hydration completion callbacks are removed.
+
+- Five focused owner tests passed: shared reads, coalesced invalidation, late
+  results, unknown failure/retry and subscriber cleanup. Renderer/Electron
+  typechecks and the production renderer build passed.
+- The unpacked arm64 package smoke passed in 18.6 seconds. After real staged
+  materialization, Explorer showed **1 hydrated / 2 pointer** and the footer
+  showed **1 / 3 hydrated** with measured disk bytes, without manual refresh.
+  Closing the native repository produced the unavailable state; reopening and
+  refreshing restored measured counts. Screenshots were inspected, and the peer
+  Crab build was restored to its saved workflow.
+- Evidence: `large-files-hydration-status-ui-proof`; application:
+  `desktop-hydration-status/mac-arm64/Crab.app` in the external build directory.
+  Shared request/lifecycle ownership accounts for the non-test source growth.
+  LFS materialization, durable transfers and the remaining matrix are open.

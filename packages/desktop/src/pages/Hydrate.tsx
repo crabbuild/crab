@@ -25,7 +25,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   const lines = useJobLines(jobId);
 
   const enabled = !!repo.path;
-  const { byPath, refresh, summary } = useHydrationStatus(repo.repo_id, enabled);
+  const { byPath, summary } = useHydrationStatus(repo.repo_id, enabled);
   const tracked = useTrackedPatterns(repo, enabled);
 
   const entries = useMemo(() => Array.from(byPath.values()), [byPath]);
@@ -63,7 +63,6 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     } finally {
       setBusy(false);
       setConfirmVerb(null);
-      refresh();
     }
   }
 

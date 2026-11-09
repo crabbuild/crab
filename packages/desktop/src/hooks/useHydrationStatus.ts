@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { HydrationEntry, HydrationStatusResult, HydrationSummary, rpc } from "../ipc";
+import { useCallback, useSyncExternalStore } from "react";
+import type { HydrationEntry, HydrationSummary } from "../ipc";
+import { hydrationStatusStore } from "../lib/hydration-status-store";
 
 export interface UseHydrationStatus {
   summary: HydrationSummary | null;
@@ -17,34 +18,15 @@ export interface UseHydrationStatus {
  * returned state.
  *
  * The hook eagerly refreshes on mount and exposes `refresh()` for
- * callers that just ran a hydrate/dehydrate and want to see the new
- * state reflected immediately.
+ * explicit reads. Native hydrate/dehydrate completion refreshes every
+ * subscribed view; the repository watcher invalidates this same owner.
  */
 export function useHydrationStatus(repoId: string, enabled = true): UseHydrationStatus {
-  const [data, setData] = useState<HydrationStatusResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const subscribe = useCallback((listener: () => void) => enabled ? hydrationStatusStore.subscribe(repoId, listener) : () => undefined, [repoId, enabled]);
+  const snapshot = useCallback(() => hydrationStatusStore.snapshot(enabled ? repoId : undefined), [repoId, enabled]);
+  const data = useSyncExternalStore(subscribe, snapshot);
   const refresh = useCallback(() => {
-    if (!enabled) return;
-    setLoading(true);
-    setError(null);
-    rpc
-      .hydrationStatus(repoId)
-      .then((d) => setData(d))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+    if (enabled) hydrationStatusStore.refresh(repoId);
   }, [repoId, enabled]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  const byPath = useMemo(() => {
-    const m = new Map<string, HydrationEntry>();
-    for (const e of data?.items ?? []) m.set(e.path, e);
-    return m;
-  }, [data]);
-
-  return { summary: data?.summary ?? null, byPath, refresh, loading, error };
+  return { ...data, refresh };
 }

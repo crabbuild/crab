@@ -570,7 +570,6 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
     setActionInProgress(path);
     try {
       await rpc.hydrate(repo.path!, [path]);
-      hydration.refresh();
     } catch { /* ignore */ }
     setActionInProgress(null);
   };
@@ -579,7 +578,6 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
     setActionInProgress(path);
     try {
       await rpc.dehydrate(repo.path!, [path]);
-      hydration.refresh();
     } catch { /* ignore */ }
     setActionInProgress(null);
   };

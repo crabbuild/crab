@@ -18,9 +18,6 @@ interface Props {
   /** Hydration state keyed by path, for tree-row decorations. */
   hydrationByPath?: Map<string, HydrationEntry>;
   onOpenFile: (path: string, entry: DirEntry) => void;
-  /** Callback after a hydrate/dehydrate runs so the caller can
-   *  refresh status data. Fired once the RPC promise resolves. */
-  onHydrateComplete?: () => void;
   /** Workspace root path — required to run hydrate/dehydrate, since
    *  those are CLI shell-outs that need a `cwd`. `undefined` for
    *  URL-opened repos: we hide the affected context-menu items. */
@@ -120,7 +117,6 @@ export const FileTree = memo(function FileTree({
   gitStatus,
   hydrationByPath,
   onOpenFile,
-  onHydrateComplete,
   workspacePath,
   repoId,
   canEdit = true,
@@ -269,11 +265,9 @@ export const FileTree = memo(function FileTree({
       } catch {
         // The Activity drawer surfaces RPC errors; we don't need to
         // double-render here.
-      } finally {
-        onHydrateComplete?.();
       }
     },
-    [workspacePath, onHydrateComplete],
+    [workspacePath],
   );
 
   // Context menu with full file operations.

@@ -364,9 +364,10 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
   useFileWatcher(watchPath, useCallback(() => {
     refreshBranchInfo();
     refreshGitStatus();
+    hydration.refresh();
     // Also refresh conflict count for the activity bar badge.
     rpc.conflictList(repo.repo_id).then((r) => setConflictCount(r.files.length)).catch(() => {});
-  }, [refreshBranchInfo, refreshGitStatus, repo.repo_id]));
+  }, [refreshBranchInfo, refreshGitStatus, hydration.refresh, repo.repo_id]));
 
   // Initial conflict count fetch.
   useEffect(() => {
@@ -694,7 +695,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
         gitStatus={gitStatus}
         onRefreshGitStatus={refreshGitStatus}
         hydrationByPath={hydration.byPath}
-        onHydrateComplete={hydration.refresh}
       />
     ),
     search: (
@@ -1004,6 +1004,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
         <StatusBar
           summary={hydration.summary}
           loading={hydration.loading}
+          error={hydration.error}
           onRefresh={hydration.refresh}
           syncToolbar={branchInfo ? {
             repoId: repo.repo_id,

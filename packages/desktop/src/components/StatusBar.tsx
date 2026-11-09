@@ -12,6 +12,7 @@ import clsx from "clsx";
 interface Props {
   summary: HydrationSummary | null;
   loading: boolean;
+  error: string | null;
   onRefresh: () => void;
   /** Navigate to the storage config section in Settings. */
   onOpenStorageConfig?: () => void;
@@ -48,7 +49,7 @@ interface Props {
  * wants a subset hydrated — that's addressed by the per-subtree
  * Hydrate action and the dataset preset we ship in Pass B.
  */
-export function StatusBar({ summary, loading, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted, activityDrawerOpen, onToggleActivityDrawer }: Props) {
+export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted, activityDrawerOpen, onToggleActivityDrawer }: Props) {
   const { state } = useStore();
   const running = Object.values(state.jobs).filter((j) => j.status === "running").length;
 
@@ -70,7 +71,7 @@ export function StatusBar({ summary, loading, onRefresh, onOpenStorageConfig, on
             <Loader2 size={11} className="animate-spin" /> Checking hydration…
           </span>
         ) : (
-          <span>No hydration data</span>
+          <span title={error ?? undefined}>{error ? "File status unavailable" : "No hydration data"}</span>
         )}
       </div>
       <div className="flex items-center gap-3">

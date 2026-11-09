@@ -21,9 +21,6 @@ interface Props {
   onRefreshGitStatus?: () => void;
   /** Hydration state map keyed by path, for tree decorations. */
   hydrationByPath?: Map<string, HydrationEntry>;
-  /** Fired after hydrate/dehydrate finishes so hydration state can
-   *  be refreshed by the owning container. */
-  onHydrateComplete?: () => void;
 }
 
 /**
@@ -44,7 +41,6 @@ export const ExplorerView = memo(function ExplorerView({
   gitStatus,
   onRefreshGitStatus,
   hydrationByPath,
-  onHydrateComplete,
 }: Props) {
   const sessionManager = useSession();
   const repoPath = useActiveRepoPath();
@@ -468,7 +464,6 @@ export const ExplorerView = memo(function ExplorerView({
               gitStatus={gitStatus}
               hydrationByPath={hydrationByPath}
               onOpenFile={onOpenFile}
-              onHydrateComplete={onHydrateComplete}
               workspacePath={repoRootPath}
               repoId={repo.repo_id}
               canEdit={canEdit}
