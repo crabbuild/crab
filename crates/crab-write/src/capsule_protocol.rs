@@ -20,8 +20,6 @@ const REF_PREPARATION_CONCURRENCY: usize = 32;
 
 #[cfg(test)]
 mod publication_scaling_tests;
-#[cfg(test)]
-mod source_durability_tests;
 
 mod compaction;
 use compaction::compact_ref_frontier;
@@ -318,7 +316,8 @@ pub async fn prepare_publication_with_ref_head_bases(
     let prepared =
         futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
             move |(edit, snapshot)| async move {
-                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf).await
+                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
+                    .await
             },
         ))
         .buffered(REF_PREPARATION_CONCURRENCY)
@@ -330,23 +329,15 @@ pub async fn prepare_publication_with_ref_head_bases(
             .iter()
             .filter_map(|(_, compacted)| compacted.clone()),
     );
-    let upload = async {
-        let started = Instant::now();
-        let uploaded = upload_immutable_runs(router, immutable_runs).await;
-        tracing::info!(
-            phase = "upload",
-            %transaction_id,
-            succeeded = uploaded.is_ok(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "Git capsule publication phase finished"
-        );
-        uploaded
-    };
-    // Lifetime retention and verified run uploads are independent before ref visibility.
-    // Await both stages on failure while the caller still owns its writer fences.
-    let (retained, uploaded) =
-        tokio::join!(retain_ref_sources(router, &prepared, generation), upload,);
-    retained?;
+    let started = Instant::now();
+    let uploaded = upload_immutable_runs(router, immutable_runs).await;
+    tracing::info!(
+        phase = "upload",
+        %transaction_id,
+        succeeded = uploaded.is_ok(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git capsule publication phase finished"
+    );
     uploaded?;
     let refs = prepared
         .into_iter()
@@ -611,7 +602,8 @@ pub async fn materialize_coordinated_repair(
     let prepared =
         futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
             move |(edit, snapshot)| async move {
-                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf).await
+                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
+                    .await
             },
         ))
         .buffered(REF_PREPARATION_CONCURRENCY)
@@ -621,12 +613,7 @@ pub async fn materialize_coordinated_repair(
         .iter()
         .filter_map(|(_, run)| run.clone())
         .collect::<Vec<_>>();
-    let (retained, uploaded) = tokio::join!(
-        retain_ref_sources(router, &prepared, generation),
-        upload_immutable_runs(router, compacted),
-    );
-    retained?;
-    uploaded?;
+    upload_immutable_runs(router, compacted).await?;
     let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
     let activation_id = activation_id(&descriptor.transaction_id);
     commit_multi_ref(router, &descriptor.transaction_id, &activation_id, refs).await?;
@@ -1160,6 +1147,7 @@ async fn prepare_ref_successor(
     // The immutable leaf owns the full object/member admission map. Sharing it
     // avoids copying repository-sized evidence once for every edited ref.
     leaf: &CapsuleRun,
+    generation: u64,
 ) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
     frontier.push(CapsulePointer::new(
@@ -1173,6 +1161,43 @@ async fn prepare_ref_successor(
         leaf.newest_base_root_digest(),
     )?);
     let compacted = compact_ref_frontier(router, &mut frontier, leaf).await?;
+    if compacted.is_some() {
+        let remaining = frontier
+            .iter()
+            .map(CapsulePointer::hash)
+            .collect::<std::collections::BTreeSet<_>>();
+        let retired = snapshot
+            .visible
+            .frontier()
+            .iter()
+            .filter(|pointer| !remaining.contains(pointer.hash()))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Captured catalog/visibility readers still address the old immutable
+        // bodies. Publish their lifetime before any replacement ref CAS can hide them.
+        crab_metadata::capsule_protocol::retain_capsule_sources(
+            router,
+            edit.ref_name(),
+            generation,
+            &retired,
+        )
+        .await
+        .map_err(|error| match error {
+            // Retry a mutable head race before ref visibility by refreshing
+            // admission. Conflicting immutable segment bytes must remain terminal.
+            crab_metadata::error::MetadataError::Storage {
+                source: StorageError::StateConflict { path },
+            } if object_store::path::Path::from(path.as_str())
+                .prefix_matches(&router.capsule_source_heads_prefix()) =>
+            {
+                WriteError::RefChanged {
+                    ref_name: edit.ref_name().to_owned(),
+                    path,
+                }
+            }
+            error => error.into(),
+        })?;
+    }
     let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
         edit.peeled_oid().map(str::to_owned),
@@ -1187,63 +1212,6 @@ async fn prepare_ref_successor(
         },
         compacted,
     ))
-}
-
-async fn retain_ref_sources(
-    router: &StoreLayout<Store>,
-    prepared: &[(PreparedRefHead, Option<CapsuleRun>)],
-    generation: u64,
-) -> Result<()> {
-    // Finish constructing the borrowing closures before suspension so service
-    // callers can still send these preparation futures between runtime threads.
-    let work = prepared
-        .iter()
-        .filter_map(|(head, compacted)| compacted.as_ref().map(|_| head))
-        .map(|prepared| async move {
-            let ref_name = prepared.candidate.ref_name();
-            let remaining = prepared
-                .candidate
-                .visible(&std::collections::BTreeSet::new())
-                .frontier()
-                .iter()
-                .map(CapsulePointer::hash)
-                .collect::<std::collections::BTreeSet<_>>();
-            let retired = prepared
-                .original
-                .visible
-                .frontier()
-                .iter()
-                .filter(|pointer| !remaining.contains(pointer.hash()))
-                .cloned()
-                .collect::<Vec<_>>();
-            // Captured readers still address replaced physical run bodies, including
-            // transaction subsets. Retain by physical hash before any ref can hide them.
-            crab_metadata::capsule_protocol::retain_capsule_sources(
-                router, ref_name, generation, &retired,
-            )
-            .await
-            .map_err(|error| match error {
-                // Only mutable lifetime-head races refresh admission; conflicting
-                // immutable segment bytes remain terminal corruption evidence.
-                crab_metadata::error::MetadataError::Storage {
-                    source: StorageError::StateConflict { path },
-                } if object_store::path::Path::from(path.as_str())
-                    .prefix_matches(&router.capsule_source_heads_prefix()) =>
-                {
-                    WriteError::RefChanged {
-                        ref_name: ref_name.to_owned(),
-                        path,
-                    }
-                }
-                error => error.into(),
-            })
-        })
-        .collect::<Vec<_>>();
-    futures_util::stream::iter(work)
-        .buffered(REF_PREPARATION_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    Ok(())
 }
 
 async fn upload_immutable_runs(router: &StoreLayout<Store>, runs: Vec<CapsuleRun>) -> Result<()> {
@@ -2179,11 +2147,7 @@ mod tests {
         }
     }
 
-    pub(super) fn transaction(
-        base: &RootSnapshot,
-        old: Option<&str>,
-        new: &str,
-    ) -> CapsuleTransaction {
+    fn transaction(base: &RootSnapshot, old: Option<&str>, new: &str) -> CapsuleTransaction {
         CapsuleTransaction::new(
             base.record().digest(),
             vec![CapsuleRefEdit::new(
@@ -2793,6 +2757,7 @@ mod tests {
             &transaction.edits()[0],
             &transaction_id,
             &leaf,
+            base.record().root().generation(),
         )
         .await
         .unwrap();

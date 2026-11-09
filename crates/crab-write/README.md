@@ -86,10 +86,8 @@ Every resulting run still contains at most 512 capsules; a frontier with no
 eligible pair requires a checkpoint.
 
 Source authentication, immutable upload verification and conditional publication are
-preserved. Source lifetime retention and verified run uploads overlap after
-compaction; both stages finish, including on failure, before preparation returns.
-Ref visibility requires both stages to succeed. The worker owns immutable data
-and cannot publish if its caller is cancelled.
+preserved. The worker owns immutable data and cannot publish if its caller is
+cancelled.
 
 Historical restore publishes a layered checkpoint against the exact fenced
 root. Visibility must authenticate every restored ref and peeled tip. Source
