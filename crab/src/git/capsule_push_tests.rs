@@ -658,13 +658,11 @@ fn generated_object_inventory_preserves_order_and_physical_pointer_bytes() {
         source.path(),
         &["replace", &pointer_oid.to_string(), &large_oid.to_string()],
     );
-    let git_dir = source.path().join(".git");
-    let objects = local_objects_at(&git_dir).unwrap();
     for packed in [false, true] {
         if packed {
             git(source.path(), &["gc", "--prune=now"]);
         }
-        let inventory = inspect_generated_objects(&git_dir, &objects, &ids).unwrap();
+        let inventory = inspect_generated_objects(&source.path().join(".git"), &ids).unwrap();
         assert_eq!(
             inventory.kinds,
             [
@@ -678,8 +676,7 @@ fn generated_object_inventory_preserves_order_and_physical_pointer_bytes() {
     }
     assert!(
         inspect_generated_objects(
-            &git_dir,
-            &objects,
+            &source.path().join(".git"),
             &[gix_hash::ObjectId::from_hex(b"ffffffffffffffffffffffffffffffffffffffff").unwrap()]
         )
         .is_err()
@@ -708,64 +705,11 @@ fn generated_object_inventory_rejects_a_pointer_with_a_forged_object_id() {
     .unwrap();
     let error = inspect_generated_objects(
         &git_dir,
-        &local_objects_at(&git_dir).unwrap(),
         &[gix_hash::ObjectId::from_hex(forged.as_bytes()).unwrap()],
     )
     .err()
     .unwrap();
     assert!(matches!(error, CrabError::CorruptObject { .. }));
-}
-
-#[test]
-fn shared_inventory_handle_refreshes_after_a_pack_is_replaced() {
-    let source = tempfile::tempdir().unwrap();
-    git(source.path(), &["init", "--initial-branch=main"]);
-    git(source.path(), &["config", "user.name", "Crab Test"]);
-    git(
-        source.path(),
-        &["config", "user.email", "crab@example.invalid"],
-    );
-    let tip = commit(source.path(), "original");
-    git(source.path(), &["gc", "--prune=now"]);
-    let git_dir = source.path().join(".git");
-    let old_packs = std::fs::read_dir(git_dir.join("objects/pack"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "pack")
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        !old_packs.is_empty(),
-        "fixture must start with a packed object"
-    );
-    let objects = local_objects_at(&git_dir).unwrap();
-    // Packing only checks exclusions before Git runs. Reading headers here would
-    // hold the pack itself open and prevent its removal on Windows.
-    let refs = BTreeMap::from([("refs/heads/main".to_owned(), tip.clone())]);
-    assert_eq!(
-        locally_available_remote_tips(&objects, &refs),
-        [tip.clone()]
-    );
-    let new_tip = commit(source.path(), "replacement pack");
-    git(source.path(), &["gc", "--prune=now"]);
-    assert!(
-        old_packs.iter().all(|path| !path.exists()),
-        "fixture must replace the previously indexed pack"
-    );
-
-    let new_loose = git_dir
-        .join("objects")
-        .join(&new_tip[..2])
-        .join(&new_tip[2..]);
-    assert!(
-        !new_loose.exists(),
-        "new tip must require the replacement pack"
-    );
-    let ids = [tip, new_tip].map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).unwrap());
-    let after = inspect_generated_objects(&git_dir, &objects, &ids).unwrap();
-    assert_eq!(after.kinds, [gix_object::Kind::Commit; 2]);
 }
 
 #[test]
