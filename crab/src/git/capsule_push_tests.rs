@@ -741,17 +741,31 @@ fn shared_inventory_handle_refreshes_after_a_pack_is_replaced() {
         "fixture must start with a packed object"
     );
     let objects = local_objects_at(&git_dir).unwrap();
-    let ids = [gix_hash::ObjectId::from_hex(tip.as_bytes()).unwrap()];
-    let before = inspect_generated_objects(&git_dir, &objects, &ids).unwrap();
-    commit(source.path(), "replacement pack");
+    // Packing only checks exclusions before Git runs. Reading headers here would
+    // hold the pack itself open and prevent its removal on Windows.
+    let refs = BTreeMap::from([("refs/heads/main".to_owned(), tip.clone())]);
+    assert_eq!(
+        locally_available_remote_tips(&objects, &refs),
+        [tip.clone()]
+    );
+    let new_tip = commit(source.path(), "replacement pack");
     git(source.path(), &["gc", "--prune=now"]);
     assert!(
         old_packs.iter().all(|path| !path.exists()),
-        "fixture must replace the previously opened pack"
+        "fixture must replace the previously indexed pack"
     );
 
+    let new_loose = git_dir
+        .join("objects")
+        .join(&new_tip[..2])
+        .join(&new_tip[2..]);
+    assert!(
+        !new_loose.exists(),
+        "new tip must require the replacement pack"
+    );
+    let ids = [tip, new_tip].map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).unwrap());
     let after = inspect_generated_objects(&git_dir, &objects, &ids).unwrap();
-    assert_eq!(after.kinds, before.kinds);
+    assert_eq!(after.kinds, [gix_object::Kind::Commit; 2]);
 }
 
 #[test]

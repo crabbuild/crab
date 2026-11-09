@@ -1,5 +1,5 @@
 ---
-name: Local object handle push qualification
+name: Local object handle caller contracts and push qualification
 'on':
   workflow_dispatch: {}
 permissions:
@@ -10,7 +10,7 @@ concurrency:
 env:
   CARGO_INCREMENTAL: 0
   CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
-  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}
+  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-42611194273
 jobs:
   push-contracts:
     name: Object handle contracts (${{ matrix.os }})
@@ -37,10 +37,13 @@ jobs:
     - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
       with:
         toolchain: 1.99.1
+        components: rustfmt, clippy
     - name: Record platform Git and compiler
       run: |
         git --version
         rustc -Vv
+        cargo fmt --version
+        cargo clippy --version
     - name: Install existing Linux build dependencies
       run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
       if: runner.os == 'Linux'
@@ -59,60 +62,10 @@ jobs:
         path: "${{ runner.temp }}/local-odb-*.log\n"
         if-no-files-found: error
         retention-days: 3
-  release-build:
-    name: Build shared protocol release artifact
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    steps:
-    - name: Checkout
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      with:
-        fetch-depth: 0
-    - name: Set up pinned Rust
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-      with:
-        toolchain: 1.99.1
-    - name: Install Linux system dependencies
-      run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
-    - name: Build release artifact with source provenance
-      run: |
-        set -euo pipefail
-        export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-local-odb-release"
-        test -z "${RUSTFLAGS:-}"
-        GIT_SHA="$(git rev-parse HEAD)" \
-          cargo build -p crab --release --locked --features gix-transport
-        test -x "${CARGO_TARGET_DIR}/release/crab"
-        python3 - <<'PY'
-        import hashlib, json, os, subprocess
-        from pathlib import Path
-        binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
-        record = {
-            'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-            'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
-            'features': 'default,gix-transport',
-            'rustflags': os.environ.get('RUSTFLAGS', ''),
-            'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
-        }
-        (binary.parent / 'candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
-        PY
-        # Artifact upload normalizes file modes, so tar preserves the executable bit.
-        tar -C "${CARGO_TARGET_DIR}/release" \
-          -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab candidate-build.json
-        "$CARGO_TARGET_DIR/release/crab" version | grep -F "$(git rev-parse HEAD)"
-        "$CARGO_TARGET_DIR/release/crab" push --help > "$RUNNER_TEMP/push-help.txt"
-    - name: Upload shared release artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: "${{ env.CRAB_RELEASE_ARTIFACT }}"
-        path: "${{ runner.temp }}/${{ env.CRAB_RELEASE_ARCHIVE }}"
-        if-no-files-found: error
-        retention-days: 3
-        compression-level: 0
   paired-existing-ref-performance:
     name: Paired existing-ref throughput (${{ matrix.client }})
     if: github.event_name == 'workflow_dispatch'
     needs:
-    - release-build
     - push-contracts
     permissions:
       contents: read
@@ -129,11 +82,11 @@ jobs:
       PAIR_CLIENT: "${{ matrix.client }}"
       PAIR_CONTROL_RUN: '42570788923'
       PAIR_CONTROL_SOURCE: 4a27de3de1757b716a1694c65a266c2afefc4412
-      PAIR_CANDIDATE_SOURCE: "${{ github.sha }}"
+      PAIR_CANDIDATE_SOURCE: 529b0b82324c9354c052b423fbab665d9145670a
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: "${{ github.sha }}"
+        ref: 529b0b82324c9354c052b423fbab665d9145670a
         fetch-depth: 0
     - name: Install fixture dependencies
       run: |
@@ -150,6 +103,8 @@ jobs:
     - uses: actions/download-artifact@v4
       with:
         name: "${{ env.CRAB_RELEASE_ARTIFACT }}"
+        run-id: 42611194273
+        github-token: "${{ github.token }}"
         path: "${{ runner.temp }}/candidate-archive"
     - uses: actions/download-artifact@v4
       with:
@@ -179,6 +134,7 @@ jobs:
         assert control['features'] == candidate['features'] == 'default,gix-transport'
         assert control['rustflags'] == candidate['rustflags'] == ''
         assert control['sha256'] == '574e2a85b5397e5ad3711fe5908c23863e614224110911f67ba844be23aefa03'
+        assert candidate['sha256'] == 'c37478d35d07f6db356fc85ab90206cb3511af859025f2a93c5d9d012ff63f04'
         for build, variable in [(control, 'PAIR_CONTROL'), (candidate, 'PAIR_CANDIDATE')]:
             assert build['sha256'] == hashlib.file_digest(Path(os.environ[variable]).open('rb'), 'sha256').hexdigest()
         PYCODE
