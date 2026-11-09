@@ -162,7 +162,7 @@ uuid = { version = "=1.24.0", features = ["v7", "serde"] }
 
 [profile.release]
 opt-level = 3
-lto = false
+lto = "thin"
 debug = 0
 strip = "symbols"
 

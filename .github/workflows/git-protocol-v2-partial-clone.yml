@@ -429,10 +429,12 @@ jobs:
       - name: Build release artifact with source provenance
         run: |
           GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
+            /usr/bin/time -v -o "$RUNNER_TEMP/release-build-resources.txt" \
+              cargo build -p crab --release --locked --features gix-transport \
+              --message-format=json > "$RUNNER_TEMP/candidate-build-artifacts.jsonl"
           test -x "${CARGO_TARGET_DIR}/release/crab"
           python3 - <<'PY'
-          import hashlib, json, os, subprocess
+          import hashlib, json, os, subprocess, tomllib
           from pathlib import Path
           binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
           record = {
@@ -440,12 +442,33 @@ jobs:
               'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
               'features': 'default,gix-transport',
               'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
+              'binary_bytes': binary.stat().st_size,
+              'release_profile': tomllib.loads(Path('Cargo.toml').read_text())['profile']['release'],
           }
           (binary.parent / 'candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
           PY
           # Artifact upload normalizes file modes, so tar preserves the executable bit.
           tar -C "${CARGO_TARGET_DIR}/release" \
             -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab candidate-build.json
+
+      - name: Verify optimized TLS trust and native root freshness
+        run: |
+          python3 -B .github/profile/run_release_tls_contract.py \
+            --artifacts "$RUNNER_TEMP/candidate-build-artifacts.jsonl" \
+            --root "$RUNNER_TEMP/release-tls-contract"
+
+      - name: Preserve optimized TLS receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tls-contract-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-tls-contract/*.json
+            ${{ runner.temp }}/release-tls-contract/*.log
+            ${{ runner.temp }}/candidate-build-artifacts.jsonl
+            ${{ runner.temp }}/release-build-resources.txt
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload shared release artifact
         uses: actions/upload-artifact@v4
@@ -455,6 +478,58 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+  optimized-platform-build:
+    name: Optimized release command (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build loader-safe release command with shipping features
+        run: |
+          set -euo pipefail
+          features="simd-accel,tier,watch,nfs,gix-pathmatch"
+          if [ "$RUNNER_OS" = macOS ]; then
+            features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"
+          fi
+          echo "RELEASE_FEATURES=$features" >> "$GITHUB_ENV"
+          GIT_SHA="$(git rev-parse HEAD)" cargo build -p crab --bin crab \
+            --release --locked --no-default-features --features "$features"
+      - name: Verify optimized entry points and structured failure
+        run: |
+          python3 -B - <<'PY'
+          import hashlib,json,os,subprocess,tempfile,tomllib
+          from pathlib import Path
+          binary=Path(os.environ['CARGO_TARGET_DIR'])/'release'/('crab.exe' if os.name=='nt' else 'crab')
+          source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          version=json.loads(subprocess.check_output([str(binary),'version','--json'],text=True))
+          assert version['schema']=='version' and version['data']['git_sha']==source
+          for command in ['push','fetch','fsck']:
+              text=subprocess.check_output([str(binary),command,'--help'],text=True)
+              assert f'crab {command}' in text
+          with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as cwd:
+              failure=subprocess.run([str(binary),'push','--json','unsupported://qualification'],cwd=cwd,text=True,capture_output=True)
+              assert failure.returncode!=0
+              payload=json.loads(failure.stdout)
+              assert payload['schema']=='push' and payload['error']['code']
+          record={'source':source,'binary_sha256':hashlib.file_digest(binary.open('rb'),'sha256').hexdigest(),'binary_bytes':binary.stat().st_size,'compiler':subprocess.check_output(['rustc','-Vv'],text=True),'features':os.environ['RELEASE_FEATURES'],'profile':tomllib.loads(Path('Cargo.toml').read_text())['profile']['release'],'checks':['version source','push/fetch/fsck help','structured push failure']}
+          (Path(os.environ['RUNNER_TEMP'])/'optimized-release.json').write_text(json.dumps(record,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimized-release-${{ matrix.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/optimized-release.json
+          if-no-files-found: warn
+          retention-days: 14
 
   real-git-version-matrix:
     name: Real Git compatibility (${{ matrix.label }})
