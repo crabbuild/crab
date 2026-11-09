@@ -52,10 +52,20 @@ jobs:
           lscpu > "$root/evidence/host.txt"
           uname -a >> "$root/evidence/host.txt"
           git --version >> "$root/evidence/host.txt"
-          cp .github/profile/diagnose_push_kernel.py .github/profile/probe_kernel_perf.py "$root/evidence/"
+          cp .github/profile/diagnose_push_kernel.py .github/profile/probe_kernel_perf.py \
+            .github/profile/test_kernel_process_ownership.py "$root/evidence/"
           perf_bin="$(find -L /usr/lib/linux-tools -mindepth 2 -type f -name perf | sort -V | tail -1)"
           test -x "$perf_bin"
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
+      - name: Require escaped descendant cleanup before the workload
+        run: |
+          set -euo pipefail
+          sleep 120 &
+          external_pid=$!
+          trap 'kill "$external_pid" 2>/dev/null || true; wait "$external_pid" || true' EXIT
+          EXTERNAL_PID="$external_pid" python3 -B .github/profile/test_kernel_process_ownership.py \
+            "$DIAGNOSTIC_ROOT/evidence/process-ownership"
+          kill -0 "$external_pid"
       - name: Require kernel visibility before preparing the workload
         run: |
           python3 -B .github/profile/probe_kernel_perf.py \
@@ -93,7 +103,7 @@ jobs:
           assert build['sha256']==hashlib.sha256(binary).hexdigest()=='20718a5d655055d6447220cd0081f53d8ce222e01cb11d3f47833916d898c8a5'
           assert json.loads((root/'evidence/control-source.json').read_text())['head_sha']==build['source']
           changed=subprocess.check_output(['git','diff','--name-only','3a4d425ab823c0d4da140a98eaeb6e4caee49c13','HEAD'],text=True).splitlines()
-          assert changed==['.github/profile/diagnose_push_kernel.py','.github/profile/probe_kernel_perf.py','.github/workflows/git-protocol-v2-partial-clone.yml'],changed
+          assert changed==['.github/profile/diagnose_push_kernel.py','.github/profile/probe_kernel_perf.py','.github/profile/test_kernel_process_ownership.py','.github/workflows/git-protocol-v2-partial-clone.yml'],changed
           assert not subprocess.check_output(['git','diff','--name-only',build['source'],'3a4d425ab823c0d4da140a98eaeb6e4caee49c13','--','crab/src','crates','Cargo.toml','Cargo.lock'],text=True).strip()
           (root/'bin/crab').write_bytes(binary)
           (root/'bin/crab').chmod(0o755)
@@ -144,6 +154,13 @@ jobs:
           root=Path(os.environ['DIAGNOSTIC_ROOT'])
           report=json.loads((root/'workload/kernel-writers-50/artifacts/report.json').read_text())
           profiles=Path(os.environ['PROFILE_ROOT'])
+          ownership=json.loads((root/'evidence/process-ownership/proof.json').read_text())
+          assert ownership['status']=='passed' and ownership['uid']==os.getuid()!=0
+          assert all(ownership[key] is True for key in (
+              'timeout_reaps_escaped_child_and_grandchild','signal_reaps_two_escaped_process_trees',
+              'signal_during_popen_registration_reaped','already_orphaned_child_reaped',
+              'unrelated_sibling_survived',
+          ))
           assert report['status']=='ok' and len(report['branch_updates'])==400
           assert all(check['ok'] for check in report['checks'])
           rows=[json.loads(line) for line in (profiles/'receipts.jsonl').read_text().splitlines()]

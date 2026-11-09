@@ -1,18 +1,20 @@
 """Temporary kernel CPU attribution for the accepted normal binary; no speedup claim."""
 
 from collections import Counter
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import subprocess
 import sys
 import threading
 import time
 
-from probe_kernel_perf import capture, kernel_perf
+from probe_kernel_perf import kernel_perf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "crab/scripts/e2e"))
 from run_existing_ref_push_rustfs import ExistingRefPush
@@ -21,6 +23,7 @@ from run_concurrent_push_smoke import SmokeError, parse_args
 
 HEADER = re.compile(r"^\s*(.*?)\s+(\d+)/(\d+)\s+\[(\d+)\]\s+([\d.]+):\s+(\d+)\s+cpu-clock:k:\s*$")
 FRAME = re.compile(r"^\s+([0-9a-f]+)\s+(.+?)\s+\((.+)\)\s*$")
+PR_SET_CHILD_SUBREAPER = 36
 
 
 def sha256_file(path):
@@ -56,26 +59,81 @@ def decode(script):
 class KernelPush(ExistingRefPush):
     def __init__(self, args, perf, profiles):
         super().__init__(args)
+        if sys.platform != "linux" or not hasattr(os, "pidfd_open"):
+            raise SmokeError("process ownership requires Linux pidfds")
+        # Git creates its own process groups. Adopt orphaned descendants so
+        # cancelling perf cannot leave a Git writer outside our ownership.
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_CHILD_SUBREAPER, ctypes.c_ulong(1), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+            raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
         self.perf = perf
         self.profiles = profiles
         self.batch = -1
         self.process_lock = threading.RLock()
         self.processes = set()
         self.stopping = False
+        self.launching = False
+        self.cancelling = False
         self.receipts = []
 
     def cancel(self):
+        self.stopping = True
+        # A signal may interrupt Popen before registration. Its caller finishes
+        # registration and retries cancellation before communicating with it.
+        if self.launching or self.cancelling:
+            return
         with self.process_lock:
-            self.stopping = True
-            for process in self.processes:
-                self.kill_group(process)
+            self.cancelling = True
+            roots = {process.pid for process in self.processes}
+            deadline = time.monotonic() + 10
+            try:
+                while True:
+                    pending = False
+                    for pid in self.children():
+                        try:
+                            descriptor = os.pidfd_open(pid)
+                        except ProcessLookupError:
+                            continue
+                        try:
+                            # Recheck ownership after opening the stable handle;
+                            # a disappearing /proc entry must never redirect a kill.
+                            if self.parent(pid) != os.getpid():
+                                continue
+                            try:
+                                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            poll = select.poll()
+                            poll.register(descriptor, select.POLLIN)
+                            if not poll.poll(0):
+                                pending = True
+                            elif pid not in roots:
+                                # Popen alone reaps registered wrappers. Only
+                                # adopted orphans are waited here, by exact PID.
+                                os.waitpid(pid, os.WNOHANG)
+                                pending = True
+                        finally:
+                            os.close(descriptor)
+                    if not pending and self.children() <= roots:
+                        return
+                    if time.monotonic() >= deadline:
+                        raise SmokeError("owned processes did not stop before cleanup deadline")
+                    time.sleep(0.01)
+            finally:
+                self.cancelling = False
 
     @staticmethod
-    def kill_group(process):
+    def parent(pid):
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+            status = Path(f"/proc/{pid}/status").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        return int(re.search(r"^PPid:\s+(\d+)$", status, re.M).group(1))
+
+    @classmethod
+    def children(cls):
+        return {int(path.name) for path in Path("/proc").iterdir()
+                if path.name.isdecimal() and cls.parent(int(path.name)) == os.getpid()}
 
     def push_concurrently(self, jobs):
         self.batch += 1
@@ -99,19 +157,21 @@ class KernelPush(ExistingRefPush):
         with self.process_lock:
             if self.stopping:
                 raise SmokeError("diagnostic cancelled")
-            process = subprocess.Popen(args, cwd=cwd, env=env, text=True, start_new_session=True,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.processes.add(process)
-            if self.stopping:
-                self.kill_group(process)
+            self.launching = True
+            try:
+                process = subprocess.Popen(args, cwd=cwd, env=env, text=True, start_new_session=True,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.processes.add(process)
+            finally:
+                self.launching = False
+        if self.stopping:
+            self.cancel()
         failure = None
         try:
             try:
                 stdout, stderr = process.communicate(timeout=timeout or self.args.timeout)
             except BaseException as error:
-                # Kill the owned group, including perf's Crab/Git descendants.
-                # Reaping only perf leaves writers running after a failed diagnostic.
-                self.kill_group(process)
+                self.cancel()
                 stdout, stderr = process.communicate()
                 failure = error
         finally:
@@ -155,7 +215,8 @@ class KernelPush(ExistingRefPush):
             command = [str(self.perf), "script", "--ns", "--show-task-events", "--show-lost-events",
                        "--kallsyms", str(self.profiles / "kallsyms.txt"), "-i", str(data),
                        "-F", "comm,pid,tid,cpu,time,event,ip,sym,dso,period"]
-            capture(command, script)
+            record = self.run_cmd(f"decode {data.stem}", command, self.profiles, timeout=30)
+            script.write_bytes(Path(record.stdout_log).read_bytes())
             samples, metadata = decode(script.read_text())
             lost = [line for line in metadata if "PERF_RECORD_LOST" in line]
             lost_records += len(lost)
@@ -185,7 +246,8 @@ class KernelPush(ExistingRefPush):
                    "comm_weights": comm_weights, "leaf_weights": leaf_weights,
                    "inclusive_weights": inclusive_weights}
         (self.profiles / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-        if count < 1000 or lost_records:
+        self.write_report(force=True)
+        if self.stopping or count < 1000 or lost_records:
             raise SmokeError("kernel attribution incomplete: insufficient samples or recorded losses")
 
 
