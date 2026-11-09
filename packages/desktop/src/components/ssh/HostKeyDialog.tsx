@@ -68,6 +68,15 @@ export function HostKeyDialog({
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.key === "Tab") {
+        const dialog = rejectRef.current?.closest('[role="dialog"], [role="alertdialog"]');
+        const controls = Array.from(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? []);
+        if (controls.length) {
+          const index = controls.indexOf(document.activeElement as HTMLElement);
+          e.preventDefault(); e.stopImmediatePropagation();
+          controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+        }
+      }
       if (e.key === "Escape") {
         e.stopPropagation();
         onReject();
@@ -175,7 +184,7 @@ export function HostKeyDialog({
                   Old Fingerprint
                 </span>
                 <div className="mt-1 rounded border border-gx-border bg-gx-bg-sub px-3 py-2 font-mono text-[11px] text-gx-muted line-through select-all">
-                  SHA256:{oldFingerprint}
+                  {oldFingerprint}
                 </div>
               </div>
               <div>
@@ -183,7 +192,7 @@ export function HostKeyDialog({
                   New Fingerprint
                 </span>
                 <div className="mt-1 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 font-mono text-[11px] text-gx-text select-all">
-                  SHA256:{fingerprint}
+                  {fingerprint}
                 </div>
               </div>
             </div>
@@ -193,7 +202,7 @@ export function HostKeyDialog({
                 SHA-256 Fingerprint
               </span>
               <div className="mt-1 rounded border border-gx-border bg-gx-bg-sub px-3 py-2 font-mono text-[11px] text-gx-text select-all">
-                SHA256:{fingerprint}
+                {fingerprint}
               </div>
             </div>
           )}

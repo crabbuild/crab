@@ -1,3 +1,4 @@
+import { HostKeyPrompts } from "./components/ssh/HostKeyPrompts";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
@@ -647,6 +648,7 @@ function Shell() {
         }}
       />
       <ToastManager />
+      <HostKeyPrompts />
       <Welcome />
       {fuzzySwitcher.open && state.workspaces.length > 0 && (
         <FuzzySwitcher

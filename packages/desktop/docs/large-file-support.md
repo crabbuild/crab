@@ -726,3 +726,65 @@ namespacing and legacy uncancellable handlers remain open.
   status, and the bundled sidecar lacks that capabilities method. These are
   follow-up implementation gaps, not passing checks. Current-head CI and the
   remaining acceptance matrix also remain open.
+
+## SSH host identity checkpoint
+
+Every SSH client created by the session manager now verifies the server key
+before authentication: direct connections, connection tests, reconnects and each
+jump hop use one connection owner. The network/authentication deadline pauses
+while the user reviews a host key. Verification remains active for rekeying;
+closing the client aborts an outstanding trust request. An omitted verifier
+rejects host identity rather than accepting it implicitly.
+
+The existing host-key dialog is now connected to the main-process trust owner.
+Unknown keys require an explicit decision; changed keys show both fingerprints
+and require the confirmation checkbox. Prompts are queued by opaque request ID,
+keyboard focus stays inside the active dialog, and rejection/closure cannot be
+accepted by a late response. The store is owned by the Electron user-data
+profile. A failed write cannot create an in-memory trusted pin, and corrupt or
+unreadable stores fail visibly instead of being overwritten. No profile or OS
+keychain entry is saved by the connection-test smoke.
+
+System `known_hosts` handling follows the
+[OpenSSH file rules](https://man.openbsd.org/sshd.8#SSH_KNOWN_HOSTS_FILE_FORMAT)
+for exact ports, hashed names, wildcard/negated patterns and revoked keys. System
+revocations reject even an app pin; explicit app pins are not bypassed by stale
+system trust. SHA-256 fingerprint text omits Base64 padding, and the randomart
+uses the same digest, matching a real `ssh-keygen -lv -E sha256` fixture. The
+[OpenSSH fingerprint implementation](https://github.com/openssh/openssh-portable/blob/master/sshkey.c)
+and installed ssh2 verifier/key-exchange source were checked. Certificate-authority
+host certificates are not qualified by this checkpoint.
+
+- Real loopback SSH first reproduced credentials sent without a trust decision.
+  Separate regressions reproduced incorrect port trust, ignored hashed names,
+  stale-system pin bypass and ignored revocation. Independent OpenSSH output
+  exposed the old MD5 art, malformed borders and padded fingerprint text. Eight
+  focused files pass 148 cases, including real reconnect/rekey, delayed/rejected
+  trust, aborted requests, persistence failures and the OpenSSH fixture.
+- The unsigned macOS arm64 package passes the actual connection form: reject
+  sends no credentials; reviewing beyond its five-second network deadline still
+  permits acceptance; saved trust is reused; changed fingerprints reject until
+  explicitly accepted and persist the new pin. Field labels, focus cycling and
+  disabled changed-key acceptance are exercised. The GUI smoke takes 13.2 seconds.
+  The same package repeats the real staged Crab/LFS SSH read/materialization and
+  native timeout/EOF cleanup proof in 8.6 seconds; both finish in 22.6 seconds.
+- Renderer/Electron builds, type checks, strict integration-spec type probes and
+  formatting pass. All 901 packaged renderer/Electron files match build output.
+  Evidence: `ssh-host-qualified-proof/`, `ssh-host-packaged-assets.json` and
+  `ssh-host-qualification.json` in the per-checkout external build directory.
+  Package: `desktop-ssh-host-trust/mac-arm64/Crab.app`. Selected screenshots were
+  inspected; the peer app was restored to its saved workflow with Activity empty.
+- Earlier smoke failures remain negative evidence: the empty start screen has no
+  SSH entry, one shutdown was interrupted, and the rotation fixture skipped its
+  listener close. ssh2's runtime Server lacks the `listening` property declared
+  by its types; both SSH fixtures now close through its actual API. The passing
+  GUI fixture starts from an opened repository. Debug instrumentation was removed.
+- Parent commit `5126ca9c2e9` passes the full SDK matrix, including the approved
+  public API snapshot gate in [SDK run 42684177152](https://github.com/crabbuild/crab/actions/runs/42684177152).
+  The desktop/architecture jobs were still running at this checkpoint.
+
+This does not qualify the complete desktop SSH path. Agent deployment/runtime
+pair delivery, capability negotiation, remote repository opening, selected
+storage identity forwarding, reconnect/disconnect ownership and cross-platform
+proof remain open, as does the empty-start SSH entry. The complete large-file
+acceptance matrix above remains the completion boundary.

@@ -174,7 +174,8 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
   } finally {
     if (writer) await cleanExit(writer);
     const exits = await Promise.allSettled(children.map(cleanExit)); clients.forEach(client => client.end());
-    if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
+    // ssh2 lacks net.Server.listening at runtime; always close the facade.
+    if (server) await new Promise<void>((resolve, reject) => server!.close(error => error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve()));
     rmSync(root, { recursive: true, force: true });
     for (const result of exits) if (result.status === "rejected") throw result.reason;
   }

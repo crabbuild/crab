@@ -26,6 +26,7 @@ import { registerSkillManagerIpc } from "./skill-manager-ipc";
 import { orchestratorReattach } from "./daemon/orchestrator-reattach";
 import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
+import { KnownHostsManager, type HostKeyRequest } from "./ssh-known-hosts";
 import { SshSessionManager } from "./ssh-manager";
 import { registerSshIpcHandlers } from "./ssh-ipc";
 import { RemoteTerminalManager } from "./ssh-terminal";
@@ -1842,7 +1843,24 @@ app.whenReady().then(async () => {
   const db = sshDatabase.getDb();
 
   // Core SSH modules
-  const sshSessionManager = new SshSessionManager();
+  const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
+  const verifyHostKey = knownHosts.authorize.bind(knownHosts);
+  const sshSessionManager = new SshSessionManager(undefined, verifyHostKey);
+  knownHosts.on("ssh:host-key-request", (prompt: HostKeyRequest) => {
+    if (!mainWindow || mainWindow.isDestroyed()) { void knownHosts.answer(prompt.requestId, false); return; }
+    mainWindow.webContents.send("ssh:host-key-request", prompt);
+  });
+  knownHosts.on("ssh:host-key-closed", (payload: { requestId: string }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("ssh:host-key-closed", payload);
+  });
+  ipcMain.handle("ssh:host-key-answer", (event, requestId: string, accepted: boolean) => {
+    if (event.sender !== mainWindow?.webContents || typeof requestId !== "string" || typeof accepted !== "boolean") throw new Error("Invalid SSH host-key decision");
+    return knownHosts.answer(requestId, accepted);
+  });
+  app.on("browser-window-created", (_event, window) => {
+    window.once("closed", () => { if (!mainWindow || mainWindow === window) knownHosts.cancelPending(); });
+  });
+  app.on("before-quit", () => knownHosts.cancelPending());
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);

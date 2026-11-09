@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Client } from "ssh2";
 import type { ClientChannel, SFTPWrapper, ConnectConfig } from "ssh2";
 import { getPassword } from "./keychain";
+import { connectVerified, type VerifyHostKey } from "./ssh-verified-connect";
 import type { AgentDeployer, DeployProgress } from "./ssh-deployer";
 import { DeployError } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
@@ -141,7 +142,7 @@ export class SshSessionManager extends EventEmitter {
   private _suspendedAt: number | null = null;
   private agentDeps: AgentDeployDeps | null = null;
 
-  constructor(agentDeps?: AgentDeployDeps) {
+  constructor(agentDeps?: AgentDeployDeps, private readonly verifyHostKey: VerifyHostKey = async () => false) {
     super();
     this.agentDeps = agentDeps ?? null;
     this.setupPowerMonitor();
@@ -326,7 +327,10 @@ export class SshSessionManager extends EventEmitter {
         }
       });
 
-      client.connect(config);
+      void connectVerified(client, config, profile.host, profile.port, this.verifyHostKey).catch(error => {
+        this.setStatus(profile.id, "error", error.message);
+        reject(error);
+      });
     });
   }
 
@@ -432,7 +436,7 @@ export class SshSessionManager extends EventEmitter {
       await new Promise<void>((resolve, reject) => {
         client!.on("ready", () => resolve());
         client!.on("error", (err: Error) => reject(err));
-        client!.connect(config);
+        void connectVerified(client!, config, profile.host, profile.port, this.verifyHostKey).catch(reject);
       });
 
       // Run `echo ok` and verify output
@@ -609,7 +613,7 @@ export class SshSessionManager extends EventEmitter {
         await new Promise<void>((resolve, reject) => {
           client.on("ready", () => resolve());
           client.on("error", (err: Error) => reject(err));
-          client.connect(config);
+          void connectVerified(client, config, conn.profile.host, conn.profile.port, this.verifyHostKey).catch(reject);
         });
 
         // Success: update the connection with the new client
@@ -914,7 +918,7 @@ export class SshSessionManager extends EventEmitter {
       await new Promise<void>((resolve, reject) => {
         firstClient.on("ready", () => resolve());
         firstClient.on("error", (err: Error) => reject(err));
-        firstClient.connect(firstConfig);
+        void connectVerified(firstClient, firstConfig, firstHop.host, firstHop.port, this.verifyHostKey).catch(reject);
       });
 
       // For multi-hop: chain through intermediate hosts using forwardOut
@@ -951,7 +955,7 @@ export class SshSessionManager extends EventEmitter {
         await new Promise<void>((resolve, reject) => {
           nextClient.on("ready", () => resolve());
           nextClient.on("error", (err: Error) => reject(err));
-          nextClient.connect(nextConfig);
+          void connectVerified(nextClient, nextConfig, nextHop.host, nextHop.port, this.verifyHostKey).catch(reject);
         });
 
         currentClient = nextClient;

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   Check,
@@ -620,13 +620,16 @@ function FormField({
   required?: boolean;
   children: React.ReactNode;
 }) {
+  const fieldId = useId();
+  const control = isValidElement<{ id?: string }>(children) && typeof children.type === "string" && ["input", "select", "textarea"].includes(children.type) ? children : null;
+  const controlId = control?.props.id ?? fieldId;
   return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-gx-text">
+    <div role={control ? undefined : "group"} aria-labelledby={control ? undefined : `${fieldId}-label`}>
+      <label id={`${fieldId}-label`} htmlFor={control ? controlId : undefined} className="mb-1 block text-xs font-medium text-gx-text">
         {label}
         {required && <span className="ml-0.5 text-red-500">*</span>}
       </label>
-      {children}
+      {control ? cloneElement(control, { id: controlId }) : children}
       {hint && <p className="mt-0.5 text-[10px] text-gx-muted">{hint}</p>}
     </div>
   );

@@ -603,6 +603,17 @@ contextBridge.exposeInMainWorld("crab", {
 
   // ─── SSH Remote Connections ─────────────────────────────────────────
   ssh: {
+    answerHostKey: (requestId: string, accepted: boolean) => ipcRenderer.invoke("ssh:host-key-answer", requestId, accepted) as Promise<void>,
+    onHostKeyRequest: (listener: (payload: import("./ssh-known-hosts").HostKeyRequest) => void) => {
+      const handler = (_event: unknown, payload: import("./ssh-known-hosts").HostKeyRequest) => listener(payload);
+      ipcRenderer.on("ssh:host-key-request", handler);
+      return () => { ipcRenderer.removeListener("ssh:host-key-request", handler); };
+    },
+    onHostKeyClosed: (listener: (payload: { requestId: string }) => void) => {
+      const handler = (_event: unknown, payload: { requestId: string }) => listener(payload);
+      ipcRenderer.on("ssh:host-key-closed", handler);
+      return () => { ipcRenderer.removeListener("ssh:host-key-closed", handler); };
+    },
     listProfiles: () =>
       ipcRenderer.invoke("ssh:list-profiles"),
     saveProfile: (profile: Record<string, unknown>) =>
