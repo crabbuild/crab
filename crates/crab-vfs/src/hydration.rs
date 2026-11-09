@@ -788,7 +788,10 @@ impl HydrationService {
     ) -> Result<Option<crab_staging::StagedFilePin>> {
         match &self.pointer_reader {
             Some(reader) => match pointer {
-                FilePointer::Crab(pointer) => reader.pin_file(pointer).await.map_err(Into::into),
+                FilePointer::Crab(pointer) => reader
+                    .pin_file_with_cancel(pointer, &self.state.cancel)
+                    .await
+                    .map_err(Into::into),
                 FilePointer::Lfs(_) => Ok(None),
             },
             None => Ok(None),

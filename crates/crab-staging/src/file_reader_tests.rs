@@ -97,6 +97,69 @@ async fn metadata_pages_preserve_repeated_occurrences_across_recipe_boundaries()
 }
 
 #[tokio::test]
+async fn writer_admission_cancels_without_blocking_the_runtime() {
+    let (root, content, hash) = segmented().await;
+    let writer = StagingArea::open(root.path().to_owned()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let read = StagedFileReader::open_with_cancel(
+        root.path().to_owned(),
+        hash,
+        content.len() as u64,
+        &cancel,
+    );
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        result = &mut read => panic!("reader bypassed exclusive writer: {}", result.is_ok()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+    }
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(StagingError::Cancelled)));
+    writer.close().await.unwrap();
+    StagingArea::open(root.path().to_owned())
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn writer_release_admits_the_complete_retained_recipe() {
+    let (root, content, hash) = segmented().await;
+    let writer = StagingArea::open(root.path().to_owned()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let read = StagedFileReader::open_with_cancel(
+        root.path().to_owned(),
+        hash,
+        content.len() as u64,
+        &cancel,
+    );
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        result = &mut read => panic!("reader bypassed exclusive writer: {}", result.is_ok()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+    }
+    writer.close().await.unwrap();
+    let reader = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reader
+            .read_range(0..content.len() as u64, &cancel)
+            .await
+            .unwrap(),
+        content
+    );
+}
+
+#[tokio::test]
 async fn lifetime_pin_preserves_reads_through_retirement_and_exclusive_maintenance() {
     for prepared_source in [false, true] {
         let (root, content, hash) = if prepared_source {

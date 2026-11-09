@@ -124,13 +124,41 @@ impl StagedFileReader {
     /// Existing but corrupt staging and size mismatches remain errors. The shared
     /// handle lasts for this operation, so it cannot block writers for a mount's lifetime.
     pub async fn open(root: PathBuf, hash: MerkleHash, size: u64) -> Result<Option<Self>> {
+        Self::open_with_cancel(root, hash, size, &CancellationToken::new()).await
+    }
+
+    /// Queue behind a staging writer while observing the caller's cancellation.
+    ///
+    /// Uses the existing staging admission deadline; cancellation releases queued
+    /// admission and awaits any started metadata work before returning.
+    pub async fn open_with_cancel(
+        root: PathBuf,
+        hash: MerkleHash,
+        size: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Self>> {
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
         match tokio::fs::metadata(&root).await {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        let staging = Arc::new(StagingAreaReadOnly::open(root).await?);
-        Self::capture(staging, hash, size)
+        let staging = Arc::new(StagingAreaReadOnly::open_for_file(root, cancel).await?);
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            if cancel.is_cancelled() {
+                return Err(StagingError::Cancelled);
+            }
+            let reader = Self::capture(staging, hash, size)?;
+            if cancel.is_cancelled() {
+                return Err(StagingError::Cancelled);
+            }
+            Ok(reader)
+        })
+        .await
+        .map_err(|error| StagingError::Io(std::io::Error::other(error)))?
     }
 
     fn capture(

@@ -572,3 +572,31 @@ incrementally and complete reads retain their separate 200 MiB ceiling.
   Notebook, inline staging/review, mode-only large-file changes, format comparisons
   and remaining provider/profile surfaces still require implementation or
   qualification; this does not close the matrix.
+
+## Staging-writer admission checkpoint
+
+The final comparison smoke exposed `CRAB-E0081` while a background Git clean
+filter held staging admission. Shared file readers previously used a short,
+synchronous lock attempt. They now queue asynchronously using staging's existing
+120-second budget and the caller's cancellation token. Started metadata work is
+joined before return; contention remains distinct from missing local content.
+No alternate source or new runtime setting is introduced.
+
+Native `Open` also listens for close/EOF before `Ready`, cancels queued admission,
+and drains its setup work before acknowledging `Closed`. Chunk, range, complete,
+CLI hydration and VFS pin owners share the same source-selection boundary.
+The tokenless Rust entry points shipped in `v2.0.0-alpha.1` delegate to that path;
+current owned operations supply their existing cancellation token.
+
+- Twelve staging-reader cases passed, including single-thread cancellation,
+  writer release, complete retained bytes, sibling cleanup, corruption and
+  retirement. Shared staging/read Clippy and the NFS consumer build passed.
+- Eight real CLI pointer/filter cases passed with the desktop pathspec feature,
+  including close/EOF before `Ready` while an exclusive writer stays active.
+  The lease restoration fixture now selects its single pointer with `--all`:
+  optional pathspec syntax is separate from the exact-byte and unchanged-index
+  lease assertions. Both minimal and desktop-pathspec CLI profiles passed all
+  eight cases after that fixture fix.
+- The matching native rebuild and comparison GUI rerun remain pending. Earlier
+  final-package preview/materialization and real-storage/cold-LFS checks passed;
+  the failed comparison smoke is not counted as successful GUI qualification.

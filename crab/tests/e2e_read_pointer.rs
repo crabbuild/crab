@@ -63,6 +63,15 @@ struct Reader {
 
 impl Reader {
     fn open(root: &Path, pointer: &[u8]) -> Self {
+        let mut reader = Self::spawn(root);
+        reader.send(Request::Open {
+            pointer_b64: STANDARD.encode(pointer),
+        });
+        assert!(matches!(reader.next(), Response::Ready { .. }));
+        reader
+    }
+
+    fn spawn(root: &Path) -> Self {
         let mut child = command(root, env!("CARGO_BIN_EXE_crab"), &["read-pointer"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -71,16 +80,11 @@ impl Reader {
             .unwrap();
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().unwrap());
-        let mut reader = Self {
+        Self {
             child,
             input,
             output,
-        };
-        reader.send(Request::Open {
-            pointer_b64: STANDARD.encode(pointer),
-        });
-        assert!(matches!(reader.next(), Response::Ready { .. }));
-        reader
+        }
     }
 
     fn send(&mut self, request: Request) {
@@ -137,6 +141,42 @@ fn content() -> Vec<u8> {
 }
 
 #[test]
+fn close_before_ready_drains_reader_waiting_for_a_staging_writer() {
+    let directory = fixture();
+    let root = directory.path();
+    std::fs::write(root.join("file.bin"), content()).unwrap();
+    git(root, &["add", "file.bin"]);
+    let pointer = git(root, &["show", ":file.bin"]);
+    let context = crab::git::worktree::WorktreeContext::resolve_from_path(root).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for close_command in [true, false] {
+        let writer = runtime
+            .block_on(crab_staging::StagingArea::open(
+                context.shared_staging_dir(),
+            ))
+            .unwrap();
+        let mut reader = Reader::spawn(root);
+        reader.send(Request::Open {
+            pointer_b64: STANDARD.encode(&pointer),
+        });
+        if close_command {
+            reader.send(Request::Close);
+        }
+        reader.input.take();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let response = reader.next();
+            reader.assert_exit();
+            let _ = send.send(response);
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(1));
+        runtime.block_on(writer.close()).unwrap();
+        worker.join().unwrap();
+        assert!(matches!(result.unwrap(), Response::Closed));
+    }
+}
+
+#[test]
 fn hydrate_reads_the_same_delegated_git_clean_lease_as_native_ranges() {
     let directory = fixture();
     let root = directory.path();
@@ -152,7 +192,7 @@ fn hydrate_reads_the_same_delegated_git_clean_lease_as_native_ranges() {
     let result = command(
         root,
         env!("CARGO_BIN_EXE_crab"),
-        &["hydrate", &format!(":(top,literal){path}"), "--json"],
+        &["hydrate", "--all", "--json"],
     )
     .output()
     .unwrap();

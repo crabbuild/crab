@@ -44,7 +44,7 @@ impl PointerReader {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        let page = match self.source(pointer).await? {
+        let page = match self.source(pointer, cancel).await? {
             PointerSource::Staged(local) => {
                 let chunks = local.chunk_page(start, limit)?;
                 let chunk_count = local.chunk_count();
@@ -90,6 +90,19 @@ impl PointerReader {
 
     /// Retain unpublished local content for a descriptor without blocking staging writers.
     pub async fn pin_file(&self, pointer: &Pointer) -> Result<Option<StagedFilePin>> {
+        self.pin_file_with_cancel(pointer, &CancellationToken::new())
+            .await
+    }
+
+    /// Retain unpublished content with cancellable staging-writer admission.
+    pub async fn pin_file_with_cancel(
+        &self,
+        pointer: &Pointer,
+        cancel: &CancellationToken,
+    ) -> Result<Option<StagedFilePin>> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
         let Some(root) = &self.staging_root else {
             return Ok(None);
         };
@@ -98,7 +111,7 @@ impl PointerReader {
         if matches!(tokio::fs::try_exists(root).await, Ok(false)) {
             return Ok(None);
         }
-        match self.source(pointer).await? {
+        match self.source(pointer, cancel).await? {
             PointerSource::Staged(local) => local.into_pin().map(Some).map_err(Into::into),
             PointerSource::Store(_) => Ok(None),
         }
@@ -128,7 +141,7 @@ impl PointerReader {
                 from_store: false,
             });
         }
-        match self.source(pointer).await? {
+        match self.source(pointer, cancel).await? {
             PointerSource::Staged(local) => Ok(PointerRead {
                 bytes: local.read_range(range, cancel).await?,
                 from_store: false,
@@ -154,7 +167,7 @@ impl PointerReader {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        match self.source(pointer).await? {
+        match self.source(pointer, cancel).await? {
             PointerSource::Staged(local) => local
                 .reconstruct_to_path(dest, cancel)
                 .await
@@ -227,7 +240,10 @@ impl PointerReader {
         })
     }
 
-    async fn source(&self, pointer: &Pointer) -> Result<PointerSource> {
+    async fn source(&self, pointer: &Pointer, cancel: &CancellationToken) -> Result<PointerSource> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
         let Some(root) = &self.staging_root else {
             return Ok(PointerSource::Store(pointer.clone()));
         };
@@ -243,10 +259,11 @@ impl PointerReader {
         }
         // Missing local ownership selects origin. A corrupt selected recipe is
         // an error; widening the remote catalog cannot repair unpublished bytes.
-        let local = StagedFileReader::open(
+        let local = StagedFileReader::open_with_cancel(
             root.clone(),
             MerkleHash::from(pointer.file_hash),
             pointer.size,
+            cancel,
         )
         .await?;
         Ok(match local {

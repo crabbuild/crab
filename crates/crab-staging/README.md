@@ -128,6 +128,13 @@ the selected terms. Its temporary pin journal is removed even while sibling
 readers remain active; payload reclamation belongs to push or exclusive
 maintenance. Shared-open filesystem/index admission runs off the Tokio worker.
 
+File readers queue asynchronously behind an active clean writer using the existing
+120-second staging admission budget. `open_with_cancel` interrupts that queue
+without blocking a runtime thread and joins started metadata work before return.
+The tokenless `open` API shipped in `v2.0.0-alpha.1` delegates to the same path;
+cancellation-aware CLI, desktop and VFS owners supply their existing read token.
+Selected corruption and admission exhaustion remain errors, never origin fallback.
+
 `StagedFileReader::into_pin` transfers the captured recipe into a
 `StagedFilePin` for an open unpublished file. It retains a metadata connection
 and an individually locked ready marker, releasing ordinary shared staging

@@ -147,6 +147,10 @@ independent cancellation; cancelling a page does not cancel its file. At most
 128 files are retained per repository. These stateful operations are rejected
 during SSH reconnection and are never served from stale cache or replayed.
 
+Native reader opening and queries share cancellable staging-writer admission.
+Closing a file while its reader is opening drains that admission before the
+helper acknowledges `Closed`, including when `Ready` has not yet been emitted.
+
 `file_materialize {repo_id, file_id, op_id}` writes a captured working Crab or
 LFS pointer through 1 MiB ranges to a same-directory temporary file. It verifies
 the complete content identity and rechecks the working pointer before atomic

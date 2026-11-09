@@ -1460,10 +1460,11 @@ async fn try_hydrate_from_staging(
         }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let Some(reader) = crab_staging::StagedFileReader::open(
+    let Some(reader) = crab_staging::StagedFileReader::open_with_cancel(
         context.shared_staging_dir(),
         MerkleHash::from(ptr.file_hash),
         ptr.size,
+        cancel,
     )
     .await?
     else {

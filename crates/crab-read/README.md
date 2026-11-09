@@ -196,6 +196,9 @@ lifetime. A staged source transfers a recipe pin without retaining staging's
 global shared lock; a captured remote source needs no local pin. The caller
 retains the returned pin until the open file closes or successfully acquires
 native backing. This local ownership does not retain remote objects against GC.
+Cancellation-aware owners use `pin_file_with_cancel`. Chunk, range and complete
+reads share cancellable staging admission, queuing behind a clean writer without
+blocking the async runtime. Contention never selects a different source.
 
 `install_git_packs_with_candidates_from_store` combines a captured view's
 origin-backed packs with verified candidate capsules. Candidates participate

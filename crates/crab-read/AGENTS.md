@@ -73,6 +73,9 @@ Git views and base errors are available. Test both profiles.
 `PointerReader::pin_file` lets open-file owners retain an unpublished recipe
 without retaining global staging admission. It shares canonical source selection;
 a local pin never replaces authenticated captured remote ownership.
+Cancellation-aware owners use `pin_file_with_cancel`; range, chunk and complete
+reads pass the same token through staging-writer admission. The tokenless API
+shipped in `v2.0.0-alpha.1` uses that same canonical source selection.
 `PointerReader` accepts resolved local LFS storage separately from Crab staging.
 Its LFS range path selects the captured remote only for absent local payloads;
 selected local corruption and I/O errors fail. Callers own an `LfsReadSession`

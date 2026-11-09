@@ -37,8 +37,41 @@ pub async fn run(cancel: &CancellationToken) -> Result<()> {
     let bytes = STANDARD
         .decode(pointer_b64)
         .map_err(std::io::Error::other)?;
-    let mut session = Session::open(&bytes).await?;
     let mut output = tokio::io::stdout();
+    let opening_cancel = cancel.child_token();
+    let opening = Session::open(&bytes, &opening_cancel);
+    tokio::pin!(opening);
+    let mut interruption = None;
+    let opened = tokio::select! {
+        biased;
+        result = &mut opening => result,
+        () = cancel.cancelled() => {
+            opening_cancel.cancel();
+            interruption = Some(Ok(None));
+            opening.await
+        }
+        command = input.next() => {
+            opening_cancel.cancel();
+            interruption = Some(command);
+            opening.await
+        }
+    };
+    if let Some(command) = interruption {
+        // Closing before Ready must drain lock admission and metadata work too.
+        // Otherwise a cancelled tab can leave a native child waiting on Git clean.
+        match opened {
+            Ok(session) => session.close().await?,
+            Err(error) if cancelled(&error, &opening_cancel) => {}
+            Err(error) => return Err(error),
+        }
+        match command? {
+            None | Some(Request::Close | Request::Cancel) => {
+                return emit(&mut output, Response::Closed).await;
+            }
+            _ => return Err(invalid("only cancel or close may interrupt reader opening")),
+        }
+    }
+    let mut session = opened?;
     let result = async {
         emit(
             &mut output,
@@ -143,7 +176,7 @@ struct Session {
 }
 
 impl Session {
-    async fn open(bytes: &[u8]) -> Result<Self> {
+    async fn open(bytes: &[u8], cancel: &CancellationToken) -> Result<Self> {
         if bytes.len() > crab_git::MAX_LFS_POINTER_SIZE {
             return Err(invalid("pointer exceeds its size limit"));
         }
@@ -171,7 +204,7 @@ impl Session {
                 .map_err(std::io::Error::other)??;
         let local = PointerReader::new(None, Some(staging.clone()), Some(storage.clone()));
         let pin = match &pointer {
-            Pointer::Crab(pointer) => local.pin_file(pointer).await?,
+            Pointer::Crab(pointer) => local.pin_file_with_cancel(pointer, cancel).await?,
             _ => None,
         };
         Ok(Self {

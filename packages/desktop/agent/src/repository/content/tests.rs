@@ -1,4 +1,5 @@
 use super::*;
+use crate::shellout;
 use tokio::io::AsyncWriteExt;
 
 async fn repository() -> (tempfile::TempDir, BrowseSession) {
