@@ -387,10 +387,10 @@ contextBridge.exposeInMainWorld("crab", {
   termKill: (id: string) => ipcRenderer.invoke("crab:term-kill", id),
   termListShells: () => ipcRenderer.invoke("crab:term-list-shells") as Promise<string[]>,
   termPoolHint: (cwd: string) => ipcRenderer.invoke("crab:term-pool-hint", cwd),
-  termSaveState: (state: { layout: unknown; scrollbackData: Record<string, string> }) =>
+  termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) =>
     ipcRenderer.invoke("crab:term-save-state", state) as Promise<{ success: boolean; error?: string }>,
-  termRestoreState: () =>
-    ipcRenderer.invoke("crab:term-restore-state") as Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>,
+  termRestoreState: (persistenceKey: string) =>
+    ipcRenderer.invoke("crab:term-restore-state", persistenceKey) as Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>,
   termNotify: (req: { title: string; body: string; icon: "success" | "error"; terminalId: string; tabIndex: number }) =>
     ipcRenderer.invoke("crab:term-notify", req),
   termLogPath: (sessionId: string) =>
@@ -399,8 +399,8 @@ contextBridge.exposeInMainWorld("crab", {
     ipcRenderer.invoke("crab:term-log-read", sessionId) as Promise<{ content: string | null; error: string | null }>,
   termLogList: () =>
     ipcRenderer.invoke("crab:term-log-list") as Promise<Array<{ sessionId: string; path: string; sizeBytes: number; mtimeMs: number }>>,
-  termClearSession: (sessionId: string) =>
-    ipcRenderer.invoke("crab:term-clear-session", sessionId) as Promise<{ success: boolean }>,
+  termClearSession: (sessionId: string, persistenceKey: string) =>
+    ipcRenderer.invoke("crab:term-clear-session", sessionId, persistenceKey) as Promise<{ success: boolean }>,
   termListDaemonSessions: (repoPath: string) =>
     ipcRenderer.invoke("crab:term-list-daemon-sessions", { repoPath }) as Promise<Array<{
       id: string;

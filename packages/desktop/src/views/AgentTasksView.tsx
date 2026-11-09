@@ -2688,11 +2688,12 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   const isVisible = active && activeTab === "terminal" && selectedTaskId === taskId;
                   return (
                     <div
-                      key={task.worktreePath}
+                      key={taskId}
                       className="absolute inset-0"
                       style={{ display: isVisible ? "block" : "none" }}
                     >
                       <TerminalView
+                        persistenceKey={`task:${task.id}`}
                         repo={{
                           ...repo,
                           repo_id: `task:${task.id}`,

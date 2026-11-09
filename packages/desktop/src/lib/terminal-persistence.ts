@@ -3,7 +3,7 @@
  *
  * Handles saving and restoring terminal layouts (tabs, splits, active tab,
  * quick terminal) across app restarts. The layout is persisted to
- * `~/.crab-desktop/terminal-state.json` via IPC to the main process.
+ * the app profile by repository or task identity via IPC to the main process.
  */
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -35,6 +35,7 @@ export interface SplitArrangement {
 
 /** IPC request payload for saving terminal state. */
 export interface SaveStateRequest {
+  persistenceKey: string;
   layout: PersistedLayout;
   scrollbackData: Record<string, string>;
 }

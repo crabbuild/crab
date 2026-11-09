@@ -1,6 +1,7 @@
 import { autoUpdater, UpdateInfo, ProgressInfo } from "electron-updater";
 import { BrowserWindow, ipcMain } from "electron";
 import * as log from "electron-log";
+import { join } from "node:path";
 
 // Configure electron-updater to use electron-log for diagnostics.
 autoUpdater.logger = log;
@@ -29,7 +30,13 @@ function send(channel: string, payload: unknown) {
 }
 
 function updateFailure(error: unknown) {
-  const code = error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
+  const failure = error !== null && typeof error === "object" ? error : {};
+  const code = "code" in failure ? failure.code : undefined;
+  // electron-updater reads this file in packaged builds; directory-only local
+  // packages may omit it. That is unavailable configuration, not a network failure.
+  if (code === "ENOENT" && "path" in failure && failure.path === join(process.resourcesPath, "app-update.yml")) {
+    return { channel: "updater:unavailable", message: "Automatic updates are not configured for this build." };
+  }
   // GitHub releases can contain only CLI archives. electron-updater 6.8
   // identifies missing desktop channel metadata separately from network failures.
   const unavailable = code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" || code === "ERR_UPDATER_NO_PUBLISHED_VERSIONS";

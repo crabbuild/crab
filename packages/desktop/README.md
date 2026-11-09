@@ -20,6 +20,8 @@ Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
 Terminal opens as a full page from its rail entry or the title-bar control.
 Ctrl+` switches between Terminal and the previous view. Navigating away keeps
 its sessions alive; agent chat terminals remain scoped to their tasks.
+Terminal layouts, scrollback, and logs stay inside the app profile. Layouts
+are isolated by repository or task, including when using a separate test profile.
 
 The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
 then More actions. Filter repositories by name or path; Escape clears the filter.

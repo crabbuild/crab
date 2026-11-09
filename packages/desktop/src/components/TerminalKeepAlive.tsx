@@ -394,6 +394,7 @@ export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKee
             >
               <TerminalView
                 repo={repo}
+                persistenceKey={repo.path ?? repo.repo_id}
                 visible={isActive}
                 startupRequest={isActive ? startupRequest : null}
                 onStartupRequestHandled={onStartupRequestHandled}

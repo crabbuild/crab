@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
@@ -265,6 +265,75 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   }
 });
 
+
+test("local build without updater configuration reports unavailable", async () => {
+  const executablePath = packagedExecutable();
+  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
+  test.skip(existsSync(path.join(resources, "app-update.yml")), "This build includes release updater configuration");
+  const root = mkdtempSync(path.join(tmpdir(), "crab-updater-unconfigured-"));
+  const application = await electron.launch({ executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+  try {
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const result = await page.evaluate(() => window.crab.updater.checkForUpdate());
+    expect(result).toEqual({ success: false, error: "Automatic updates are not configured for this build." });
+    await expect(page.getByRole("status").filter({ hasText: result.error })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  } finally {
+    await application.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal restore is isolated by profile and repository", async () => {
+  test.setTimeout(60_000);
+  const root = mkdtempSync(path.join(tmpdir(), "crab-terminal-isolation-"));
+  const testHome = path.join(root, "home");
+  const repository = path.join(root, "repository");
+  mkdirSync(testHome);
+  mkdirSync(repository);
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
+  const profile = path.join(root, "profile-a");
+  const env = { ...process.env, HOME: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
+  let application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
+  const savedLayout = { version: 1, tabs: [{ id: "old-tab", title: "Other repository shell", shell: "", cwd: path.join(root, "removed-repository") }], splits: [], activeTabIndex: 0 };
+  try {
+    let page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    expect(await page.evaluate(layout => window.crab.termSaveState({ persistenceKey: "other-repository", layout, scrollbackData: { "old-tab": "saved scrollback" } }), savedLayout)).toEqual({ success: true });
+    expect(await page.evaluate(() => window.crab.termRestoreState("other-repository"))).toEqual({ layout: savedLayout, scrollbackData: { "old-tab": "saved scrollback" } });
+    await page.evaluate(() => window.crab.termClearSession("old-tab", "other-repository"));
+    expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).scrollbackData).toEqual({});
+    expect((await page.evaluate(repository => window.crab.termRestoreState(repository), repository)).layout).toBeNull();
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+    const handle = await call(page, "open_local", { repo_id: "terminal-isolation", path: repository });
+    await page.evaluate(({ handle, repository }) => {
+      window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repository } }));
+    }, { handle, repository });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true }).click();
+    const terminal = page.getByRole("region", { name: "Terminal page", exact: true });
+    await expect(terminal).toBeVisible();
+    await expect(terminal.getByText("Other repository shell", { exact: true })).toHaveCount(0);
+    await terminal.locator(".xterm-helper-textarea:visible").first().focus();
+    const proof = path.join(root, "working-directory.txt");
+    await page.keyboard.type(`node -e "require('fs').writeFileSync(process.argv[1],process.cwd())" "${proof}"`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => existsSync(proof) ? readFileSync(proof, "utf8") : "").toBe(realpathSync(repository));
+    await page.screenshot({ path: test.info().outputPath("terminal-isolation.png") });
+    await application.close();
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile-b")}`], env });
+    page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).layout).toBeNull();
+    expect(existsSync(path.join(testHome, ".crab-desktop", "terminal-state.json"))).toBe(false);
+  } finally {
+    await application.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("workspace sidebar filters, pins, remembers recents and restores collapse and scroll", async () => {
   test.setTimeout(90_000);
