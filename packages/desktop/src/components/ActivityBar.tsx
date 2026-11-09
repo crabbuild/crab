@@ -3,130 +3,123 @@ import clsx from "clsx";
 import {
   Bot,
   Files,
-  FolderTree,
   GitGraph,
-  GitPullRequest,
-  LayoutDashboard,
   Monitor,
+  MoreHorizontal,
   Package,
-  Search,
   Settings,
-  SquareDot,
-  Terminal,
-  Globe,
   Workflow,
-  type LucideIcon,
-  Blocks,
 } from "lucide-react";
-
-export type SidebarView =
-  | "explorer"
-  | "search"
-  | "changes"
-  | "branches"
-  | "worktrees"
-  | "conflicts"
-  | "timeline"
-  | "pull-requests"
-  | "crab"
-  | "workflows"
-  | "agent-workflows"
-  | "terminal"
-  | "dashboard"
-  | "orchestrator"
-  | "agents"
-  | "browser"
-  | "ssh"
-  | "settings";
-
-interface ViewDef {
-  id: SidebarView;
-  label: string;
-  icon: LucideIcon;
-}
-
-export const VIEWS: ViewDef[] = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "orchestrator", label: "Chat", icon: Bot },
-  { id: "explorer", label: "Explorer", icon: Files },
-  { id: "search", label: "Search", icon: Search },
-  { id: "crab", label: "Large Files", icon: Package },
-  { id: "changes", label: "Changes & Stashes", icon: SquareDot },
-  { id: "worktrees", label: "Worktrees & Branches", icon: FolderTree },
-  { id: "timeline", label: "Timeline & Conflicts", icon: GitGraph },
-  { id: "pull-requests", label: "Pull Requests", icon: GitPullRequest },
-  { id: "agent-workflows", label: "Agent Workflows", icon: Blocks },
-  { id: "workflows", label: "Data Workflows", icon: Workflow },
-  { id: "browser", label: "Browser", icon: Globe },
-    { id: "ssh", label: "SSH Connections", icon: Monitor },
-  { id: "terminal", label: "Terminal", icon: Terminal },
-  { id: "settings", label: "Settings", icon: Settings },
-];
+import { navigationGroup, type SidebarView } from "../lib/navigation";
+import { ContextMenu } from "./ContextMenu";
 
 interface Props {
   active: SidebarView;
-  sidebarOpen: boolean;
   onSelect: (view: SidebarView) => void;
-  /** Views to hide from the activity bar (e.g. pull-requests when no
-   *  forge provider is detected). */
   hiddenViews?: SidebarView[];
-  /** Badge counts to display on view icons (e.g. conflict count). */
   badges?: Partial<Record<SidebarView, number>>;
 }
 
-export function ActivityBar({ active, sidebarOpen: _sidebarOpen, onSelect, hiddenViews = [], badges = {} }: Props) {
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
+const PRIMARY = [
+  { id: "orchestrator", label: "Chat", icon: Bot },
+  { id: "explorer", label: "Files", icon: Files },
+  { id: "changes", label: "Git", icon: GitGraph },
+  { id: "crab", label: "Large Files", icon: Package },
+] as const;
 
-  // Tasks view is always visible — the orchestrator setting controls
-  // whether agents can be spawned, not whether the panel is accessible.
-  const visibleViews = hiddenViews.length > 0
-    ? VIEWS.filter((v) => !hiddenViews.includes(v.id))
-    : VIEWS;
-
+export function ActivityBar({
+  active,
+  onSelect,
+  hiddenViews = [],
+  badges = {},
+}: Props) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const moreItems = [
+    { id: "workflows" as const, label: "Data Workflows", icon: Workflow },
+    { id: "ssh" as const, label: "SSH Connections", icon: Monitor },
+  ].filter((item) => !hiddenViews.includes(item.id));
+  const buttonClass =
+    "relative mb-1 flex h-10 w-10 items-center justify-center rounded text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent";
   return (
     <nav
       className="flex h-full w-12 shrink-0 flex-col items-center border-r border-gx-border bg-gx-surface py-2"
       aria-label="Primary"
     >
-      {visibleViews.map((v) => {
-        const isActive = active === v.id;
+      {PRIMARY.map((item) => {
+        const selected =
+          active === item.id ||
+          (navigationGroup(active) != null &&
+            navigationGroup(active) === navigationGroup(item.id));
+        const count =
+          item.id === "changes"
+            ? (badges.changes ?? 0) + (badges.timeline ?? 0)
+            : (badges[item.id] ?? 0);
         return (
-          <div key={v.id} className="relative">
-            <button
-              type="button"
-              onClick={() => onSelect(v.id)}
-              onMouseEnter={() => setHoveredId(v.id)}
-              onMouseLeave={() => setHoveredId(null)}
-              className={clsx(
-                "relative mb-1 flex h-10 w-10 items-center justify-center rounded text-gx-muted transition",
-                isActive ? "text-gx-text" : "hover:text-gx-text hover:bg-gx-surface-hover",
-              )}
-              aria-label={v.label}
-              aria-pressed={isActive}
-            >
-              <v.icon size={20} />
-              {isActive && (
-                <span className="absolute left-0 top-1 h-8 w-[2px] rounded-r bg-gx-accent" />
-              )}
-              {/* Badge count indicator */}
-              {badges[v.id] != null && badges[v.id]! > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-gx-error px-1 text-[9px] font-bold text-white">
-                  {badges[v.id]! > 99 ? "99+" : badges[v.id]}
-                </span>
-              )}
-            </button>
-            {/* VS Code-style tooltip — appears to the right of the icon */}
-            {hoveredId === v.id && (
-              <div
-                className="pointer-events-none absolute left-[48px] top-1/2 z-50 -translate-y-1/2 whitespace-nowrap rounded border border-gx-border bg-gx-surface px-2 py-1 text-[11px] text-gx-text shadow-lg"
-                role="tooltip"
-              >
-                {v.label}
-              </div>
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onSelect(item.id)}
+            className={clsx(buttonClass, selected && "text-gx-text")}
+            aria-label={item.label}
+            aria-pressed={selected}
+            title={item.label}
+          >
+            <item.icon size={20} />
+            {selected && (
+              <span className="absolute left-0 top-1 h-8 w-px bg-gx-accent" />
             )}
-          </div>
+            {count > 0 && (
+              <span className="absolute right-0 top-0 rounded-full bg-gx-error px-1 text-[9px] text-white">
+                {count > 99 ? "99+" : count}
+              </span>
+            )}
+          </button>
         );
       })}
+      <button
+        type="button"
+        className={clsx(
+          buttonClass,
+          moreItems.some((item) => item.id === active) &&
+            "text-gx-text bg-gx-surface-hover",
+        )}
+        aria-label="More tools"
+        title="More tools"
+        aria-haspopup="menu"
+        aria-expanded={menu != null}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setMenu(menu ? null : { x: rect.right + 4, y: rect.top });
+        }}
+      >
+        <MoreHorizontal size={20} />
+      </button>
+      <div className="flex-1" />
+      <button
+        type="button"
+        className={clsx(
+          buttonClass,
+          active === "settings" && "text-gx-text bg-gx-surface-hover",
+        )}
+        aria-label="Settings"
+        title="Settings (⌘,)"
+        aria-pressed={active === "settings"}
+        onClick={() => onSelect("settings")}
+      >
+        <Settings size={20} />
+      </button>
+      {menu && (
+        <ContextMenu
+          items={moreItems}
+          position={menu}
+          onSelect={(id) => {
+            const item = moreItems.find((entry) => entry.id === id);
+            if (item) onSelect(item.id);
+            setMenu(null);
+          }}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </nav>
   );
 }

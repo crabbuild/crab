@@ -4,6 +4,14 @@ import { entry, state, workspace } from "./fixtures/workspace";
 
 // StoreProvider delegates these actions to this same reducer.
 describe("workspace state", () => {
+  it("records recent access only in the selected workspace", () => {
+    const local = workspace();
+    const remote = { ...workspace("/remote"), kind: "remote" as const, profileId: "server" };
+    const original = state([local, remote]);
+    const result = workspaceReducer(original, { type: "tab-bar-activate", relativePath: "repo" });
+    expect(result.workspaces[0].repos[0].lastAccessedAt).toBeGreaterThan(0);
+    expect(result.workspaces[1]).toBe(remote);
+  });
   it("opens distinct workspaces without replacing the others", () => {
     const local = workspace();
     const remote = { ...workspace("/remote"), kind: "remote" as const, profileId: "server" };
@@ -15,6 +23,13 @@ describe("workspace state", () => {
     const refreshed = workspace("/workspace", [entry("new")]);
     const result = workspaceReducer(state([workspace()]), { type: "workspace-set", workspace: refreshed });
     expect(result.workspaces).toEqual([refreshed]);
+  });
+
+  it("refresh preserves open handles and recent access for repositories still discovered", () => {
+    const opened = entry("repo", { level: 2, openRepoId: "opened", lastAccessedAt: 42 });
+    const original = state([workspace("/workspace", [opened, entry("removed")])]);
+    const result = workspaceReducer(original, { type: "workspace-set", workspace: workspace("/workspace", [entry("repo"), entry("new")]) });
+    expect(result.workspaces[0].repos).toEqual([opened, entry("new")]);
   });
 
   it("selects a workspace independently of repository tabs", () => {

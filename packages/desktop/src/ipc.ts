@@ -1250,6 +1250,7 @@ declare global {
       };
       // SSH enhanced operations
       ssh: {
+        openAsRepo: (profileId: string, path: string) => Promise<RepoHandle>;
         // Sync operations
         syncAddPair: (config: { profileId: string; localDir: string; remoteDir: string; ignorePatterns?: string[] }) => Promise<{ syncPairId: string }>;
         syncRemovePair: (syncPairId: string) => Promise<void>;

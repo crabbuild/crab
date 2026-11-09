@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Terminal } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Maximize2, Minimize2, Terminal } from "lucide-react";
 import clsx from "clsx";
 import { OpenRepo, WorkspaceRepoEntry } from "../state";
 import { createPresetManager, type StartupCommand } from "../lib/terminal-presets";
@@ -21,6 +21,9 @@ interface Props {
   /** Bottom terminal panel toggle. */
   terminalOpen: boolean;
   onToggleTerminal: () => void;
+  terminalMaximized: boolean;
+  onToggleTerminalMaximized: () => void;
+  onShowOverview: () => void;
   /** Called when user selects an agent preset from the dropdown. */
   onSpawnAgentTerminal?: (cmd: StartupCommand) => void;
   /** Workspace name (when a workspace is active). */
@@ -61,6 +64,9 @@ export function TopBar({
   onForward,
   terminalOpen,
   onToggleTerminal,
+  terminalMaximized,
+  onToggleTerminalMaximized,
+  onShowOverview,
   onSpawnAgentTerminal,
   workspaceName,
   workspaceRepos,
@@ -182,24 +188,14 @@ export function TopBar({
             ref={wsDropdownRef}
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            <button
-              type="button"
-              className="flex items-center gap-2 rounded-md border border-gx-border/60 bg-gx-bg-sub px-3 py-1 text-[12px] hover:border-gx-accent/50 hover:bg-gx-surface-hover transition"
-              onClick={() => setWsDropdownOpen((o) => !o)}
-              title={`Workspace: ${workspaceName}\nClick to switch repos`}
-            >
-              <FolderGit2 size={12} className="shrink-0 text-gx-accent" />
-              <span className="shrink-0 font-medium text-gx-text">{workspaceName}</span>
-              {activeRepo && (
-                <>
-                  <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-                  <span className="shrink-0 text-[11px] text-gx-muted max-w-[160px] truncate">
-                    {activeRepo.label}
-                  </span>
-                </>
-              )}
-              <ChevronDown size={10} className={clsx("shrink-0 text-gx-muted transition", wsDropdownOpen && "rotate-180")} />
-            </button>
+            <div className="flex max-w-full items-center rounded-md border border-gx-border/60 bg-gx-bg-sub text-xs">
+              <button type="button" aria-label="Repository overview" title="Repository overview" onClick={onShowOverview} className="flex min-w-0 items-center gap-2 rounded-l-md px-3 py-1 hover:bg-gx-surface-hover">
+                <FolderGit2 size={12} className="shrink-0 text-gx-accent" />
+                <span className="max-w-32 truncate text-gx-muted">{workspaceName}</span>
+                {activeRepo && <><ChevronRight size={10} className="shrink-0 text-gx-muted" /><span className="max-w-40 truncate text-gx-text">{activeRepo.label}</span></>}
+              </button>
+              <button type="button" aria-label="Switch repository" aria-expanded={wsDropdownOpen} onClick={() => setWsDropdownOpen((value) => !value)} className="rounded-r-md border-l border-gx-border px-2 py-2 text-gx-muted hover:bg-gx-surface-hover"><ChevronDown size={10} /></button>
+            </div>
 
             {/* Dropdown list of workspace repos */}
             {wsDropdownOpen && (
@@ -245,10 +241,13 @@ export function TopBar({
           </div>
         ) : activeRepo ? (
           /* Single repo mode: standalone repo — show repo icon + name, no dropdown */
-          <div
+          <button
             className="flex min-w-0 max-w-full items-center gap-2 rounded-md border border-gx-border/60 bg-gx-bg-sub px-3 py-1 text-[12px]"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
             title={`${activeRepo.label}\n${activeRepo.url}`}
+            type="button"
+            aria-label="Repository overview"
+            onClick={onShowOverview}
           >
             {isWorktree ? (
               <FolderTree size={12} className="shrink-0 text-gx-accent" />
@@ -265,16 +264,16 @@ export function TopBar({
                     : "repo"}
                 </span>
                 <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-                <span className="shrink-0 font-medium text-gx-accent">
+                <span className="min-w-0 truncate font-medium text-gx-accent">
                   {worktreeName}
                 </span>
               </>
             ) : (
-              <span className="shrink-0 font-medium text-gx-text">
+              <span className="min-w-0 truncate font-medium text-gx-text">
                 {activeRepo.label}
               </span>
             )}
-          </div>
+          </button>
         ) : (
           <div
             className="select-none text-[11px] text-gx-muted"
@@ -289,6 +288,7 @@ export function TopBar({
         className="flex shrink-0 items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
+        {terminalOpen && <button type="button" aria-label={terminalMaximized ? "Restore terminal" : "Maximize terminal"} title={terminalMaximized ? "Restore terminal" : "Maximize terminal"} onClick={onToggleTerminalMaximized} className="rounded p-2 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text">{terminalMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>}
         <TerminalSplitButton
           terminalOpen={terminalOpen}
           onToggleTerminal={onToggleTerminal}

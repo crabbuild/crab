@@ -3,7 +3,7 @@ import { OpenRepo } from "../state";
 import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, rpc } from "../ipc";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import { WorkspaceShell } from "./WorkspaceShell";
-import { SidebarView } from "./ActivityBar";
+import { isSidebarView, type SidebarView } from "../lib/navigation";
 import { useSession } from "../lib/session-context";
 import { useSetting } from "../settings";
 import { ExplorerView } from "../views/ExplorerView";
@@ -18,17 +18,14 @@ import { DashboardView } from "../views/DashboardView";
 import { CommitDetailView } from "../views/CommitDetailView";
 import { BranchDetailView } from "../views/BranchDetailView";
 import { SshView } from "../views/SshView";
-import { TerminalView } from "../views/TerminalView";
 import { CrabFlowView } from "../views/FlowView";
 import { PullRequestsView } from "../views/PullRequestsView";
 import { PullRequestView } from "../views/PullRequestView";
 import { WorkflowEditorView } from "../views/WorkflowEditorView";
-import { AgentWorkflowBuilderView } from "../views/AgentWorkflowBuilderView";
 import { TimeMachineView } from "../views/TimeMachineView";
 import { WorktreeCompareView } from "../views/WorktreeCompareView";
 import { CrossRepoBranchCompareView, CrossRepoCompareTarget } from "../views/CrossRepoBranchCompareView";
 import { AgentTasksView } from "../views/AgentTasksView";
-import { BrowserView } from "../views/BrowserView";
 import { MergeEditor } from "./MergeEditor";
 import { EditorPane, EditorTab } from "./EditorPane";
 import { DiffView } from "../views/DiffView";
@@ -41,31 +38,6 @@ import { useSessionFile } from "../hooks/useSessionFile";
 import { useSessionSubView } from "../hooks/useSessionSubView";
 
 import { NavEntry } from "../hooks/useNavHistory";
-
-/**
- * Valid sidebar view identifiers for graceful fallback during session
- * restore. If a saved view was removed in a code update, we fall back
- * to "explorer" instead of rendering a broken state.
- */
-const KNOWN_VIEWS: SidebarView[] = [
-  "explorer",
-  "search",
-  "changes",
-  "branches",
-  "worktrees",
-  "conflicts",
-  "timeline",
-  "pull-requests",
-  "crab",
-  "workflows",
-  "agent-workflows",
-  "terminal",
-  "dashboard",
-  "orchestrator",
-  "agents",
-  "ssh",
-  "settings",
-];
 
 interface RepoDetailProps {
   repo: OpenRepo;
@@ -93,17 +65,17 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   const [rev, setRev] = useState<string | null>(null);
   const [activeView, setActiveViewRaw] = useState<SidebarView>(() => {
     // Priority: 1) repo.initialView (deferred open), 2) saved session, 3) "dashboard"
-    if (repo.initialView) return repo.initialView as SidebarView;
+    if (repo.initialView && isSidebarView(repo.initialView)) return repo.initialView;
     if (repo.path) {
       const session = sessionManager.activate(repo.path);
-      if (session?.activeView && KNOWN_VIEWS.includes(session.activeView as SidebarView)) {
-        const savedView = session.activeView as SidebarView;
+      if (session?.activeView && isSidebarView(session.activeView)) {
+        const savedView = session.activeView;
         // If the saved view is a non-full-pane view (e.g. "explorer") but
         // there was no active file, the user was likely seeing the dashboard
         // fallback. Restore to "dashboard" so the indicator matches reality.
         const fullPaneViews: SidebarView[] = [
-          "settings", "dashboard", "terminal", "crab",
-          "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
+          "settings", "dashboard", "crab",
+          "workflows", "orchestrator", "changes", "timeline",
           "pull-requests", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
@@ -152,28 +124,10 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     if (wt) setSelectedBranch(null);
   }, []);
 
-  // When navigating to "branches", redirect to the merged "worktrees"
-  // view. When navigating to "conflicts", redirect to "timeline".
   const setActiveView = useCallback((view: SidebarView) => {
-    if (view === "branches") {
-      localStorage.setItem("crab.worktreesBranches.tab", "branches");
-      setWorktreesBranchesTabRaw("branches");
-      setActiveViewRaw("worktrees");
-    } else if (view === "conflicts") {
-      localStorage.setItem("crab.timelineConflicts.tab", "conflicts");
-      setTimelineConflictsTabRaw("conflicts");
-      setActiveViewRaw("timeline");
-    } else {
-      // Clear branch selection when navigating away from worktrees
-      if (view !== "worktrees") {
-        setSelectedBranch(null);
-      }
-      // Clear conflict path when navigating away from timeline
-      if (view !== "timeline") {
-        setConflictPath(null);
-      }
-      setActiveViewRaw(view);
-    }
+    if (view !== "worktrees") setSelectedBranch(null);
+    if (view !== "timeline") setConflictPath(null);
+    setActiveViewRaw(view);
   }, []);
 
   // Start the native file watcher for this repo. Individual views
@@ -189,8 +143,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     const hidden: SidebarView[] = [];
     if (!repo.forge_provider) hidden.push("pull-requests");
     if (!features.sshRemoteEnabled) hidden.push("ssh");
-    // Agentic features moved to beyond-desktop
-    hidden.push("agent-workflows", "browser");
     return hidden;
   }, [repo.forge_provider, features.sshRemoteEnabled]);
 
@@ -212,9 +164,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   const [timelineCommits, setTimelineCommits] = useState<CommitRow[]>([]);
   const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(() => {
-    // Restore selectedBranch from session if the view is "worktrees" or "branches"
+    // Restore the branch selection owned by the worktrees view.
     // so the user returns to the exact branch they were looking at.
-    if ((activeView === "worktrees" || activeView === "branches") && repo.path) {
+    if (activeView === "worktrees" && repo.path) {
       const session = sessionManager.activate(repo.path);
       const savedBranch = session?.viewState?.selectedBranch;
       if (typeof savedBranch === "string" && savedBranch.length > 0) {
@@ -256,22 +208,21 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     return () => window.removeEventListener("crab:active-view-changed", handler);
   }, [repo.path, sessionManager]);
 
+  useEffect(() => {
+    const showOverview = () => setActiveView("dashboard");
+    window.addEventListener("crab:show-repository-overview", showOverview);
+    return () => window.removeEventListener("crab:show-repository-overview", showOverview);
+  }, [setActiveView]);
+
   // Restore view when navEntry changes (back/forward triggered).
   useEffect(() => {
     if (!navEntry || !isRestoringRef) return;
     isRestoringRef.current = true;
-    setActiveView(navEntry.view as SidebarView);
+    if (isSidebarView(navEntry.view)) setActiveView(navEntry.view);
     if (navEntry.commit !== undefined) setSelectedCommit(navEntry.commit ?? null);
     // Allow the next render cycle to complete before re-enabling push.
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [navEntry]);
-
-  // Switch to terminal view when an SSH terminal is opened from the SSH panel.
-  useEffect(() => {
-    const handler = () => setActiveView("terminal");
-    window.addEventListener("crab:open-ssh-terminal-here", handler);
-    return () => window.removeEventListener("crab:open-ssh-terminal-here", handler);
-  }, []);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -453,7 +404,8 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
       rpc.conflictList(repo.repo_id).then((r) => {
         setConflictCount(r.files.length);
         if (r.files.length > 0) {
-          setActiveView("conflicts");
+          setTimelineConflictsTabRaw("conflicts");
+          setActiveView("timeline");
         }
       }).catch(() => {});
     }
@@ -515,35 +467,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     }
   }, [entries, repo.path, repo.repo_id, sessionManager]);
 
-  // Drop tabs whenever the repo identity changes — mixing state
-  // across repos would produce confusing "same path, different file"
-  // bugs. If the repo specifies an initialView (e.g. "dashboard"
-  // after opening a deferred repo), switch to it so the workspace
-  // state can initialize before the user navigates elsewhere.
-  // On initial mount we always pass the computed activeView so
-  // WorkspaceShell's ActivityBar indicator stays in sync with the
-  // actual main pane content (avoids stale localStorage desync).
-  const [requestedView, setRequestedView] = useState<SidebarView | null>(
-    () => (repo.initialView as SidebarView) ?? activeView,
-  );
-  useEffect(() => {
-    setEditorTabs([]);
-    setDiffTabs([]);
-    setActiveKey(null);
-    if (repo.initialView) {
-      setRequestedView(repo.initialView as SidebarView);
-    }
-  }, [repo.repo_id]);
-
-  // Clear the requested view after WorkspaceShell has consumed it,
-  // so subsequent user navigation isn't blocked.
-  useEffect(() => {
-    if (requestedView) {
-      const timer = setTimeout(() => setRequestedView(null), 0);
-      return () => clearTimeout(timer);
-    }
-  }, [requestedView]);
-
+  // RepoDetail is keyed by repo_id in App; changing identity remounts its state.
   const entryByPath = useMemo(() => {
     const m = new Map<string, DirEntry>();
     for (const e of entries ?? []) m.set(e.path, e);
@@ -768,9 +692,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     return () => window.removeEventListener("crab:open-cross-repo-compare", handler);
   }, []);
 
-  // Sidebar content multiplexed by active view. Omitting a view here
-  // makes <WorkspaceShell/> render a "coming soon" placeholder —
-  // useful for future views we haven't built yet.
+  // Sidebar content uses the same route as the rail and local navigation.
   const views: Partial<Record<SidebarView, React.ReactNode>> = {
     explorer: (
       <ExplorerView
@@ -799,19 +721,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
       />
     ),
     crab: <CrabFlowView repo={repo} onSelectCommit={(sha) => { setSelectedCommit(sha); setActiveView("timeline"); }} onOpenFile={openFile} />,
-    branches: (
-      <WorktreesAndBranchesView
-        repo={repo}
-        onSelectWorktree={handleSelectWorktree}
-        selectedWorktree={selectedWorktree}
-        statusMap={worktreeStatusMap}
-        onStatusMapChange={setWorktreeStatusMap}
-        selectedBranch={selectedBranch}
-        onSelectBranch={handleSelectBranch}
-        requestedTab={worktreesBranchesTab}
-        onTabChange={handleTabChange}
-      />
-    ),
     worktrees: (
       <WorktreesAndBranchesView
         repo={repo}
@@ -826,32 +735,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
       />
     ),
     timeline: (
-      <TimelineAndConflictsView
-        repo={repo}
-        selectedCommit={selectedCommit}
-        onSelectCommit={(sha) => {
-          setSelectedCommit(sha);
-          if (sha) setConflictPath(null);
-        }}
-        onCommitsLoaded={setTimelineCommits}
-        timelineRefreshKey={timelineRefreshKey}
-        conflictPath={conflictPath}
-        onSelectConflictFile={(p) => {
-          setConflictPath(p);
-          if (p) setSelectedCommit(null);
-        }}
-        onConflictCountChange={(count) => {
-          setConflictCount(count);
-          rpc.conflictList(repo.repo_id).then((r) => {
-            setConflictFiles(r.files.map((f) => f.path));
-          }).catch(() => {});
-        }}
-        conflictCount={conflictCount}
-        requestedTab={timelineConflictsTab}
-        onTabChange={handleTimelineConflictsTabChange}
-      />
-    ),
-    conflicts: (
       <TimelineAndConflictsView
         repo={repo}
         selectedCommit={selectedCommit}
@@ -910,9 +793,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   // When the active view is NOT one of these and there are no open tabs,
   // we show the Dashboard as a landing page instead of a blank screen.
   const fullPaneActiveViews: SidebarView[] = [
-    "settings", "dashboard", "terminal", "crab",
-    "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
-    "pull-requests", "worktrees", "browser",
+    "settings", "dashboard", "crab",
+    "workflows", "orchestrator", "changes", "timeline",
+    "pull-requests", "worktrees",
   ];
   const showDashboardFallback =
     !hasOpenTabs &&
@@ -928,16 +811,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         <WorkspaceShell
           views={views}
           onViewChange={setActiveView}
-          requestedView={requestedView}
-          fullPaneViews={["settings", "dashboard", "terminal", "crab", "workflows", "agent-workflows", "orchestrator", "changes", "ssh", "browser"]}
+          activeView={activeView}
+          fullPaneViews={["settings", "dashboard", "crab", "workflows", "orchestrator", "changes", "ssh"]}
           hiddenViews={hiddenViews}
           badges={conflictCount > 0 ? { timeline: conflictCount } : undefined}
           main={
             <div className="relative flex h-full w-full min-w-0 flex-col">
-              {/* Terminal is always mounted but hidden when not active to preserve PTY sessions */}
-              <div className={activeView === "terminal" ? "absolute inset-0 flex" : "hidden"}>
-                <TerminalView repo={repo} />
-              </div>
               {activeView === "settings" ? (
                 <SettingsView />
               ) : activeView === "ssh" ? (
@@ -946,8 +825,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                 <CrabFlowView repo={repo} onSelectCommit={(sha) => { setSelectedCommit(sha); setActiveView("timeline"); }} onOpenFile={openFile} />
               ) : activeView === "workflows" ? (
                 <WorkflowEditorView repo={repo} />
-              ) : activeView === "agent-workflows" ? (
-                <AgentWorkflowBuilderView repo={repo} />
               ) : activeView === "orchestrator" ? (
                 <AgentTasksView repo={repo} onOpenAgentManager={() => {
                   setActiveView("settings");
@@ -965,10 +842,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                   activeDiffPath={null}
                   onCommit={() => setTimelineRefreshKey((k) => k + 1)}
                 />
-              ) : activeView === "terminal" ? (
-                null
-              ) : activeView === "browser" ? (
-                <BrowserView repoPath={repo.path} />
               ) : activeView === "dashboard" ? (
                 <DashboardView
                   repo={repo}
@@ -978,7 +851,8 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                   }}
                   onSelectBranch={(name) => {
                     setSelectedBranch(name);
-                    setActiveView("branches");
+                    setWorktreesBranchesTabRaw("branches");
+                    setActiveView("worktrees");
                   }}
                 />
             ) : activeView === "timeline" && selectedCommit ? (
@@ -1075,7 +949,8 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                 }}
                 onSelectBranch={(name) => {
                   setSelectedBranch(name);
-                  setActiveView("branches");
+                  setWorktreesBranchesTabRaw("branches");
+                    setActiveView("worktrees");
                 }}
               />
             ) : splitTab ? (

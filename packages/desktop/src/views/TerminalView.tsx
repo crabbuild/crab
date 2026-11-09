@@ -147,7 +147,17 @@ import { usePtyMode } from "../lib/pty-mode-context";
 
 // --- Types ---
 
+export interface SshTerminalRequest {
+  profileId: string;
+  hostname: string;
+  colour?: string;
+  cwd?: string;
+}
+
 interface Props {
+  sshRequest?: SshTerminalRequest | null;
+  onSshRequestHandled?: () => void;
+  globalTerminal?: boolean;
   repo: OpenRepo;
   /**
    * Optional — when provided, non-zero exit codes surface a "Send error
@@ -509,7 +519,7 @@ function savePasteGuardConfig(config: PasteGuardConfig) {
  * - Export output (text / HTML)
  * - Copy all output, rename tabs, search, context menu
  */
-export function TerminalView({ repo, onSendErrorToAgent, visible = true, defaultSessionType }: Props) {
+export function TerminalView({ repo, onSendErrorToAgent, visible = true, defaultSessionType, sshRequest, onSshRequestHandled, globalTerminal = false }: Props) {
   const initialLeaf = createLeaf();
   const [splitTree, setSplitTree] = useState<SplitNode>(initialLeaf);
   const [activePaneId, setActivePaneId] = useState(initialLeaf.id);
@@ -993,7 +1003,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
         env?: Record<string, string>;
         agentMeta?: AgentMeta;
       } | undefined;
-      if (!cmd) return;
+      if (!cmd || !visible || !globalTerminal) return;
       const leaf = findLeaf(splitTreeRef.current, activePaneId) ?? getAllLeaves(splitTreeRef.current)[0];
       if (!leaf) return;
       void spawnTab(leaf.id, undefined, {
@@ -1008,24 +1018,16 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
     window.addEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
     return () => window.removeEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId]);
+  }, [splitTree, activePaneId, visible, globalTerminal]);
 
-  // Listen for "Open Terminal Here" requests from the remote file tree context menu.
+  // App queues this request until the active global terminal has mounted.
+  // Hidden repo and task terminals must never consume another terminal's request.
   useEffect(() => {
-    function handleOpenTerminalHere(e: Event) {
-      const detail = (e as CustomEvent).detail as {
-        profileId: string;
-        hostname: string;
-        colour?: string;
-        cwd: string;
-      } | undefined;
-      if (!detail) return;
-      void spawnSshTab(detail.profileId, detail.hostname, detail.cwd, detail.colour);
-    }
-    window.addEventListener("crab:open-ssh-terminal-here", handleOpenTerminalHere);
-    return () => window.removeEventListener("crab:open-ssh-terminal-here", handleOpenTerminalHere);
+    if (!sshRequest || !visible || !globalTerminal) return;
+    void spawnSshTab(sshRequest.profileId, sshRequest.hostname, sshRequest.cwd, sshRequest.colour);
+    onSshRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId]);
+  }, [sshRequest, visible, globalTerminal]);
 
   // Cmd+Shift+T: open a remote terminal on the most recently used SSH connection.
   useEffect(() => {
