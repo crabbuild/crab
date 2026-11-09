@@ -1501,7 +1501,7 @@ jobs:
           window_seconds=60
           xet_root="${RUNNER_TEMP}/crab-s3-gateway-xet"
           crab_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release/crab"
-          run_owner() {
+          run_crab() {
             (
               cd "${xet_root}/source"
               AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
@@ -1514,11 +1514,16 @@ jobs:
               AWS_EC2_METADATA_DISABLED=true \
               AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
               CRAB_CACHE_DIR="${xet_root}/owner-cache" \
-                "${crab_bin}" metadb owner "$@"
+                "${crab_bin}" "$@"
             )
           }
+          # The SDK fixture publishes remote bytes without configuring a local
+          # CLI repository. Configure it before starting native maintenance.
+          run_crab configure \
+            crab://crab-s3-gateway-qualification/repositories/qualification \
+            --provider s3 --no-auto-track
           for attempt in $(seq 1 30); do
-            run_owner --once --jsonl >"${xet_root}/owner-preflight.jsonl"
+            run_crab metadb owner --once --jsonl >"${xet_root}/owner-preflight.jsonl"
             action="$(jq -r '.data.action' "${xet_root}/owner-preflight.jsonl")"
             pending="$(jq -r '.data.geometric_repack_packs' \
               "${xet_root}/owner-preflight.jsonl")"
@@ -1536,7 +1541,7 @@ jobs:
             aws --endpoint-url http://127.0.0.1:18080 s3api list-objects-v2 \
               --bucket gateway-repository --prefix main/ --max-keys 1 \
               --no-paginate >/dev/null
-          run_owner --interval 5 --jsonl \
+          run_crab metadb owner --interval 5 --jsonl \
             >"${xet_root}/owner.jsonl" 2>"${xet_root}/owner.stderr" &
           owner_pid=$!
           stop_owner() {
@@ -1842,6 +1847,10 @@ jobs:
               steps.graceful.outcome == 'success' &&
               steps.compose.outcome == 'success' &&
               steps.report.outcome == 'success' }}
+        env:
+          SOAK_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.sustained_soak }}
+          SOAK_OUTCOME: ${{ steps.soak.outcome }}
+          SOAK_SECONDS: ${{ inputs.soak_duration_seconds }}
         run: |
           report="${RUNNER_TEMP}/crab-s3-gateway-evidence/report.json"
           if grep -Fq \
@@ -1950,6 +1959,20 @@ jobs:
               "${path}" >/dev/null
           done
           soak="${RUNNER_TEMP}/crab-s3-gateway-evidence/soak-proof.json"
+          owner="${RUNNER_TEMP}/crab-s3-gateway-evidence/owner-proof.json"
+          # The soak keeps collecting diagnostics after failure. Missing output
+          # must fail a requested qualification instead of skipping its checks.
+          if test "${SOAK_REQUESTED}" = true; then
+            if test "${SOAK_OUTCOME}" != success || ! test -s "${soak}" || ! test -s "${owner}"; then
+              echo "Requested signed-write soak did not complete with soak and owner proof" >&2
+              exit 1
+            fi
+            jq -e --argjson seconds "${SOAK_SECONDS}" \
+              '.workload.duration_seconds == $seconds and
+               .gateway.elapsed_ms >= ($seconds * 1000) and
+               .comparison.integrity_passed and .comparison.performance_passed' \
+              "${soak}" >/dev/null
+          fi
           if test -f "${soak}"; then
             if grep -Fq \
               -e "${RUSTFS_ACCESS_KEY}" \
@@ -1965,7 +1988,6 @@ jobs:
             fi
             jq -e '.status == "passed"' "${soak}" >/dev/null
           fi
-          owner="${RUNNER_TEMP}/crab-s3-gateway-evidence/owner-proof.json"
           if test -f "${owner}"; then
             if grep -Fq \
               -e "${RUSTFS_ACCESS_KEY}" \
@@ -1980,7 +2002,7 @@ jobs:
               exit 1
             fi
             jq -e \
-              '.schema == "crab.s3-gateway-owner-soak" and .owner_alive == true' \
+              '.schema == "crab.s3-gateway-owner-soak" and .owner_alive == true and .samples > 0' \
               "${owner}" >/dev/null
           fi
 
