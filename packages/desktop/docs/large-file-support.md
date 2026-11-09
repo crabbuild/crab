@@ -370,3 +370,37 @@ reopen action. File size is logical; no disk/cache availability is inferred.
   `desktop-media/mac-arm64/Crab.app` in the per-worktree external build directory.
   The other Crab build was restored to its saved workflow after both checks.
   Remote media UI, cold multi-GiB LFS and the remaining matrix are unqualified.
+
+
+## Hydration ownership audit
+
+The native reproduction found two independent paths behind the inspector's
+hydrate action. `crab hydrate` returned success with zero selected files for LFS,
+leaving its pointer untouched. A newly Git-cleaned Crab pointer failed to hydrate
+although its native captured reader returned the correct bytes.
+
+Crab staging reads now use `StagedFileReader`, including delegated Git-clean
+leases, rather than a second reconstruction loop that required a published path
+head. The shared reader retains the exact recipe, bounds coalesced payload reads
+and verifies complete BLAKE3 before atomic publication. Selected staging errors
+propagate through both configured and unconfigured hydrators instead of being
+replaced with the earlier remote lookup error. No publication authority changes.
+
+- The delegated-recipe command regression failed before the fix and passed
+  afterward. Seven native pointer cases passed, including literal bracketed
+  paths, unchanged Git pointers after hydration, cancellation/pin retention and
+  selected staging corruption that leaves both working pointer and index intact.
+- The existing published-recipe hydration and actual replica-backed hydration
+  cases passed. Reconstruction ownership moved to the existing staging reader;
+  non-test source decreased by 66 lines.
+- Matching release build (5m 24s), unpacked arm64 package and packaged GUI smoke
+  passed. In 44.4 seconds the smoke repeated previews, integrity and cache
+  cleanup, then clicked **Hydrate to disk** for a 4 MiB staged Crab file. Its
+  bytes matched the fixture, the Git pointer stayed unchanged and reopened
+  details displayed **Working file**. The screenshot was inspected; its footer
+  still showed the earlier hydration counts, so status refresh remains open.
+  The LFS no-op and complete materialization/repository lifecycle remain open.
+  Evidence: `large-files-staged-hydrate-ui-proof`; artifact:
+  `desktop-staged-hydrate/mac-arm64/Crab.app` in the external build directory.
+- Reproduction: `hydrate-desktop-repro.yxrf8inq/report.json` in the external build
+  directory. Native regression logs use the `large-files-hydrate-` prefix.

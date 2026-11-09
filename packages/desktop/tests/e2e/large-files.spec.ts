@@ -7,7 +7,7 @@ import { call, packagedExecutable } from "./packaged-app";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 
-test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydration", async () => {
+test("packaged desktop previews large pointers and materializes staged Crab content", async () => {
   test.setTimeout(240_000);
   const executablePath = packagedExecutable();
   const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
@@ -22,6 +22,7 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
   delete env.GIT_INDEX_FILE;
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
   const pointers = new Map<string, Buffer>();
+  let stagedContent: Buffer | undefined;
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
     git(["init", "--initial-branch=main"]);
@@ -33,12 +34,13 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
       git(["config", `filter.${kind}.required`, "true"]);
     }
     writeFileSync(path.join(source, ".gitignore"), ".crab/\n");
-    writeFileSync(path.join(source, ".gitattributes"), "large.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\n");
-    const sizes = { "large.safetensors": 3 * 1024 ** 3, "lfs.safetensors": 4 * 1024 ** 2 };
+    writeFileSync(path.join(source, ".gitattributes"), "large.safetensors filter=crab -text\nstaged.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\n");
+    const sizes = { "large.safetensors": 3 * 1024 ** 3, "lfs.safetensors": 4 * 1024 ** 2, "staged.safetensors": 4 * 1024 ** 2 };
     for (const [file, size] of Object.entries(sizes)) {
       const header = Buffer.from(JSON.stringify({ weights: { dtype: "U8", shape: [size], data_offsets: [0, size] } }));
       const prefix = Buffer.alloc(8);
       prefix.writeBigUInt64LE(BigInt(header.length));
+      if (file === "staged.safetensors") stagedContent = Buffer.concat([prefix, header, Buffer.alloc(size)]);
       writeFileSync(path.join(source, file), Buffer.concat([prefix, header]));
       const descriptor = openSync(path.join(source, file), "r+");
       try { ftruncateSync(descriptor, prefix.length + header.length + size); }
@@ -148,6 +150,17 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
     await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
     await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(pointers.get("large.safetensors"));
+    await page.locator('[role="treeitem"][data-item-path="staged.safetensors"]').click();
+    await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "File details", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate to disk", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "File materialized on disk" })).toBeVisible();
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
+    expect(git(["show", ":staged.safetensors"])).toEqual(pointers.get("staged.safetensors"));
+    await page.getByRole("button", { name: "Back to preview", exact: true }).click();
+    await page.getByRole("button", { name: "File details", exact: true }).click();
+    await expect(inspector.getByText("Working file", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("materialized-staged-file.png") });
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

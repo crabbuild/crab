@@ -137,6 +137,61 @@ fn content() -> Vec<u8> {
 }
 
 #[test]
+fn hydrate_reads_the_same_delegated_git_clean_lease_as_native_ranges() {
+    let directory = fixture();
+    let root = directory.path();
+    let original = content();
+    let path = "model[1].bin";
+    std::fs::write(root.join(path), &original).unwrap();
+    git(root, &["add", "--", path]);
+    let pointer = git(root, &["show", &format!(":{path}")]);
+    std::fs::write(root.join(path), &pointer).unwrap();
+    let mut reader = Reader::open(root, &pointer);
+    assert_eq!(reader.range(0, 16), original[..16]);
+    reader.close();
+    let result = command(
+        root,
+        env!("CARGO_BIN_EXE_crab"),
+        &["hydrate", &format!(":(top,literal){path}"), "--json"],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!(std::fs::read(root.join(path)).unwrap(), original);
+    assert_eq!(git(root, &["show", &format!(":{path}")]), pointer);
+}
+
+#[test]
+fn hydrate_reports_selected_staging_corruption_without_replacing_the_pointer() {
+    let directory = fixture();
+    let root = directory.path();
+    let path = "model.bin";
+    std::fs::write(root.join(path), content()).unwrap();
+    git(root, &["add", "--", path]);
+    let indexed = git(root, &["show", &format!(":{path}")]);
+    let mut pointer = crab_types::pointer::Pointer::parse(&indexed).unwrap();
+    pointer.size += 1;
+    let invalid = pointer.serialize();
+    std::fs::write(root.join(path), &invalid).unwrap();
+    let result = command(
+        root,
+        env!("CARGO_BIN_EXE_crab"),
+        &["hydrate", path, "--json"],
+    )
+    .output()
+    .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(!result.status.success());
+    assert_eq!(response["error"]["code"], "CRAB-E0080");
+    assert_eq!(std::fs::read(root.join(path)).unwrap(), invalid);
+    assert_eq!(git(root, &["show", &format!(":{path}")]), indexed);
+}
+
+#[test]
 fn staged_crab_and_lfs_ranges_are_byte_identical_without_hydrating_worktree() {
     let directory = fixture();
     let root = directory.path();
