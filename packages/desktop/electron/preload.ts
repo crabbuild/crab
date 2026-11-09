@@ -19,6 +19,8 @@ const ALLOWED_METHODS = new Set([
   "list",
   "list_refs",
   "stat",
+  "media_open",
+  "media_close",
   "file_open",
   "file_chunks",
   "file_close",

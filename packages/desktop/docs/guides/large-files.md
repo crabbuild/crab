@@ -92,6 +92,15 @@ For repositories containing structured datasets:
 
 ## Operations
 
+### Playing Large Media
+
+Open an audio or video file in Files to play it with native media controls.
+Playback and seeking use bounded byte ranges from one captured version, including
+Crab and LFS pointers; the working file stays a pointer. A first LFS read can
+verify the complete object before playback starts. Corruption and read failures
+appear in the preview, and **Reopen media** captures a fresh version for retry.
+Container and codec support follows the bundled Electron media decoder.
+
 ### Tracking a File
 
 1. The "Untracked Large Files" section shows files above the size

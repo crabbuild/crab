@@ -10,8 +10,8 @@ completion. This record tracks implementation and qualification separately.
 | Capability | Required behavior | Current gap / qualification |
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
-| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Cold multi-GiB remote LFS costs, packaged cancellation, media delivery and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Parser and desktop qualification are in progress; media and query paths still need audit. |
+| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold multi-GiB remote LFS costs, packaged interruption and other profiles remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Existing workflows need qualification together, including uncommitted staged content and failures. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Publish state is component-owned and cancellation is optimistic. |
@@ -90,11 +90,9 @@ completion. This record tracks implementation and qualification separately.
 
 - One-shot RPC previews capture and close their source per operation. The new
   file inspector retains a source across metadata pages, with independent query
-  cancellation and close/repository-close drain. Media still needs to use this
-  owner for bounded byte delivery; retaining a snapshot alone does not avoid
-  repeated cold LFS verification.
-- Media still uses complete base64 responses (video up to 200 MiB). Introduce
-  range-backed media delivery so large playback/seeking stays bounded.
+  cancellation and close/repository-close drain. Media uses the same retained
+  owner for bounded byte delivery. Checked LFS proofs survive independent query
+  drains; cold multi-GiB remote verification budgets/progress remain open.
 - Complete preview resource limits include decoded Parquet pages and rendered
   cells, not only source bytes. Preserve access to full data through explicit
   transfer/query operations rather than silently reporting incomplete results.
@@ -330,3 +328,45 @@ Remaining integration details found during qualification:
   The unsigned unpacked artifact is `desktop-lfs-cache/mac-arm64/Crab.app`
   beneath the per-worktree external build directory. Cold multi-GiB LFS budget/
   progress, media delivery and the remaining acceptance matrix stay open.
+
+
+## Retained media checkpoint
+
+Audio and video use one captured file behind an opaque main-process capability.
+The old complete base64 loaders and their 100/200 MiB limits are removed. The
+private `read_range` request takes a retained `file_id`; both ranges and chunk
+pages bind independent query scopes. Seeking does not reopen a pathname.
+
+The Electron protocol streams 1 MiB windows with backpressure and single-range
+206 responses, including suffix/open-ended ranges. HEAD reads no payload;
+invalid ranges return 416. Cancellation awaits that response's native query.
+Tab cleanup, repository close, main-frame navigation, renderer failure and app
+exit close owned resources after draining native work. Structured native errors
+appear in the preview; unsupported containers/codecs show a decoder error and
+reopen action. File size is logical; no disk/cache availability is inferred.
+
+- Thirteen focused media cases passed, plus five renderer cancellation and
+  thirty SSH router cases. They cover bounded streaming, range semantics,
+  per-response cancellation, independent seeks, structured failures, late
+  capture cleanup, close acknowledgement and owner isolation.
+- The retained-range Rust handler regression passed: cancel a query, replace
+  the working pathname, read the original bytes through the same file identity,
+  then close and reject another range. Renderer/Electron typechecks passed.
+- Matching release native build (6m 06s), renderer/Electron builds and the
+  unsigned macOS arm64 package passed. Read-only RustFS qualification repeated
+  lazy-clone/direct-remote Crab/LFS ranges, complete reads, previews and chunk
+  pages with 175 GET/HEAD requests, zero writes and unchanged pointers. Evidence:
+  `large-files-media-proof.f3tup_jg/report.json` in the external build directory.
+- Packaged large-file preview/integrity/cache smoke passed in 14.5 seconds.
+  The media smoke passed in 21.5 seconds: real Explorer actions played and
+  sought 320 MiB Crab/LFS PCM WAV files, a 240 MiB VP9 WebM and an ordinary Git
+  WAV. Captured ranges survived working-pointer replacement, expired URLs
+  rejected reads after tab replacement, corrupt LFS showed its native failure,
+  no complete byte RPC was used, each range was at most 1 MiB, and all captures
+  closed. The initial media run stopped in its test-only recording hook before
+  playback; correcting its module loader produced the successful run.
+- Screenshots in `large-files-media-playback-proof` were visually inspected,
+  including the sought video frame and LFS integrity failure. Application:
+  `desktop-media/mac-arm64/Crab.app` in the per-worktree external build directory.
+  The other Crab build was restored to its saved workflow after both checks.
+  Remote media UI, cold multi-GiB LFS and the remaining matrix are unqualified.

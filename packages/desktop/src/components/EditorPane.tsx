@@ -25,8 +25,7 @@ import { NumpyView } from "./previews/NumpyView";
 import { ZipView } from "./previews/ZipView";
 import { NotebookView } from "./previews/NotebookView";
 import { PdfView } from "./previews/PdfView";
-import { VideoView } from "./previews/VideoView";
-import { AudioView } from "./previews/AudioView";
+import { MediaView } from "./previews/MediaView";
 import { GeoJsonView } from "./previews/GeoJsonView";
 import { SqliteView } from "./previews/SqliteView";
 import { OnnxView } from "./previews/OnnxView";
@@ -526,8 +525,7 @@ function PreviewBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: Editor
   if (kind === "pointer") return <FileInspector repo={repo} path={tab.path} rev={tab.rev} />;
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
   if (kind === "image") return <ImageView {...common} entryKind={tab.entry.kind} />;
-  if (kind === "video") return <VideoView {...common} />;
-  if (kind === "audio") return <AudioView {...common} />;
+  if (kind === "video" || kind === "audio") return <MediaView {...common} kind={kind} />;
   if (kind === "markdown") {
     if (canEdit) {
       return <MarkdownEditorBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;

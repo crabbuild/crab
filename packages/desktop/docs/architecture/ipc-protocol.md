@@ -132,11 +132,25 @@ file_id, start, limit, op_id?}` returns at most 512 ordered occurrences and a
 next cursor; repeated hashes retain their positions. Local recipes do not claim
 published xorb placement. Git and LFS files have no Crab recipe.
 
+`read_range {repo_id, file_id, offset, length, op_id?}` reads up to 8 MiB from
+that retained source. Byte ranges and chunk pages use independent query scopes;
+reopening a pathname is not part of range delivery.
+
 `file_close {repo_id, file_id}` cancels and drains active queries before releasing
 the native source. Repository close drains every retained file. Queries have
 independent cancellation; cancelling a page does not cancel its file. At most
 128 files are retained per repository. These stateful operations are rejected
 during SSH reconnection and are never served from stale cache or replayed.
+
+The main process owns `media_open {repo_id, path, rev?, op_id?}` and
+`media_close {media_id}`. It captures a native file and exposes an opaque
+`crab-content://media/<id>` capability to the application window. Audio/video
+GETs stream 1 MiB windows with backpressure; single byte ranges support seeking,
+and HEAD reads no payload. Invalid ranges return 416. Native failures emit
+`media/error {media_id, error}` with the structured RPC failure to that window.
+Tab cleanup cancels and drains active queries before closing the captured file;
+repository close, navigation, renderer failure and application exit also drain
+owned media. URLs expire on close and never contain a file path or credentials.
 
 ### Git Operations
 - `git_status_porcelain`, `git_diff_file`, `git_grep`

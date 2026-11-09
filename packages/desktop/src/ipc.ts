@@ -184,6 +184,13 @@ export interface CapturedFile {
   git_oid: string | null;
 }
 
+export interface MediaSource {
+  media_id: string;
+  url: string;
+  size: number;
+  kind: PointerKind;
+}
+
 export interface FileChunkPage {
   chunk_count: number;
   xorb_count: number | null;
@@ -1714,6 +1721,11 @@ export const rpc = {
   stat: (repo_id: string, path: string, rev?: string) =>
     call<FileStat>("stat", { repo_id, path, rev }),
 
+  openMedia: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<MediaSource>("media_open", { repo_id, path, ...opts }, signal),
+
+  closeMedia: (media_id: string) => call<{ closed: string }>("media_close", { media_id }),
+
   openFile: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
     call<CapturedFile>("file_open", { repo_id, path, ...opts }, signal),
 
@@ -1734,19 +1746,9 @@ export const rpc = {
   writeBytes: (repo_id: string, path: string, bytes_b64: string) =>
     call<{ written: boolean; size: number }>("write_bytes", { repo_id, path, bytes_b64 }),
 
-  readRange: (
-    repo_id: string,
-    path: string,
-    offset: number,
-    length: number,
-    { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {},
-  ) =>
+  readRange: (repo_id: string, file_id: string, offset: number, length: number, signal?: AbortSignal) =>
     call<{ offset: number; length: number; bytes_b64: string; file_size: number }>("read_range", {
-      repo_id,
-      path,
-      offset,
-      length,
-      ...opts,
+      repo_id, file_id, offset, length,
     }, signal),
 
   previewParquet: (

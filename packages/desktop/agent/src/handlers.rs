@@ -2451,9 +2451,10 @@ async fn read_bytes(state: &State, p: ReadTextParams) -> Result<Value> {
 #[derive(Debug, Deserialize)]
 struct ReadRangeParams {
     #[serde(flatten)]
-    file: PreviewParams,
+    file: FileIdParams,
     offset: u64,
     length: u32,
+    op_id: Option<String>,
 }
 
 async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
@@ -2462,7 +2463,7 @@ async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
     if p.length > 8 * 1024 * 1024 {
         return Err(AgentError::Other("read_range length exceeds 8 MiB".into()));
     }
-    read_source(state, p.file, |source| async move {
+    read_retained(state, p.file, p.op_id, |source| async move {
         let bytes = source.read_range(p.offset, p.length).await?;
         Ok(json!({
             "offset": p.offset.min(source.size),
@@ -2562,7 +2563,7 @@ async fn file_open(state: &State, p: PreviewParams) -> Result<Value> {
     result
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct FileIdParams {
     repo_id: String,
     file_id: String,
@@ -2583,16 +2584,29 @@ async fn file_chunks(state: &State, p: FileChunksParams) -> Result<Value> {
             "chunk page limit must be between 1 and 512".into(),
         ));
     }
-    let repo = state.get(&p.file.repo_id).await?;
-    let file = repo.files.get(&p.file.file_id).await?;
-    let (_guard, source) = file.query().await?;
-    let scope = source.scope();
-    let read = async {
+    read_retained(state, p.file, p.op_id, |source| async move {
         Ok(serde_json::to_value(
             source.chunk_page(p.start, p.limit).await?,
         )?)
-    };
-    cancellable_read(state, p.op_id, &scope, read).await
+    })
+    .await
+}
+
+async fn read_retained<F, W>(
+    state: &State,
+    p: FileIdParams,
+    op_id: Option<String>,
+    work: F,
+) -> Result<Value>
+where
+    F: FnOnce(Arc<crate::repository::FileSource>) -> W,
+    W: std::future::Future<Output = Result<Value>>,
+{
+    let repo = state.get(&p.repo_id).await?;
+    let file = repo.files.get(&p.file_id).await?;
+    let (_guard, source) = file.query().await?;
+    let scope = source.scope();
+    cancellable_read(state, op_id, &scope, work(source)).await
 }
 
 async fn file_close(state: &State, p: FileIdParams) -> Result<Value> {
@@ -5660,6 +5674,58 @@ mod tests {
                 (&json!(true), &json!(65536), &Value::Null)
             );
         }
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_ranges_keep_the_capture_until_explicit_close() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"captured").unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root).await.unwrap();
+        state.insert("test".into(), repo, Some(root.clone())).await;
+        let opened = file_open(
+            &state,
+            serde_json::from_value(json!({ "repo_id": "test", "path": "file.txt" })).unwrap(),
+        )
+        .await
+        .unwrap();
+        let file = || {
+            serde_json::from_value(json!({ "repo_id": "test", "file_id": opened["file_id"] }))
+                .unwrap()
+        };
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let worker = state.clone();
+        let id = file();
+        let reading = tokio::spawn(async move {
+            read_retained(&worker, id, Some("range".into()), |source| async move {
+                entered.send(()).unwrap();
+                while source.check_cancelled().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+                source.read_range(0, 8).await?;
+                Ok(Value::Null)
+            })
+            .await
+        });
+        started.await.unwrap();
+        assert!(state.cancel_registry.cancel("range").await);
+        assert!(reading.await.unwrap().unwrap_err().is_cancelled());
+        std::fs::write(root.join("replacement"), b"replacement").unwrap();
+        std::fs::rename(root.join("replacement"), root.join("file.txt")).unwrap();
+        let range = || ReadRangeParams {
+            file: file(),
+            offset: 3,
+            length: 8,
+            op_id: None,
+        };
+        let bytes = read_range(&state, range()).await.unwrap();
+        assert_eq!(
+            bytes,
+            json!({ "offset": 3, "length": 5, "bytes_b64": "dHVyZWQ=", "file_size": 8 })
+        );
+        file_close(&state, file()).await.unwrap();
+        assert!(read_range(&state, range()).await.is_err());
         state.shutdown().await.unwrap();
     }
 

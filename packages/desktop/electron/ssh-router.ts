@@ -67,6 +67,7 @@ const WRITE_METHODS = new Set([
   "file_open",
   "file_chunks",
   "file_close",
+  "read_range",
   "add",
   "git_commit",
   "git_stage",

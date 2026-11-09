@@ -67,8 +67,10 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
       await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
       const metadata = await call(page, "preview_safetensors", { repo_id: "large-files", path: file, rev: "HEAD" });
       expect((metadata.tensors as { nbytes: number }[])[0].nbytes).toBe(size);
-      const range = await call(page, "read_range", { repo_id: "large-files", path: file, offset: size - 16, length: 16 });
+      const captured = await call(page, "file_open", { repo_id: "large-files", path: file });
+      const range = await call(page, "read_range", { repo_id: "large-files", file_id: captured.file_id, offset: size - 16, length: 16 });
       expect(Buffer.from(range.bytes_b64 as string, "base64")).toEqual(Buffer.alloc(16));
+      await call(page, "file_close", { repo_id: "large-files", file_id: captured.file_id });
       expect(readFileSync(path.join(source, file))).toEqual(pointers.get(file));
       await page.screenshot({ path: test.info().outputPath(`${file}.png`) });
     }

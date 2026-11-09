@@ -56,7 +56,7 @@ describe("read cancellation", () => {
   it("does not cancel an operation that has already completed", async () => {
     const bridge = vi.fn().mockResolvedValue({ size: 12 });
     vi.stubGlobal("window", { crab: { rpc: bridge } });
-    const operation = callCancellable("read_range", { repo_id: "repo", path: "file" });
+    const operation = callCancellable("read_range", { repo_id: "repo", file_id: "captured" });
     await operation.promise;
     operation.cancel();
     expect(bridge).toHaveBeenCalledTimes(1);
@@ -66,7 +66,7 @@ describe("read cancellation", () => {
     const work = deferred<unknown>();
     const bridge = vi.fn((method: string) => method === "rpc/cancel" ? Promise.resolve({ ok: false }) : work.promise);
     vi.stubGlobal("window", { crab: { rpc: bridge } });
-    const operation = callCancellable("read_range", { repo_id: "repo", path: "file" });
+    const operation = callCancellable("read_range", { repo_id: "repo", file_id: "captured" });
     operation.cancel();
     work.resolve({ bytes_b64: "Ynl0ZXM=" });
     await expect(operation.promise).resolves.toEqual({ bytes_b64: "Ynl0ZXM=" });

@@ -1,4 +1,4 @@
-import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage } from "electron";
+import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protocol,webContents } from "electron";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
 import { rpcReply } from "./rpc-transport";
+import { MediaResources } from "./media";
 import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
@@ -74,6 +75,9 @@ const isDev = !app.isPackaged;
 // subprocess (and any crab CLI invocations) inherit AWS/storage creds
 // even though macOS GUI apps don't get the user's shell environment.
 loadEnvGlobal();
+
+protocol.registerSchemesAsPrivileged([{ scheme: "crab-content", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
+let media: MediaResources | null = null;
 
 let mainWindow: BrowserWindow | null = null;
 let agent: Agent | null = null;
@@ -227,6 +231,13 @@ async function createWindow() {
     },
   });
 
+  const owner = mainWindow.webContents;
+  const ownerId = owner.id;
+  const closeMedia = () => { void media?.closeOwner(ownerId).catch(error => console.error("Media cleanup failed", error)); };
+  owner.on("did-start-navigation", (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) closeMedia(); });
+  owner.on("render-process-gone", closeMedia);
+  owner.on("destroyed", closeMedia);
+
   const devServer = process.env.VITE_DEV_SERVER_URL;
   if (isDev && devServer) {
     await mainWindow.loadURL(devServer);
@@ -318,7 +329,7 @@ function registerIpc(skillManager: SkillManager) {
   // ProviderRegistry based on the repo_id in params. For open_local
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
-  ipcMain.handle("crab:rpc", (_evt, method: string, params: unknown) => rpcReply(async () => {
+  async function requestAgent(method: string, params: unknown): Promise<unknown> {
     await agentReady;
     if (!agent) throw new Error("agent not running");
 
@@ -353,6 +364,7 @@ function registerIpc(skillManager: SkillManager) {
     // Handle repo close: unregister the provider.
     if (method === "close") {
       const repoId = extractRepoIdFromParams(params);
+      if (repoId) await media?.closeRepo(repoId);
       // Route the close call through the appropriate provider.
       let result: unknown;
       if (repoId) {
@@ -387,6 +399,21 @@ function registerIpc(skillManager: SkillManager) {
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
     return agent.request(method, params);
+  }
+  media = new MediaResources(requestAgent, (owner, id, error) => {
+    const contents = webContents.fromId(owner);
+    if (contents && !contents.isDestroyed()) contents.send("crab:event", { method: "media/error", params: { media_id: id, error } });
+  });
+  protocol.handle("crab-content", request => media!.fetch(request));
+  ipcMain.handle("crab:rpc", (event, method: string, params: unknown) => rpcReply(async () => {
+    if (method === "media_open" || method === "media_close") {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id || !media) throw new Error("Media requests require the application window");
+      if (method === "media_open") return media.open(event.sender.id, params);
+      if (!params || typeof params !== "object" || !("media_id" in params) || typeof params.media_id !== "string") throw new Error("Media identity is required");
+      await media.close(event.sender.id, params.media_id);
+      return { closed: params.media_id };
+    }
+    return requestAgent(method, params);
   }));
 
   ipcMain.handle("crab:dialog-open-repo", async () => {
@@ -2418,7 +2445,7 @@ app.on("will-quit", (e) => {
   stopAllWatchers();
   stopAutoUpdater();
   Promise.all([
-    agent?.shutdown(),
+    (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
     sidecarManager.stopAll(),
     lspManager.stopAll(),
   ]).finally(() => {
