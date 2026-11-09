@@ -8,8 +8,9 @@ pub use crate::client::{Reference, References, RepositoryCapability as Capabilit
 #[cfg(feature = "files")]
 pub use crate::content::ContentStream;
 pub use crate::read_types::{
-    Blame, BlameRange, Commit, Diff, DiffClassification, DiffHunk, EntryMode, HistoryTraversal,
-    Page, PageCursor, PageRequest, Signature, SignatureHeader, TreeEntry,
+    Blame, BlameRange, Commit, ContentKind, Diff, DiffClassification, DiffHunk, EntryMode,
+    FileMetadata, HistoryTraversal, Page, PageCursor, PageRequest, Signature, SignatureHeader,
+    TreeEntry,
 };
 
 #[cfg(feature = "publish")]

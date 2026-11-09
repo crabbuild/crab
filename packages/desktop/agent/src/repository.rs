@@ -5,13 +5,16 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use crab_sdk::remote::{EntryMode, PageRequest, Snapshot};
+use crab_sdk::remote::{ContentKind, EntryMode, PageRequest, Snapshot};
 use crab_sdk::storage::{ContentCache, DirectStoreOptions};
 use crab_sdk::{Client, GitPath, OpenOptions, RepositoryLocator, Revision};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::{AgentError, Result, shellout};
+
+mod content;
+pub(crate) use content::FileSource;
 
 #[derive(Clone)]
 pub struct BrowseSession {
@@ -31,13 +34,6 @@ pub enum EntryKind {
     Submodule,
     File,
     Pointer,
-    Lfs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentKind {
-    Git,
-    Crab,
     Lfs,
 }
 
@@ -331,8 +327,18 @@ impl BrowseSession {
                                 pointer_hash: None,
                             });
                         } else {
-                            let blob = snapshot.read_blob(item.path).await?;
-                            entries.push(entry(name, blob.len() as u64, &blob));
+                            let metadata = snapshot.file_metadata(item.path.clone()).await?;
+                            if metadata.kind == ContentKind::Git {
+                                entries.push(BrowserEntry {
+                                    path: name.into(),
+                                    kind: EntryKind::File,
+                                    size: Some(metadata.size),
+                                    pointer_hash: None,
+                                });
+                            } else {
+                                let blob = snapshot.read_blob(item.path).await?;
+                                entries.push(entry(name, metadata.git_size, &blob));
+                            }
                         }
                     }
                     cursor = page.next;
@@ -347,6 +353,10 @@ impl BrowseSession {
 
     pub async fn stat(&self, path: &str, rev: Option<&str>) -> Result<FileMetadata> {
         GitPath::new(path.as_bytes().to_vec())?;
+        if self.remote.is_some() {
+            let snapshot = self.snapshot(rev).await?;
+            return remote_metadata(&snapshot, path, rev).await;
+        }
         let entry = self
             .list(Some(path), rev)
             .await?
@@ -450,6 +460,28 @@ impl BrowseSession {
             "chunk_count": null, "xorb_count": null, "dedup_ratio": null }),
         )
     }
+}
+
+async fn remote_metadata(
+    snapshot: &Snapshot,
+    path: &str,
+    rev: Option<&str>,
+) -> Result<FileMetadata> {
+    let path = GitPath::new(path.as_bytes().to_vec())?;
+    let metadata = snapshot.file_metadata(path.clone()).await?;
+    let pointer_hash = if metadata.kind == ContentKind::Git {
+        None
+    } else {
+        let pointer = snapshot.read_blob(path).await?;
+        entry(String::new(), metadata.git_size, &pointer).pointer_hash
+    };
+    Ok(FileMetadata {
+        size: metadata.size,
+        pointer_hash,
+        mtime: None,
+        rev: rev.map(str::to_owned),
+        kind: metadata.kind,
+    })
 }
 
 fn revision(value: &str) -> Result<Revision> {

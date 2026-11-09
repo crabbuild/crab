@@ -11,7 +11,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::repository::{BrowseSession, BrowserEntry, ContentKind, EntryKind, FileMetadata};
+use crate::repository::{BrowseSession, BrowserEntry, EntryKind, FileMetadata};
+use crab_sdk::remote::ContentKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, mpsc};
@@ -2558,12 +2559,6 @@ struct ReadRangeParams {
 
 /// Read a byte range from `(path, rev)`. Returns base64-encoded.
 ///
-/// Implementation note: the SDK doesn't yet expose an origin-side
-/// range reader, so for now we read the full blob and slice. That
-/// makes this verb only useful for already-hydrated files; callers
-/// asking for a range on a pointer will get the full file fetched.
-/// The verb's signature is future-proof — when the SDK gains native
-/// range reads the implementation swaps without a breaking change.
 async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
     use base64::Engine as _;
 
@@ -2574,43 +2569,14 @@ async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
         )));
     }
     let repo = state.get(&p.repo_id).await?;
-    match repo.read(&p.path, p.rev.as_deref()).await {
-        Ok(bytes) => {
-            let end = (p.offset + u64::from(p.length)).min(bytes.len() as u64) as usize;
-            let start = p.offset.min(bytes.len() as u64) as usize;
-            let slice = &bytes[start..end];
-            let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
-            Ok(json!({
-                "offset": start,
-                "length": end - start,
-                "bytes_b64": encoded,
-                "file_size": bytes.len(),
-            }))
-        }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: read from working tree for untracked files.
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            let abs = work_dir.join(&p.path);
-            if !abs.exists() {
-                return Err(AgentError::PathNotFound {
-                    path: p.path.clone(),
-                });
-            }
-            let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-            let end = (p.offset + u64::from(p.length)).min(bytes.len() as u64) as usize;
-            let start = p.offset.min(bytes.len() as u64) as usize;
-            let slice = &bytes[start..end];
-            let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
-            Ok(json!({
-                "offset": start,
-                "length": end - start,
-                "bytes_b64": encoded,
-                "file_size": bytes.len(),
-                "untracked": true,
-            }))
-        }
-        Err(e) => Err(e.into()),
-    }
+    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
+    let bytes = source.read_range(p.offset, p.length).await?;
+    Ok(json!({
+        "offset": p.offset.min(source.size),
+        "length": bytes.len(),
+        "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "file_size": source.size,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2618,42 +2584,20 @@ struct PreviewParams {
     repo_id: String,
     path: String,
     #[serde(default)]
-    // Preserved for wire-compat — previews read from the hydrated
-    // working tree which already reflects the checked-out rev, so we
-    // don't use this field today. Kept so callers can migrate to a
-    // future "preview at historical rev" without a breaking change.
-    #[allow(dead_code)]
     rev: Option<String>,
 }
 
-/// Resolve `(repo_id, path, rev)` to a local working-tree file path,
-/// then hand off to a format-specific previewer.
-///
-/// Why this lives in the agent and not the SDK: the previewers need
-/// a file handle with `Seek`, and the SDK's `read()` produces `Bytes`
-/// in memory. For hydrated files the workspace copy is already on
-/// disk and cheap to re-open; that's the fast path we take here. For
-/// unhydrated pointers the handler returns a structured error so the
-/// UI can prompt the user to hydrate before previewing.
 async fn preview_fmt(
     state: &State,
     p: PreviewParams,
-    f: fn(&std::path::Path) -> Result<Value>,
+    f: fn(preview::PreviewReader) -> Result<Value>,
 ) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::Other(format!(
-            "file not on disk: {} (run `crab hydrate` to materialize it first)",
-            abs.display()
-        )));
-    }
-    // Off-thread: format parsing is CPU-bound (arrow deserialise,
-    // zip inflate). `spawn_blocking` keeps the async dispatch loop
-    // responsive so other verbs keep running during a parse.
-    tokio::task::spawn_blocking(move || f(&abs))
+    let repo = state.get(&p.repo_id).await?;
+    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
+    let reader = preview::PreviewReader::new(source);
+    tokio::task::spawn_blocking(move || f(reader))
         .await
-        .map_err(|e| AgentError::Other(format!("join error: {e}")))?
+        .map_err(std::io::Error::other)?
 }
 
 #[derive(Debug, Deserialize)]
@@ -2661,28 +2605,19 @@ struct ParquetPreviewParams {
     repo_id: String,
     path: String,
     #[serde(default)]
-    #[allow(dead_code)]
     rev: Option<String>,
-    /// Max rows in the preview body. Clamped to [1, 5000] by the
-    /// parser. Defaults to `DEFAULT_PARQUET_PREVIEW_ROWS` when
-    /// omitted.
     #[serde(default)]
     max_rows: Option<usize>,
 }
 
 async fn preview_parquet(state: &State, p: ParquetPreviewParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::Other(format!(
-            "file not on disk: {} (run `crab hydrate` to materialize it first)",
-            abs.display()
-        )));
-    }
+    let repo = state.get(&p.repo_id).await?;
+    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
+    let reader = preview::PreviewReader::new(source);
     let max_rows = p.max_rows.unwrap_or(preview::DEFAULT_PARQUET_PREVIEW_ROWS);
-    tokio::task::spawn_blocking(move || preview::parquet(&abs, max_rows))
+    tokio::task::spawn_blocking(move || preview::parquet(reader, max_rows))
         .await
-        .map_err(|e| AgentError::Other(format!("join error: {e}")))?
+        .map_err(std::io::Error::other)?
 }
 
 /// Repository summary: total files, by kind, by top-level extension,

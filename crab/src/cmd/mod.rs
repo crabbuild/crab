@@ -55,6 +55,7 @@ pub mod plan_apply;
 pub mod prune;
 pub mod pull;
 pub mod push;
+pub mod read_pointer;
 pub mod recover;
 pub mod recovery;
 pub mod release;

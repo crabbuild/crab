@@ -127,6 +127,43 @@ impl TreeEntry {
     }
 }
 
+/// Storage representation of a logical file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContentKind {
+    Git,
+    Crab,
+    Lfs,
+}
+
+/// File identity and sizes without reconstructing pointer content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMetadata {
+    pub id: ObjectId,
+    pub git_size: u64,
+    pub size: u64,
+    pub kind: ContentKind,
+}
+
+impl FileMetadata {
+    pub(crate) fn from_owner(value: crab_remote_git::BlobMetadata) -> Result<Self> {
+        use crab_remote_git::ContentClassification as C;
+        let size = value
+            .logical_size
+            .ok_or_else(|| Error::new(ErrorKind::Corruption, "file has no logical size"))?;
+        Ok(Self {
+            id: ObjectId::from_owner(value.oid)?,
+            git_size: value.git_size,
+            size,
+            kind: match value.classification {
+                C::OrdinaryGit => ContentKind::Git,
+                C::CrabPointer => ContentKind::Crab,
+                C::LfsPointer => ContentKind::Lfs,
+            },
+        })
+    }
+}
+
 /// An opaque in-process continuation bound to a repository generation and commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageCursor {

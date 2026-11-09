@@ -124,6 +124,14 @@ recovery token before calling `execute`. See the
 [`remote_edit`](examples/remote_edit.rs) example for streamed Git and hydrated
 file edits, commit creation, atomic ref updates, and result handling.
 
+`Snapshot::file_metadata` returns the Git object identity, Git representation
+size, logical size and `remote::ContentKind` without reconstructing Crab/LFS
+payloads or decoding large ordinary Git blobs. Read metadata and ranges from the
+same snapshot to keep their revision consistent. `open_file` accepts
+`operation::ReadOptions::with_range` for verified logical ranges. LFS may need a
+complete verification pass before its first range; range output size does not
+promise an equally small network transfer.
+
 ## Local repositories
 
 Enable `local` and provide absolute paths to compatible Git and Crab

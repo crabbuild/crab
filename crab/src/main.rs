@@ -79,6 +79,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Read verified pointer ranges for the matching desktop runtime.
+    #[command(hide = true)]
+    ReadPointer(crab::cmd::read_pointer::ReadPointerArgs),
     /// Guided cloud, credential, repository, and large-file setup.
     Configure {
         /// Remote URL, or omit it for an interactive prompt.
@@ -2285,6 +2288,7 @@ impl Cmd {
     /// Matches the canonical names from the structured-output spec.
     fn schema_name(&self) -> &'static str {
         match self {
+            Self::ReadPointer(_) => "read-pointer",
             Self::Configure { .. } => "configure",
             Self::Init { .. } => "init",
             Self::Setup { .. } => "setup",
@@ -3620,6 +3624,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Mirror(ref args)) => run_mirror_command(args, &cancel).await,
+        Some(Cmd::ReadPointer(args)) => {
+            crab::cmd::read_pointer::run(&args, &cancel).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Download {
             repo,
             paths,

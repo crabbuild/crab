@@ -907,6 +907,49 @@ impl Snapshot {
             .await
     }
 
+    /// Inspect a file without reconstructing pointers or decoding large Git blobs.
+    pub fn file_metadata(
+        &self,
+        path: GitPath,
+    ) -> crate::Request<'_, crate::read_types::FileMetadata, ReadOptions> {
+        crate::Request::new(move |options| Box::pin(self.file_metadata_with_options(path, options)))
+    }
+
+    async fn file_metadata_with_options(
+        &self,
+        path: GitPath,
+        options: ReadOptions,
+    ) -> Result<crate::read_types::FileMetadata> {
+        let repository = self.repository.owner.clone();
+        let snapshot = self.owner.clone();
+        self.repository
+            .client
+            .0
+            .operations
+            .run(options.operation.clone(), move |cancel| async move {
+                let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
+                    .map_err(remote_error)?;
+                let operation = repository
+                    .operation_with_limits(OperationKind::Content, &cancel, options.limits()?)
+                    .await
+                    .map_err(remote_error)?;
+                let result = async {
+                    let metadata = snapshot.blob_metadata(&path, &operation).await?;
+                    operation
+                        .charge(
+                            crab_remote_git::BudgetDimension::ResponseBytes,
+                            std::mem::size_of::<crate::read_types::FileMetadata>() as u64,
+                        )
+                        .await?;
+                    Ok(metadata)
+                }
+                .await;
+                let metadata = operation.finish(result).await.map_err(remote_error)?;
+                crate::read_types::FileMetadata::from_owner(metadata)
+            })
+            .await
+    }
+
     /// Read exact Git bytes, including pointer text, within owner limits.
     pub fn read_blob(&self, path: GitPath) -> crate::Request<'_, Bytes, ReadOptions> {
         crate::Request::new(move |options| Box::pin(self.read_blob_with_options(path, options)))
