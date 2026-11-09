@@ -95,6 +95,7 @@ use crate::workflow::resume::{
     self, CliFlags, DagResumeReport, FsState, ResumeAction, StageAction, walk_dag,
 };
 use crate::workflow::scheduler_lock::SchedulerLock;
+use crate::workflow::signals::OutputMirroring;
 use crate::workflow::stage::{
     Cmd, Dep, DepUrlHashExt, EnvSpec, Out, OutKind, Resources, RetryPolicy, Stage, StageName,
     is_url_dep,
@@ -126,7 +127,7 @@ const WORKFLOW_STAGE_EVENT_STREAM_SCHEMA: &str = "workflow.stage.event";
 
 #[derive(Clone)]
 pub(crate) struct RunInvocationOptions {
-    pub mirror_child_output: bool,
+    pub child_output: OutputMirroring,
     pub external_kill_path: Option<PathBuf>,
     pub child_started: Option<Arc<dyn Fn(u32) + Send + Sync>>,
     pub allow_checkpoints: bool,
@@ -138,7 +139,7 @@ pub(crate) struct RunInvocationOptions {
 impl Default for RunInvocationOptions {
     fn default() -> Self {
         Self {
-            mirror_child_output: true,
+            child_output: OutputMirroring::Stdio,
             external_kill_path: None,
             child_started: None,
             allow_checkpoints: false,
@@ -475,8 +476,13 @@ pub(crate) async fn run_in_with_options(
     args: &RunArgs,
     repo_root: &Path,
     mode: OutputMode,
-    options: RunInvocationOptions,
+    mut options: RunInvocationOptions,
 ) -> Result<()> {
+    // Structured stdout belongs to the result protocol. Child logs stay live on
+    // stderr so consumers can parse every stdout line without losing capture.
+    if mode != OutputMode::Text && options.child_output != OutputMirroring::None {
+        options.child_output = OutputMirroring::Stderr;
+    }
     // Config gate: fresh configs run workflows by default, while an explicit
     // `[workflow] enabled = false` remains a hard opt-out.
     let config = Config::resolve_for_repo(repo_root)?;
@@ -725,7 +731,7 @@ async fn run_inline_single_stage(
             config.workflow.graceful_shutdown_timeout_secs,
         ),
         stderr_tail_bytes: crate::workflow::signals::DEFAULT_STDERR_TAIL_BYTES,
-        mirror_child_output: options.mirror_child_output,
+        child_output: options.child_output,
         external_kill_path: options.external_kill_path.clone(),
         child_started: options.child_started.clone(),
         max_outs_per_stage: config.workflow.max_outs_per_stage,
@@ -860,6 +866,7 @@ async fn run_inline_single_stage(
                             hook_cmd,
                             &stage.env,
                             executor_cfg.working_dir.as_deref(),
+                            executor_cfg.child_output,
                         )
                         .await?;
                         if !status.success() {
@@ -2308,6 +2315,7 @@ async fn execute_stage_parallel(
                         hook_cmd.clone(),
                         stage.env.clone(),
                         executor_cfg.working_dir.clone(),
+                        executor_cfg.child_output,
                     )
                     .await?;
                     if !status.success() {
@@ -2558,7 +2566,7 @@ fn build_executor_cfg(
             config.workflow.graceful_shutdown_timeout_secs,
         ),
         stderr_tail_bytes: crate::workflow::signals::DEFAULT_STDERR_TAIL_BYTES,
-        mirror_child_output: options.mirror_child_output,
+        child_output: options.child_output,
         external_kill_path: options.external_kill_path,
         child_started: options.child_started,
         max_outs_per_stage: config.workflow.max_outs_per_stage,
@@ -2950,6 +2958,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
                             hook_cmd,
                             &stage.env,
                             executor_cfg.working_dir.as_deref(),
+                            executor_cfg.child_output,
                         )
                         .await?;
                         if !status.success() {
@@ -5355,7 +5364,7 @@ mod tests {
             tmp.path(),
             OutputMode::Text,
             RunInvocationOptions {
-                mirror_child_output: false,
+                child_output: OutputMirroring::None,
                 ..RunInvocationOptions::default()
             },
         )
@@ -5393,7 +5402,7 @@ mod tests {
             tmp.path(),
             OutputMode::Text,
             RunInvocationOptions {
-                mirror_child_output: false,
+                child_output: OutputMirroring::None,
                 ..RunInvocationOptions::default()
             },
         )
@@ -5432,7 +5441,7 @@ mod tests {
             tmp.path(),
             OutputMode::Text,
             RunInvocationOptions {
-                mirror_child_output: false,
+                child_output: OutputMirroring::None,
                 ..RunInvocationOptions::default()
             },
         )
@@ -6621,7 +6630,7 @@ mod tests {
             tmp.path(),
             OutputMode::Text,
             RunInvocationOptions {
-                mirror_child_output: false,
+                child_output: OutputMirroring::None,
                 ..RunInvocationOptions::default()
             },
         )

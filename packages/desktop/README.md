@@ -222,6 +222,9 @@ tests and packaged storage qualification.
   remain unavailable, rather than displaying invented successful counts.
 - Workflow parsing, graph construction, templates, and DVC conversion use
   `crab-workflow`; status, queue mutation, and execution use the bundled CLI.
+  The editor Output panel retains the current run's command logs and stage
+  events, and displays execution errors even when the CLI fails before a stage
+  starts. Structured CLI stdout and live command logs on stderr stay separate.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
 - Closing a remote session drains its SDK client. Agent shutdown cancels and joins outstanding requests
   before closing its SDK clients and SlateDB index.

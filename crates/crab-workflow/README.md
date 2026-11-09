@@ -91,6 +91,11 @@ Use `crab-workflow` for parsing, planning, hashing, and state contracts. The
 product command owns user-facing repository discovery and chooses when to
 invoke the executor, scheduler, or status renderer.
 
+For `crab run --json` and `--jsonl`, stdout contains only structured results
+and events. Child stdout and stderr stream to the CLI's stderr; stage log files,
+stderr failure tails, and declared stdout capture are preserved independently.
+JSONL stage events flush immediately so consumers can show progress during a run.
+
 Cached artifact paths are repository-relative and already include stage `wdir`.
 The product materializer resolves them against the invocation repository, so
 experiment worktrees do not publish cache hits into the caller’s directory.

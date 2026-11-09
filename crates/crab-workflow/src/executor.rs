@@ -53,7 +53,7 @@ use crate::journal::Journal;
 use crate::sandbox::{self, HermeticSandboxPolicy};
 use crate::signals::{
     ChildSupervisor, DEFAULT_GRACEFUL_SHUTDOWN, DEFAULT_STDERR_TAIL_BYTES, EventSink,
-    SupervisorEvent, SupervisorOutcome, stage_log_path,
+    OutputMirroring, SupervisorEvent, SupervisorOutcome, stage_log_path,
 };
 use crate::stage::{
     Cmd, Dep, DepUrlHashExt, Out, OutKind, Stage, StageName, expand_external_url_out_alias,
@@ -81,9 +81,8 @@ pub struct ExecutorConfig {
     /// Max bytes retained from the child's stderr for failure
     /// reporting. Default matches the journal `stderr_tail` width.
     pub stderr_tail_bytes: usize,
-    /// Whether child stdout/stderr should also be mirrored to this
-    /// process. Logs and stderr tails are still captured when false.
-    pub mirror_child_output: bool,
+    /// Destination for mirrored child output; logs and stderr tails are always captured.
+    pub child_output: OutputMirroring,
     /// Optional file watched by the supervisor to interrupt a
     /// running child from an external queue command.
     pub external_kill_path: Option<PathBuf>,
@@ -161,7 +160,7 @@ impl std::fmt::Debug for ExecutorConfig {
             .field("cache_root", &self.cache_root)
             .field("graceful_shutdown", &self.graceful_shutdown)
             .field("stderr_tail_bytes", &self.stderr_tail_bytes)
-            .field("mirror_child_output", &self.mirror_child_output)
+            .field("child_output", &self.child_output)
             .field("external_kill_path", &self.external_kill_path)
             .field(
                 "child_started",
@@ -217,7 +216,7 @@ impl ExecutorConfig {
             cache_root,
             graceful_shutdown: DEFAULT_GRACEFUL_SHUTDOWN,
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
-            mirror_child_output: true,
+            child_output: OutputMirroring::Stdio,
             external_kill_path: None,
             child_started: None,
             max_outs_per_stage: 10_000,
@@ -979,7 +978,7 @@ async fn run_supervised_command(
     let mut supervisor = ChildSupervisor::new(command, options.log_path.to_path_buf())
         .with_graceful_shutdown(cfg.graceful_shutdown)
         .with_stderr_tail_bytes(cfg.stderr_tail_bytes)
-        .with_output_mirroring(cfg.mirror_child_output);
+        .with_output_mirroring(cfg.child_output);
     if let Some(path) = cfg.external_kill_path.clone() {
         supervisor = supervisor.with_external_kill_path(path);
     }
@@ -1096,13 +1095,13 @@ pub async fn execute_hook(
     cmd: &Cmd,
     env: &crate::stage::EnvSpec,
     cwd: Option<&Path>,
+    output: OutputMirroring,
 ) -> Result<std::process::ExitStatus> {
     if let Cmd::ShellList(commands) = cmd {
         let mut last_status = None;
         for shell in commands {
             let mut command = build_shell_command(shell, env, cwd, None)?;
-            command.stdout(Stdio::inherit());
-            command.stderr(Stdio::inherit());
+            configure_hook_output(&mut command, output);
             let mut child = command.spawn().map_err(CrabError::Io)?;
             let status = child.wait().await.map_err(CrabError::Io)?;
             if !status.success() {
@@ -1115,8 +1114,7 @@ pub async fn execute_hook(
         }
     }
     let mut command = build_command(cmd, env, cwd, None)?;
-    command.stdout(Stdio::inherit());
-    command.stderr(Stdio::inherit());
+    configure_hook_output(&mut command, output);
     let mut child = command.spawn().map_err(CrabError::Io)?;
     child.wait().await.map_err(CrabError::Io)
 }
@@ -1126,14 +1124,14 @@ pub async fn execute_hook_owned(
     cmd: crate::stage::Cmd,
     env: crate::stage::EnvSpec,
     cwd: Option<std::path::PathBuf>,
+    output: OutputMirroring,
 ) -> Result<std::process::ExitStatus> {
     match cmd {
         Cmd::ShellList(commands) => {
             let mut last_status = None;
             for shell in commands {
                 let mut command = build_shell_command(&shell, &env, cwd.as_deref(), None)?;
-                command.stdout(Stdio::inherit());
-                command.stderr(Stdio::inherit());
+                configure_hook_output(&mut command, output);
                 let mut child = command.spawn().map_err(CrabError::Io)?;
                 let status = child.wait().await.map_err(CrabError::Io)?;
                 if !status.success() {
@@ -1146,19 +1144,32 @@ pub async fn execute_hook_owned(
             }
             let mut command =
                 build_command(&Cmd::ShellList(Vec::new()), &env, cwd.as_deref(), None)?;
-            command.stdout(Stdio::inherit());
-            command.stderr(Stdio::inherit());
+            configure_hook_output(&mut command, output);
             let mut child = command.spawn().map_err(CrabError::Io)?;
             child.wait().await.map_err(CrabError::Io)
         }
         cmd => {
             let mut command = build_command(&cmd, &env, cwd.as_deref(), None)?;
-            command.stdout(Stdio::inherit());
-            command.stderr(Stdio::inherit());
+            configure_hook_output(&mut command, output);
             let mut child = command.spawn().map_err(CrabError::Io)?;
             child.wait().await.map_err(CrabError::Io)
         }
     }
+}
+
+// Hooks bypass supervision but must honor the same output destination on cache hits.
+fn configure_hook_output(command: &mut Command, output: OutputMirroring) {
+    let stdout = match output {
+        OutputMirroring::None => Stdio::null(),
+        OutputMirroring::Stdio => Stdio::inherit(),
+        OutputMirroring::Stderr => Stdio::from(std::io::stderr()),
+    };
+    let stderr = if output == OutputMirroring::None {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    };
+    command.stdout(stdout).stderr(stderr);
 }
 
 /// Map a supervisor outcome onto the workflow error vocabulary.
@@ -2762,7 +2773,7 @@ mod tests {
             cache_root: tmp.path().join(".crab/cache"),
             graceful_shutdown: Duration::from_millis(200),
             stderr_tail_bytes: 1024,
-            mirror_child_output: true,
+            child_output: OutputMirroring::Stdio,
             external_kill_path: None,
             child_started: None,
             max_outs_per_stage: 10_000,

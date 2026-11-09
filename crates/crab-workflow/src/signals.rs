@@ -62,6 +62,17 @@ pub enum EscalationReason {
     ExternalKillRequest,
 }
 
+/// Where supervised child output is mirrored; file capture is independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMirroring {
+    /// Capture logs without mirroring either stream.
+    None,
+    /// Preserve the child's stdout and stderr destinations.
+    Stdio,
+    /// Send both streams to stderr, reserving stdout for structured results.
+    Stderr,
+}
+
 /// Lifecycle events the supervisor emits for executor-side wiring.
 ///
 /// The executor turns each event into a journal transition; the
@@ -177,7 +188,7 @@ pub struct ChildSupervisor {
     graceful_shutdown: Duration,
     stderr_tail_bytes: usize,
     event_sink: Option<EventSink>,
-    mirror_output: bool,
+    mirror_output: OutputMirroring,
     external_kill_path: Option<PathBuf>,
     /// When set, stdout is also written verbatim to this path (for
     /// `OutKind::Stdout` capture). The file is created/truncated at
@@ -200,7 +211,7 @@ impl ChildSupervisor {
             graceful_shutdown: DEFAULT_GRACEFUL_SHUTDOWN,
             stderr_tail_bytes: DEFAULT_STDERR_TAIL_BYTES,
             event_sink: None,
-            mirror_output: true,
+            mirror_output: OutputMirroring::Stdio,
             external_kill_path: None,
             stdout_capture_path: None,
             stdout_capture_append: false,
@@ -239,10 +250,9 @@ impl ChildSupervisor {
         self
     }
 
-    /// Control whether child stdout/stderr are mirrored to the
-    /// parent process in addition to being written to the log file.
+    /// Choose the parent streams used in addition to the log file.
     #[must_use]
-    pub fn with_output_mirroring(mut self, mirror: bool) -> Self {
+    pub fn with_output_mirroring(mut self, mirror: OutputMirroring) -> Self {
         self.mirror_output = mirror;
         self
     }
@@ -750,18 +760,25 @@ async fn pump_stdout(
     stdout: ChildStdout,
     log: Arc<Mutex<File>>,
     capture: Option<Arc<Mutex<File>>>,
-    mirror_output: bool,
+    mirror_output: OutputMirroring,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     let mut out = tokio::io::stdout();
+    let mut err = tokio::io::stderr();
     loop {
         match reader.next_line().await {
             Ok(Some(line)) => {
                 // Let write failures on the user's tty / logfile
                 // degrade gracefully — a dropped line is preferable
                 // to aborting the supervisor mid-run.
-                if mirror_output {
-                    let _ = write_line(&mut out, &line).await;
+                match mirror_output {
+                    OutputMirroring::Stdio => {
+                        let _ = write_line(&mut out, &line).await;
+                    }
+                    OutputMirroring::Stderr => {
+                        let _ = write_line(&mut err, &line).await;
+                    }
+                    OutputMirroring::None => {}
                 }
                 let mut guard = log.lock().await;
                 let _ = write_line(&mut *guard, &line).await;
@@ -778,20 +795,29 @@ async fn pump_stdout(
             }
         }
     }
+    match mirror_output {
+        OutputMirroring::Stdio => {
+            let _ = out.flush().await;
+        }
+        OutputMirroring::Stderr => {
+            let _ = err.flush().await;
+        }
+        OutputMirroring::None => {}
+    }
 }
 
 async fn pump_stderr(
     stderr: ChildStderr,
     log: Arc<Mutex<File>>,
     tail: Arc<Mutex<RingTail>>,
-    mirror_output: bool,
+    mirror_output: OutputMirroring,
 ) {
     let mut reader = BufReader::new(stderr).lines();
     let mut err = tokio::io::stderr();
     loop {
         match reader.next_line().await {
             Ok(Some(line)) => {
-                if mirror_output {
+                if mirror_output != OutputMirroring::None {
                     let _ = write_line(&mut err, &line).await;
                 }
                 {
@@ -811,12 +837,13 @@ async fn pump_stderr(
             }
         }
     }
+    if mirror_output != OutputMirroring::None {
+        let _ = err.flush().await;
+    }
 }
 
 async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> std::io::Result<()> {
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    Ok(())
+    writer.write_all(format!("{line}\n").as_bytes()).await
 }
 
 #[cfg(all(test, unix))]

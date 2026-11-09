@@ -171,7 +171,7 @@ impl<W: Write> JsonlStream<W> {
         self.write_schema_event(self.schema, event_type, data)
     }
 
-    /// Emit a workflow-layer `workflow.stage.*` event.
+    /// Emit and flush a workflow-layer `workflow.stage.*` event.
     ///
     /// Each variant carries its own schema name (e.g.
     /// `workflow.stage.running`), unlike the default event writer
@@ -191,7 +191,9 @@ impl<W: Write> JsonlStream<W> {
             WorkflowStageEvent::Hashed(p) => self.write_schema_event(schema, "event", p),
             WorkflowStageEvent::Committed(p) => self.write_schema_event(schema, "event", p),
             WorkflowStageEvent::Failed(p) => self.write_schema_event(schema, "event", p),
-        }
+        }?;
+        let _ = self.writer.flush();
+        Ok(())
     }
 
     /// Write a line with an explicit schema override.
@@ -227,9 +229,9 @@ impl<W: Write> JsonlStream<W> {
     /// `workflow.stage.not_started` (no stage_hash) and the
     /// terminal `workflow.run` summary that rides the same stream.
     /// Consumers dispatch on `schema` per line rather than on the
-    /// stream's umbrella name. Never rate-limited. When
-    /// `event_type = "result"` the writer is flushed so a terminal
-    /// summary on a dropped stream doesn't get swallowed.
+    /// stream's umbrella name. Never rate-limited.
+    /// Every event is flushed so long-running stages report their state
+    /// before completion rather than waiting for the stream's buffer to fill.
     pub fn emit_schema_event<T: Serialize>(
         &mut self,
         schema: &'static str,
@@ -237,9 +239,7 @@ impl<W: Write> JsonlStream<W> {
         data: T,
     ) -> crate::core::error::Result<()> {
         self.write_schema_event(schema, event_type, data)?;
-        if event_type == "result" {
-            let _ = self.writer.flush();
-        }
+        let _ = self.writer.flush();
         Ok(())
     }
 }
@@ -332,6 +332,17 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn schema_events_are_visible_before_terminal_result() {
+        let buf = SharedBuf::new();
+        let mut stream = JsonlStream::new("workflow.stage.event", "1.0", buf.clone());
+        stream
+            .emit_schema_event("workflow.stage.started", "event", TestPayload { value: 1 })
+            .unwrap();
+        let event: ParsedEvent = serde_json::from_str(&buf.to_string()).unwrap();
+        assert_eq!(event.schema, "workflow.stage.started");
     }
 
     #[test]
@@ -588,6 +599,11 @@ mod tests {
         stream
             .emit_workflow_stage_event(&WorkflowStageEvent::Started(&started))
             .unwrap();
+        assert_eq!(
+            buf.to_string().lines().count(),
+            1,
+            "stage start must be live"
+        );
         stream
             .emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&cache))
             .unwrap();

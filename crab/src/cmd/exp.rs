@@ -1471,7 +1471,11 @@ pub(crate) async fn run_exp_run_with_id(
         tmpdir_path.clone(),
         OutputMode::Text,
         crate::cmd::run::RunInvocationOptions {
-            mirror_child_output: options.mirror_child_output && !is_queued_run,
+            child_output: if options.mirror_child_output && !is_queued_run {
+                crate::workflow::signals::OutputMirroring::Stdio
+            } else {
+                crate::workflow::signals::OutputMirroring::None
+            },
             external_kill_path: is_queued_run
                 .then(|| crate::cmd::exp_queue::queue_kill_path(repo_root, &exp_id.to_string())),
             child_started: queue_child_started,

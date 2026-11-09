@@ -98,6 +98,85 @@ test("packaged updater handles CLI-only releases and genuine desktop updates", a
   }
 });
 
+test("workflow commands stream output and surface failures through the packaged runner", async () => {
+  test.setTimeout(90_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-workflow-output-"));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  mkdirSync(repo);
+  mkdirSync(home);
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: repo });
+  const workflow = `stages:
+  example:
+    cmd: "echo helloxxxx"
+    outs:
+      - example.out
+  xxxx:
+    cmd: "echo hhhh"
+    deps:
+      - stage_out:
+          stage: "example"
+          out: "example.out"
+`;
+  writeFileSync(path.join(repo, "crab.yaml"), workflow);
+  execFileSync("git", ["add", "crab.yaml"], { cwd: repo });
+  execFileSync("git", ["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Workflow fixture"], { cwd: repo });
+  const environment = { ...process.env };
+  delete environment.CRAB_WORKFLOW_ENABLED;
+  const application = await electron.launch({
+    executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`],
+    env: { ...environment, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache") },
+  });
+  try {
+    const page = await application.firstWindow();
+    const rendererErrors: string[] = [];
+    page.on("pageerror", error => rendererErrors.push(error.message));
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    await expect.poll(async () => {
+      try { return (await call(page, "ping", {})).pong; } catch { return undefined; }
+    }).toBe(desktopVersion);
+    await page.evaluate(async repo => {
+      const handle = await window.crab.rpc("open_local", { repo_id: "workflow-output", path: repo });
+      window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repo } }));
+    }, repo);
+    const primary = page.getByRole("navigation", { name: "Primary", exact: true });
+    await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    const output = page.getByRole("region", { name: "Workflow output", exact: true });
+    await expect(output.getByText("helloxxxx", { exact: true })).toBeVisible();
+    await expect(output.getByText("hhhh", { exact: true })).toBeVisible();
+    await expect(output.getByText("example: Completed", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(repo, "example.out"), "utf8")).toBe("helloxxxx\n");
+    await page.screenshot({ path: test.info().outputPath("workflow-output-success.png") });
+
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    const failedCommand = { argv: [process.execPath, "-e", "console.error('stage-failure'); process.exit(7)"] };
+    writeFileSync(path.join(repo, "crab.yaml"), workflow.replace('cmd: "echo hhhh"', `cmd: ${JSON.stringify(failedCommand)}`));
+    await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(page.getByText("Failed", { exact: true })).toBeVisible();
+    await expect(output.getByText("stage-failure", { exact: true })).toBeVisible();
+    await expect(output.getByRole("alert")).toBeVisible();
+    await expect(output.getByText(/xxxx: Failed/)).toBeVisible();
+    await expect(output.getByText("helloxxxx", { exact: true })).toHaveCount(0);
+    await expect(output.getByText("Run a workflow to see output here.", { exact: true })).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath("workflow-output-failure.png") });
+
+    mkdirSync(path.join(repo, ".crab"), { recursive: true });
+    writeFileSync(path.join(repo, ".crab", "local.toml"), "[workflow]\nenabled = false\n");
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(output.getByRole("alert")).toContainText("workflow feature is disabled");
+    await expect(output.getByText("stage-failure", { exact: true })).toHaveCount(0);
+    expect(rendererErrors).toEqual([]);
+  } finally {
+    await application.close();
+    // Agent discovery probes can finish writing after Electron closes.
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
 test("packaged desktop opens and reads a real repository through its v2 agent", async () => {
   test.setTimeout(60_000);
   const executablePath = packagedExecutable();

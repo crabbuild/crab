@@ -55,6 +55,126 @@ fn parse_line(line: &str) -> (String, String, Value) {
     (schema, event_type, v)
 }
 
+#[test]
+fn structured_cache_hit_hooks_keep_child_output_off_stdout() {
+    for mode in ["--json", "--jsonl"] {
+        for target in [None, Some("capture")] {
+            let tmp = TempDir::new().unwrap();
+            fs::write(
+                tmp.path().join("crab.yaml"),
+                r#"stages:
+  capture:
+    cmd: "echo payload > capture.out"
+    outs: [capture.out]
+    side_effects: true
+    on_cache_hit: "echo hook-message"
+"#,
+            )
+            .unwrap();
+            let mut command = Command::new(bin());
+            command
+                .current_dir(tmp.path())
+                .env("CRAB_CACHE_DIR", tmp.path().join("cache"))
+                .env("CRAB_WORKFLOW_ENABLED", "1")
+                .args(["run", mode]);
+            command.args(target);
+            assert!(command.output().unwrap().status.success());
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{mode}/{target:?}: {stderr}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if mode == "--jsonl" {
+                let frames: Vec<_> = stdout.lines().map(parse_line).collect();
+                assert_eq!(frames.last().unwrap().1, "result");
+            } else {
+                serde_json::from_str::<Value>(&stdout).unwrap();
+            }
+            assert!(
+                stderr.lines().any(|line| line == "hook-message"),
+                "{mode}/{target:?}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn structured_runs_keep_child_output_off_stdout() {
+    let shell: &[&str] = if cfg!(windows) {
+        &["cmd.exe", "/D", "/S", "/C"]
+    } else {
+        &["/bin/sh", "-c"]
+    };
+    let script = if cfg!(windows) {
+        "echo child-stdout&echo child-stderr>&2"
+    } else {
+        "echo child-stdout; echo child-stderr >&2"
+    };
+    for (mode, target) in [
+        ("--jsonl", "dag"),
+        ("--jsonl", "single"),
+        ("--jsonl", "inline"),
+        ("--json", "dag"),
+        ("--json", "single"),
+        ("--json", "inline"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("crab.yaml"),
+            r#"stages:
+  capture:
+    cmd: "echo child-stdout; echo child-stderr >&2"
+    outs: [capture.out]
+  consume:
+    cmd: "echo downstream"
+    deps:
+      - stage_out: { stage: capture, out: capture.out }
+"#
+            .replace("echo child-stdout; echo child-stderr >&2", script),
+        )
+        .unwrap();
+        let mut command = Command::new(bin());
+        command
+            .current_dir(tmp.path())
+            .env("CRAB_CACHE_DIR", tmp.path().join("cache"))
+            .env("CRAB_WORKFLOW_ENABLED", "1")
+            .args(["run", mode]);
+        match target {
+            "single" => {
+                command.arg("capture");
+            }
+            "inline" => {
+                command.args(["--name", "capture", "--outs", "capture.out", "--"]);
+                command.args(shell).arg(script);
+            }
+            _ => {}
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{mode}/{target}: {stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if mode == "--jsonl" {
+            let frames: Vec<_> = stdout.lines().map(parse_line).collect();
+            assert_eq!(frames.last().unwrap().1, "result", "{mode}/{target}");
+        } else {
+            let envelope: Value = serde_json::from_str(&stdout).unwrap();
+            assert!(envelope["data"].is_object(), "{mode}/{target}: {stdout}");
+        }
+        assert!(
+            stderr.lines().any(|line| line == "child-stdout"),
+            "{mode}/{target}: {stderr}"
+        );
+        assert!(
+            stderr.lines().any(|line| line == "child-stderr"),
+            "{mode}/{target}: {stderr}"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("capture.out")).unwrap(),
+            "child-stdout\n",
+            "{mode}/{target}"
+        );
+    }
+}
+
 /// A two-stage DAG run emits the per-stage event sequence for each
 /// stage plus a terminal `workflow.run` summary.
 #[test]
