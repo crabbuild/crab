@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelGroupHandle } from "react-resizable-panels";
 import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
 import { PtyModeProvider } from "./lib/pty-mode-context";
@@ -29,6 +29,7 @@ import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
 import { localPathName } from "./lib/local-path-name";
+import type { SshTerminalRequest } from "./views/TerminalView";
 import type { StartupCommand } from "./lib/terminal-presets";
 
 // Side-effect imports: register commands in the command-registry at startup.
@@ -143,6 +144,25 @@ function Shell() {
 
   // Bottom terminal panel state (VS Code-style Ctrl+` toggle).
   const [bottomTerminalOpen, setBottomTerminalOpen] = useState(false);
+  const [terminalMaximized, setTerminalMaximized] = useState(false);
+  const [terminalActivated, setTerminalActivated] = useState(false);
+  const [sshTerminalRequest, setSshTerminalRequest] = useState<SshTerminalRequest | null>(null);
+  const terminalPanelsRef = useRef<ImperativePanelGroupHandle>(null);
+  const terminalLayoutRef = useRef([70, 30]);
+  const toggleTerminal = useCallback(() => {
+    if (bottomTerminalOpen && !terminalMaximized && terminalPanelsRef.current) {
+      terminalLayoutRef.current = terminalPanelsRef.current.getLayout();
+    }
+    setBottomTerminalOpen((open) => !open);
+  }, [bottomTerminalOpen, terminalMaximized]);
+  useEffect(() => {
+    if (bottomTerminalOpen) setTerminalActivated(true);
+    else setTerminalMaximized(false);
+    const panels = terminalPanelsRef.current;
+    if (!panels) return;
+    const layout = bottomTerminalOpen ? (terminalMaximized ? [0, 100] : terminalLayoutRef.current) : [100, 0];
+    panels.setLayout(layout);
+  }, [bottomTerminalOpen, terminalMaximized]);
 
   // ── Session persistence: deactivate/activate on repo switch ──────
   const sessionManager = useSession();
@@ -498,19 +518,27 @@ function Shell() {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === "`") {
         e.preventDefault();
-        setBottomTerminalOpen((o) => !o);
+        toggleTerminal();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [toggleTerminal]);
 
   // Listen for programmatic terminal open requests (e.g. from the orchestrator
   // when spawning a terminal-only agent).
   useEffect(() => {
     const handler = () => setBottomTerminalOpen(true);
+    const openSsh = (event: Event) => {
+      setSshTerminalRequest((event as CustomEvent<SshTerminalRequest>).detail);
+      setBottomTerminalOpen(true);
+    };
     window.addEventListener("crab:open-terminal", handler);
-    return () => window.removeEventListener("crab:open-terminal", handler);
+    window.addEventListener("crab:open-ssh-terminal-here", openSsh);
+    return () => {
+      window.removeEventListener("crab:open-terminal", handler);
+      window.removeEventListener("crab:open-ssh-terminal-here", openSsh);
+    };
   }, []);
 
   // Evict repos from terminal keep-alive when they're removed from the store.
@@ -598,8 +626,17 @@ function Shell() {
         canForward={nav.canForward}
         onBack={handleBack}
         onForward={handleForward}
+        terminalMaximized={terminalMaximized}
+        onToggleTerminalMaximized={() => {
+          if (!terminalMaximized && terminalPanelsRef.current) terminalLayoutRef.current = terminalPanelsRef.current.getLayout();
+          setTerminalMaximized((value) => !value);
+        }}
+        onShowOverview={() => {
+          setTerminalMaximized(false);
+          window.dispatchEvent(new CustomEvent("crab:show-repository-overview"));
+        }}
         terminalOpen={bottomTerminalOpen}
-        onToggleTerminal={() => setBottomTerminalOpen((o) => !o)}
+        onToggleTerminal={toggleTerminal}
         onSpawnAgentTerminal={handleSpawnAgentTerminal}
         workspaceName={workspaceActive ? (getActiveWorkspace(state)?.name ?? null) : null}
         workspaceRepos={workspaceActive ? activeWorkspaceRepos : undefined}
@@ -614,8 +651,8 @@ function Shell() {
         {repoSidebarOpen && (
           <Sidebar onCollapse={() => setRepoSidebarOpen(false)} />
         )}
-        <PanelGroup direction="vertical" className="min-w-0 flex-1">
-          <Panel minSize={20} className="min-h-0">
+        <PanelGroup ref={terminalPanelsRef} direction="vertical" className="min-w-0 flex-1">
+          <Panel minSize={terminalMaximized ? 0 : 20} collapsible collapsedSize={0} className={terminalMaximized ? "hidden" : "min-h-0"}>
             <main className="h-full w-full overflow-hidden">
               {active ? (
                 <RepoDetail
@@ -634,24 +671,20 @@ function Shell() {
               )}
             </main>
           </Panel>
-          {bottomTerminalOpen && (
-            <>
-              <PanelResizeHandle className="h-px cursor-row-resize bg-gx-border hover:bg-gx-accent/50 transition-colors" />
-              <Panel
-                defaultSize={30}
-                minSize={10}
-                maxSize={80}
-                className="min-h-0 bg-gx-bg-sub"
-              >
-                <TerminalKeepAlive
-                  ref={terminalKeepAliveRef}
-                  repos={state.repos}
-                  activeRepoId={active?.repo_id ?? null}
-                  maxKeptAlive={effectiveKeepAliveLimit}
-                />
-              </Panel>
-            </>
-          )}
+          <PanelResizeHandle disabled={!bottomTerminalOpen || terminalMaximized} tabIndex={bottomTerminalOpen && !terminalMaximized ? 0 : -1} className={bottomTerminalOpen && !terminalMaximized ? "h-px cursor-row-resize bg-gx-border hover:bg-gx-accent/50" : "pointer-events-none h-0"} />
+          <Panel defaultSize={0} minSize={bottomTerminalOpen ? 10 : 0} maxSize={terminalMaximized ? 100 : 80} collapsible collapsedSize={0} className={bottomTerminalOpen ? "min-h-0 bg-gx-bg-sub" : "hidden"}>
+            {/* Closing or maximizing changes visibility, never PTY ownership. */}
+            {terminalActivated && (
+              <TerminalKeepAlive
+                ref={terminalKeepAliveRef}
+                repos={state.repos}
+                activeRepoId={bottomTerminalOpen ? active?.repo_id ?? null : null}
+                maxKeptAlive={effectiveKeepAliveLimit}
+                sshRequest={sshTerminalRequest}
+                onSshRequestHandled={() => setSshTerminalRequest(null)}
+              />
+            )}
+          </Panel>
         </PanelGroup>
       </div>
       <ProgressDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />

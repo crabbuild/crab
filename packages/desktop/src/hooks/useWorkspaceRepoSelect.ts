@@ -1,6 +1,7 @@
 import { useCallback } from "react";
-import { useStore } from "../state";
+import { useStore, type Workspace } from "../state";
 import { rpc, RepoHandle } from "../ipc";
+import { workspaceIdentity } from "../lib/workspace-sidebar";
 import { publishToast } from "../lib/toasts";
 
 /**
@@ -20,7 +21,7 @@ export function useWorkspaceRepoSelect() {
   const { state, dispatch, addRepo, setActive } = useStore();
 
   const selectWorkspaceRepo = useCallback(
-    async (relativePath: string) => {
+    async (relativePath: string, owner?: Workspace) => {
       if (state.workspaces.length === 0) return;
 
       // Find the entry across all workspaces
@@ -28,7 +29,10 @@ export function useWorkspaceRepoSelect() {
       let wsRootPath: string | null = null;
       let wsKind: "local" | "remote" = "local";
       let wsProfileId: string | undefined;
-      for (const ws of state.workspaces) {
+      const candidates = owner
+        ? state.workspaces.filter((workspace) => workspaceIdentity(workspace) === workspaceIdentity(owner))
+        : [...state.workspaces].sort((a, b) => Number(b.rootPath === state.activeWorkspaceRootPath) - Number(a.rootPath === state.activeWorkspaceRootPath));
+      for (const ws of candidates) {
         const found = ws.repos.find((e) => e.relativePath === relativePath);
         if (found) {
           entry = found;
@@ -61,7 +65,7 @@ export function useWorkspaceRepoSelect() {
         if (wsKind === "remote" && wsProfileId) {
           // Remote repo: open via SSH agent. The main process handler
           // registers the RemoteProvider and starts file watching.
-          handle = await (window as any).crab.ssh.openAsRepo(
+          handle = await window.crab.ssh.openAsRepo(
             wsProfileId,
             entry.absolutePath,
           );
@@ -80,6 +84,7 @@ export function useWorkspaceRepoSelect() {
         });
         addRepo({
           ...handle,
+          repo_id: repoId,
           label: entry.name,
           path: entry.absolutePath,
           openedAt: Date.now(),
@@ -94,7 +99,7 @@ export function useWorkspaceRepoSelect() {
         });
       }
     },
-    [state.workspaces, dispatch, addRepo, setActive],
+    [state.workspaces, state.activeWorkspaceRootPath, dispatch, addRepo, setActive],
   );
 
   return selectWorkspaceRepo;

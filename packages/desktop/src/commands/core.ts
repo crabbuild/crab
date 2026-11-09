@@ -134,7 +134,7 @@ commands.register({
   title: "Navigate to Terminal",
   category: "View",
   keywords: ["shell", "console", "cli"],
-  run: async () => {},
+  run: async () => { window.dispatchEvent(new CustomEvent("crab:open-terminal")); },
 });
 
 commands.register({

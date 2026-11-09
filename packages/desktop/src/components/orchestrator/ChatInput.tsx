@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -222,6 +223,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   const attachInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
+
+  useLayoutEffect(() => {
+    const composer = containerRef.current;
+    const content = composer?.closest<HTMLElement>("[data-chat-content]");
+    if (!composer || !content) return;
+    // Inline menus scroll within the chat's available space; full dialogs
+    // render at the document layer so they can cover navigation normally.
+    const measure = () => {
+      const height = Math.max(48, composer.getBoundingClientRect().top - content.getBoundingClientRect().top - 8);
+      composer.style.setProperty("--composer-popup-height", `${height}px`);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(composer);
+    observer.observe(content);
+    window.addEventListener("resize", measure);
+    measure();
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
+  }, []);
 
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
@@ -585,7 +604,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="relative rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
+      className="relative isolate rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown
@@ -1054,7 +1073,7 @@ function PopoverMenu({
     <div
       role="menu"
       className={clsx(
-        "absolute bottom-full z-40 mb-2 min-w-[200px] rounded-lg border border-gx-border bg-gx-bg shadow-xl overflow-hidden",
+        "absolute bottom-full z-40 mb-2 max-h-[var(--composer-popup-height)] min-w-[200px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-xl",
         anchor === "left" ? "left-2" : "right-2",
       )}
     >

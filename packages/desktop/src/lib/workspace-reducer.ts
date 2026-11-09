@@ -26,7 +26,24 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // Add or replace workspace by rootPath
       const existing = state.workspaces.findIndex((w) => w.rootPath === action.workspace.rootPath);
       const workspaces = existing >= 0
-        ? state.workspaces.map((w, i) => i === existing ? action.workspace : w)
+        ? state.workspaces.map((workspace, index) => {
+            if (index !== existing) return workspace;
+            if (workspace.kind !== action.workspace.kind || workspace.profileId !== action.workspace.profileId) return action.workspace;
+            const previous = new Map(workspace.repos.map((entry) => [entry.relativePath, entry]));
+            // Discovery owns membership, not open handles. Losing an L2 handle
+            // would detach the selected repo from its workspace after Refresh.
+            const repos = action.workspace.repos.map((entry) => {
+              const opened = previous.get(entry.relativePath);
+              if (!opened || opened.absolutePath !== entry.absolutePath) return entry;
+              return {
+                ...entry,
+                level: opened.openRepoId ? 2 as const : entry.level,
+                openRepoId: opened.openRepoId,
+                lastAccessedAt: Math.max(entry.lastAccessedAt, opened.lastAccessedAt),
+              };
+            });
+            return { ...action.workspace, repos };
+          })
         : [...state.workspaces, action.workspace];
       return { ...state, workspaces };
     }
@@ -92,7 +109,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
 
     case "tab-bar-activate": {
       const now = Date.now();
+      const activeRoot = state.activeWorkspaceRootPath ?? state.workspaces[0]?.rootPath;
       const workspaces = state.workspaces.map((ws) => {
+        // Relative paths are workspace-local; another host's repo must not
+        // become Recent merely because it has the same directory name.
+        if (ws.rootPath !== activeRoot) return ws;
         const hasEntry = ws.repos.some((e) => e.relativePath === action.relativePath);
         if (!hasEntry) return ws;
         const repos = ws.repos.map((entry) =>

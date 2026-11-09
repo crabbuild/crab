@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
+import { matchesRepository, workspaceIdentity } from "../lib/workspace-sidebar";
 import { localPathName } from "../lib/local-path-name";
 import {
   ChevronDown,
@@ -64,6 +65,27 @@ const DEFAULT_WIDTH = 260;
 export function Sidebar({ onCollapse }: Props) {
   const { state, dispatch, addRepo, removeRepo, setActive, pinRepo, unpinRepo, reorderRepos } = useStore();
   const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollPosition = useRef(0);
+  const restoringScroll = useRef(false);
+  const activeWorkspace = getActiveWorkspace(state);
+  const scrollKey = `crab.repoSidebarScroll.${activeWorkspace ? workspaceIdentity(activeWorkspace) : "standalone"}`;
+  useLayoutEffect(() => {
+    scrollPosition.current = Number(localStorage.getItem(scrollKey)) || 0;
+    return () => localStorage.setItem(scrollKey, String(scrollPosition.current));
+  }, [scrollKey]);
+  useLayoutEffect(() => {
+    restoringScroll.current = true;
+    if (scrollRef.current) scrollRef.current.scrollTop = query.trim() ? 0 : scrollPosition.current;
+    const frame = requestAnimationFrame(() => { restoringScroll.current = false; });
+    return () => cancelAnimationFrame(frame);
+  }, [scrollKey, query, state.workspaces, state.repos]);
+  useEffect(() => {
+    const saveScroll = () => localStorage.setItem(scrollKey, String(scrollPosition.current));
+    window.addEventListener("beforeunload", saveScroll);
+    return () => window.removeEventListener("beforeunload", saveScroll);
+  }, [scrollKey]);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneTargetWorkspace, setCloneTargetWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -356,11 +378,11 @@ export function Sidebar({ onCollapse }: Props) {
         <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openLocal} disabled={busy} title="Open Repository">
           <FolderOpen size={14} />
         </button>
-        <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={() => setCloneOpen(true)} disabled={busy} title="Clone Repository">
-          <Download size={14} />
-        </button>
         <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={openWorkspace} disabled={busy} title="Open Workspace">
           <FolderGit2 size={14} />
+        </button>
+        <button type="button" className="btn h-[30px] w-[30px] shrink-0 justify-center px-0" onClick={() => setCloneOpen(true)} disabled={busy} title="Clone Repository">
+          <Download size={14} />
         </button>
         {/* More actions dropdown */}
         <div className="relative" ref={addMenuRef}>
@@ -422,7 +444,32 @@ export function Sidebar({ onCollapse }: Props) {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto">
+      <div className="relative mx-3 mb-1 mt-1 flex shrink-0 items-center">
+        <Search size={12} className="pointer-events-none absolute left-2 text-gx-muted" />
+        <input
+          aria-label="Filter repositories"
+          placeholder="Filter repositories…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") { event.stopPropagation(); setQuery(""); }
+          }}
+          className="w-full rounded border border-gx-border bg-gx-bg-sub py-1.5 pl-7 pr-7 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+        />
+        {query && (
+          <button type="button" aria-label="Clear repository filter" className="absolute right-1 rounded p-1 text-gx-muted hover:text-gx-text" onClick={() => setQuery("")}>
+            <X size={12} />
+          </button>
+        )}
+      </div>
+      <div
+        ref={scrollRef}
+        aria-label="Repository list"
+        className="min-h-0 flex-1 overflow-auto"
+        onScroll={(event) => {
+          if (!query.trim() && !restoringScroll.current) scrollPosition.current = event.currentTarget.scrollTop;
+        }}
+      >
         {/* ── Workspaces section (when any workspace is active) ── */}
         {state.workspaces.length > 0 && (
           <div>
@@ -430,20 +477,23 @@ export function Sidebar({ onCollapse }: Props) {
               type="button"
               className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text transition"
               onClick={() => setWorkspacesSectionCollapsed((v) => !v)}
-              aria-expanded={!workspacesSectionCollapsed}
+              aria-expanded={!workspacesSectionCollapsed || Boolean(query.trim())}
               aria-label="Toggle Workspaces section"
             >
               {workspacesSectionCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
               <span>Workspaces</span>
             </button>
-            {!workspacesSectionCollapsed && (
+            {(!workspacesSectionCollapsed || query.trim()) && (
               <div className="pl-2">
                 {state.workspaces.map((ws) => (
                   <WorkspaceSidebar
-                    key={ws.rootPath}
+                    key={workspaceIdentity(ws)}
                     workspace={ws}
-                    activeRelativePath={activeWorkspaceRelativePath}
-                    onSelect={selectWorkspaceRepo}
+                    query={query}
+                    pinnedPaths={state.pinnedPaths}
+                    onTogglePin={(path) => state.pinnedPaths.has(path) ? unpinRepo(path) : pinRepo(path)}
+                    activeRelativePath={ws.repos.some((entry) => entry.openRepoId === state.activeRepoId) ? activeWorkspaceRelativePath : null}
+                    onSelect={(path) => selectWorkspaceRepo(path, ws)}
                     onRemoveRepo={handleRemoveRepoFromWorkspace}
                     onRefresh={handleRefreshWorkspace}
                     onClose={() => handleCloseWorkspace(ws.rootPath)}
@@ -463,7 +513,7 @@ export function Sidebar({ onCollapse }: Props) {
         {/* ── Repositories section ── */}
         {(() => {
           // When workspaces are active, show standalone repos; otherwise show all repos
-          const reposToShow = state.workspaces.length > 0 ? standaloneRepos : visibleRepos;
+          const reposToShow = (state.workspaces.length > 0 ? standaloneRepos : visibleRepos).filter((repo) => matchesRepository(query, repo.label, repo.path ?? repo.url));
           if (state.workspaces.length > 0 && reposToShow.length === 0) return null;
           return (
             <div>
@@ -471,16 +521,16 @@ export function Sidebar({ onCollapse }: Props) {
                 type="button"
                 className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text transition"
                 onClick={() => setReposSectionCollapsed((v) => !v)}
-                aria-expanded={!reposSectionCollapsed}
+                aria-expanded={!reposSectionCollapsed || Boolean(query.trim())}
                 aria-label="Toggle Repositories section"
               >
                 {reposSectionCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
                 <span>Repositories</span>
               </button>
-              {!reposSectionCollapsed && (
+              {(!reposSectionCollapsed || query.trim()) && (
                 <ul className="mt-1 pl-3 pr-2">
                   {reposToShow.length === 0 && (
-                    <li className="px-2 py-6 text-center text-xs text-gx-muted">No repositories open yet.</li>
+                    <li className="px-2 py-6 text-center text-xs text-gx-muted">{query.trim() ? "No matching repositories" : "No repositories open yet."}</li>
                   )}
                   {/* Pinned repos (not draggable, always on top, alphabetic) */}
                   {reposToShow.filter((r) => r.path && state.pinnedPaths.has(r.path)).map((repo) => (

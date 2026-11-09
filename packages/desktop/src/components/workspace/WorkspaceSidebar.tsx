@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -9,16 +9,28 @@ import {
   FolderTree,
   GitBranch,
   LayoutDashboard,
+  MoreHorizontal,
+  Pin,
+  PinOff,
   RefreshCw,
   Settings,
   X,
 } from "lucide-react";
 import type { Workspace, WorkspaceRepoEntry } from "../../state";
+import {
+  groupWorkspaceRepositories,
+  readWorkspaceSidebarState,
+  workspaceIdentity,
+  workspaceRepoIdentity,
+} from "../../lib/workspace-sidebar";
 import { ContextMenu, type MenuItemDef } from "../ContextMenu";
 
 export interface WorkspaceSidebarProps {
   workspace: Workspace;
   activeRelativePath: string | null;
+  query: string;
+  pinnedPaths: Set<string>;
+  onTogglePin: (path: string) => void;
   onSelect: (relativePath: string) => void;
   onRemoveRepo?: (relativePath: string) => void;
   onRefresh?: () => void;
@@ -28,16 +40,12 @@ export interface WorkspaceSidebarProps {
   onCloneRepository?: () => void;
 }
 
-/**
- * Sidebar workspace view: flat list of all workspace repos with
- * inline status (branch, dirty count) and visual level indicators.
- *
- * Simplified model: a workspace is either entirely local or entirely
- * remote. All repos are discovered under the workspace root.
- */
 export function WorkspaceSidebar({
   workspace,
   activeRelativePath,
+  query,
+  pinnedPaths,
+  onTogglePin,
   onSelect,
   onRemoveRepo,
   onRefresh,
@@ -46,310 +54,352 @@ export function WorkspaceSidebar({
   onShowDashboard,
   onCloneRepository,
 }: WorkspaceSidebarProps) {
-  // Group repos: worktrees nested under parent repos.
-  // A worktree is identified by having a relativePath that starts with
-  // another repo's relativePath + "/". We use a simple heuristic:
-  // repos whose path is a sub-path of another repo are treated as worktrees.
-  const { topLevel, worktreeMap } = useMemo(() => {
-    const sorted = [...workspace.repos].sort(
-      (a, b) => a.relativePath.localeCompare(b.relativePath),
-    );
-    const topLevel: WorkspaceRepoEntry[] = [];
-    const worktreeMap = new Map<string, WorkspaceRepoEntry[]>();
-
-    for (const entry of sorted) {
-      // Check if this entry is a worktree nested under a parent repo
-      const parent = topLevel.find(
-        (p) =>
-          entry.relativePath.startsWith(p.relativePath + "/") &&
-          entry.relativePath !== p.relativePath,
-      );
-      if (parent) {
-        const existing = worktreeMap.get(parent.relativePath) ?? [];
-        existing.push(entry);
-        worktreeMap.set(parent.relativePath, existing);
-      } else {
-        topLevel.push(entry);
+  const storageKey = `crab.workspaceSidebar.${workspaceIdentity(workspace)}`;
+  const [saved, setSaved] = useState(() =>
+    readWorkspaceSidebarState(storageKey),
+  );
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const collapsed = saved.collapsed && !query.trim();
+  // Discovery can replace status entries. Keep bounded access history separately
+  // so refreshing or restarting cannot move every recent repository back to All.
+  useEffect(() => {
+    setSaved((previous) => {
+      const recent = { ...previous.recent };
+      let changed = false;
+      for (const entry of workspace.repos) {
+        if (entry.lastAccessedAt > (recent[entry.relativePath] ?? 0)) {
+          recent[entry.relativePath] = entry.lastAccessedAt;
+          changed = true;
+        }
       }
-    }
-    return { topLevel, worktreeMap };
+      if (!changed) return previous;
+      return {
+        ...previous,
+        recent: Object.fromEntries(
+          Object.entries(recent)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 20),
+        ),
+      };
+    });
   }, [workspace.repos]);
-
-  // Context menu state for workspace header right-click
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  // Collapsible state for the workspace's repo list
-  const [reposCollapsed, setReposCollapsed] = useState(false);
-
-  const contextMenuItems: MenuItemDef[] = [
-    { id: "show-dashboard", label: "Show Workspace Dashboard", icon: LayoutDashboard },
-    ...(onCloneRepository ? [{ id: "clone-repo", label: "Clone Repository to Workspace", icon: Download }] : []),
-    ...(onRefresh ? [{ id: "refresh", label: "Refresh Workspace", icon: RefreshCw }] : []),
-    ...(onSettings ? [{ id: "settings", label: "Workspace Settings", icon: Settings }] : []),
-    ...(onClose ? [{ id: "close", label: "Close Workspace", icon: X, separator: true, danger: true }] : []),
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+  }, [storageKey, saved]);
+  const { groups, children } = useMemo(
+    () =>
+      groupWorkspaceRepositories(workspace, pinnedPaths, saved.recent, query),
+    [workspace, pinnedPaths, saved.recent, query],
+  );
+  const actions: MenuItemDef[] = [
+    {
+      id: "overview",
+      label: "Show Workspace Dashboard",
+      icon: LayoutDashboard,
+    },
+    ...(onCloneRepository
+      ? [
+          {
+            id: "clone",
+            label: "Clone Repository to Workspace",
+            icon: Download,
+          },
+        ]
+      : []),
+    ...(onRefresh
+      ? [{ id: "refresh", label: "Refresh Workspace", icon: RefreshCw }]
+      : []),
+    ...(onSettings
+      ? [{ id: "settings", label: "Workspace Settings", icon: Settings }]
+      : []),
+    ...(onClose
+      ? [
+          {
+            id: "close",
+            label: "Close Workspace",
+            icon: X,
+            separator: true,
+            danger: true,
+          },
+        ]
+      : []),
   ];
-
-  function handleContextMenuSelect(itemId: string) {
-    setContextMenu(null);
-    switch (itemId) {
-      case "show-dashboard":
-        onShowDashboard?.();
-        break;
-      case "clone-repo":
-        onCloneRepository?.();
-        break;
-      case "refresh":
-        onRefresh?.();
-        break;
-      case "settings":
-        onSettings?.();
-        break;
-      case "close":
-        onClose?.();
-        break;
-    }
-  }
-
+  const handlers: Record<string, (() => void) | undefined> = {
+    overview: onShowDashboard,
+    clone: onCloneRepository,
+    refresh: onRefresh,
+    settings: onSettings,
+    close: onClose,
+  };
   return (
-    <div className="flex flex-col">
-      {/* Workspace header */}
+    <section aria-label={`${workspace.name} workspace`}>
       <div
-        className="flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-gx-surface-hover/50 transition"
-        onContextMenu={(e) => {
-          e.preventDefault();
-          setContextMenu({ x: e.clientX, y: e.clientY });
+        className="flex items-center gap-1 rounded px-2 py-1.5 hover:bg-gx-surface-hover/50"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
         }}
-        title="Click to expand/collapse workspace repos"
       >
         <button
           type="button"
-          className="shrink-0 p-0 text-gx-muted hover:text-gx-text"
-          onClick={(e) => { e.stopPropagation(); setReposCollapsed((v) => !v); }}
-          aria-label={reposCollapsed ? "Expand workspace" : "Collapse workspace"}
+          className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+          aria-label={collapsed ? "Expand workspace" : "Collapse workspace"}
+          aria-expanded={!collapsed}
+          onClick={() =>
+            setSaved((previous) => ({
+              ...previous,
+              collapsed: !previous.collapsed,
+            }))
+          }
         >
-          {reposCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </button>
-        <div className="min-w-0 flex-1 cursor-pointer" onClick={onShowDashboard}>
-          <div className="truncate text-xs font-semibold text-gx-text flex items-center gap-1">
-            {workspace.name}
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={onShowDashboard}
+          title={
+            workspace.kind === "remote"
+              ? `${workspace.profileLabel ?? workspace.profileId}:${workspace.rootPath}`
+              : workspace.rootPath
+          }
+        >
+          <span className="flex items-center gap-1 text-xs font-semibold text-gx-text">
+            <span className="truncate">{workspace.name}</span>
             {workspace.kind === "remote" && (
-              <span title={`Remote: ${workspace.profileLabel ?? workspace.profileId}`}>
-                <Cloud size={10} className="text-gx-accent" />
-              </span>
+              <Cloud size={11} className="shrink-0 text-gx-accent" />
+            )}
+          </span>
+          <span className="block truncate text-[10px] text-gx-muted">
+            {workspace.kind === "remote"
+              ? `${workspace.profileLabel ?? workspace.profileId}:`
+              : ""}
+            {workspace.rootPath}
+          </span>
+        </button>
+        <button
+          type="button"
+          aria-label={`${workspace.name} workspace actions`}
+          aria-haspopup="menu"
+          aria-expanded={menu != null}
+          title="Workspace actions"
+          className="shrink-0 rounded p-1.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            setMenu(menu ? null : { x: rect.left, y: rect.bottom });
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </div>
+      {!collapsed &&
+        (groups.length ? (
+          groups.map((group) => (
+            <div key={group.label}>
+              <div className="px-4 pb-1 pt-2 text-[10px] font-medium text-gx-muted">
+                {group.label}
+              </div>
+              <ul
+                aria-label={`${workspace.name} ${group.label}`}
+                className="px-2 pl-3"
+              >
+                {group.entries.map((entry) => (
+                  <li key={entry.relativePath}>
+                    <WorkspaceRepoRow
+                      entry={entry}
+                      isActive={entry.relativePath === activeRelativePath}
+                      onSelect={onSelect}
+                      onRemove={onRemoveRepo}
+                      pinned={pinnedPaths.has(
+                        workspaceRepoIdentity(workspace, entry),
+                      )}
+                      onTogglePin={() =>
+                        onTogglePin(workspaceRepoIdentity(workspace, entry))
+                      }
+                    />
+                    {(children.get(entry.relativePath)?.length ?? 0) > 0 && (
+                      <ul className="ml-3 border-l border-gx-border/40 pl-1.5">
+                        {children.get(entry.relativePath)!.map((child) => (
+                          <li key={child.relativePath}>
+                            <WorkspaceRepoRow
+                              entry={child}
+                              isActive={
+                                child.relativePath === activeRelativePath
+                              }
+                              onSelect={onSelect}
+                              isWorktree
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        ) : (
+          <div className="px-4 py-5 text-xs text-gx-muted">
+            {query.trim()
+              ? "No matching repositories"
+              : "No repositories found"}
+            {!query.trim() && onCloneRepository && (
+              <button
+                type="button"
+                className="mt-3 flex items-center gap-1 rounded border border-gx-border px-2 py-1.5 hover:text-gx-text"
+                onClick={onCloneRepository}
+              >
+                <Download size={12} />
+                Clone Repository
+              </button>
             )}
           </div>
-          <div className="truncate text-[10px] text-gx-muted">
-            {workspace.kind === "remote" && workspace.profileLabel
-              ? `${workspace.profileLabel}:${workspace.rootPath}`
-              : workspace.rootPath}
-          </div>
-        </div>
-        {onCloneRepository && (
-          <button
-            type="button"
-            className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
-            onClick={(e) => { e.stopPropagation(); onCloneRepository(); }}
-            title="Clone Repository to Workspace"
-            aria-label="Clone Repository to Workspace"
-          >
-            <Download size={12} />
-          </button>
-        )}
-        {onSettings && (
-          <button
-            type="button"
-            className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
-            onClick={(e) => { e.stopPropagation(); onSettings(); }}
-            title="Workspace Settings"
-            aria-label="Workspace Settings"
-          >
-            <Settings size={12} />
-          </button>
-        )}
-        {onRefresh && (
-          <button
-            type="button"
-            className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
-            onClick={(e) => { e.stopPropagation(); onRefresh(); }}
-            title="Refresh workspace"
-            aria-label="Refresh workspace"
-          >
-            <RefreshCw size={12} />
-          </button>
-        )}
-        {onClose && (
-          <button
-            type="button"
-            className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-error hover:bg-gx-surface-hover transition"
-            onClick={(e) => { e.stopPropagation(); onClose(); }}
-            title="Close workspace"
-            aria-label="Close workspace"
-          >
-            <X size={12} />
-          </button>
-        )}
-      </div>
-
-      {/* Repo list (collapsible) */}
-      {!reposCollapsed && (
-        topLevel.length === 0 ? (
-          <div className="px-3 py-6 text-center">
-            <p className="text-xs text-gx-muted">No repositories found</p>
-            <p className="mt-1 text-[10px] text-gx-muted/70">
-              Try adjusting the scan depth or exclude patterns in workspace settings.
-            </p>
-            {/* Action buttons for empty state */}
-            <div className="mt-3 flex flex-col gap-1.5">
-              {onCloneRepository && (
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-center gap-1.5 rounded border border-gx-border px-2 py-1.5 text-[11px] text-gx-muted hover:text-gx-text hover:border-gx-accent/50 hover:bg-gx-accent/5 transition"
-                  onClick={onCloneRepository}
-                >
-                  <Download size={11} />
-                  Clone Repository
-                </button>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div>
-            <ul className="flex-1 overflow-auto pl-3 pr-2 py-1">
-              {topLevel.map((entry) => (
-                <li key={entry.relativePath}>
-                  <WorkspaceRepoRow
-                    entry={entry}
-                    isActive={entry.relativePath === activeRelativePath}
-                    onSelect={onSelect}
-                    onRemove={onRemoveRepo}
-                  />
-                  {/* Nested worktrees */}
-                  {worktreeMap.has(entry.relativePath) && (
-                    <ul className="ml-3 border-l border-gx-border/40 pl-1.5">
-                      {worktreeMap.get(entry.relativePath)!.map((wt) => (
-                        <li key={wt.relativePath}>
-                          <WorkspaceRepoRow
-                            entry={wt}
-                            isActive={wt.relativePath === activeRelativePath}
-                            onSelect={onSelect}
-                            isWorktree
-                          />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )
-      )}
-
-      {/* Context menu */}
-      {contextMenu && (
+        ))}
+      {menu && (
         <ContextMenu
-          items={contextMenuItems}
-          position={contextMenu}
-          onSelect={handleContextMenuSelect}
-          onClose={() => setContextMenu(null)}
+          items={actions}
+          position={menu}
+          onSelect={(id) => {
+            setMenu(null);
+            handlers[id]?.();
+          }}
+          onClose={() => setMenu(null)}
         />
       )}
-    </div>
+    </section>
   );
 }
 
-// ── Individual repo row ─────────────────────────────────────────────
-
-interface WorkspaceRepoRowProps {
+interface RowProps {
   entry: WorkspaceRepoEntry;
   isActive: boolean;
   onSelect: (relativePath: string) => void;
   onRemove?: (relativePath: string) => void;
   isWorktree?: boolean;
+  pinned?: boolean;
+  onTogglePin?: () => void;
 }
 
-function WorkspaceRepoRow({ entry, isActive, onSelect, onRemove, isWorktree }: WorkspaceRepoRowProps) {
-  const isLevel0 = entry.level === 0;
-  const isLevel2 = entry.level === 2;
-  const hasError = entry.error !== null;
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
-
-  const ctxMenuItems: MenuItemDef[] = [
-    ...(onRemove && !isWorktree ? [{ id: "remove", label: "Remove from Workspace", icon: X, danger: true }] : []),
+function WorkspaceRepoRow({
+  entry,
+  isActive,
+  onSelect,
+  onRemove,
+  isWorktree,
+  pinned,
+  onTogglePin,
+}: RowProps) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const actions: MenuItemDef[] = [
+    ...(onTogglePin
+      ? [
+          {
+            id: "pin",
+            label: pinned ? "Unpin repository" : "Pin repository",
+            icon: pinned ? PinOff : Pin,
+          },
+        ]
+      : []),
+    ...(onRemove
+      ? [
+          {
+            id: "remove",
+            label: "Remove from Workspace",
+            icon: X,
+            danger: true,
+          },
+        ]
+      : []),
   ];
-
+  const changed = `${entry.dirtyCount} changed ${entry.dirtyCount === 1 ? "file" : "files"}`;
   return (
     <>
-    <button
-      type="button"
-      className={clsx(
-        "group flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs transition mb-0.5",
-        isActive && "bg-gx-accent/15 ring-1 ring-gx-accent/30",
-        !isActive && !isLevel0 && "hover:bg-gx-surface-hover",
-        isLevel0 && !isActive && "opacity-50 hover:opacity-70 hover:bg-gx-surface-hover",
-      )}
-      onClick={() => onSelect(entry.relativePath)}
-      onContextMenu={(e) => {
-        if (ctxMenuItems.length > 0) {
-          e.preventDefault();
-          setCtxMenu({ x: e.clientX, y: e.clientY });
-        }
-      }}
-      title={hasError ? `Error: ${entry.error}` : entry.absolutePath}
-    >
-      {/* Error indicator */}
-      {hasError && (
-        <span className="shrink-0" title={entry.error ?? undefined}>
-          <AlertCircle size={12} className="text-gx-error" />
-        </span>
-      )}
-
-      {/* Worktree icon */}
-      {isWorktree && !hasError && (
-        <FolderTree size={11} className="shrink-0 text-gx-muted" />
-      )}
-
-      {/* Repo name */}
-      <span
+      <div
         className={clsx(
-          "min-w-0 flex-1 truncate font-medium",
-          isActive && "text-gx-text",
-          !isActive && isLevel0 && "text-gx-muted",
-          !isActive && !isLevel0 && "text-gx-text",
+          "group mb-0.5 flex items-center rounded",
+          isActive ? "bg-gx-accent/15" : "hover:bg-gx-surface-hover",
         )}
-      >
-        {entry.name}
-      </span>
-
-      {/* Level 2 open indicator */}
-      {isLevel2 && !isActive && (
-        <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-gx-accent/50" title="Open" />
-      )}
-
-      {/* Branch + dirty count (Level 1+) */}
-      {!isLevel0 && entry.branch && (
-        <span className="shrink-0 flex items-center gap-0.5 text-[10px] text-gx-muted">
-          <GitBranch size={9} />
-          <span className="max-w-[80px] truncate">{entry.branch}</span>
-        </span>
-      )}
-
-      {!isLevel0 && entry.dirtyCount !== null && entry.dirtyCount > 0 && (
-        <span className="shrink-0 rounded bg-gx-warn/20 px-1 py-0.5 text-[9px] font-medium text-gx-warn">
-          {entry.dirtyCount}
-        </span>
-      )}
-    </button>
-    {ctxMenu && (
-      <ContextMenu
-        items={ctxMenuItems}
-        position={ctxMenu}
-        onSelect={(id) => {
-          setCtxMenu(null);
-          if (id === "remove") onRemove?.(entry.relativePath);
+        onContextMenu={(event) => {
+          if (!actions.length) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
         }}
-        onClose={() => setCtxMenu(null)}
-      />
-    )}
+      >
+        <button
+          type="button"
+          aria-current={isActive ? "true" : undefined}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent"
+          title={
+            entry.error
+              ? `${entry.absolutePath}\nError: ${entry.error}`
+              : `${entry.absolutePath}${entry.branch ? `\n${entry.branch}` : ""}`
+          }
+          onClick={() => onSelect(entry.relativePath)}
+        >
+          {entry.error ? (
+            <AlertCircle
+              size={12}
+              className="shrink-0 text-gx-error"
+              aria-label={entry.error}
+            />
+          ) : isWorktree ? (
+            <FolderTree size={11} className="shrink-0 text-gx-muted" />
+          ) : null}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-medium text-gx-text">
+              {entry.name}
+            </span>
+            {isActive && entry.branch && (
+              <span className="mt-0.5 flex items-center gap-1 text-[10px] text-gx-muted">
+                <GitBranch size={10} />
+                <span className="truncate">{entry.branch}</span>
+              </span>
+            )}
+          </span>
+          {entry.level === 2 && !isActive && (
+            <span
+              className="h-1 w-1 shrink-0 rounded-full bg-gx-accent"
+              title="Open"
+            />
+          )}
+          {(entry.dirtyCount ?? 0) > 0 && (
+            <span
+              aria-label={changed}
+              title={changed}
+              className="shrink-0 rounded bg-gx-surface-hover px-1.5 py-0.5 text-[10px] tabular-nums text-gx-muted"
+            >
+              {entry.dirtyCount}
+            </span>
+          )}
+        </button>
+        {onTogglePin && (
+          <button
+            type="button"
+            aria-label={`${pinned ? "Unpin" : "Pin"} ${entry.name}`}
+            title={pinned ? "Unpin repository" : "Pin repository"}
+            onClick={onTogglePin}
+            className={clsx(
+              "mr-1 shrink-0 rounded p-1 text-gx-muted hover:text-gx-text focus-visible:opacity-100",
+              !pinned &&
+                "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+            )}
+          >
+            <Pin size={11} className={pinned ? "fill-current" : undefined} />
+          </button>
+        )}
+      </div>
+      {menu && (
+        <ContextMenu
+          items={actions}
+          position={menu}
+          onSelect={(id) => {
+            setMenu(null);
+            if (id === "pin") onTogglePin?.();
+            else if (id === "remove") onRemove?.(entry.relativePath);
+          }}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </>
   );
 }

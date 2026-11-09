@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { TerminalView } from "../views/TerminalView";
+import { TerminalView, type SshTerminalRequest } from "../views/TerminalView";
 import type { OpenRepo } from "../state";
 
 // --- Memory API typing (Chrome/Electron only) ---
@@ -32,6 +32,8 @@ const MEMORY_PRESSURE_THRESHOLD = 0.8;
 // --- Types ---
 
 export interface TerminalKeepAliveProps {
+  sshRequest?: SshTerminalRequest | null;
+  onSshRequestHandled?: () => void;
   /** All open repos in the store. */
   repos: OpenRepo[];
   /** The currently active repo ID (or null if none). */
@@ -114,7 +116,7 @@ interface SuspendedWorkspaceState {
  * independently.
  */
 export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKeepAliveProps>(
-  function TerminalKeepAlive({ repos, activeRepoId, maxKeptAlive, onSendErrorToAgent }, ref) {
+  function TerminalKeepAlive({ repos, activeRepoId, maxKeptAlive, onSendErrorToAgent, sshRequest, onSshRequestHandled }, ref) {
     // LRU order: index 0 = most recently used, last = least recently used.
     const [lruOrder, setLruOrder] = useState<string[]>([]);
 
@@ -399,6 +401,9 @@ export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKee
               <TerminalView
                 repo={repo}
                 visible={isActive}
+                globalTerminal
+                sshRequest={isActive ? sshRequest : null}
+                onSshRequestHandled={onSshRequestHandled}
                 onSendErrorToAgent={isActive ? onSendErrorToAgent : undefined}
               />
             </div>

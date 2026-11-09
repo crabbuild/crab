@@ -97,7 +97,7 @@ export function FileMentionDropdown({ matches, loading, onSelect, visible }: Pro
       ref={listRef}
       role="listbox"
       aria-label="File mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[240px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
     >
       {loading && matches.length === 0 && (
         <div className="px-3 py-2 text-[11px] text-gx-muted">Searching files…</div>

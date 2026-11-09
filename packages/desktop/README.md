@@ -7,6 +7,28 @@ the matching Crab CLI for writes, hydration, and workflow runs.
 The package includes the CLI, Git remote helper, NFS helper, and agent. An older
 CLI on the user's PATH cannot override the bundled runtime.
 
+## Navigation
+
+The primary rail contains **Chat**, **Files**, **Git**, and **Large Files**.
+Files switches between Explorer and Search; Git switches between Changes,
+History, Branches & Worktrees, and Pull Requests (when a forge is detected).
+**More tools** opens Data Workflows and, when enabled, SSH Connections.
+Settings stays at the bottom. Click the repository name in the title bar for
+its Overview; the adjacent arrow switches workspace repositories.
+
+Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
+The title-bar Terminal control owns the global terminal, with maximize/restore
+and Ctrl+` to show/hide it. Hiding or maximizing preserves its sessions; agent
+chat terminals remain scoped to their tasks.
+
+The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
+then More actions. Filter repositories by name or path; Escape clears the filter.
+Each workspace has a single actions menu for dashboard, clone, refresh, settings,
+and close. Pin repositories from their row or context menu. Pinned repositories
+appear first, followed by five recent repositories and the alphabetical remainder;
+worktrees stay nested. Workspace collapse, recent access, pins, and sidebar scroll
+survive restarts. Changed-file badges are neutral counts; errors retain error color.
+
 ## Build
 
 Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used

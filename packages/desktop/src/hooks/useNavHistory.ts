@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { isSidebarView } from "../lib/navigation";
 
 /**
  * VS Code-style back/forward navigation history.
@@ -41,29 +42,6 @@ export interface UseNavHistoryOptions {
 /** Maximum number of navigation entries retained per repo. */
 const NAV_HISTORY_CAP = 50;
 
-/**
- * Known valid view names. When back/forward lands on an entry whose
- * view is not in this set, it's treated as a dead entry and skipped.
- */
-const KNOWN_NAV_VIEWS = new Set([
-  "explorer",
-  "search",
-  "changes",
-  "branches",
-  "worktrees",
-  "conflicts",
-  "timeline",
-  "pull-requests",
-  "crab",
-  "workflows",
-  "terminal",
-  "dashboard",
-  "orchestrator",
-  "agents",
-  "ssh",
-  "settings",
-]);
-
 export function useNavHistory(options?: UseNavHistoryOptions) {
   const stackRef = useRef<NavEntry[]>([{ view: "explorer" }]);
   const indexRef = useRef(0);
@@ -93,11 +71,11 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
       const prevEntry = stackRef.current[indexRef.current];
       // Skip dead entries (views that no longer exist).
       let targetIdx = indexRef.current - 1;
-      while (targetIdx > 0 && !KNOWN_NAV_VIEWS.has(stackRef.current[targetIdx].view)) {
+      while (targetIdx > 0 && !isSidebarView(stackRef.current[targetIdx].view)) {
         targetIdx--;
       }
       // If the final candidate is also dead, don't navigate.
-      if (!KNOWN_NAV_VIEWS.has(stackRef.current[targetIdx].view)) return;
+      if (!isSidebarView(stackRef.current[targetIdx].view)) return;
 
       indexRef.current = targetIdx;
       const newEntry = stackRef.current[indexRef.current];
@@ -119,11 +97,11 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
       // Skip dead entries (views that no longer exist).
       let targetIdx = indexRef.current + 1;
       const maxIdx = stackRef.current.length - 1;
-      while (targetIdx < maxIdx && !KNOWN_NAV_VIEWS.has(stackRef.current[targetIdx].view)) {
+      while (targetIdx < maxIdx && !isSidebarView(stackRef.current[targetIdx].view)) {
         targetIdx++;
       }
       // If the final candidate is also dead, don't navigate.
-      if (!KNOWN_NAV_VIEWS.has(stackRef.current[targetIdx].view)) return;
+      if (!isSidebarView(stackRef.current[targetIdx].view)) return;
 
       indexRef.current = targetIdx;
       const newEntry = stackRef.current[indexRef.current];

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { VIEW_LABELS } from "../src/lib/navigation";
 import type { NavEntry } from "../src/hooks/useNavHistory";
 
 /**
@@ -11,25 +12,7 @@ import type { NavEntry } from "../src/hooks/useNavHistory";
 
 const NAV_HISTORY_CAP = 50;
 
-/** Known valid view names — mirrors the KNOWN_NAV_VIEWS set in useNavHistory.ts */
-const KNOWN_NAV_VIEWS = new Set([
-  "explorer",
-  "search",
-  "changes",
-  "branches",
-  "worktrees",
-  "conflicts",
-  "timeline",
-  "pull-requests",
-  "crab",
-  "workflows",
-  "terminal",
-  "dashboard",
-  "orchestrator",
-  "agents",
-  "ssh",
-  "settings",
-]);
+const KNOWN_NAV_VIEWS = new Set(Object.keys(VIEW_LABELS));
 
 /** Minimal reimplementation of the nav history logic for testing. */
 class NavHistoryTestHarness {
@@ -434,7 +417,7 @@ describe("useNavHistory", () => {
       const nav = new NavHistoryTestHarness();
       nav.push({ view: "timeline", commit: "sha1" });
       nav.push({ view: "changes" });
-      nav.push({ view: "branches", repoPath: "frontend" });
+      nav.push({ view: "worktrees", repoPath: "frontend" });
       nav.push({ view: "search" });
       nav.push({ view: "settings" });
 
@@ -452,7 +435,7 @@ describe("useNavHistory", () => {
       expect(nav2.stack[0]).toEqual({ view: "explorer" });
       expect(nav2.stack[1]).toEqual({ view: "timeline", commit: "sha1" });
       expect(nav2.stack[2]).toEqual({ view: "changes" });
-      expect(nav2.stack[3]).toEqual({ view: "branches", repoPath: "frontend" });
+      expect(nav2.stack[3]).toEqual({ view: "worktrees", repoPath: "frontend" });
       expect(nav2.stack[4]).toEqual({ view: "search" });
       expect(nav2.stack[5]).toEqual({ view: "settings" });
       // Verify correct index.

@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ImperativePanelHandle, Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import {
+  ImperativePanelHandle,
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+} from "react-resizable-panels";
 import clsx from "clsx";
-import { ActivityBar, SidebarView, VIEWS } from "./ActivityBar";
+import { ActivityBar } from "./ActivityBar";
+import {
+  navigationGroup,
+  VIEW_GROUPS,
+  VIEW_LABELS,
+  type SidebarView,
+} from "../lib/navigation";
 import { useSetting } from "../settings";
 
 interface Props {
@@ -9,14 +20,8 @@ interface Props {
    *  sidebar will render a placeholder for that view. */
   views: Partial<Record<SidebarView, React.ReactNode>>;
   main: React.ReactNode;
-  /** Notifies the parent whenever the active view changes (e.g. via
-   *  the activity bar or the Cmd+, accelerator). Parents use this to
-   *  switch the main pane between editor / Settings / etc. */
-  onViewChange?: (view: SidebarView) => void;
-  /** When set, overrides the current view. Used by the parent to
-   *  programmatically switch views (e.g. to "dashboard" after opening
-   *  a deferred repo). */
-  requestedView?: SidebarView | null;
+  activeView: SidebarView;
+  onViewChange: (view: SidebarView) => void;
   /** Views that should hide the middle sidebar entirely — letting
    *  the main content extend edge-to-edge. Used today by the Settings
    *  page, which has its own internal left-nav and doesn't benefit
@@ -30,7 +35,6 @@ interface Props {
 }
 
 const LS_WIDTH_KEY = "crab.sidebarPct";
-const LS_VIEW_KEY = "crab.sidebarView";
 const LS_OPEN_KEY = "crab.sidebarOpen";
 
 /**
@@ -44,30 +48,25 @@ const LS_OPEN_KEY = "crab.sidebarOpen";
  * sibling panel alive so state (open files, scroll offsets) survives
  * across toggles.
  */
-export function WorkspaceShell({ views, main, onViewChange, requestedView, fullPaneViews = [], hiddenViews = [], badges = {} }: Props) {
-  const [activeView, setActiveView] = useState<SidebarView>(() => {
-    const saved = localStorage.getItem(LS_VIEW_KEY);
-    return (saved as SidebarView | null) ?? "dashboard";
-  });
+export function WorkspaceShell({
+  views,
+  main,
+  activeView,
+  onViewChange,
+  fullPaneViews = [],
+  hiddenViews = [],
+  badges = {},
+}: Props) {
+  const lastGroupView = useRef({ files: "explorer", git: "changes" } as Record<
+    "files" | "git",
+    SidebarView
+  >);
+  const group = navigationGroup(activeView);
+  if (group) lastGroupView.current[group] = activeView;
   const [open, setOpen] = useState<boolean>(() => {
     const saved = localStorage.getItem(LS_OPEN_KEY);
     return saved == null ? true : saved === "1";
   });
-
-  // Allow the parent to programmatically switch views (e.g. to
-  // "dashboard" after opening a deferred repo).
-  useEffect(() => {
-    if (requestedView) {
-      setActiveView(requestedView);
-    }
-  }, [requestedView]);
-
-  // Emit the initial view too so the parent can render the correct
-  // main pane on first paint.
-  useEffect(() => {
-    onViewChange?.(activeView);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeView]);
 
   // Remember the last non-zero sidebar width so collapse/expand
   // restores it. Defaults to 22 % which is close to VS Code's own
@@ -104,10 +103,6 @@ export function WorkspaceShell({ views, main, onViewChange, requestedView, fullP
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(LS_VIEW_KEY, activeView);
-  }, [activeView]);
-
-  useEffect(() => {
     localStorage.setItem(LS_OPEN_KEY, open ? "1" : "0");
     const panel = sidebarPanelRef.current;
     if (!panel) return;
@@ -126,81 +121,126 @@ export function WorkspaceShell({ views, main, onViewChange, requestedView, fullP
   // Settings, also VS Code-native.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === "b") {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key === "b"
+      ) {
         e.preventDefault();
         setOpen((o) => !o);
-      } else if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === ",") {
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key === ","
+      ) {
         e.preventDefault();
-        setActiveView("settings");
+        onViewChange("settings");
         setOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [onViewChange]);
 
   const onActivitySelect = (view: SidebarView) => {
-    if (view === activeView) {
-      setOpen((o) => !o);
-    } else {
-      setActiveView(view);
+    const selectedGroup = navigationGroup(view);
+    const target = selectedGroup ? lastGroupView.current[selectedGroup] : view;
+    if (target === activeView && !isFullPane) setOpen((value) => !value);
+    else {
+      onViewChange(target);
       setOpen(true);
     }
   };
 
-  const activeDef = VIEWS.find((v) => v.id === activeView);
   const activeContent = views[activeView];
 
   return (
     <div className="flex h-full min-h-0 w-full">
       {showActivityBar && (
-        <ActivityBar active={activeView} sidebarOpen={open} onSelect={onActivitySelect} hiddenViews={hiddenViews} badges={badges} />
-      )}
-      <PanelGroup direction="horizontal" className="flex min-h-0 flex-1">
-        <Panel
-          ref={sidebarPanelRef}
-          defaultSize={sidebarVisible ? lastWidthRef.current : 0}
-          minSize={sidebarVisible ? 12 : 0}
-          maxSize={60}
-          collapsible
-          collapsedSize={0}
-          onResize={onResize}
-          onCollapse={() => {
-            // Only update `open` if this was a user-initiated collapse
-            // (dragging the handle). Programmatic collapses (full-pane
-            // views hiding the sidebar) should not change `open` so the
-            // activity bar indicator stays visible.
-            if (programmaticCollapseRef.current) {
-              programmaticCollapseRef.current = false;
-            } else {
-              setOpen(false);
-            }
-          }}
-          onExpand={() => setOpen(true)}
-          className={clsx(
-            "flex min-h-0 flex-col bg-gx-surface",
-            !sidebarVisible && "hidden",
-          )}
-        >
-          <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] uppercase tracking-wider text-gx-muted">
-            <span>{activeDef?.label ?? "Sidebar"}</span>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col">
-            {activeContent ?? (
-              <div className="p-3 text-xs text-gx-muted">Coming soon.</div>
-            )}
-          </div>
-        </Panel>
-        <PanelResizeHandle
-          className={clsx(
-            "w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50",
-            !sidebarVisible && "pointer-events-none w-0",
-          )}
+        <ActivityBar
+          active={activeView}
+          onSelect={onActivitySelect}
+          hiddenViews={hiddenViews}
+          badges={badges}
         />
-        <Panel minSize={20} className="min-h-0 min-w-0">
-          {main}
-        </Panel>
-      </PanelGroup>
+      )}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {group && (
+          <nav
+            aria-label={group === "files" ? "Files" : "Git"}
+            className="flex shrink-0 flex-wrap gap-1 border-b border-gx-border bg-gx-surface px-2 py-1"
+          >
+            {VIEW_GROUPS[group]
+              .filter((view) => !hiddenViews.includes(view))
+              .map((view) => (
+                <button
+                  key={view}
+                  type="button"
+                  aria-pressed={activeView === view}
+                  onClick={() => {
+                    onViewChange(view);
+                    setOpen(true);
+                  }}
+                  className={clsx(
+                    "rounded px-2 py-1.5 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent",
+                    activeView === view
+                      ? "bg-gx-accent/15 text-gx-text"
+                      : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                  )}
+                >
+                  {VIEW_LABELS[view]}
+                </button>
+              ))}
+          </nav>
+        )}
+        <PanelGroup direction="horizontal" className="flex min-h-0 flex-1">
+          <Panel
+            ref={sidebarPanelRef}
+            defaultSize={sidebarVisible ? lastWidthRef.current : 0}
+            minSize={sidebarVisible ? 12 : 0}
+            maxSize={60}
+            collapsible
+            collapsedSize={0}
+            onResize={onResize}
+            onCollapse={() => {
+              // Only update `open` if this was a user-initiated collapse
+              // (dragging the handle). Programmatic collapses (full-pane
+              // views hiding the sidebar) should not change `open` so the
+              // activity bar indicator stays visible.
+              if (programmaticCollapseRef.current) {
+                programmaticCollapseRef.current = false;
+              } else {
+                setOpen(false);
+              }
+            }}
+            onExpand={() => setOpen(true)}
+            className={clsx(
+              "flex min-h-0 flex-col bg-gx-surface",
+              !sidebarVisible && "hidden",
+            )}
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] uppercase tracking-wider text-gx-muted">
+              <span>{VIEW_LABELS[activeView]}</span>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              {activeContent ?? (
+                <div className="p-3 text-xs text-gx-muted">Coming soon.</div>
+              )}
+            </div>
+          </Panel>
+          <PanelResizeHandle
+            className={clsx(
+              "w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50",
+              !sidebarVisible && "pointer-events-none w-0",
+            )}
+          />
+          <Panel minSize={20} className="min-h-0 min-w-0">
+            {main}
+          </Panel>
+        </PanelGroup>
+      </div>
     </div>
   );
 }
