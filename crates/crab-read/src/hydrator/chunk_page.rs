@@ -96,7 +96,7 @@ impl ShardHydrator {
         let readers = Mutex::new(HashMap::new());
         let cache = self.store.local_cache();
         let shard =
-            get_or_download_shard(&cache, &self.store, &self.router, &readers, &shard_hash).await?;
+            get_or_download_shard(cache, &self.store, &self.router, &readers, &shard_hash).await?;
         check_cancelled(cancel)?;
         let file = shard
             .get_file_info(&file_hash)?

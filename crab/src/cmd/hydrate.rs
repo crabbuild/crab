@@ -1447,7 +1447,19 @@ async fn try_hydrate_from_staging(
     let Some(parent) = dest.parent() else {
         return Ok(None);
     };
-    let context = WorktreeContext::resolve_from_path(parent)?;
+    // Export destinations outside a worktree have no staging candidate. Keep
+    // the original remote failure there; discovery/setup failures still fail.
+    let context = match crab_git::worktree::WorktreeContext::resolve_from_path(parent) {
+        Ok(context) => WorktreeContext::from(context),
+        Err(crab_git::worktree::WorktreeError::Discover {
+            source:
+                gix_discover::upwards::Error::NoGitRepository { .. }
+                | gix_discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+                | gix_discover::upwards::Error::NoGitRepositoryWithinFs { .. },
+            ..
+        }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let Some(reader) = crab_staging::StagedFileReader::open(
         context.shared_staging_dir(),
         MerkleHash::from(ptr.file_hash),
