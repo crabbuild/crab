@@ -1,39 +1,1027 @@
-name: Temporary safe ICF component qualification
+name: Git protocol v2 partial-clone qualification
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/git-protocol-v2-partial-clone.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crab/Cargo.toml"
+      - "crab/src/git/**"
+      - "crab/src/engine/pointer.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/hydrate/**"
+      - "crab/src/cmd/lfs/**"
+      - "crab/src/cmd/mirror.rs"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/pull.rs"
+      - "crab/src/cmd/pull/**"
+      - "crab/src/cmd/cache.rs"
+      - "crab/src/main.rs"
+      - "crates/crab-cache/**"
+      - "crab/src/lfs/**"
+      - "crab/src/core/error.rs"
+      - "crab/src/core/config.rs"
+      - "crab/src/cmd/fsck*.rs"
+      - "crab/src/cmd/history_recovery.rs"
+      - "crab/src/cmd/metadb.rs"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/cmd/repack.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/replication/**"
+      - "crab/src/metadata/**"
+      - "crab/src/coordination/**"
+      - "crates/crab-coordination/**"
+      - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
+      - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/run_lfs_qualification.py"
+      - "crab/scripts/e2e/run_mixed_history_rustfs.py"
+      - "crab/scripts/e2e/test_run_lfs_qualification.py"
+      - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_lfs_selection_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py"
+      - "crab/scripts/verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_protocol_qualification_logs.py"
+      - "crab/tests/**"
+      - "crates/crab-git/**"
+      - "crates/crab-auth-server/**"
+      - "crates/crab-auth/**"
+      - "crates/crab-staging/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-read/**"
+      - "crates/crab-remote-git/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-vfs/**"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/architecture/git-capability-matrix.json"
+      - "crab/docs/architecture/git-capability-matrix.md"
+      - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
+      - "plans/013-add-git-protocol-v2-and-partial-clone.md"
+      - "plans/designs/client-side-git-v2-partial-clone.md"
+  pull_request:
+    paths:
+      - ".github/workflows/git-protocol-v2-partial-clone.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crab/Cargo.toml"
+      - "crab/src/git/**"
+      - "crab/src/engine/pointer.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/hydrate/**"
+      - "crab/src/cmd/lfs/**"
+      - "crab/src/cmd/mirror.rs"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/pull.rs"
+      - "crab/src/cmd/pull/**"
+      - "crab/src/cmd/cache.rs"
+      - "crab/src/main.rs"
+      - "crates/crab-cache/**"
+      - "crab/src/lfs/**"
+      - "crab/src/core/error.rs"
+      - "crab/src/core/config.rs"
+      - "crab/src/cmd/fsck*.rs"
+      - "crab/src/cmd/history_recovery.rs"
+      - "crab/src/cmd/metadb.rs"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/cmd/repack.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/replication/**"
+      - "crab/src/metadata/**"
+      - "crab/src/coordination/**"
+      - "crates/crab-coordination/**"
+      - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
+      - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
+      - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
+      - "crab/scripts/e2e/run_lfs_qualification.py"
+      - "crab/scripts/e2e/run_mixed_history_rustfs.py"
+      - "crab/scripts/e2e/test_run_lfs_qualification.py"
+      - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_lfs_selection_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py"
+      - "crab/scripts/verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_protocol_qualification_logs.py"
+      - "crab/tests/**"
+      - "crates/crab-git/**"
+      - "crates/crab-auth-server/**"
+      - "crates/crab-auth/**"
+      - "crates/crab-staging/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-read/**"
+      - "crates/crab-remote-git/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-vfs/**"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/architecture/git-capability-matrix.json"
+      - "crab/docs/architecture/git-capability-matrix.md"
+      - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
+      - "plans/013-add-git-protocol-v2-and-partial-clone.md"
+      - "plans/designs/client-side-git-v2-partial-clone.md"
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      control_run:
+        description: Optional control release-artifact run for paired performance qualification
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: safe-icf-component-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target/crab-protocol-v2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
+  # Keep the producer/consumer name stable when GitHub reruns only failed jobs.
+  # The release build is shared by every attempt of this workflow run.
+  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}
 
 jobs:
-  component:
-    name: Compare default and safe ICF links
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: never
+  unit-and-transcript:
+    name: Protocol unit and transcript tests
+    needs: [cli-and-transcript, reader-and-storage]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Require complete protocol test coverage
+        env:
+          CLI_RESULT: ${{ needs.cli-and-transcript.result }}
+          READER_RESULT: ${{ needs.reader-and-storage.result }}
+        run: |
+          test "$CLI_RESULT" = success
+          test "$READER_RESULT" = success
+
+  cli-and-transcript:
+    name: Protocol CLI and transcript tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          toolchain: 1.99.1
-      - name: Install existing Linux build dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev binutils
-      - name: Verify linker contracts and compare isolated release links
-        run: python3 .github/profile/qualify_safe_icf.py
+          prefix-key: crab-protocol-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
+
+      - name: Run protocol CLI and transcript tests
+        env:
+          # The Linux test runner's default worker stack is too small for
+          # the largest async protocol fixtures; keep valid coverage from
+          # becoming a stack-overflow false negative.
+          RUST_MIN_STACK: "8388608"
+        run: |
+          cargo test -p crab --lib cmd::mirror --locked --features gix-transport,testing
+          cargo test -p crab --lib git::process::tests --locked --features gix-transport
+          cargo test -p crab --lib git::connectivity::tests --locked --features gix-transport
+          cargo test -p crab --lib git::pack::install::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::coordinator::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::discovery::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::recent::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::prune::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::batch::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::fetch_filter::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::transfer_agent::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::install::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::install::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::push::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::fetch::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::clone::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --features gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests --locked --features gix-transport
+          cargo test -p crab --lib engine::pointer::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::pull:: --locked --features gix-transport
+          cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --features gix-transport
+          cargo test -p crab --lib cmd::push::followtag_tests --locked --features gix-transport
+          cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
+          cargo test -p crab --lib git::index::tests --locked --features gix-transport
+          cargo test -p crab --lib publication_recovery --locked --features gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport -- --nocapture
+          cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
+          cargo test -p crab --lib git::remote_helper::tests::capsule_promisor_fetch_ --locked --features gix-transport
+          cargo test -p crab --lib cmd::gc::journal::tests --locked --features gix-transport
+          cargo test -p crab --bin crab gc_fence_migration_requires_explicit --locked --features gix-transport
+          cargo test -p crab --lib coordination::heartbeat::tests --locked --features gix-transport
+          cargo test -p crab --locked --features gix-transport \
+            --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
+
+      - name: Verify executable compatibility matrix
+        run: |
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_concurrent_push_smoke.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_existing_ref_push_rustfs.py
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py --help > /dev/null
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_mixed_team_rustfs.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_run_lfs_qualification.py
+          python3 crab/scripts/verify_git_capability_matrix.py
+          python3 crab/scripts/tests/test_verify_git_capability_matrix.py
+          python3 crab/scripts/tests/test_protocol_qualification_logs.py
+
+      - name: Check protocol formatting
+        run: |
+          rustfmt --edition 2024 --check \
+            crab/src/git/remote_helper.rs \
+            crab/src/git/upload_pack_wire.rs \
+            crates/crab-git/src/walk.rs \
+            crates/crab-metadata/src/git_visibility.rs \
+            crates/crab-read/src/upload_pack.rs \
+            crates/crab-remote-git/src/pack.rs \
+            crates/crab-remote-git/src/operation.rs \
+            crates/crab-remote-git/src/reader.rs \
+            crates/crab-remote-git/src/repository.rs
+
+  reader-and-storage:
+    name: Protocol reader and storage tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: crab-protocol-readers-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
+
+      - name: Run protocol reader and storage tests
+        env:
+          # The Linux test runner's default worker stack is too small for
+          # the largest async protocol fixtures; keep valid coverage from
+          # becoming a stack-overflow false negative.
+          RUST_MIN_STACK: "8388608"
+        run: |
+          cargo test -p crab-cache --features local-cache --locked
+          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
+          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
+          cargo test -p crab-write --lib capsule_protocol:: --locked
+          cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader
+          cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+          cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
+          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo test -p crab-coordination --lib gc_fence:: --locked --features object-store-lock
+          cargo check -p crab-coordination --locked --no-default-features
+          cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
+
+  cross-platform-contract:
+    name: Protocol contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Record native Git version
+        run: git --version
+
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: crab-protocol-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
+
+      - name: Run native cache lifecycle contracts
+        run: cargo test -p crab-cache --features local-cache --locked
+
+      - name: Run native staging segment contracts
+        run: cargo test -p crab-staging --lib segment::tests --locked
+
+      - name: Run native mirror and subprocess contracts
+        run: >-
+          cargo test -p crab --lib cmd::mirror --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport,testing
+
+      - name: Run complete pre-push batch decoder contracts
+        run: |
+          cargo test -p crab-git --locked pre_push
+          cargo test -p crab-git --locked tag::tests
+
+      - name: Run visibility deletion contracts
+        run: cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+
+      - name: Run ref-journal rollback contracts
+        run: cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
+
+      - name: Run lease renewal contracts
+        run: |
+          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo test -p crab --lib coordination::heartbeat::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run hook composition and frozen-ref discovery contracts
+        run: |
+          cargo test -p crab --lib git::pack::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::push::followtag_tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport -- --nocapture
+          cargo test -p crab --lib git::push_staging::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
+          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
+          cargo test -p crab --lib git::index::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib publication_recovery --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib capsule_push_retires_staging_only_after_confirmed_ref_publication --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run LFS pre-push contracts
+        run: >-
+          cargo test -p crab --lib cmd::lfs::push::tests --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run shared subprocess and LFS publication contracts
+        run: |
+          cargo test -p crab --lib cmd::mirror::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::connectivity::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::publication::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::coordinator::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::discovery::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::recent::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::prune::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::batch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::fetch_filter::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::transfer_agent::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::fetch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::clone::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib engine::pointer::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::pull:: --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run protocol and transcript contracts
+        run: >-
+          cargo test -p crab --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
+
+  release-build:
+    name: Build shared protocol release artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Build release artifact with source provenance
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)" \
+            cargo build -p crab --release --locked --features gix-transport
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
+          record = {
+              'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
+              'features': 'default,gix-transport',
+              'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
+          }
+          (binary.parent / 'candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
+          PY
+          # Artifact upload normalizes file modes, so tar preserves the executable bit.
+          tar -C "${CARGO_TARGET_DIR}/release" \
+            -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab candidate-build.json
+
+      - name: Upload shared release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/${{ env.CRAB_RELEASE_ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  real-git-version-matrix:
+    name: Real Git compatibility (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    needs: [unit-and-transcript, release-build]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: git-2-30
+            git_version: 2.30.9
+          - label: git-2-40
+            git_version: 2.40.4
+          - label: git-2-45
+            git_version: 2.45.4
+          - label: git-current
+            git_version: current
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ matrix.label }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install compatibility dependencies
+        run: |
+          # Generated fixtures must not dirty the source attested by the report.
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
+            libexpat1-dev libfuse3-dev libpcre2-dev libssl-dev pipx xz-utils \
+            zlib1g-dev
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract shared release artifact
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
+
+      - name: Install selected Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ matrix.git_version }}"
+          if [ "$version" = "current" ]; then
+            git_bin="$(command -v git)"
+          else
+            archive="$RUNNER_TEMP/git-${version}.tar.xz"
+            source_dir="$RUNNER_TEMP/git-${version}"
+            prefix="$RUNNER_TEMP/git-install-${version}"
+            curl --fail --location --silent --show-error \
+              "https://www.kernel.org/pub/software/scm/git/git-${version}.tar.xz" \
+              --output "$archive"
+            tar -xJf "$archive" -C "$RUNNER_TEMP"
+            (
+              cd "$source_dir"
+              make configure
+              ./configure --prefix="$prefix" --without-tcltk
+              make -j"$(nproc)" all
+              make install
+            )
+            git_bin="$prefix/bin/git"
+          fi
+          "$git_bin" --version
+          echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+          dirname "$git_bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned previous release for rollback qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rollback="$RUNNER_TEMP/gc-fence-rollback"
+          mkdir -p "$rollback"
+          asset_id="$(gh api repos/crabbuild/crab/releases/tags/v1.0.1 \
+            --jq '.assets[] | select(.name == "crab-linux-x86_64.tar.gz") | .id')"
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/crabbuild/crab/releases/assets/$asset_id" \
+            > "$rollback/crab-linux-x86_64.tar.gz"
+          (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
+          tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
+          test -x "$rollback/crab"
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
+            --name "crab-protocol-v2-${{ matrix.label }}" \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs "crab-protocol-v2-${{ matrix.label }}" >&2 || true
+          exit 1
+
+      - name: Run real-Git RustFS lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-crab-bin "$RUNNER_TEMP/gc-fence-rollback/crab" \
+            --rollback-crab-tag v1.0.1 \
+            --git-bin "$GIT_BIN" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --mirror-reconciliation \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      - name: Enforce all declared capability evidence
+        run: |
+          python3 crab/scripts/verify_git_capability_matrix.py \
+            --report "$CRAB_E2E_ROOT/$CRAB_E2E_RUN_ID/artifacts/report.json" \
+            --profile linux-rustfs-release \
+            --git-version "${{ matrix.git_version }}" \
+            --git-bin "$GIT_BIN" \
+            --binary "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-binary "$RUNNER_TEMP/gc-fence-rollback/crab" \
+            --source-revision "$(git rev-parse HEAD)"
+
+      - name: Qualify explicit coordination upgrade and tagged writer refusal
+        run: |
+          set -euo pipefail
+          rollback="$RUNNER_TEMP/gc-fence-rollback"
+          python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-crab-bin "$rollback/crab" \
+            --endpoint-url "$AWS_ENDPOINT_URL" --bucket "$CRAB_E2E_BUCKET" \
+            --root "$CRAB_E2E_ROOT" --run-id "${CRAB_E2E_RUN_ID}-migration" \
+            --only-gc-fence-upgrade
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs "crab-protocol-v2-${{ matrix.label }}" > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f "crab-protocol-v2-${{ matrix.label }}" >/dev/null 2>&1 || true
+
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-protocol-v2-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-migration/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-migration/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  rustfs-lifecycle:
+    name: Released-shape RustFS partial-clone lifecycle
+    runs-on: ubuntu-latest
+    needs: [unit-and-transcript, release-build]
+    timeout-minutes: 45
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install smoke dependencies
+        run: |
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx git-lfs
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract shared release artifact
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
+            --name crab-protocol-v2-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-protocol-v2-rustfs >&2 || true
+          exit 1
+
+      - name: Run real-Git RustFS lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      - name: Compare LFS selection with native Git LFS
+        run: |
+          python3 crab/scripts/e2e/run_lfs_selection_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}-lfs-selection" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      - name: Verify fresh mirrors and complete source ref namespaces
+        run: |
+          python3 crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}-mirror-namespace" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      # The four-agent cohort follows branch fan-out and recovery phases, so
+      # its bounded locator baseline includes the resulting compaction state.
+      - name: Run concurrent-push visibility and crash-recovery lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_concurrent_push_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}-concurrent" \
+            --agents 8 \
+            --same-branch-agents 4 \
+            --max-parallel-pushes 8 \
+            --upload-concurrency 2 \
+            --rebase-on-non-fast-forward \
+            --omit-lock-wait-secs \
+            --rebase-retry-limit 64 \
+            --max-locator-requests-per-success 500 \
+            --crash-boundary \
+            --marker-faults \
+            --crash-lock-ttl-secs 21 \
+            --lock-wait-secs 30 \
+            --manifest-cas-retries 64
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs crab-protocol-v2-rustfs > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-protocol-v2-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-protocol-v2-partial-clone-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-concurrent/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-concurrent/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-lfs-selection/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-lfs-selection/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  existing-ref-performance:
+    name: Existing-ref throughput (${{ matrix.client }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: [release-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [native, git]
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install fixture dependencies
+        run: |
+          echo "CRAB_PERF_ROOT=$RUNNER_TEMP/crab-existing-ref-${{ matrix.client }}" >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx sysstat
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract and verify source provenance
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
+
+      - name: Prepare pinned real Git history
+        run: |
+          curl_source="$RUNNER_TEMP/Github/curl/curl"
+          mkdir -p "$(dirname "$curl_source")"
+          git clone --no-checkout https://github.com/curl/curl.git "$curl_source"
+          git -C "$curl_source" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+          git -C "$curl_source" status --porcelain
+
+      - name: Start RustFS
+        id: performance-store
+        run: |
+          mkdir -p "$CRAB_PERF_ROOT/rustfs-data"
+          sudo chown 10001:10001 "$CRAB_PERF_ROOT/rustfs-data"
+          docker run -d --name crab-existing-ref-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            -v "$CRAB_PERF_ROOT/rustfs-data:/data" \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          docker image inspect "$RUSTFS_IMAGE" --format '{{json .RepoDigests}}' \
+            > "$CRAB_PERF_ROOT/rustfs-image.json"
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = 200 ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-existing-ref-rustfs >&2 || true
+          exit 1
+
+      - name: Measure independent writers and verify cold readback
+        run: |
+          for actors in 50 10 1; do
+            rounds=$((100 / actors))
+            if [ "$actors" = 50 ]; then rounds=7; fi
+            python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+              --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+              --source "$RUNNER_TEMP/Github/curl/curl" \
+              --root "$CRAB_PERF_ROOT" --run-id "writers-${actors}" \
+              --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+              --push-client "${{ matrix.client }}" \
+              --agents "$actors" --branch-update-rounds "$rounds" --max-parallel-pushes "$actors" \
+              --consumer-mode cold-final --skip-same-branch --no-request-capture \
+              --timeout 600 --push-timeout 600
+          done
+
+      - name: Report latency and enforce the native push median budget
+        run: |
+          python3 - "$CRAB_PERF_ROOT" "${{ matrix.client }}" <<'PY'
+          import json
+          import math
+          import sys
+          from pathlib import Path
+
+          results = []
+          for actors in (1, 10, 50):
+              path = Path(sys.argv[1]) / f"writers-{actors}" / "artifacts" / "report.json"
+              report = json.loads(path.read_text())
+              if report["status"] != "ok":
+                  raise SystemExit(f"{actors}-writer integrity qualification failed")
+              if report["workload"]["update_payload_bytes"] != 4096:
+                  raise SystemExit("latency qualification requires 4 KiB update payloads")
+              timings = sorted(row["command"]["duration_ms"] for row in report["branch_updates"])
+              expected_samples = 350 if actors == 50 else 100
+              if len(timings) != expected_samples:
+                  raise SystemExit(f"{actors}-writer measurement requires {expected_samples} update samples")
+              results.append({"actors": actors, "samples": len(timings),
+                              "p50_ms": timings[math.ceil(len(timings) * 0.5) - 1],
+                              "p95_ms": timings[math.ceil(len(timings) * 0.95) - 1],
+                              "max_ms": max(timings)})
+          output = {"client": sys.argv[2], "cohorts": results}
+          (Path(sys.argv[1]) / "latency.json").write_text(json.dumps(output, indent=2) + "\n")
+          print(json.dumps(output))
+          if sys.argv[2] == "native" and any(row["p50_ms"] >= 500 for row in results):
+              raise SystemExit("native push p50 must be below 500 ms at every measured concurrency")
+          PY
+
+      - name: Isolate storage and client costs after latency qualification
+        if: always() && steps.performance-store.outcome == 'success'
+        run: |
+          pidstat -h -u -r -d -p ALL 1 > "$CRAB_PERF_ROOT/profile-resources.txt" &
+          profile_sampler_pid=$!
+          trap 'kill "$profile_sampler_pid" 2>/dev/null || true; wait "$profile_sampler_pid" 2>/dev/null || true' EXIT
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --output "$CRAB_PERF_ROOT/profile-storage.json"
+          CRAB_LOG=crab_write::capsule_protocol=info,crab::git::capsule_push=debug,crab::cmd::push=info \
+          GIT_TRACE2_EVENT="$CRAB_PERF_ROOT/profile-git-trace.jsonl" \
+            python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+              --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+              --source "$RUNNER_TEMP/Github/curl/curl" \
+              --root "$CRAB_PERF_ROOT" --run-id profile-writers-50 \
+              --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+              --push-client "${{ matrix.client }}" \
+              --agents 50 --branch-update-rounds 2 --max-parallel-pushes 50 \
+              --consumer-mode cold-final --skip-same-branch --no-request-capture \
+              --timeout 600 --push-timeout 600
+          python3 crab/scripts/e2e/run_push_preflight_control.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --root "$CRAB_PERF_ROOT/profile-writers-50" \
+            --output "$CRAB_PERF_ROOT/profile-preflight.json"
+
+      - name: Capture RustFS logs and stop fixture
+        if: always()
+        run: |
+          mkdir -p "$CRAB_PERF_ROOT"
+          docker logs crab-existing-ref-rustfs > "$CRAB_PERF_ROOT/rustfs.log" 2>&1 || true
+          docker stop crab-existing-ref-rustfs || true
+
+      - name: Upload performance and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: existing-ref-performance-${{ matrix.client }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_PERF_ROOT }}/writers-*/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/writers-*/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.json
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.jsonl
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.txt
+            ${{ env.CRAB_PERF_ROOT }}/latency.json
+            ${{ env.CRAB_PERF_ROOT }}/rustfs.log
+            ${{ env.CRAB_PERF_ROOT }}/rustfs-image.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  paired-existing-ref-performance:
+    name: Paired existing-ref throughput (${{ matrix.client }})
+    if: github.event_name == 'workflow_dispatch' && inputs.control_run != ''
+    needs: [release-build]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [native, git]
+    env:
+      PAIR_CLIENT: ${{ matrix.client }}
+      PAIR_CONTROL_RUN: ${{ inputs.control_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fixture dependencies
+        run: |
+          {
+            echo "PAIR_ROOT=$RUNNER_TEMP/crab-paired-$PAIR_CLIENT"
+            echo "PAIR_SOURCE=$RUNNER_TEMP/Github/curl/curl"
+            echo "PAIR_CONTROL=$RUNNER_TEMP/paired-control/crab"
+            echo "PAIR_CANDIDATE=$RUNNER_TEMP/paired-candidate/crab"
+          } >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/candidate-archive
+      - uses: actions/download-artifact@v4
+        with:
+          name: crab-protocol-v2-linux-x86_64-${{ inputs.control_run }}
+          run-id: ${{ inputs.control_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/control-archive
+      - name: Verify artifact sources and prepare pinned Git history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$PAIR_CONTROL_RUN" =~ ^[0-9]+$ ]]
+          mkdir -p "$(dirname "$PAIR_CONTROL")" "$(dirname "$PAIR_CANDIDATE")" "$(dirname "$PAIR_SOURCE")"
+          tar -xzf "$RUNNER_TEMP/candidate-archive/${CRAB_RELEASE_ARCHIVE}" -C "$(dirname "$PAIR_CANDIDATE")"
+          tar -xzf "$RUNNER_TEMP/control-archive/crab-protocol-v2-linux-x86_64.tar.gz" -C "$(dirname "$PAIR_CONTROL")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PAIR_CONTROL_RUN" \
+            --jq '{head_sha: .head_sha, run_id: .id, path: .path}' > "$RUNNER_TEMP/control-source.json"
+          control_sha="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/control-source.json"))["head_sha"])')"
+          "$PAIR_CONTROL" version | grep -F "$control_sha"
+          "$PAIR_CANDIDATE" version | grep -F "$(git rev-parse HEAD)"
+          git clone --no-checkout https://github.com/curl/curl.git "$PAIR_SOURCE"
+          git -C "$PAIR_SOURCE" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+      - name: Compare identical 1, 10 and 50-client workloads in ABBA order
+        run: python3 -B crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py
+      - name: Enforce the original native median budget in both candidate trials
+        if: matrix.client == 'native'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = json.loads((Path(os.environ['PAIR_ROOT']) / 'results.json').read_text())
+          candidates = [row for row in rows if row['variant'] == 'candidate']
+          assert len(candidates) == 6
+          assert all(row['p50_ms'] < 500 for row in candidates), candidates
+          PY
+      - name: Stop only this comparison's fixtures
+        if: always()
+        run: |
+          docker ps -aq --filter "label=crab-paired=$GITHUB_RUN_ID-$PAIR_CLIENT" \
+            | xargs -r docker rm -f
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: crab-safe-icf-component-${{ github.run_id }}
-          path: ${{ runner.temp }}/crab-safe-icf-proof
+          name: paired-push-${{ matrix.client }}-${{ github.run_id }}
+          path: |
+            ${{ env.PAIR_ROOT }}/*.json
+            ${{ env.PAIR_ROOT }}/*.log
+            ${{ env.PAIR_ROOT }}/*/paired-writers-*/artifacts/**
+            ${{ env.PAIR_ROOT }}/*/paired-writers-*/logs/**
+            ${{ runner.temp }}/control-source.json
+            ${{ runner.temp }}/paired-candidate/candidate-build.json
           if-no-files-found: error
-          retention-days: 3
-          compression-level: 6
