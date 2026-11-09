@@ -1,74 +1,197 @@
-name: Kernel profiling permission probe
+name: Linux independent push kernel CPU diagnostic
 
-# Temporary qualification branch only; never promote this workflow replacement.
+# Temporary diagnostic only. Product source and normal release are unchanged.
 on:
   workflow_dispatch:
+    inputs:
+      control_run:
+        description: Accepted normal Linux release artifact run
+        required: true
+        default: "42479567473"
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: kernel-permission-${{ github.ref }}
+  group: push-kernel-diagnostic-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  AWS_ACCESS_KEY_ID: crab
+  AWS_SECRET_ACCESS_KEY: crab
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://127.0.0.1:9000
+  RUSTFS_IMAGE: rustfs/rustfs@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66
+
 jobs:
-  kernel-permission:
+  push-kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
-          # Scope proof compares against the fixed base after follow-up commits.
           fetch-depth: 0
           persist-credentials: false
-      - name: Require unchanged product source
-        run: |
-          python3 -B - <<'PY'
-          import subprocess
-
-          changed = subprocess.check_output([
-              'git', 'diff', '--name-only',
-              '3a4d425ab823c0d4da140a98eaeb6e4caee49c13', 'HEAD',
-          ], text=True).splitlines()
-          assert changed == [
-              '.github/profile/probe_kernel_perf.py',
-              '.github/workflows/git-protocol-v2-partial-clone.yml',
-          ], changed
-          PY
-      - name: Install and select the actual perf executable
+      - name: Install fixture tools and initialize evidence
         run: |
           set -euo pipefail
+          root="$RUNNER_TEMP/crab-push-kernel"
+          mkdir -p "$root/evidence" "$root/bin"
+          {
+            echo "DIAGNOSTIC_ROOT=$root"
+            echo "PROFILE_ROOT=$root/evidence/profiles"
+            echo "PROBE_ROOT=$root/evidence/permission"
+          } >> "$GITHUB_ENV"
           sudo apt-get update -y
-          sudo apt-get install -y linux-tools-common linux-tools-generic libcap2-bin
+          sudo apt-get install -y curl libfuse3-dev pipx binutils linux-tools-common linux-tools-generic libcap2-bin
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          lscpu > "$root/evidence/host.txt"
+          uname -a >> "$root/evidence/host.txt"
+          git --version >> "$root/evidence/host.txt"
+          cp .github/profile/diagnose_push_kernel.py .github/profile/probe_kernel_perf.py "$root/evidence/"
           perf_bin="$(find -L /usr/lib/linux-tools -mindepth 2 -type f -name perf | sort -V | tail -1)"
-          test -x "${perf_bin}"
-          printf 'PERF_BIN=%s\nPROBE_ROOT=%s\n' "${perf_bin}" \
-            "${RUNNER_TEMP}/crab-kernel-permission" >> "${GITHUB_ENV}"
-      - name: Require real symbolized kernel samples and restore capabilities
+          test -x "$perf_bin"
+          echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
+      - name: Require kernel visibility before preparing the workload
         run: |
           python3 -B .github/profile/probe_kernel_perf.py \
-            --perf-bin "${PERF_BIN}" --output "${PROBE_ROOT}"
-      - name: Restore only the capability set owned by this probe
+            --perf-bin "$PERF_BIN" --output "$PROBE_ROOT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: crab-protocol-v2-linux-x86_64-${{ inputs.control_run }}
+          run-id: ${{ inputs.control_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/control-archive
+      - name: Verify exact accepted release and pinned workload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_RUN: ${{ inputs.control_run }}
+        run: |
+          set -euo pipefail
+          test "$CONTROL_RUN" = 42479567473
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CONTROL_RUN" \
+            --jq '{head_sha: .head_sha, run_id: .id, path: .path}' \
+            > "$DIAGNOSTIC_ROOT/evidence/control-source.json"
+          python3 -B - <<'PY'
+          import hashlib,json,os,subprocess,tarfile
+          from pathlib import Path
+          root=Path(os.environ['DIAGNOSTIC_ROOT'])
+          archive=Path(os.environ['RUNNER_TEMP'])/'control-archive/crab-protocol-v2-linux-x86_64.tar.gz'
+          with tarfile.open(archive) as handle:
+              members={member.name:member for member in handle.getmembers()}
+              assert set(members)=={'crab','candidate-build.json'}
+              assert all(member.isfile() for member in members.values())
+              binary=handle.extractfile(members['crab']).read()
+              manifest=handle.extractfile(members['candidate-build.json']).read()
+          build=json.loads(manifest)
+          assert build['source']=='17481e2a642095b357bba32d9113b9a9c58a895b'
+          assert build['features']=='default,gix-transport'
+          assert build['sha256']==hashlib.sha256(binary).hexdigest()=='20718a5d655055d6447220cd0081f53d8ce222e01cb11d3f47833916d898c8a5'
+          assert json.loads((root/'evidence/control-source.json').read_text())['head_sha']==build['source']
+          changed=subprocess.check_output(['git','diff','--name-only','3a4d425ab823c0d4da140a98eaeb6e4caee49c13','HEAD'],text=True).splitlines()
+          assert changed==['.github/profile/diagnose_push_kernel.py','.github/profile/probe_kernel_perf.py','.github/workflows/git-protocol-v2-partial-clone.yml'],changed
+          assert not subprocess.check_output(['git','diff','--name-only',build['source'],'3a4d425ab823c0d4da140a98eaeb6e4caee49c13','--','crab/src','crates','Cargo.toml','Cargo.lock'],text=True).strip()
+          (root/'bin/crab').write_bytes(binary)
+          (root/'bin/crab').chmod(0o755)
+          (root/'evidence/candidate-build.json').write_bytes(manifest)
+          (root/'evidence/identity.json').write_text(json.dumps({'diagnostic_source':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'product_base':'3a4d425ab823c0d4da140a98eaeb6e4caee49c13','release':build,'scope':'Normal accepted binary; kernel attribution only'},indent=2)+'\n')
+          PY
+          "$DIAGNOSTIC_ROOT/bin/crab" version | tee "$DIAGNOSTIC_ROOT/evidence/version.txt"
+          readelf -SW "$DIAGNOSTIC_ROOT/bin/crab" > "$DIAGNOSTIC_ROOT/evidence/elf-sections.txt"
+          ! grep -F '.symtab' "$DIAGNOSTIC_ROOT/evidence/elf-sections.txt"
+          source="$RUNNER_TEMP/Github/curl/curl"
+          mkdir -p "$(dirname "$source")"
+          git clone --no-checkout https://github.com/curl/curl.git "$source"
+          git -C "$source" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+          test -z "$(git -C "$source" status --porcelain)"
+      - name: Start owned disk-backed RustFS
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAGNOSTIC_ROOT/data"
+          chmod 777 "$DIAGNOSTIC_ROOT/data"
+          docker run -d --name "crab-kernel-$GITHUB_RUN_ID" \
+            --label "crab-kernel=$GITHUB_RUN_ID" -p 127.0.0.1:9000:9000 \
+            -v "$DIAGNOSTIC_ROOT/data:/data" \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          docker image inspect "$RUSTFS_IMAGE" --format '{{json .RepoDigests}}' \
+            > "$DIAGNOSTIC_ROOT/evidence/rustfs-image.json"
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = 200 ]; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Measure 400 real updates and require cold integrity checks
+        run: |
+          python3 -B .github/profile/diagnose_push_kernel.py \
+            --crab-bin "$DIAGNOSTIC_ROOT/bin/crab" \
+            --source "$RUNNER_TEMP/Github/curl/curl" \
+            --root "$DIAGNOSTIC_ROOT/workload" --run-id kernel-writers-50 \
+            --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" --push-client native \
+            --agents 50 --branch-update-rounds 8 --max-parallel-pushes 50 \
+            --consumer-mode cold-final --skip-same-branch --no-request-capture \
+            --timeout 600 --push-timeout 600
+      - name: Require complete updates, raw profiles and permission cleanup
+        run: |
+          python3 -B - <<'PYPROOF'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['DIAGNOSTIC_ROOT'])
+          report=json.loads((root/'workload/kernel-writers-50/artifacts/report.json').read_text())
+          profiles=Path(os.environ['PROFILE_ROOT'])
+          assert report['status']=='ok' and len(report['branch_updates'])==400
+          assert all(check['ok'] for check in report['checks'])
+          rows=[json.loads(line) for line in (profiles/'receipts.jsonl').read_text().splitlines()]
+          assert len(rows)==400 and all(row['exit_code']==0 for row in rows)
+          summary=json.loads((profiles/'summary.json').read_text())
+          assert summary['updates']==summary['profiles']==400
+          assert summary['samples']>=1000 and summary['lost_records']==0
+          for row in rows:
+              data=profiles/row['profile']
+              with data.open('rb') as handle:
+                  assert hashlib.file_digest(handle,'sha256').hexdigest()==row['data_sha256']
+              assert data.with_suffix('.script').is_file() and data.with_suffix('.json').is_file()
+          for directory in (profiles,Path(os.environ['PROBE_ROOT'])):
+              proof=json.loads((directory/'probe.json').read_text())
+              assert proof['status']=='passed' and proof['capabilities_restored'] is True
+              assert proof['initial_capabilities']=='' and not (directory/'owned-perf.txt').exists()
+          PYPROOF
+      - name: Restore only owned perf capabilities
         if: always()
         run: |
-          python3 -B - <<'PY'
+          python3 -B - <<'PYCLEAN'
           import os
           from pathlib import Path
           import subprocess
-
-          root = os.environ.get('PROBE_ROOT')
-          marker = Path(root) / 'owned-perf.txt' if root else None
-          if marker and marker.is_file():
-              perf = Path(marker.read_text().strip()).resolve(strict=True)
-              assert perf.name == 'perf' and perf.is_relative_to(Path('/usr/lib'))
-              subprocess.run(['sudo', '-n', 'setcap', '-r', str(perf)], check=True)
-              assert not subprocess.check_output(['getcap', str(perf)], text=True).strip()
-              marker.unlink()
-          PY
+          for key in ('PROBE_ROOT','PROFILE_ROOT'):
+              root=os.environ.get(key)
+              marker=Path(root)/'owned-perf.txt' if root else None
+              if marker and marker.is_file():
+                  perf=Path(marker.read_text().strip()).resolve(strict=True)
+                  assert perf.name=='perf' and perf.is_relative_to(Path('/usr/lib'))
+                  subprocess.run(['sudo','-n','setcap','-r',str(perf)],check=True)
+                  assert not subprocess.check_output(['getcap',str(perf)],text=True).strip()
+                  marker.unlink()
+          PYCLEAN
+      - name: Stop only owned fixture
+        if: always()
+        run: |
+          if test -n "${DIAGNOSTIC_ROOT:-}"; then
+            docker logs "crab-kernel-$GITHUB_RUN_ID" > "$DIAGNOSTIC_ROOT/evidence/rustfs.log" 2>&1 || true
+          fi
+          docker ps -aq --filter "label=crab-kernel=$GITHUB_RUN_ID" | xargs -r docker rm -f
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-permission-${{ github.run_id }}
-          path: ${{ runner.temp }}/crab-kernel-permission/**
+          name: push-kernel-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/crab-push-kernel/evidence/**
+            ${{ runner.temp }}/crab-push-kernel/workload/kernel-writers-50/artifacts/**
+            ${{ runner.temp }}/crab-push-kernel/workload/kernel-writers-50/logs/**
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
