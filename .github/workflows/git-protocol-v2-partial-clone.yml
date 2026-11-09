@@ -18,7 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # Scope proof compares against the fixed base after follow-up commits.
+          fetch-depth: 0
           persist-credentials: false
       - name: Require unchanged product source
         run: |

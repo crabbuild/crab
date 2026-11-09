@@ -50,10 +50,10 @@ def main():
         capture([str(perf), "version"], root / "perf-version.txt")
         capture(["uname", "-a"], root / "kernel-version.txt")
         capture(["sudo", "-n", "cat", "/proc/kallsyms"], root / "kallsyms.txt")
-        # Inherited per-command events avoid unrelated runner processes. Kernel
-        # callchains use the running kernel's unwinder; no user stack dump is requested.
+        # Inherited events isolate the command; kernel chains use the runner's unwinder.
+        # Per-task events omit CPU identity by default, but the report requires it.
         command = [str(perf), "record", "--strict-freq", "-e", "cpu-clock:k", "-F", "999",
-                   "-m", "8", "--no-buildid", "--call-graph", "fp", "-P",
+                   "-m", "8", "--no-buildid", "--call-graph", "fp", "--sample-cpu", "-P",
                    "-o", str(root / "probe.data"), "--", sys.executable, "-c",
                    "import os\nfor _ in range(1000000): os.stat('/proc/self/status')"]
         proof["record_command"] = command
