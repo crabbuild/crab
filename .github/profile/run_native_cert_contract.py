@@ -19,16 +19,24 @@ args = parser.parse_args()
 root = args.root
 root.mkdir(parents=True, exist_ok=False)
 fixture = Path(tempfile.mkdtemp(prefix='fixture-', dir=root))
+# Ambient request extensions can duplicate -addext entries under LibreSSL;
+# use an owned config so valid fixture roots do not inherit machine policy.
+config = fixture/'openssl.cnf'
+config.write_text('[req]\ndistinguished_name = subject\n[subject]\n')
+config_path = str(config)
+openssl_version = subprocess.check_output(['openssl', 'version'], text=True).strip()
 commands = [
-    ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=Crab qualification CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', 'ca.key', '-out', 'ca.pem'],
-    ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=Crab other qualification CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', 'other.key', '-out', 'other.pem'],
-    ['req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-keyout', 'server.key', '-out', 'server.csr'],
+    ['req', '-config', config_path, '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=Crab qualification CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', 'ca.key', '-out', 'ca.pem'],
+    ['req', '-config', config_path, '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=Crab other qualification CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', 'other.key', '-out', 'other.pem'],
+    ['req', '-config', config_path, '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-keyout', 'server.key', '-out', 'server.csr'],
     ['x509', '-req', '-in', 'server.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '1', '-extfile', 'server.ext', '-out', 'server.pem'],
 ]
 (fixture/'server.ext').write_text('subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n')
 with (root/'openssl.log').open('wb') as log:
     for command in commands:
         subprocess.run(['openssl', *command], cwd=fixture, stdout=log, stderr=subprocess.STDOUT, check=True)
+public_certificates = {name: {'sha256': hashlib.sha256((fixture/name).read_bytes()).hexdigest(), 'pem': (fixture/name).read_text()} for name in ['ca.pem', 'other.pem', 'server.pem']}
+(root/'fixture-certificates.json').write_text(json.dumps({'openssl_version': openssl_version, 'request_config': config.read_text(), 'certificates': public_certificates}, indent=2)+'\n')
 artifacts = [json.loads(line) for line in args.artifacts.read_text().splitlines() if line.startswith('{')]
 source = Path(__file__).with_name('native_cert_contract.rs')
 command = ['rustc', *(['+'+args.toolchain] if args.toolchain else []), '--edition=2024', '--test', str(source), '-o', str(root/'contract')]

@@ -1,21 +1,65 @@
 ---
-name: Combined TLS startup push qualification
 'on':
   workflow_dispatch: {}
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: tls-startup-combined-${{ github.ref }}
+  group: tls-combined-portable-${{ github.ref }}
   cancel-in-progress: false
 env:
   CARGO_INCREMENTAL: 0
   CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
-  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}
+  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-42649451866
+name: Combined TLS portable certificate qualification
 jobs:
-  push-contracts:
-    name: TLS and push contracts (${{ matrix.os }})
+  verify-original-contracts:
+    name: Verify original immutable build and completed contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      with:
+        fetch-depth: 0
+    - name: Verify source reuse and original results
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        set -euo pipefail
+        git diff --quiet 7553a760cc0f4b9b80667864ff23ec1df059493c "$GITHUB_SHA" -- . ':(exclude).github'
+        gh api repos/crabbuild/crab/actions/runs/42649451866 > "$RUNNER_TEMP/original-run.json"
+        gh api 'repos/crabbuild/crab/actions/runs/42649451866/jobs?per_page=100' > "$RUNNER_TEMP/original-jobs.json"
+        python3 - <<'PYCODE'
+        import json, os
+        from pathlib import Path
+        root = Path(os.environ['RUNNER_TEMP'])
+        run = json.loads((root/'original-run.json').read_text())
+        assert run['head_sha'] == '7553a760cc0f4b9b80667864ff23ec1df059493c'
+        assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+        jobs = {job['id']: job for job in json.loads((root/'original-jobs.json').read_text())['jobs']}
+        for job_id in [129271535865, 129271536312, 129271536245, 129271536364, 129271536702]:
+            assert jobs[job_id]['conclusion'] == 'success', jobs[job_id]['name']
+        mac = jobs[129271536528]
+        assert mac['conclusion'] == 'failure'
+        steps = {step['name']: step for step in mac['steps']}
+        assert steps['Run complete Capsule push and pack contracts']['conclusion'] == 'success'
+        assert steps['Verify actual linked TLS and certificate contracts']['conclusion'] == 'failure'
+        assert [step['name'] for step in mac['steps'] if step['conclusion'] == 'failure'] == ['Verify actual linked TLS and certificate contracts']
+        paired = [job for job in jobs.values() if job['name'].startswith('Paired existing-ref')]
+        assert paired and all(job['conclusion'] == 'skipped' for job in paired)
+        print('Original source, immutable build, upstream checks, platform core checks and skipped performance jobs verified')
+        PYCODE
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: original-tls-gates-${{ github.run_id }}
+        path: "${{ runner.temp }}/original-*.json\n"
+        if-no-files-found: error
+        retention-days: 3
+  tls-contracts:
+    name: Portable certificate contracts (${{ matrix.os }})
     runs-on: "${{ matrix.os }}"
-    timeout-minutes: 55
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -47,106 +91,33 @@ jobs:
     - name: Install existing Linux build dependencies
       run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
       if: runner.os == 'Linux'
-    - name: Run complete Capsule push and pack contracts
+    - name: Build libraries and verify real TLS with owned certificate configuration
       run: |
         set -euo pipefail
-        export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-tls-combined-contracts"
-        cargo test -p crab --lib --locked ${{ matrix.cargo_args }} git::capsule_push::tests 2>&1 | tee "$RUNNER_TEMP/tls-combined-capsule-tests.log"
-        cargo test -p crab --lib --locked ${{ matrix.cargo_args }} git::pack:: 2>&1 | tee "$RUNNER_TEMP/tls-combined-pack-tests.log"
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-tls-portable-contracts"
+        git --version > "$RUNNER_TEMP/tls-portable-toolchain.log"
+        rustc -Vv >> "$RUNNER_TEMP/tls-portable-toolchain.log"
+        openssl version >> "$RUNNER_TEMP/tls-portable-toolchain.log"
+        cargo build -p crab --lib --locked ${{ matrix.cargo_args }} --message-format=json > "$RUNNER_TEMP/tls-portable-build.jsonl"
+        python3 -B .github/profile/run_native_cert_contract.py --artifacts "$RUNNER_TEMP/tls-portable-build.jsonl" --root "$RUNNER_TEMP/tls-portable-contract"
         cargo fmt --all -- --check
-        cargo clippy -p crab --no-deps --locked ${{ matrix.cargo_args }} -- -A clippy::style -A clippy::complexity -A clippy::perf -A clippy::pedantic -A clippy::nursery -A clippy::cargo -A clippy::restriction -D clippy::correctness -D clippy::suspicious -A unfulfilled_lint_expectations 2>&1 | tee "$RUNNER_TEMP/tls-combined-clippy.log"
-    - name: Verify actual linked TLS and certificate contracts
-      run: |
-        set -euo pipefail
-        export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-tls-combined-contracts"
-        cargo build -p crab --lib --locked ${{ matrix.cargo_args }} --message-format=json > "$RUNNER_TEMP/tls-combined-platform-build.jsonl"
-        python3 -B .github/profile/run_native_cert_contract.py --artifacts "$RUNNER_TEMP/tls-combined-platform-build.jsonl" --root "$RUNNER_TEMP/tls-combined-contract"
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: tls-combined-contracts-${{ matrix.os }}-${{ github.run_id }}
+        name: tls-portable-contracts-${{ matrix.os }}-${{ github.run_id }}
         path: |
-          ${{ runner.temp }}/tls-combined-*.log
-          ${{ runner.temp }}/tls-combined-contract/*.json
-          ${{ runner.temp }}/tls-combined-contract/*.log
-          ${{ runner.temp }}/tls-combined-platform-build.jsonl
+          ${{ runner.temp }}/tls-portable-contract/*.json
+          ${{ runner.temp }}/tls-portable-contract/*.log
+          ${{ runner.temp }}/tls-portable-build.jsonl
+          ${{ runner.temp }}/tls-portable-toolchain.log
         if-no-files-found: error
         retention-days: 3
-  release-build:
-    name: Build shared protocol release artifact
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    steps:
-    - name: Checkout
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      with:
-        fetch-depth: 0
-    - name: Set up pinned Rust
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-      with:
-        toolchain: 1.99.1
-    - name: Install Linux system dependencies
-      run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
-    - name: Build release artifact with source provenance
-      run: |
-        set -euo pipefail
-        export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-tls-combined-release"
-        test -z "${RUSTFLAGS:-}"
-        test -z "${CARGO_ENCODED_RUSTFLAGS:-}"
-        GIT_SHA="$(git rev-parse HEAD)" \
-          cargo build -p crab --release --locked --features gix-transport \
-            --message-format=json > "$RUNNER_TEMP/candidate-build-artifacts.jsonl"
-        test -x "${CARGO_TARGET_DIR}/release/crab"
-        python3 - <<'PY'
-        import hashlib, json, os, subprocess
-        from pathlib import Path
-        binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
-        record = {
-            'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-            'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
-            'features': 'default,gix-transport',
-            'rustflags': os.environ.get('RUSTFLAGS', ''),
-            'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
-        }
-        (binary.parent / 'candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
-        PY
-        # Artifact upload normalizes file modes, so tar preserves the executable bit.
-        tar -C "${CARGO_TARGET_DIR}/release" \
-          -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab candidate-build.json
-        "$CARGO_TARGET_DIR/release/crab" version | grep -F "$(git rev-parse HEAD)"
-        "$CARGO_TARGET_DIR/release/crab" push --help > "$RUNNER_TEMP/push-help.txt"
-    - name: Verify native certificate loading and real TLS contracts
-      run: |
-        python3 -B .github/profile/run_native_cert_contract.py \
-          --artifacts "$RUNNER_TEMP/candidate-build-artifacts.jsonl" \
-          --root "$RUNNER_TEMP/native-cert-contract"
-    - name: Preserve certificate qualification receipts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: native-certificate-contract-${{ github.run_id }}
-        path: |
-          ${{ runner.temp }}/native-cert-contract/*.json
-          ${{ runner.temp }}/native-cert-contract/*.log
-          ${{ runner.temp }}/candidate-build-artifacts.jsonl
-        if-no-files-found: warn
-        retention-days: 3
-    - name: Upload shared release artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: "${{ env.CRAB_RELEASE_ARTIFACT }}"
-        path: "${{ runner.temp }}/${{ env.CRAB_RELEASE_ARCHIVE }}"
-        if-no-files-found: error
-        retention-days: 3
-        compression-level: 0
   paired-existing-ref-performance:
     name: Paired existing-ref throughput (${{ matrix.client }})
     if: github.event_name == 'workflow_dispatch'
     needs:
-    - release-build
-    - push-contracts
-    - pki-decoder-experiment
-    - native-certificate-upstream
+    - verify-original-contracts
+    - tls-contracts
     permissions:
       contents: read
       actions: read
@@ -162,7 +133,7 @@ jobs:
       PAIR_CLIENT: "${{ matrix.client }}"
       PAIR_CONTROL_RUN: '42570788923'
       PAIR_CONTROL_SOURCE: 4a27de3de1757b716a1694c65a266c2afefc4412
-      PAIR_CANDIDATE_SOURCE: "${{ github.sha }}"
+      PAIR_CANDIDATE_SOURCE: 7553a760cc0f4b9b80667864ff23ec1df059493c
     steps:
     - uses: actions/checkout@v4
       with:
@@ -184,6 +155,8 @@ jobs:
       with:
         name: "${{ env.CRAB_RELEASE_ARTIFACT }}"
         path: "${{ runner.temp }}/candidate-archive"
+        run-id: 42649451866
+        github-token: "${{ github.token }}"
     - uses: actions/download-artifact@v4
       with:
         name: crab-relr-normal-42570788923
@@ -212,6 +185,7 @@ jobs:
         assert control['features'] == candidate['features'] == 'default,gix-transport'
         assert control['rustflags'] == candidate['rustflags'] == ''
         assert control['sha256'] == '574e2a85b5397e5ad3711fe5908c23863e614224110911f67ba844be23aefa03'
+        assert candidate['sha256'] == '22485f8ad48cb0cf68187dc6d1f4c28637f21f64800dde8269d928d0428a6b03'
         for build, variable in [(control, 'PAIR_CONTROL'), (candidate, 'PAIR_CANDIDATE')]:
             assert build['sha256'] == hashlib.file_digest(Path(os.environ[variable]).open('rb'), 'sha256').hexdigest()
         PYCODE
@@ -250,93 +224,3 @@ jobs:
           ${{ runner.temp }}/paired-candidate/candidate-build.json
           ${{ runner.temp }}/paired-control/candidate-build.json
         if-no-files-found: error
-  pki-decoder-experiment:
-    name: Isolated PKI decoder qualification
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up pinned Rust
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-      with:
-        toolchain: 1.99.1
-        components: clippy
-    - name: Set qualification paths
-      run: |
-        {
-          echo "PKI_SOURCE=$RUNNER_TEMP/Github/rustls/pki-types"
-          echo "PKI_PROOF=$RUNNER_TEMP/pki-proof"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/target/pki-decoder"
-        } >> "$GITHUB_ENV"
-    - name: Install Valgrind and MSRV
-      run: |
-        sudo apt-get update -y
-        sudo apt-get install -y valgrind
-        rustup toolchain install 1.60.0 --profile minimal --no-self-update
-    - name: Restore pinned upstream tests and fixtures
-      run: |
-        mkdir -p "$(dirname "$PKI_SOURCE")" "$PKI_PROOF"
-        git clone --no-checkout https://github.com/rustls/pki-types.git "$PKI_SOURCE"
-        git -C "$PKI_SOURCE" checkout --detach bb3c1da0e69e8ee3dcdfb16c245f974d636ed481
-        cp vendor/rustls-pki-types/src/base64.rs "$PKI_SOURCE/src/base64.rs"
-        sha256sum vendor/rustls-pki-types/src/base64.rs "$PKI_SOURCE/src/base64.rs" > "$PKI_PROOF/decoder-hashes.log"
-    - name: Run upstream unit, integration and documentation tests
-      shell: bash
-      run: |
-        set -o pipefail
-        cd "$PKI_SOURCE"
-        cargo test --locked 2>&1 | tee "$PKI_PROOF/default.log"
-        cargo test --locked --all-features 2>&1 | tee "$PKI_PROOF/all-features.log"
-        cargo test --locked --no-default-features 2>&1 | tee "$PKI_PROOF/no-default.log"
-        cargo clippy --locked --all-features -- -D warnings 2>&1 | tee "$PKI_PROOF/clippy.log"
-    - name: Check full crate with Rust 1.60
-      shell: bash
-      run: |
-        set -o pipefail
-        cd "$PKI_SOURCE"
-        # Old Cargo uses the Git registry index. A local source directory
-        # avoids that unrelated download while preserving the upstream lock.
-        mkdir -p .cargo
-        cargo vendor --locked "$RUNNER_TEMP/pki-msrv-deps" > .cargo/config.toml
-        cargo +1.60.0 check --locked --offline --lib --all-features 2>&1 | tee "$PKI_PROOF/msrv-all.log"
-        cargo +1.60.0 check --locked --offline --lib --no-default-features 2>&1 | tee "$PKI_PROOF/msrv-no-default.log"
-    - name: Run secret codepoint check under Valgrind
-      shell: bash
-      run: |
-        set -o pipefail
-        cd "$PKI_SOURCE"
-        cargo test --locked --all-features --lib --no-run --message-format json > "$PKI_PROOF/test-build.jsonl"
-        exe="$(python3 -c 'import json,os; print(next(x["executable"] for line in open(os.environ["PKI_PROOF"]+"/test-build.jsonl") if (x:=json.loads(line)).get("reason")=="compiler-artifact" and x.get("executable") and x["profile"]["test"]))')"
-        valgrind --error-exitcode=99 --exit-on-first-error=yes "$exe" \
-          --exact base64::tests::codepoint_decode_secret_does_not_branch_or_index_on_secret_input \
-          --nocapture 2>&1 | tee "$PKI_PROOF/valgrind.log"
-        if grep -F 'SKIPPED' "$PKI_PROOF/valgrind.log"; then exit 1; fi
-        grep -F '1 passed; 0 failed' "$PKI_PROOF/valgrind.log"
-    - uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: pki-decoder-proof-${{ github.run_id }}
-        path: "${{ env.PKI_PROOF }}/"
-        if-no-files-found: error
-        retention-days: 14
-  native-certificate-upstream:
-    name: Released native certificate loader contracts
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-    - name: Set up pinned Rust
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-      with:
-        toolchain: 1.99.1
-    - name: Test exact published upstream source
-      run: |
-        set -euo pipefail
-        source="$RUNNER_TEMP/Github/rustls/rustls-native-certs"
-        mkdir -p "$(dirname "$source")"
-        git clone --branch v/0.8.5 --depth 1 \
-          https://github.com/rustls/rustls-native-certs.git "$source"
-        test "$(git -C "$source" rev-parse HEAD)" = 4bcc4bb91d0b0bdffa49a9b3c85bb0fc03d49899
-        CARGO_TARGET_DIR="$RUNNER_TEMP/native-certs-upstream-target" \
-          cargo test --manifest-path "$source/Cargo.toml" --lib --locked
-        test -z "$(git -C "$source" status --porcelain)"
