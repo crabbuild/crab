@@ -42,6 +42,7 @@ impl ContentCache {
 
 pub(crate) struct ContentRuntime {
     pub(crate) layout: StoreLayout<Store>,
+    pub(crate) lfs_proofs: crab_lfs::LfsReadCache,
     cache: Option<ContentCache>,
     namespace: String,
     catalog: Arc<crab_metadata::capsule_protocol::PointerCatalogLookup>,
@@ -95,6 +96,7 @@ impl ContentRuntime {
         hash.update(layout.repo_prefix().as_bytes());
         Self {
             layout,
+            lfs_proofs: crab_lfs::LfsReadCache::default(),
             cache,
             catalog: Arc::new(catalog),
             namespace: hash.finalize().to_hex().to_string(),

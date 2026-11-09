@@ -130,7 +130,11 @@ payloads or decoding large ordinary Git blobs. Read metadata and ranges from the
 same snapshot to keep their revision consistent. `open_file` accepts
 `operation::ReadOptions::with_range` for verified logical ranges. LFS may need a
 complete verification pass before its first range; range output size does not
-promise an equally small network transfer.
+promise an equally small network transfer. Snapshot-owned LFS proof retention
+can reuse checked canonical objects across streams when fresh metadata and the
+strong GET validator match. Each stream still drains its own verification jobs;
+retention never crosses storage-target or key authority. Routed/unbound sources
+retain fresh verification. Reads do not write remote receipts.
 
 With `files`, `Snapshot::file_chunks(path, start, limit)` inspects up to 512
 ordered Crab chunk occurrences through that snapshot's captured catalog.

@@ -3,7 +3,7 @@
 use std::{ops::Range, path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use crab_lfs::LfsReadSession;
+use crab_lfs::{LfsReadCache, LfsReadSession};
 use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_read::PointerReader;
 use crab_types::pointer_read::{Request, Response};
@@ -137,7 +137,7 @@ struct Session {
     staging: PathBuf,
     storage: PathBuf,
     pin: Option<crab_staging::StagedFilePin>,
-    lfs: LfsReadSession,
+    proofs: LfsReadCache,
     remote: Option<PointerReader>,
     lookup: Option<SharedFileIndexLookup>,
 }
@@ -181,7 +181,7 @@ impl Session {
             staging,
             storage,
             pin,
-            lfs: LfsReadSession::default(),
+            proofs: LfsReadCache::default(),
             remote: None,
             lookup: None,
         })
@@ -195,9 +195,23 @@ impl Session {
     }
 
     async fn query(&mut self, request: Request, cancel: &CancellationToken) -> Result<Response> {
+        let session = LfsReadSession::new(self.proofs.clone());
+        let result = self.query_inner(request, cancel, &session).await;
+        // A cancelled remote future can leave an admitted SHA-256 job. Drain
+        // this query's work before acknowledging it, while keeping checked sources.
+        session.close().await;
+        result
+    }
+
+    async fn query_inner(
+        &mut self,
+        request: Request,
+        cancel: &CancellationToken,
+        session: &LfsReadSession,
+    ) -> Result<Response> {
         match request {
             Request::Range { offset, length } => {
-                let (offset, bytes) = self.read(offset, length, cancel).await?;
+                let (offset, bytes) = self.read(offset, length, cancel, session).await?;
                 Ok(Response::Data {
                     offset,
                     bytes_b64: STANDARD.encode(bytes),
@@ -252,6 +266,7 @@ impl Session {
         offset: u64,
         length: u32,
         cancel: &CancellationToken,
+        session: &LfsReadSession,
     ) -> Result<(u64, Vec<u8>)> {
         if length > MAX_RANGE_BYTES {
             return Err(invalid("range length exceeds 8 MiB"));
@@ -262,7 +277,7 @@ impl Session {
         if start == end {
             return Ok((start, Vec::new()));
         }
-        let bytes = self.range(start..end, cancel).await?;
+        let bytes = self.range(start..end, cancel, session).await?;
         if bytes.len() as u64 != end - start {
             return Err(invalid("pointer reader returned an incomplete range"));
         }
@@ -270,7 +285,12 @@ impl Session {
         Ok((start, bytes))
     }
 
-    async fn range(&mut self, range: Range<u64>, cancel: &CancellationToken) -> Result<Vec<u8>> {
+    async fn range(
+        &mut self,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+        session: &LfsReadSession,
+    ) -> Result<Vec<u8>> {
         match &self.pointer {
             Pointer::Crab(pointer) if self.pin.is_some() => {
                 return Ok(self
@@ -281,8 +301,7 @@ impl Session {
                     .to_vec());
             }
             Pointer::Lfs(pointer) => {
-                if let Some(bytes) = self
-                    .lfs
+                if let Some(bytes) = session
                     .read_local_range(
                         &self.storage,
                         &pointer.oid,
@@ -306,7 +325,7 @@ impl Session {
             Pointer::Crab(pointer) => reader.read_range(pointer, range, cancel).await?,
             Pointer::Lfs(pointer) => {
                 reader
-                    .read_lfs_range(pointer, range, cancel, &self.lfs)
+                    .read_lfs_range(pointer, range, cancel, session)
                     .await?
             }
         };
@@ -314,7 +333,6 @@ impl Session {
     }
 
     async fn close(self) -> Result<()> {
-        self.lfs.close().await;
         if let Some(lookup) = self.lookup {
             lookup.close().await?;
         }

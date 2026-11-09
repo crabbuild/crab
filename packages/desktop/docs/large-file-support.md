@@ -299,3 +299,34 @@ Remaining integration details found during qualification:
   unsigned. This does not qualify Windows/Linux, other storage profiles,
   cold multi-GiB remote LFS, media delivery, durable transfers or the remaining
   acceptance matrix.
+
+## LFS read ownership and integrity checkpoint
+
+- Verification sessions now separate per-operation jobs from bounded shared
+  proof retention. The native helper drains each query before acknowledging
+  cancellation and keeps checked local sources for subsequent requests. SDK
+  file and archive streams use the same runtime-owned proof cache.
+- Remote proof reuse requires a canonical bound transport, store incarnation,
+  object key, SHA-256 and fresh matching metadata. Ranged GET responses still
+  match the verified strong validator. Local and remote proof memory is bounded.
+- An isolated regression reproduced acceptance of a corrupt byte through a
+  different read route when a persisted receipt's opaque validator coincided.
+  Receipts now bind the canonical transport; routed/unbound sources cannot reuse
+  canonical receipts. Wire version 2 / verifier 3 invalidates older cache records
+  from v2.0.0-alpha.1 safely through fresh verification; file data is retained.
+- Declared-size mismatches reject a range before opening the payload. Focused
+  checks passed: 59 object-store cases, 11 selected cache/read cases, SDK files
+  and metadata-only fixtures, and the VFS consumer build. Five native pointer
+  cases passed for scoped query ownership; later receipt/size changes affect
+  remote object reads and are covered by the object-store/SDK fixtures.
+- The matching native release build and unpacked arm64 package passed. The
+  isolated RustFS sidecar fixture covered published chunk pages for lazy-clone
+  and direct-remote sources, Crab/LFS ranges, complete bytes and tensor previews:
+  230 GET/HEAD requests, zero writes, unchanged working pointers. Evidence:
+  `large-files-proof.fr8_x69z/report.json` in the external build directory.
+- Packaged GUI smoke passed in 15.1 seconds, including 3 GiB chunk pagination
+  after pointer replacement, LFS corruption/repair and safe cache cleanup.
+  Evidence: `large-files-lfs-ui-proof/qualification.json` and screenshots.
+  The unsigned unpacked artifact is `desktop-lfs-cache/mac-arm64/Crab.app`
+  beneath the per-worktree external build directory. Cold multi-GiB LFS budget/
+  progress, media delivery and the remaining acceptance matrix stay open.

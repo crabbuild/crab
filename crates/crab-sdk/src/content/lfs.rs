@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use crab_remote_git::OperationContext;
-use crab_storage::{Store, StoreLayout};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
@@ -8,7 +7,7 @@ use crate::remote_error::consumer_error;
 use crate::{Error, ErrorKind, ReadOptions};
 
 pub(crate) async fn deliver(
-    layout: &StoreLayout<Store>,
+    runtime: &super::crab::ContentRuntime,
     bytes: Bytes,
     options: ReadOptions,
     operation: &OperationContext,
@@ -30,14 +29,15 @@ pub(crate) async fn deliver(
     }
     let range = options.byte_range(pointer.size).map_err(consumer_error)?;
     let store = crab_lfs::LfsObjectStore::new(
-        layout
+        runtime
+            .layout
             .store()
             .clone()
             .with_read_admission(operation.read_admission()),
-        layout.repo_prefix(),
+        runtime.layout.repo_prefix(),
     );
     let cancellation = operation.cancellation();
-    let session = crab_lfs::LfsReadSession::default();
+    let session = crab_lfs::LfsReadSession::new(runtime.lfs_proofs.clone());
     let result = async {
         let (_, _, mut stream) = tokio::select! {
             biased;

@@ -84,10 +84,10 @@ const MAX_PENDING_UPLOAD_BYTES: usize = MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PAR
 /// accumulators. Sized to match the part size so a single read tops up
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = MIN_STREAM_PART_SIZE;
-const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x01";
-// Version 1 could bind a verified upload to an unrelated later HEAD response.
-// Its receipts must miss so the next verifier hashes the actual object version.
-const RECEIPT_VERIFIER: &str = "crab-lfs/2";
+const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x02";
+// Earlier receipts lacked canonical transport binding. They must miss rather
+// than certify another store whose opaque version tokens happen to coincide.
+const RECEIPT_VERIFIER: &str = "crab-lfs/3";
 const MAX_RECEIPT_FIELD_SIZE: usize = 4 * 1024;
 const MAX_RECEIPT_SIZE: u64 = 16 * 1024;
 
@@ -113,6 +113,7 @@ enum UploadSource<'a> {
 
 struct VerificationReceipt {
     oid: [u8; 32],
+    target_identity: [u8; 32],
     size: u64,
     object_path: String,
     e_tag: Option<String>,
@@ -786,16 +787,10 @@ impl LfsObjectStore {
         session: Option<&LfsReadSession>,
     ) -> Result<ObjectMeta> {
         let path = Self::object_path_at(prefix, oid);
-        match Self::inspect_existing_at(store, prefix, &path, oid, session).await? {
-            ExistingObject::Valid(meta) => {
-                if meta.size == expected_size {
-                    Ok(meta)
-                } else {
-                    Err(LfsError::ObjectCorrupt {
-                        oid: hex_encode(oid),
-                    })
-                }
-            }
+        match Self::inspect_existing_at(store, prefix, &path, oid, Some(expected_size), session)
+            .await?
+        {
+            ExistingObject::Valid(meta) => Ok(meta),
             ExistingObject::Missing => Err(LfsError::ObjectMissing {
                 oid: hex_encode(oid),
             }),
@@ -875,10 +870,14 @@ impl LfsObjectStore {
         // hash delivered bytes directly, avoiding a second full download.
         let expected_bytes = requested.end - requested.start;
         let oid = *oid;
+        let proof = session
+            .map(LfsReadSession::cache)
+            .transpose()?
+            .map(|cache| (cache, store.clone(), path, meta.clone()));
         let session = session.cloned();
         let stream = futures_util::stream::try_unfold(
-            (stream, 0u64, Sha256::new(), false, session),
-            move |(mut stream, received, hasher, complete, session)| async move {
+            (stream, 0u64, Sha256::new(), false, session, proof),
+            move |(mut stream, received, hasher, complete, session, proof)| async move {
                 if complete {
                     return Ok(None);
                 }
@@ -908,8 +907,15 @@ impl LfsObjectStore {
                     if full && hasher.clone().finalize().as_slice() != oid {
                         return Err(corrupt());
                     }
+                    if full && let Some((cache, store, path, meta)) = &proof {
+                        // Bind proof to this verified GET, never a later HEAD.
+                        cache.remember_remote(store, path, &oid, meta)?;
+                    }
                 }
-                Ok(Some((chunk, (stream, received, hasher, complete, session))))
+                Ok(Some((
+                    chunk,
+                    (stream, received, hasher, complete, session, proof),
+                )))
             },
         )
         .boxed();
@@ -1033,8 +1039,14 @@ impl LfsObjectStore {
             return;
         }
 
+        // Receipts survive process and connection changes. Opaque validators
+        // cannot carry verification across distinct physical storage targets.
+        let Some(target_identity) = store.read_prefix_target_identity(&object_path).copied() else {
+            return;
+        };
         let receipt = VerificationReceipt {
             oid: *oid,
+            target_identity,
             size,
             object_path: object_path.to_string(),
             e_tag,
@@ -1077,7 +1089,7 @@ impl LfsObjectStore {
     }
 
     async fn inspect_existing(&self, path: &Path, oid: &[u8; 32]) -> Result<ExistingObject> {
-        Self::inspect_existing_at(&self.store, &self.prefix, path, oid, None).await
+        Self::inspect_existing_at(&self.store, &self.prefix, path, oid, None, None).await
     }
 
     async fn inspect_existing_at(
@@ -1085,6 +1097,7 @@ impl LfsObjectStore {
         prefix: &str,
         path: &Path,
         oid: &[u8; 32],
+        expected_size: Option<u64>,
         session: Option<&LfsReadSession>,
     ) -> Result<ExistingObject> {
         let meta = match store.head(path).await {
@@ -1092,17 +1105,35 @@ impl LfsObjectStore {
             Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
             Err(error) => return Err(error.into()),
         };
-        if receipt_matches(store, prefix, path, oid, &meta).await {
+        if expected_size.is_some_and(|size| size != meta.size) {
+            return Ok(ExistingObject::Corrupt(ETag {
+                e_tag: meta.e_tag,
+                version: meta.version,
+            }));
+        }
+        let cache = session.map(LfsReadSession::cache).transpose()?;
+        if let Some(cache) = &cache
+            && cache.matches_remote(store, path, oid, &meta)?
+        {
             return Ok(ExistingObject::Valid(meta));
         }
-
-        origin::inspect(store, path, oid, None, session).await
+        let result = if receipt_matches(store, prefix, path, oid, &meta).await {
+            ExistingObject::Valid(meta)
+        } else {
+            origin::inspect(store, path, oid, expected_size, session).await?
+        };
+        if let Some(cache) = cache
+            && let ExistingObject::Valid(meta) = &result
+        {
+            cache.remember_remote(store, path, oid, meta)?;
+        }
+        Ok(result)
     }
 }
 
 // Weak HTTP validators permit byte differences (RFC 9110 section 8.8.3.2).
 // Receipts and split verification/serving both require exact object identity.
-fn has_byte_validator(meta: &ObjectMeta) -> bool {
+pub(crate) fn has_byte_validator(meta: &ObjectMeta) -> bool {
     has_byte_validator_values(meta.e_tag.as_deref(), meta.version.as_deref())
 }
 
@@ -1134,6 +1165,11 @@ async fn receipt_matches(
     oid: &[u8; 32],
     meta: &ObjectMeta,
 ) -> bool {
+    // A canonical receipt cannot authorize a scoped route whose matching
+    // opaque tokens may identify different bytes in another store.
+    let Some(target_identity) = store.read_prefix_target_identity(object_path) else {
+        return false;
+    };
     if !has_byte_validator(meta) {
         return false;
     }
@@ -1155,11 +1191,12 @@ async fn receipt_matches(
     let Some(receipt) = decode_receipt(&body) else {
         tracing::debug!(
             oid = %hex_encode(oid),
-            "LFS verification receipt malformed; hashing object body"
+            "LFS verification receipt cannot establish proof; hashing object body"
         );
         return false;
     };
     receipt.oid == *oid
+        && receipt.target_identity == *target_identity
         && receipt.size == meta.size
         && receipt.object_path == object_path.to_string()
         && receipt.e_tag == meta.e_tag
@@ -1171,6 +1208,7 @@ fn encode_receipt(receipt: &VerificationReceipt) -> Result<Vec<u8>> {
     let mut body = Vec::with_capacity(256);
     body.extend_from_slice(RECEIPT_MAGIC);
     body.extend_from_slice(&receipt.oid);
+    body.extend_from_slice(&receipt.target_identity);
     body.extend_from_slice(&receipt.size.to_be_bytes());
     append_receipt_field(&mut body, receipt.object_path.as_bytes())?;
     append_receipt_option(&mut body, receipt.e_tag.as_deref())?;
@@ -1209,6 +1247,9 @@ fn decode_receipt(body: &[u8]) -> Option<VerificationReceipt> {
     let oid = take_receipt_bytes(body, &mut cursor, 32)?;
     let mut oid_bytes = [0u8; 32];
     oid_bytes.copy_from_slice(oid);
+    let target = take_receipt_bytes(body, &mut cursor, 32)?;
+    let mut target_identity = [0; 32];
+    target_identity.copy_from_slice(target);
     let size_bytes = take_receipt_bytes(body, &mut cursor, 8)?;
     let size = u64::from_be_bytes(size_bytes.try_into().ok()?);
     let object_path = receipt_string(body, &mut cursor)?;
@@ -1220,6 +1261,7 @@ fn decode_receipt(body: &[u8]) -> Option<VerificationReceipt> {
     }
     Some(VerificationReceipt {
         oid: oid_bytes,
+        target_identity,
         size,
         object_path,
         e_tag,
@@ -1653,8 +1695,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_receipts_cannot_certify_unhashed_head_metadata() {
-        let store = test_base_store();
+    async fn older_unbound_receipts_cannot_certify_unhashed_head_metadata() {
+        let store = test_base_store().with_target_identity([1; 32]);
         let oid = sha256_oid(b"hello");
         let path = LfsObjectStore::object_path_for_prefix("repo", &oid);
         store
@@ -1662,26 +1704,26 @@ mod tests {
             .await
             .unwrap();
         let meta = store.head(&path).await.unwrap();
-        let receipt = VerificationReceipt {
-            oid,
-            size: meta.size,
-            object_path: path.to_string(),
-            e_tag: meta.e_tag,
-            version: meta.version,
-            verifier: "crab-lfs/1".to_owned(),
-        };
-        store
-            .put_overwrite(
-                &receipt_path_at("repo", &oid),
-                Bytes::from(encode_receipt(&receipt).unwrap()),
-            )
-            .await
-            .unwrap();
-        let lfs = LfsObjectStore::new(store, "repo");
-        assert!(matches!(
-            lfs.verify_size(&oid, 5).await,
-            Err(LfsError::ObjectCorrupt { .. })
-        ));
+        let lfs = LfsObjectStore::new(store.clone(), "repo");
+        for verifier in ["crab-lfs/1", "crab-lfs/2"] {
+            // v2.0.0-alpha.1 used this wire layout without transport identity.
+            // Upgrade must rehash rather than trust a receipt bound only to tokens.
+            let mut body = b"crab-lfs-receipt\0\x01".to_vec();
+            body.extend_from_slice(&oid);
+            body.extend_from_slice(&meta.size.to_be_bytes());
+            append_receipt_field(&mut body, path.as_ref().as_bytes()).unwrap();
+            append_receipt_option(&mut body, meta.e_tag.as_deref()).unwrap();
+            append_receipt_option(&mut body, meta.version.as_deref()).unwrap();
+            append_receipt_field(&mut body, verifier.as_bytes()).unwrap();
+            store
+                .put_overwrite(&receipt_path_at("repo", &oid), body.into())
+                .await
+                .unwrap();
+            assert!(matches!(
+                lfs.verify_size(&oid, 5).await,
+                Err(LfsError::ObjectCorrupt { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1689,6 +1731,7 @@ mod tests {
         let oid = [0x42u8; 32];
         let receipt = VerificationReceipt {
             oid,
+            target_identity: [1; 32],
             size: 17,
             object_path: "repo/lfs/objects/42/42/object".to_owned(),
             e_tag: Some("etag-value".to_owned()),
@@ -1698,7 +1741,10 @@ mod tests {
 
         let encoded = encode_receipt(&receipt).unwrap();
         assert_eq!(&encoded[..RECEIPT_MAGIC.len()], RECEIPT_MAGIC);
-        assert_eq!(decode_receipt(&encoded).map(|_| ()), Some(()));
+        assert_eq!(
+            decode_receipt(&encoded).map(|receipt| receipt.target_identity),
+            Some([1; 32])
+        );
 
         let mut trailing = encoded;
         trailing.push(0);
@@ -1848,7 +1894,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_size_backfills_validator_receipt_for_external_object() {
-        let raw_store = test_base_store();
+        let raw_store = test_base_store().with_target_identity([1; 32]);
         let store = LfsObjectStore::new(raw_store.clone(), "repo");
         let data = Bytes::from_static(b"external object");
         let oid = sha256_oid(&data);

@@ -51,13 +51,20 @@ or a matching pathname never substitutes for content verification; replacing
 or unlinking the path cannot redirect a retained source. A failed range clears
 that proof for a fresh later repair, while the failing call remains an error.
 
-The session retains at most 128 sources and 8 MiB of block hashes. Active claims
+`LfsReadCache` separates checked-source retention from verification jobs.
+`LfsReadSession::new(cache.clone())` owns one independently drained operation;
+its close releases that cache claim. Drop the shared cache after all sessions
+close to release retained local sources. The default session owns a private
+cache, preserving its close/release boundary.
+
+The local cache retains at most 128 sources and 8 MiB of block hashes. Active claims
 cannot be evicted into duplicate verifiers. If a proof cannot fit, that read
 still performs full verification without retaining it. Payload buffers and other
 sessions are separate resources. Only open-time `NotFound` returns absence;
 other I/O or integrity failures remain errors. Callers resolve Git settings
 before callbacks. Blocking reads retain shared process verification admission
-after cancellation; session close drains jobs and releases retained sources.
+after cancellation; session close drains jobs and releases its cache claim.
+The last cache owner releases retained sources.
 Retention is an acceleration cache, not a durable LFS GC-root/payload pin.
 
 Streaming uploads use the storage facade for multipart start and completion;
@@ -95,11 +102,19 @@ response must match the version that passed verification; a same-size
 replacement is rejected before its stream is returned. Without such a validator,
 use `download_to_file`, which hashes the bytes from one read before succeeding.
 
-Receipts use verifier `crab-lfs/2`. Older receipts trigger fresh hashing because
-the previous writer could attach an unrelated HEAD response to an upload's
-verified bytes. New uploads no longer write HEAD-based receipts: the first
-receipt-aware verifier hashes the stored body and records that response's
-metadata. This adds one full verification read before later receipt hits.
+Receipts use wire version 2 and verifier `crab-lfs/3`. They bind the canonical
+transport identity in addition to SHA-256, key, size and provider validators.
+Scoped routes and unbound stores cannot reuse or record a canonical receipt:
+opaque tokens from distinct stores may coincide. Ordinary verified reads still
+work through fresh hashing.
+
+The `v2.0.0-alpha.1` release wrote wire version 1 / verifier 2 receipts without
+transport binding. Those and earlier receipts are cache misses after upgrade;
+file data is preserved. Explicit verification rewrites eligible receipts with
+the new binding, while reads stay read-only. An upgrade may therefore require
+one full-object verification before later range reuse. New uploads never bind
+verified input bytes to an unrelated later HEAD response; receipts retain the
+identity of the verified GET or acknowledged PUT.
 
 `verify_origin(oid, expected_size)` performs a fresh SHA-256 and exact-size check
 without reading/writing verification receipts or using the configured fallback.
@@ -167,5 +182,18 @@ Callers with explicit shutdown obligations use `get_stream_with_session` and an
 `LfsReadSession`. Drop outstanding read futures and streams before awaiting
 session close. Both receipt-miss preverification and full delivery register
 blocking SHA-256 jobs with this session; close drains started jobs after a
-cancelled join and rejects new verification work. The ordinary `get_stream`
+cancelled join and rejects new verification work. The native pointer helper
+closes an operation session before acknowledging each query, while retaining
+its file-owned proof cache. SDK content operations share snapshot-owned proof
+retention and drain their own verification sessions.
+
+Remote proof retention accepts at most 128 validator records and 8 MiB. A record
+binds SHA-256, size, object key, process store incarnation and an explicit
+canonical transport identity. Every reuse compares fresh HEAD metadata, and
+range delivery still requires its GET to match the verified strong validator.
+A mismatch discards the cached record before fresh verification. Routed or
+unbound transports verify through the ordinary path; opaque validators cannot
+carry proof across stores. Only verified GET bytes or existing valid receipts
+populate retention; full delivery records proof after successful EOF. These
+reads do not write receipts. The ordinary `get_stream`
 entry point retains its existing global verification admission contract.
