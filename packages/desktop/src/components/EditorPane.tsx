@@ -4,7 +4,7 @@ import clsx from "clsx";
 import { Binary, Code2, Download, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
 import { DirEntry, mainProcess, PointerInfo, rpc } from "../ipc";
 import { OpenRepo } from "../state";
-import { base64ToBytes, bytesToUtf8, hexDump, isProbablyBinary } from "../lib/binary";
+import { base64ToBytes, decodeText, hexDump } from "../lib/binary";
 import { previewKindFor, PreviewKind } from "../lib/preview-kind";
 import { useSetting } from "../settings";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
@@ -549,6 +549,7 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
 
   const [load, setLoad] = useState<LoadState>({ state: "loading" });
   const maxKib = useSetting("maxPreviewKib");
+  const maxBytes = Math.max(maxKib * 1024, 64 * 1024);
   const capabilities = useRepoCapabilities();
 
   // Editing is allowed when the repo supports editing and viewing the working tree (rev === null).
@@ -588,11 +589,12 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
     }
   }, [onDirtyChange, tab.key]);
 
-  const { showPrompt: showExternalChangePrompt, acceptReload, keepMine } = useExternalFileChange({
+  const { showPrompt: showExternalChangePrompt, reloadError, acceptReload, keepMine } = useExternalFileChange({
     repo,
     filePath: tab.path,
     isDirty,
     currentContent: load.state === "text" ? load.text : null,
+    maxBytes,
     enabled: canEdit && load.state === "text",
     onReload: handleExternalReload,
   });
@@ -680,75 +682,25 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
   }, [repo.path, tab.path, isLocal]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setLoad({ state: "loading" });
-
-    // When editing the working tree of a local repo, read directly from
-    // disk so we always see the latest on-disk content. For remote repos,
-    // use rpc.readText which routes through the provider.
-    if (canEdit && isLocal && repo.path) {
-      const fullPath = `${repo.path}/${tab.path}`;
-      mainProcess.fsReadFile(fullPath)
-        .then((res) => {
-          if (cancelled) return;
-          if (!res.exists || res.content === null) {
-            setLoad({ state: "error", message: "File not found on disk" });
-            return;
-          }
-          setLoad({ state: "text", text: res.content });
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    } else if (canEdit && !isLocal) {
-      // Remote editable file: load via rpc.readText for working tree content.
-      rpc.readText(repo.repo_id, tab.path, { max_bytes: Math.max(maxKib * 1024, 64 * 1024) })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setLoad({ state: "truncated", reason: res.reason ?? "file too large to edit", size: res.size });
-            return;
-          }
-          setLoad({ state: "text", text: res.text ?? "" });
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    } else {
-      rpc
-        .readBytes(repo.repo_id, tab.path, {
-          rev: tab.rev ?? undefined,
-          max_bytes: Math.max(maxKib * 1024, 64 * 1024),
-        })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setLoad({
-              state: "truncated",
-              reason: res.reason ?? "file too large to preview",
-              size: res.size,
-            });
-            return;
-          }
-          const bytes = res.bytes_b64 ? base64ToBytes(res.bytes_b64) : new Uint8Array();
-          if (isProbablyBinary(bytes)) {
-            setLoad({ state: "binary", bytes, size: res.size });
-          } else {
-            setLoad({ state: "text", text: bytesToUtf8(bytes) });
-          }
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    }
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.key, maxKib]);
+    rpc.readBytes(repo.repo_id, tab.path, {
+      rev: tab.rev ?? undefined, max_bytes: maxBytes, signal: controller.signal,
+    }).then((res) => {
+      if (controller.signal.aborted) return;
+      if (res.truncated) {
+        setLoad({ state: "truncated", reason: res.reason ?? "File exceeds the preview limit", size: res.size });
+        return;
+      }
+      const bytes = res.bytes_b64 ? base64ToBytes(res.bytes_b64) : new Uint8Array();
+      const text = decodeText(bytes);
+      if (text === null) setLoad({ state: "binary", bytes, size: res.size });
+      else setLoad({ state: "text", text });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setLoad({ state: "error", message: error instanceof Error ? error.message : String(error) });
+    });
+    return () => controller.abort();
+  }, [repo.repo_id, tab.key, tab.path, tab.rev, maxBytes]);
 
   if (load.state === "loading") {
     return (
@@ -800,7 +752,7 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
       )}
       {/* External file change prompt */}
       {showExternalChangePrompt && (
-        <ExternalChangePrompt onReload={acceptReload} onKeepMine={keepMine} />
+        <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />
       )}
       <div className="min-h-0 flex-1">
         <CodeEditor
@@ -824,6 +776,8 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
  * Defaults to the source editor so the user can immediately type.
  */
 function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
+  const maxKib = useSetting("maxPreviewKib");
+  const maxBytes = Math.max(maxKib * 1024, 64 * 1024);
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -857,11 +811,12 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
     }
   }, [onDirtyChange, tab.key]);
 
-  const { showPrompt: showExternalChangePrompt, acceptReload, keepMine } = useExternalFileChange({
+  const { showPrompt: showExternalChangePrompt, reloadError, acceptReload, keepMine } = useExternalFileChange({
     repo,
     filePath: tab.path,
     isDirty,
     currentContent: content,
+    maxBytes,
     enabled: !loading && !error,
     onReload: handleExternalReload,
   });
@@ -938,41 +893,20 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo.path, tab.path, isLocal]);
 
-  // Load file content.
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    if (isLocal && repo.path) {
-      // Local: read from disk.
-      mainProcess.fsReadFile(`${repo.path}/${tab.path}`)
-        .then((res) => {
-          if (cancelled) return;
-          if (!res.exists || res.content === null) {
-            setError("File not found on disk");
-          } else {
-            setContent(res.content);
-          }
-        })
-        .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => !cancelled && setLoading(false));
-    } else {
-      // Remote: read via rpc.readText.
-      rpc.readText(repo.repo_id, tab.path, { max_bytes: 512 * 1024 })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setError("File too large to edit");
-          } else {
-            setContent(res.text ?? "");
-          }
-        })
-        .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => !cancelled && setLoading(false));
-    }
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.key]);
+    rpc.readText(repo.repo_id, tab.path, { max_bytes: maxBytes, signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        if (result.truncated) setError(result.reason ?? "File exceeds the editor limit");
+        else setContent(result.text ?? "");
+      })
+      .catch((error) => { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [repo.repo_id, tab.key, tab.path, maxBytes]);
 
   if (loading) {
     return (
@@ -1000,7 +934,7 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
       )}
       {/* External file change prompt */}
       {showExternalChangePrompt && (
-        <ExternalChangePrompt onReload={acceptReload} onKeepMine={keepMine} />
+        <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />
       )}
       {/* Mode toggle toolbar */}
       <div className="flex shrink-0 items-center gap-1 border-b border-gx-border bg-gx-surface px-3 py-1">

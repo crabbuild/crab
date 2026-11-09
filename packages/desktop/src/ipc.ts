@@ -1524,16 +1524,18 @@ export function callCancellable<T>(
   const op_id = crypto.randomUUID();
   let cancelled = false;
   let settled = false;
-  const enriched = typeof params === "object" && params !== null
+  const enriched: Record<string, unknown> = typeof params === "object" && params !== null
     ? { ...params, op_id }
     : { op_id };
+  const cancellation: { op_id: string; repo_id?: string } = { op_id };
+  if (typeof enriched.repo_id === "string") cancellation.repo_id = enriched.repo_id;
   const promise = (window.crab.rpc(method, enriched) as Promise<T>).finally(() => { settled = true; });
   const cancel = () => {
     if (cancelled || settled) return;
     cancelled = true;
     // Sending the signal does not establish cancellation. The work may have
     // already completed; only its reply establishes success, failure or cancel.
-    void window.crab.rpc("rpc/cancel", { op_id }).catch(() => undefined);
+    void window.crab.rpc("rpc/cancel", cancellation).catch(() => undefined);
   };
   return { promise, cancel };
 }
@@ -1659,11 +1661,11 @@ export const rpc = {
   pointerInfo: (repo_id: string, path: string, rev?: string) =>
     call<PointerInfo>("pointer_info", { repo_id, path, rev }),
 
-  readText: (repo_id: string, path: string, opts: { rev?: string; max_bytes?: number } = {}) =>
-    call<ReadTextResult>("read_text", { repo_id, path, ...opts }),
+  readText: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+    call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),
 
-  readBytes: (repo_id: string, path: string, opts: { rev?: string; max_bytes?: number } = {}) =>
-    call<ReadBytesResult>("read_bytes", { repo_id, path, ...opts }),
+  readBytes: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+    call<ReadBytesResult>("read_bytes", { repo_id, path, ...opts }, signal),
 
   writeText: (repo_id: string, path: string, content: string) =>
     call<{ written: boolean; size: number }>("write_text", { repo_id, path, content }),

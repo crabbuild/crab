@@ -149,6 +149,16 @@ impl From<crate::AgentError> for RpcError {
                 1012,
                 Some(serde_json::json!({ "kind": "content_read", "code": code })),
             ),
+            E::Integrity {
+                algorithm,
+                expected,
+                actual,
+            } => (
+                1012,
+                Some(
+                    serde_json::json!({ "kind": "content_read", "code": "integrity", "algorithm": algorithm, "expected": expected, "actual": actual }),
+                ),
+            ),
             E::Decode(_) => (-32700, None),
             E::RepoNotOpen(_) => (1004, None),
             E::StaleHunk {
@@ -198,6 +208,7 @@ impl From<crate::AgentError> for RpcError {
             | E::Workflow(_)
             | E::Yaml(_)
             | E::Shared(_)
+            | E::Preview { .. }
             | E::Other(_) => (1000, None),
         };
         Self {

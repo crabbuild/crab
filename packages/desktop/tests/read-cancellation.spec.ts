@@ -33,13 +33,13 @@ describe("read cancellation", () => {
     const bridge = vi.fn((method: string, _params: Record<string, unknown>) => method === "rpc/cancel" ? Promise.resolve({ ok: true }) : work.promise);
     vi.stubGlobal("window", { crab: { rpc: bridge } });
     const controller = new AbortController();
-    const result = rpc.previewNpy("repo", "array.npy", { signal: controller.signal });
+    const result = rpc.previewNpy("ssh://server/repository", "array.npy", { signal: controller.signal });
     controller.abort();
     const request = bridge.mock.calls[0];
     expect(request[0]).toBe("preview_npy");
     const params = request[1];
     expect(params.signal).toBeUndefined();
-    expect(bridge).toHaveBeenLastCalledWith("rpc/cancel", { op_id: params.op_id });
+    expect(bridge).toHaveBeenLastCalledWith("rpc/cancel", { op_id: params.op_id, repo_id: "ssh://server/repository" });
     work.reject({ code: 1010, message: "Operation cancelled" });
     await expect(result).rejects.toMatchObject({ code: 1010 });
   });

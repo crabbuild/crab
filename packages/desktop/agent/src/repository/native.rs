@@ -20,7 +20,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{AgentError, Result, shellout, storage_auth::Connection};
 
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
-const RANGE_TIMEOUT: Duration = Duration::from_secs(60);
+// Match the SDK's five-minute read owner; an initial LFS range can
+// verify the whole payload before returning its selected bytes.
+const RANGE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(super) struct NativeReads(Arc<Runtime>);
@@ -409,9 +411,10 @@ impl Process {
             other => Err(unexpected(other)),
         };
         if timed_out {
-            return Err(AgentError::Other(
-                "native range read exceeded 60 seconds".into(),
-            ));
+            return Err(AgentError::Other(format!(
+                "native range read exceeded {} seconds",
+                RANGE_TIMEOUT.as_secs()
+            )));
         }
         result
     }

@@ -73,7 +73,7 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
         </div>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <Stat label="Parameters" value={humanParams(totalParams)} />
-          <Stat label="On disk" value={formatBytes(totalBytes)} />
+          <Stat label="Logical size" value={formatBytes(totalBytes)} />
           <Stat label="Tensors" value={data.tensor_count.toLocaleString()} />
           <Stat label="Header" value={formatBytes(data.header_bytes)} />
         </div>

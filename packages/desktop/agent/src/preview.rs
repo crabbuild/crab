@@ -25,6 +25,16 @@ use serde_json::{Value, json};
 
 use crate::{AgentError, Result};
 
+fn parse_error(
+    context: impl Into<String>,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> AgentError {
+    AgentError::Preview {
+        context: context.into(),
+        source: Box::new(source),
+    }
+}
+
 mod reader;
 pub(crate) use reader::PreviewReader;
 
@@ -45,8 +55,8 @@ pub fn parquet(
     // request can't blow the agent's heap.
     let max_rows = max_rows.clamp(1, 5000);
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| AgentError::Other(format!("parquet: {e}")))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| parse_error("parquet", e))?;
 
     // Capture metadata into owned values up front. The builder is
     // consumed by `.build()` below, but we want schema info and
@@ -98,7 +108,7 @@ pub fn parquet(
         .with_batch_size(max_rows)
         .with_limit(max_rows)
         .build()
-        .map_err(|e| AgentError::Other(format!("parquet reader: {e}")))?;
+        .map_err(|e| parse_error("parquet reader", e))?;
 
     let mut rows_json: Vec<u8> = Vec::new();
     {
@@ -106,14 +116,12 @@ pub fn parquet(
             .with_explicit_nulls(true)
             .build::<_, JsonArray>(&mut rows_json);
         for batch in reader {
-            let batch = batch.map_err(|e| AgentError::Other(format!("parquet batch: {e}")))?;
+            let batch = batch.map_err(|e| parse_error("parquet batch", e))?;
             writer
                 .write(&batch)
-                .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+                .map_err(|e| parse_error("arrow→json", e))?;
         }
-        writer
-            .finish()
-            .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+        writer.finish().map_err(|e| parse_error("arrow→json", e))?;
     }
     let rows: Value = serde_json::from_slice(&rows_json)?;
 
@@ -199,7 +207,7 @@ pub fn safetensors(mut file: impl Read + Seek) -> Result<Value> {
 
 /// NumPy `.npy` header parse.
 pub fn numpy_npy(file: impl Read) -> Result<Value> {
-    let npy = npyz::NpyFile::new(file).map_err(|e| AgentError::Other(format!("npy: {e}")))?;
+    let npy = npyz::NpyFile::new(file).map_err(|e| parse_error("npy", e))?;
     let header = npy.header();
     let shape: Vec<u64> = header.shape().to_vec();
     let dtype = format!("{:?}", header.dtype());
@@ -224,13 +232,12 @@ pub fn numpy_npy(file: impl Read) -> Result<Value> {
 /// shapes/dtypes. Implemented by treating the `.npz` as a zip archive
 /// and parsing each member's npy header.
 pub fn numpy_npz(file: impl Read + Seek) -> Result<Value> {
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("npz zip: {e}")))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| parse_error("npz zip", e))?;
     let mut members: Vec<Value> = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| AgentError::Other(format!("npz member {i}: {e}")))?;
+            .map_err(|e| parse_error(format!("npz member {i}"), e))?;
         let name = entry.name().to_owned();
         if !name.ends_with(".npy") {
             continue;
@@ -263,15 +270,14 @@ pub fn numpy_npz(file: impl Read + Seek) -> Result<Value> {
 
 /// Zip archive member listing.
 pub fn zip_archive(file: impl Read + Seek) -> Result<Value> {
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("zip: {e}")))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| parse_error("zip", e))?;
     let mut members: Vec<Value> = Vec::with_capacity(archive.len());
     let mut total_compressed: u128 = 0;
     let mut total_uncompressed: u128 = 0;
     for i in 0..archive.len() {
         let entry = archive
             .by_index(i)
-            .map_err(|e| AgentError::Other(format!("zip member {i}: {e}")))?;
+            .map_err(|e| parse_error(format!("zip member {i}"), e))?;
         total_compressed += u128::from(entry.compressed_size());
         total_uncompressed += u128::from(entry.size());
         members.push(json!({
@@ -300,8 +306,8 @@ pub fn notebook_meta(mut file: impl Read) -> Result<Value> {
     let mut contents = String::new();
     file.read_to_string(&mut contents).map_err(AgentError::Io)?;
 
-    let nb: Value = serde_json::from_str(&contents)
-        .map_err(|e| AgentError::Other(format!("notebook JSON parse: {e}")))?;
+    let nb: Value =
+        serde_json::from_str(&contents).map_err(|e| parse_error("notebook JSON parse", e))?;
 
     let obj = nb
         .as_object()

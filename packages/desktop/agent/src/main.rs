@@ -96,8 +96,24 @@ pub enum AgentError {
     #[error("native content read failed ({code}): {message}")]
     NativeRead { code: String, message: String },
 
+    #[error(
+        "complete file {algorithm} hash differs from its captured pointer: expected {expected}, got {actual}"
+    )]
+    Integrity {
+        algorithm: &'static str,
+        expected: String,
+        actual: String,
+    },
+
     #[error(transparent)]
     Shared(Arc<AgentError>),
+
+    #[error("{context}: {source}")]
+    Preview {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("unknown method: {0}")]
     UnknownMethod(String),
@@ -141,6 +157,19 @@ pub enum AgentError {
 }
 
 pub type Result<T> = std::result::Result<T, AgentError>;
+
+impl AgentError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::OpCancelled { .. } => true,
+            Self::Shared(error) => error.is_cancelled(),
+            Self::Sdk(error) => {
+                error.kind() == crab_sdk::ErrorKind::Cancelled && error.cleanup_error().is_none()
+            }
+            _ => false,
+        }
+    }
+}
 
 /// Writer shared between the request dispatch loop and long-running
 /// streaming handlers. `Mutex` keeps NDJSON frames from interleaving

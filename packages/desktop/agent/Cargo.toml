@@ -83,6 +83,8 @@ notify = "7"
 # back over JSON-RPC, but we do base64-encode small previews.
 base64 = "0.22"
 bytes = { workspace = true }
+blake3 = { workspace = true }
+sha2 = "0.10"
 
 # Stream adapters for `walk()` consumers (used by `list_stream`).
 futures-util = { workspace = true }

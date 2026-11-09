@@ -15,7 +15,7 @@ use crate::{AgentError, Result, shellout};
 
 mod content;
 mod native;
-pub(crate) use content::{FileSource, ReadScope};
+pub(crate) use content::{FileSource, MAX_COMPLETE_BYTES, ReadScope};
 
 #[derive(Clone)]
 pub struct BrowseSession {
@@ -206,7 +206,11 @@ impl BrowseSession {
         Ok(remote.repository.remote()?.refs().await?)
     }
 
-    async fn snapshot(&self, rev: Option<&str>) -> Result<Snapshot> {
+    async fn snapshot(
+        &self,
+        rev: Option<&str>,
+        options: crab_sdk::operation::Options,
+    ) -> Result<Snapshot> {
         let remote = self
             .remote
             .as_ref()
@@ -214,7 +218,7 @@ impl BrowseSession {
         let repository = remote.repository.remote()?;
         let revision = match rev {
             None | Some("HEAD") => {
-                let refs = repository.refs().await?;
+                let refs = repository.refs().with_options(options.clone()).await?;
                 revision(
                     refs.head()
                         .ok_or_else(|| AgentError::Other("remote has no HEAD".into()))?,
@@ -222,7 +226,7 @@ impl BrowseSession {
             }
             Some(rev) => revision(rev)?,
         };
-        Ok(repository.snapshot(revision).await?)
+        Ok(repository.snapshot(revision).with_options(options).await?)
     }
 
     pub async fn list(&self, prefix: Option<&str>, rev: Option<&str>) -> Result<Vec<BrowserEntry>> {
@@ -308,7 +312,7 @@ impl BrowseSession {
                 }
             }
         } else {
-            let snapshot = self.snapshot(rev).await?;
+            let snapshot = self.snapshot(rev, Default::default()).await?;
             let mut pending = vec![GitPath::root()];
             while let Some(directory) = pending.pop() {
                 let mut cursor = None;
@@ -364,7 +368,7 @@ impl BrowseSession {
     pub async fn stat(&self, path: &str, rev: Option<&str>) -> Result<FileMetadata> {
         GitPath::new(path.as_bytes().to_vec())?;
         if self.remote.is_some() {
-            let snapshot = self.snapshot(rev).await?;
+            let snapshot = self.snapshot(rev, Default::default()).await?;
             return remote_metadata(&snapshot, path, rev).await;
         }
         let entry = self
@@ -390,76 +394,6 @@ impl BrowseSession {
                 _ => ContentKind::Git,
             },
         })
-    }
-
-    pub async fn read(&self, path: &str, rev: Option<&str>) -> Result<Bytes> {
-        GitPath::new(path.as_bytes().to_vec())?;
-        if let Some(root) = &self.work_dir {
-            let stat = self.stat(path, rev).await?;
-            if rev.is_none() {
-                let bytes = tokio::fs::read(root.join(path)).await?;
-                if matches!(
-                    crab_git::classify(&bytes),
-                    crab_git::PointerKind::NotAPointer
-                ) {
-                    return Ok(bytes.into());
-                }
-            }
-            let object = format!("{}:{path}", rev.unwrap_or(""));
-            if stat.kind == ContentKind::Git {
-                return Ok(git(root, &["show", &object]).await?.into());
-            }
-            // Override both drivers so a previously installed v1 filter cannot service v2 reads.
-            let binary = shellout::resolve_crab_bin();
-            let quoted = format!(
-                "'{}' filter-process",
-                binary.to_string_lossy().replace('\'', "'\\''")
-            );
-            let crab = format!("filter.crab.process={quoted}");
-            let lfs = format!("filter.lfs.process={quoted}");
-            let bytes = git(
-                root,
-                &[
-                    "-c",
-                    &crab,
-                    "-c",
-                    &lfs,
-                    "cat-file",
-                    "--filters",
-                    &format!("--path={path}"),
-                    &object,
-                ],
-            )
-            .await?;
-            if !matches!(
-                crab_git::classify(&bytes),
-                crab_git::PointerKind::NotAPointer
-            ) {
-                return Err(AgentError::Other("Git returned an unresolved content pointer; configure Crab tracking before reading".into()));
-            }
-            return Ok(bytes.into());
-        }
-        let snapshot = self.snapshot(rev).await?;
-        let mut stream = snapshot
-            .open_file(GitPath::new(path.as_bytes().to_vec())?)
-            .await?;
-        let mut bytes = Vec::new();
-        loop {
-            match stream.next().await {
-                Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = stream.close().await;
-                    return Err(error.into());
-                }
-            }
-        }
-        stream.close().await?;
-        Ok(bytes.into())
-    }
-
-    pub async fn read_text(&self, path: &str, rev: Option<&str>) -> Result<String> {
-        Ok(String::from_utf8(self.read(path, rev).await?.to_vec())?)
     }
 
     pub async fn pointer_info(&self, path: &str, rev: Option<&str>) -> Result<Value> {
@@ -581,6 +515,15 @@ async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    async fn text(session: &BrowseSession, path: &str, rev: Option<&str>) -> Result<String> {
+        let source = FileSource::capture(session, path, rev, session.read_scope()).await?;
+        let bytes = source.read_complete(1024).await;
+        let closed = source.close().await;
+        let bytes = bytes?;
+        closed?;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+
     #[tokio::test]
     #[ignore = "requires an isolated CRAB_SDK_TEST_S3_BUCKET fixture"]
     async fn native_v2_snapshot_reads_committed_content() {
@@ -631,7 +574,7 @@ mod tests {
                     repository,
                 })),
             };
-            session.read_text("file.txt", None).await
+            text(&session, "file.txt", None).await
         }
         .await;
         client.close().await.unwrap();
@@ -664,12 +607,9 @@ mod tests {
             .unwrap();
         let session = BrowseSession::open_local(root).await.unwrap();
         let result = async {
+            assert_eq!(text(&session, "file.txt", None).await.unwrap(), "edited\n");
             assert_eq!(
-                session.read_text("file.txt", None).await.unwrap(),
-                "edited\n"
-            );
-            assert_eq!(
-                session.read_text("file.txt", Some("HEAD")).await.unwrap(),
+                text(&session, "file.txt", Some("HEAD")).await.unwrap(),
                 "committed\n"
             );
             assert!(matches!(

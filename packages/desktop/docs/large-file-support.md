@@ -145,3 +145,59 @@ optimistically; search and timeline callers reject stale results independently.
   builds passed. Packaged GUI cancellation and complete feature qualification
   remain open; the focused packaged smoke now covers a real staged 3 GiB Crab
   file, LFS previews and visible integrity failure/repair.
+
+- Packaged macOS arm64 smoke passed for checkpoint `98bc6f87b6b` (16 seconds):
+  real Git filters staged a sparse 3 GiB Crab file and a 4 MiB LFS file; actual
+  Explorer clicks rendered tensor metadata while both working files remained
+  pointers. Committed previews and boundary ranges also matched expected data.
+  Corrupting the LFS object produced a visible integrity failure; repairing it
+  restored the visible preview. Screenshots and logs are in the external build
+  directory's `large-files-session-ui-proof` and `large-files-session-ui-smoke.log`.
+  This qualifies that read-session checkpoint, not the remaining acceptance rows.
+
+### Complete-read consolidation checkpoint
+
+`read_text` and `read_bytes` now use captured sources instead of index-size checks
+followed by a separate whole-file loader. Local, index, committed and remote
+responses share a finite 200 MiB ceiling; each UI request keeps its smaller
+selected limit. Complete Crab/LFS responses also verify the assembled file's
+BLAKE3/SHA-256 identity. Remote complete reads use the SDK's non-range integrity
+path, and a complete ordinary Git read uses one captured object process.
+
+Text/Markdown editors and external reloads use the same bounded read owner.
+Cancellation includes the repository ID so SSH requests reach their remote
+owner. The tensor summary's former “On disk” label now says “Logical size”.
+New focused tests cover grown working files, untracked symlinks outside the
+repository, stitched native responses and empty-pointer identity. Repeat builds,
+remote proof and packaged qualification after this consolidation.
+
+- The native fixture passed with 10 MiB payloads, crossing the 8 MiB native
+  frame boundary and validating complete reconstructed bytes plus incorrect
+  empty-pointer hashes. Repository/source tests passed (6), complete-read
+  handler tests passed (2), and renderer cancellation tests passed (5).
+- Matching debug binaries passed the read-only RustFS fixture with 10 MiB
+  payloads and complete `read_bytes` responses for local-clone/direct-remote
+  Crab/LFS sources: 167 GET/HEAD requests, zero writes, no hydration.
+- Captured-source and real native tests passed again after cancellation error
+  preservation; parser tests passed (5). Cancellation waits for admitted work
+  and preserves an integrity failure even when cancellation was also observed.
+  Renderer/Electron typechecks and eight renderer cancellation/text-decoding
+  tests passed. Invalid UTF-8 selects hex view rather than lossy editable text;
+  failed or oversized external reloads show an actionable warning.
+- Editor save concurrency and draft persistence still need qualification;
+  reload notification alone does not make autosave conflict-safe. The packaged
+  checkpoint predates this consolidation and must be rebuilt for GUI proof.
+  Evidence: `large-files-proof._xhbivbf/report.json` in the external build root;
+  payload SHA-256 `4c22df11d3ecfef30df347707e9070fd9f96a0112170cb85b736818ef56001fd`.
+  Renderer/Electron type checks passed; repeat packaged proof remains required.
+
+Remaining integration details found during qualification:
+
+- The visible Electron error currently includes its IPC wrapper text; preserve
+  structured content errors across that boundary and provide an actionable retry.
+- A working file that grows past the editor's reload budget needs a visible
+  unavailable/conflict state while preserving the user's draft.
+- Large remote LFS first reads may require complete SHA-256 verification. The
+  native reader now matches the SDK's five-minute default owner, but explicit
+  verification cost/progress, read budgets and the transfer queue still need
+  coherent behavior for objects larger/slower than a preview budget permits.

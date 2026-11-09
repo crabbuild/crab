@@ -7,12 +7,11 @@
  * - If the editor buffer is clean (not dirty): silently reloads content
  * - If the editor buffer is dirty: shows a prompt with Reload / Keep Mine
  *
- * Works for both local and remote repos — uses `mainProcess.fsReadFile`
- * for local files and `rpc.readText` for remote files.
+ * Uses captured, bounded RPC reads for both local and remote repositories.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { onAgentEvent, mainProcess, rpc } from "../ipc";
+import { onAgentEvent, rpc } from "../ipc";
 import type { OpenRepo } from "../state";
 import { getWatchPath } from "./useFileWatcher";
 
@@ -21,6 +20,7 @@ interface ExternalChangeState {
   showPrompt: boolean;
   /** The new content from disk/remote (available when prompt is shown). */
   newContent: string | null;
+  reloadError: string | null;
 }
 
 interface UseExternalFileChangeOptions {
@@ -31,6 +31,7 @@ interface UseExternalFileChangeOptions {
   isDirty: boolean;
   /** Current content in the editor buffer (used for comparison). */
   currentContent: string | null;
+  maxBytes: number;
   /** Whether the file is in an editable state (working tree, canEdit). */
   enabled: boolean;
   /** Called when the file should be silently reloaded (buffer was clean). */
@@ -40,6 +41,7 @@ interface UseExternalFileChangeOptions {
 interface UseExternalFileChangeResult {
   /** Whether the external change prompt is visible. */
   showPrompt: boolean;
+  reloadError: string | null;
   /** Accept the external change — reload the file content. */
   acceptReload: () => void;
   /** Reject the external change — keep the current editor content. */
@@ -51,12 +53,14 @@ export function useExternalFileChange({
   filePath,
   isDirty,
   currentContent,
+  maxBytes,
   enabled,
   onReload,
 }: UseExternalFileChangeOptions): UseExternalFileChangeResult {
   const [state, setState] = useState<ExternalChangeState>({
     showPrompt: false,
     newContent: null,
+    reloadError: null,
   });
 
   // Keep stable refs to avoid re-subscribing on every render.
@@ -72,45 +76,53 @@ export function useExternalFileChange({
   // Debounce timer to avoid checking too frequently during rapid events.
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const readRef = useRef<AbortController | null>(null);
   const watchPath = getWatchPath(repo);
 
   const checkForChanges = useCallback(async () => {
     if (!enabledRef.current) return;
 
-    let newContent: string | null = null;
-
+    readRef.current?.abort();
+    const controller = new AbortController();
+    readRef.current = controller;
+    let newContent: string;
     try {
-      if (repo.is_remote) {
-        // Remote: read via RPC
-        const result = await rpc.readText(repo.repo_id, filePath);
-        if (result.truncated || result.text === null) return;
-        newContent = result.text;
-      } else if (repo.path) {
-        // Local: read from disk
-        const fullPath = `${repo.path}/${filePath}`;
-        const result = await mainProcess.fsReadFile(fullPath);
-        if (!result.exists || result.content === null) return;
-        newContent = result.content;
-      } else {
+      const result = await rpc.readText(repo.repo_id, filePath, { max_bytes: maxBytes, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (result.truncated || result.text === null) {
+        setState({
+          showPrompt: true,
+          newContent: null,
+          reloadError: result.reason ?? "The changed file exceeds the editor limit. Your open buffer is unchanged.",
+        });
         return;
       }
-    } catch {
-      // Read failed (connection lost, file deleted, etc.) — ignore.
+      newContent = result.text;
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setState({ showPrompt: true, newContent: null, reloadError: error instanceof Error ? error.message : String(error) });
+      }
       return;
+    } finally {
+      if (readRef.current === controller) readRef.current = null;
     }
 
     // Compare with current editor content.
-    if (newContent === currentContentRef.current) return;
+    if (newContent === currentContentRef.current) {
+      setState({ showPrompt: false, newContent: null, reloadError: null });
+      return;
+    }
 
     // Content differs — decide based on dirty state.
     if (!isDirtyRef.current) {
       // Buffer is clean: silently reload.
       onReloadRef.current(newContent);
+      setState({ showPrompt: false, newContent: null, reloadError: null });
     } else {
       // Buffer is dirty: show prompt.
-      setState({ showPrompt: true, newContent });
+      setState({ showPrompt: true, newContent, reloadError: null });
     }
-  }, [repo.is_remote, repo.repo_id, repo.path, filePath]);
+  }, [repo.repo_id, filePath, maxBytes]);
 
   // Subscribe to fs/changed events.
   useEffect(() => {
@@ -134,6 +146,8 @@ export function useExternalFileChange({
 
     return () => {
       off();
+      readRef.current?.abort();
+      readRef.current = null;
       if (checkTimerRef.current) {
         clearTimeout(checkTimerRef.current);
         checkTimerRef.current = null;
@@ -144,13 +158,15 @@ export function useExternalFileChange({
   const acceptReload = useCallback(() => {
     if (state.newContent !== null) {
       onReloadRef.current(state.newContent);
+      setState({ showPrompt: false, newContent: null, reloadError: null });
+    } else {
+      void checkForChanges();
     }
-    setState({ showPrompt: false, newContent: null });
-  }, [state.newContent]);
+  }, [state.newContent, checkForChanges]);
 
   const keepMine = useCallback(() => {
-    setState({ showPrompt: false, newContent: null });
+    setState({ showPrompt: false, newContent: null, reloadError: null });
   }, []);
 
-  return { showPrompt: state.showPrompt, acceptReload, keepMine };
+  return { showPrompt: state.showPrompt, reloadError: state.reloadError, acceptReload, keepMine };
 }

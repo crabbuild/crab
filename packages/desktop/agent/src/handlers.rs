@@ -1189,12 +1189,8 @@ async fn pointer_info(state: &State, p: StatParams) -> Result<Value> {
 
 #[derive(Debug, Deserialize)]
 struct ReadTextParams {
-    repo_id: String,
-    path: String,
-    #[serde(default)]
-    rev: Option<String>,
-    /// Cap on bytes returned to the UI. Defaults to 512 KiB so the
-    /// renderer can't accidentally DOS itself on a 4 GB pointer.
+    #[serde(flatten)]
+    file: PreviewParams,
     #[serde(default = "default_max_bytes")]
     max_bytes: usize,
 }
@@ -1204,66 +1200,15 @@ fn default_max_bytes() -> usize {
 }
 
 async fn read_text(state: &State, p: ReadTextParams) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    match repo.stat(&p.path, p.rev.as_deref()).await {
-        Ok(stat) => {
-            if stat.size as usize > p.max_bytes {
-                return Ok(json!({
-                    "truncated": true,
-                    "size": stat.size,
-                    "text": null,
-                    "reason": format!("file is {} bytes, limit is {}", stat.size, p.max_bytes),
-                }));
-            }
-            let text = repo.read_text(&p.path, p.rev.as_deref()).await?;
-            Ok(json!({
-                "truncated": false,
-                "size": stat.size,
-                "text": text,
-            }))
+    let maximum = p.max_bytes.min(crate::repository::MAX_COMPLETE_BYTES);
+    read_source(state, p.file, |source| async move {
+        if source.size > maximum as u64 {
+            return Ok(json!({ "truncated": true, "size": source.size, "text": null,
+                "reason": format!("file is {} bytes, limit is {maximum}", source.size) }));
         }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: file is untracked but may exist on disk.
-            read_text_from_worktree(state, &p).await
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Filesystem fallback for `read_text` when the SDK reports NotFound
-/// (untracked file). Reads directly from the working tree.
-async fn read_text_from_worktree(state: &State, p: &ReadTextParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::PathNotFound {
-            path: p.path.clone(),
-        });
-    }
-    let metadata = std::fs::metadata(&abs).map_err(AgentError::Io)?;
-    let size = metadata.len() as usize;
-    if size > p.max_bytes {
-        return Ok(json!({
-            "truncated": true,
-            "size": size,
-            "text": null,
-            "untracked": true,
-            "reason": format!("file is {} bytes, limit is {}", size, p.max_bytes),
-        }));
-    }
-    let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-    match String::from_utf8(bytes) {
-        Ok(text) => Ok(json!({
-            "truncated": false,
-            "size": size,
-            "text": text,
-            "untracked": true,
-        })),
-        Err(_) => Err(AgentError::Other(format!(
-            "file is not valid UTF-8: {}",
-            p.path
-        ))),
-    }
+        let bytes = source.read_complete(maximum).await?;
+        Ok(json!({ "truncated": false, "size": source.size, "text": String::from_utf8(bytes.to_vec())? }))
+    }).await
 }
 
 // ─── Worktree list (Pillar B) ────────────────────────────────────────
@@ -2475,74 +2420,21 @@ async fn write_bytes(state: &State, p: WriteBytesParams) -> Result<Value> {
     Ok(json!({ "written": true, "size": size }))
 }
 
-/// Read a file at `(path, rev)` as raw bytes, returned base64-encoded.
-///
-/// The editor UI calls this when a blob looks binary (no UTF-8 decode
-/// available) so it can render a hex preview or media panel without
-/// the text-path's lossy UTF-8 roundtrip. Same size cap as
-/// `read_text` — the ceiling is enforced here rather than trusting
-/// callers to check `stat` first.
 async fn read_bytes(state: &State, p: ReadTextParams) -> Result<Value> {
     use base64::Engine as _;
-
-    let repo = state.get(&p.repo_id).await?;
-    match repo.stat(&p.path, p.rev.as_deref()).await {
-        Ok(stat) => {
-            if stat.size as usize > p.max_bytes {
-                return Ok(json!({
-                    "truncated": true,
-                    "size": stat.size,
-                    "bytes_b64": null,
-                    "reason": format!("file is {} bytes, limit is {}", stat.size, p.max_bytes),
-                }));
-            }
-            let bytes = repo.read(&p.path, p.rev.as_deref()).await?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes.as_ref());
-            Ok(json!({
-                "truncated": false,
-                "size": stat.size,
-                "bytes_b64": encoded,
-            }))
+    let maximum = p.max_bytes.min(crate::repository::MAX_COMPLETE_BYTES);
+    read_source(state, p.file, |source| async move {
+        if source.size > maximum as u64 {
+            return Ok(
+                json!({ "truncated": true, "size": source.size, "bytes_b64": null,
+                "reason": format!("file is {} bytes, limit is {maximum}", source.size) }),
+            );
         }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: file is untracked but may exist on disk.
-            read_bytes_from_worktree(state, &p).await
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Filesystem fallback for `read_bytes` when the SDK reports NotFound
-/// (untracked file). Reads directly from the working tree.
-async fn read_bytes_from_worktree(state: &State, p: &ReadTextParams) -> Result<Value> {
-    use base64::Engine as _;
-
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::PathNotFound {
-            path: p.path.clone(),
-        });
-    }
-    let metadata = std::fs::metadata(&abs).map_err(AgentError::Io)?;
-    let size = metadata.len() as usize;
-    if size > p.max_bytes {
-        return Ok(json!({
-            "truncated": true,
-            "size": size,
-            "bytes_b64": null,
-            "untracked": true,
-            "reason": format!("file is {} bytes, limit is {}", size, p.max_bytes),
-        }));
-    }
-    let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(json!({
-        "truncated": false,
-        "size": size,
-        "bytes_b64": encoded,
-        "untracked": true,
-    }))
+        let bytes = source.read_complete(maximum).await?;
+        Ok(json!({ "truncated": false, "size": source.size,
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes) }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2602,8 +2494,9 @@ where
         };
         let source = match captured {
             Ok(source) => Arc::new(source),
-            Err(error @ AgentError::Shared(_)) => return Err(error),
-            Err(_) if cancelled => return Err(AgentError::OpCancelled { op_id: id.clone() }),
+            Err(error) if error.is_cancelled() => {
+                return Err(AgentError::OpCancelled { op_id: id.clone() });
+            }
             Err(error) => return Err(error),
         };
         if cancelled {
@@ -2620,10 +2513,22 @@ where
         // Cancellation never abandons blocking parsers, native children or SDK
         // streams. Close errors take precedence over the cancellation result.
         source.close().await?;
-        if cancelled {
-            return Err(AgentError::OpCancelled { op_id: id.clone() });
+        if let Some(error) = scope.failure() {
+            return Err(error);
         }
-        result
+        match result {
+            Err(error) if error.is_cancelled() => {
+                Err(AgentError::OpCancelled { op_id: id.clone() })
+            }
+            Err(AgentError::Preview { .. } | AgentError::Io(_)) if scope.cancelled_read() => {
+                Err(AgentError::OpCancelled { op_id: id.clone() })
+            }
+            Err(error) => Err(error),
+            Ok(_) if cancelled || scope.cancelled_read() => {
+                Err(AgentError::OpCancelled { op_id: id.clone() })
+            }
+            Ok(value) => Ok(value),
+        }
     }
     .await;
     state.cancel_registry.unregister(&id).await;
@@ -5697,48 +5602,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_reads_enforce_limits_against_the_working_source() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"ok").unwrap();
+        assert!(sh(&root, &["add", "file.txt"]).status.success());
+        std::fs::write(root.join("file.txt"), vec![b'x'; 65536]).unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root).await.unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        for text in [true, false] {
+            let params = serde_json::from_value(
+                json!({ "repo_id": "test", "path": "file.txt", "max_bytes": 32 }),
+            )
+            .unwrap();
+            let value = if text {
+                read_text(&state, params).await
+            } else {
+                read_bytes(&state, params).await
+            }
+            .unwrap();
+            let key = if text { "text" } else { "bytes_b64" };
+            assert_eq!(
+                (&value["truncated"], &value["size"], &value[key]),
+                (&json!(true), &json!(65536), &Value::Null)
+            );
+        }
+        state.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_reads_reject_untracked_symlinks_outside_the_repository() {
+        let (directory, root) = git_init_repo();
+        let outside = directory.path().join("outside.txt");
+        std::fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(outside, root.join("link.txt")).unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root).await.unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        for text in [true, false] {
+            let params =
+                serde_json::from_value(json!({ "repo_id": "test", "path": "link.txt" })).unwrap();
+            let error = if text {
+                read_text(&state, params).await
+            } else {
+                read_bytes(&state, params).await
+            }
+            .unwrap_err();
+            assert!(error.to_string().contains("outside the repository"));
+        }
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn file_read_cancellation_waits_for_work_and_closes_its_source() {
         let (_directory, root) = git_init_repo();
         std::fs::write(root.join("file.txt"), b"content").unwrap();
         let state = State::new();
         let repo = BrowseSession::open_local(&root).await.unwrap();
         state.insert("test".into(), repo, Some(root)).await;
-        let (entered, source) = tokio::sync::oneshot::channel();
-        let (release, released) = tokio::sync::oneshot::channel();
-        let worker_state = state.clone();
-        let operation = tokio::spawn(async move {
-            read_source(
-                &worker_state,
-                PreviewParams {
-                    repo_id: "test".into(),
-                    path: "file.txt".into(),
-                    rev: None,
-                    op_id: Some("preview".into()),
-                },
-                |source| async move {
-                    assert!(entered.send(source).is_ok());
-                    released.await.unwrap();
-                    Ok(json!({ "finished": true }))
-                },
-            )
+        for failure in [false, true] {
+            let (entered, source) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let worker_state = state.clone();
+            let operation = tokio::spawn(async move {
+                read_source(
+                    &worker_state,
+                    PreviewParams {
+                        repo_id: "test".into(),
+                        path: "file.txt".into(),
+                        rev: None,
+                        op_id: Some("preview".into()),
+                    },
+                    |source| async move {
+                        assert!(entered.send(source.clone()).is_ok());
+                        released.await.unwrap();
+                        if failure {
+                            return Err(AgentError::Integrity {
+                                algorithm: "BLAKE3",
+                                expected: "expected".into(),
+                                actual: "actual".into(),
+                            });
+                        }
+                        let reader = preview::PreviewReader::new(source);
+                        tokio::task::spawn_blocking(move || preview::numpy_npy(reader))
+                            .await
+                            .map_err(std::io::Error::other)?
+                    },
+                )
+                .await
+            });
+            let source = source.await.unwrap();
+            assert!(state.cancel_registry.cancel("preview").await);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while source.check_cancelled().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-        });
-        let source = source.await.unwrap();
-        assert!(state.cancel_registry.cancel("preview").await);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while source.check_cancelled().is_ok() {
-                tokio::task::yield_now().await;
+            .unwrap();
+            assert!(!operation.is_finished());
+            release.send(()).unwrap();
+            let result = operation.await.unwrap();
+            if failure {
+                assert!(matches!(result, Err(AgentError::Integrity { .. })));
+            } else {
+                assert!(
+                    matches!(result, Err(AgentError::OpCancelled { op_id }) if op_id == "preview")
+                );
             }
-        })
-        .await
-        .unwrap();
-        assert!(!operation.is_finished());
-        release.send(()).unwrap();
-        assert!(
-            matches!(operation.await.unwrap(), Err(AgentError::OpCancelled { op_id }) if op_id == "preview")
-        );
-        assert!(source.read_range(0, 1).await.is_err());
-        assert!(!state.cancel_registry.cancel("preview").await);
+            assert!(source.read_range(0, 1).await.is_err());
+            assert!(!state.cancel_registry.cancel("preview").await);
+        }
         state.shutdown().await.unwrap();
     }
 

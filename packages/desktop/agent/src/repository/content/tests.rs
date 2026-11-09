@@ -66,6 +66,12 @@ async fn local_source_rejects_truncation_and_retains_opened_content_after_replac
             .to_string()
             .contains("file changed")
     );
+    tokio::fs::write(&path, b"").await.unwrap();
+    let empty = FileSource::capture(&repo, "file.txt", None, repo.read_scope())
+        .await
+        .unwrap();
+    tokio::fs::write(&path, b"grown").await.unwrap();
+    assert!(empty.read_complete(0).await.is_err());
 }
 
 #[tokio::test]
@@ -144,7 +150,7 @@ async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
         "crab.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\n",
     )
     .unwrap();
-    let size = 2 * 1024 * 1024;
+    let size = 10 * 1024 * 1024;
     let header = serde_json::to_vec(
         &json!({"weights": {"dtype":"U8", "shape":[size], "data_offsets":[0, size]}}),
     )
@@ -172,8 +178,37 @@ async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
             .unwrap()
             .unwrap();
         assert_eq!(preview["tensors"][0]["nbytes"], size);
+        assert_eq!(
+            source.read_complete(bytes.len()).await.unwrap(),
+            bytes.as_slice()
+        );
+        assert!(source.read_complete(1024).await.is_err());
         source.close().await.unwrap();
         assert_eq!(std::fs::read(root.join(path)).unwrap(), pointer);
+    }
+    for pointer in [
+        crab_types::pointer::Pointer {
+            file_hash: [1; 32],
+            size: 0,
+            shard_hint: None,
+        }
+        .serialize(),
+        // Canonical empty LFS serializes to an empty Git blob. Exercise the
+        // accepted textual pointer shape with an incorrect empty-content hash.
+        format!(
+            "version {}\noid sha256:{}\nsize 0\n",
+            crab_git::lfs_pointer::LFS_VERSION_URL,
+            crab_git::lfs_pointer::hex_encode(&[1; 32])
+        )
+        .into_bytes(),
+    ] {
+        std::fs::write(root.join("empty.pointer"), &pointer).unwrap();
+        let source = FileSource::capture(&repo, "empty.pointer", None, repo.read_scope())
+            .await
+            .unwrap();
+        let result = source.read_complete(0).await;
+        source.close().await.unwrap();
+        assert!(matches!(result, Err(AgentError::Integrity { .. })));
     }
     let source = FileSource::capture(&repo, "crab.safetensors", None, repo.read_scope())
         .await

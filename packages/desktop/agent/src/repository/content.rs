@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use super::*;
 
 pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
+pub(crate) const MAX_COMPLETE_BYTES: usize = 200 * 1024 * 1024;
 
 pub(crate) struct FileSource {
     source: Source,
@@ -19,6 +20,8 @@ pub(crate) struct ReadScope {
     sdk: Cancellation,
     stop: tokio_util::sync::CancellationToken,
     id: String,
+    failure: Arc<std::sync::OnceLock<Arc<AgentError>>>,
+    cancelled_read: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ReadScope {
@@ -27,6 +30,8 @@ impl ReadScope {
             sdk: Cancellation::default(),
             stop,
             id: uuid::Uuid::new_v4().to_string(),
+            failure: Arc::new(std::sync::OnceLock::new()),
+            cancelled_read: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -37,15 +42,38 @@ impl ReadScope {
 
     pub(crate) fn check(&self) -> Result<()> {
         if self.stop.is_cancelled() {
-            return Err(AgentError::OpCancelled {
+            return Err(self.record(AgentError::OpCancelled {
                 op_id: self.id.clone(),
-            });
+            }));
         }
         Ok(())
     }
 
     fn options(&self) -> Options {
         Options::default().with_cancellation(self.sdk.clone())
+    }
+
+    fn record(&self, error: AgentError) -> AgentError {
+        if error.is_cancelled() {
+            self.cancelled_read
+                .store(true, std::sync::atomic::Ordering::Release);
+            return error;
+        }
+        let error = match error {
+            AgentError::Shared(error) => error,
+            error => Arc::new(error),
+        };
+        let _ = self.failure.set(error.clone());
+        AgentError::Shared(error)
+    }
+
+    pub(crate) fn failure(&self) -> Option<AgentError> {
+        self.failure.get().cloned().map(AgentError::Shared)
+    }
+
+    pub(crate) fn cancelled_read(&self) -> bool {
+        self.cancelled_read
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -58,7 +86,10 @@ enum Source {
         root: PathBuf,
         oid: String,
     },
-    Pointer(super::native::NativeFile),
+    Pointer {
+        reader: super::native::NativeFile,
+        identity: Identity,
+    },
     Remote {
         snapshot: Snapshot,
         path: GitPath,
@@ -75,7 +106,7 @@ impl FileSource {
         scope.check()?;
         let validated = GitPath::new(path.as_bytes().to_vec())?;
         let Some(root) = &repo.work_dir else {
-            let snapshot = repo.snapshot(rev).await?;
+            let snapshot = repo.snapshot(rev, scope.options()).await?;
             let metadata = snapshot
                 .file_metadata(validated.clone())
                 .with_options(ReadOptions::default().with_operation(scope.options()))
@@ -107,8 +138,8 @@ impl FileSource {
                 .map_err(std::io::Error::other)?;
             if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
                 let bytes = git(root, &["cat-file", "blob", &oid]).await?;
-                if let Some(size) = pointer_size(&bytes) {
-                    return Self::pointer(repo, root, bytes.into(), size, scope).await;
+                if let Some((size, identity)) = pointer_metadata(&bytes) {
+                    return Self::pointer(repo, root, bytes.into(), size, identity, scope).await;
                 }
             }
             return Ok(Self {
@@ -129,7 +160,10 @@ impl FileSource {
                     error.into()
                 }
             })?;
-        if !absolute.starts_with(root) {
+        // Both sides need the native canonical form, including Windows verbatim
+        // paths and repositories opened through a filesystem symlink.
+        let boundary = tokio::fs::canonicalize(root).await?;
+        if !absolute.starts_with(boundary) {
             return Err(AgentError::Other(
                 "file resolves outside the repository".into(),
             ));
@@ -148,8 +182,8 @@ impl FileSource {
             {
                 return Err(changed());
             }
-            if let Some(size) = pointer_size(&bytes) {
-                return Self::pointer(repo, root, bytes.into(), size, scope).await;
+            if let Some((size, identity)) = pointer_metadata(&bytes) {
+                return Self::pointer(repo, root, bytes.into(), size, identity, scope).await;
             }
         }
         Ok(Self {
@@ -167,6 +201,7 @@ impl FileSource {
         root: &Path,
         bytes: Bytes,
         size: u64,
+        identity: Identity,
         scope: ReadScope,
     ) -> Result<Self> {
         let source = repo
@@ -183,14 +218,17 @@ impl FileSource {
         Ok(Self {
             scope,
             size,
-            source: Source::Pointer(source),
+            source: Source::Pointer {
+                reader: source,
+                identity,
+            },
         })
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
         self.scope.cancel();
-        if let Source::Pointer(source) = &self.source {
-            source.close().await?;
+        if let Source::Pointer { reader, .. } = &self.source {
+            reader.close().await?;
         }
         Ok(())
     }
@@ -200,6 +238,15 @@ impl FileSource {
     }
 
     pub(crate) async fn read_range(&self, offset: u64, length: u32) -> Result<Bytes> {
+        // Some format dependencies stringify I/O sources. Keep the first
+        // captured read failure so they cannot turn cancellation or corrupt
+        // content into an unrelated format error or a successful preview.
+        self.range(offset, length)
+            .await
+            .map_err(|error| self.scope.record(error))
+    }
+
+    async fn range(&self, offset: u64, length: u32) -> Result<Bytes> {
         self.scope.check()?;
         if length > MAX_RANGE_BYTES {
             return Err(AgentError::Other("range length exceeds 8 MiB".into()));
@@ -208,6 +255,12 @@ impl FileSource {
         let end = start.saturating_add(u64::from(length)).min(self.size);
         let length = (end - start) as usize;
         if length == 0 {
+            if let Source::Local { file, modified } = &self.source {
+                let metadata = file.lock().await.metadata().await?;
+                if metadata.len() != self.size || metadata.modified().ok() != *modified {
+                    return Err(changed());
+                }
+            }
             return Ok(Bytes::new());
         }
         let bytes = match &self.source {
@@ -218,7 +271,11 @@ impl FileSource {
                     return Err(changed());
                 }
                 file.seek(std::io::SeekFrom::Start(start)).await?;
-                let mut bytes = vec![0; length];
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(length)
+                    .map_err(std::io::Error::other)?;
+                bytes.resize(length, 0);
                 file.read_exact(&mut bytes).await?;
                 let after = file.metadata().await?;
                 if after.len() != self.size || after.modified().ok() != *modified {
@@ -226,64 +283,13 @@ impl FileSource {
                 }
                 bytes.into()
             }
-            Source::Git { root, oid } => {
-                let mut child = shellout::git_command()
-                    .args(["cat-file", "blob", oid])
-                    .current_dir(root)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()?;
-                let mut stdout = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| AgentError::Other("Git stdout unavailable".into()))?;
-                let read = async {
-                    let mut remaining = start;
-                    let mut discard = vec![0; (1024 * 1024_u64).min(start) as usize];
-                    while remaining > 0 {
-                        self.scope.check()?;
-                        let take = remaining.min(discard.len() as u64) as usize;
-                        stdout.read_exact(&mut discard[..take]).await?;
-                        remaining -= take as u64;
-                    }
-                    let mut bytes = vec![0; length];
-                    stdout.read_exact(&mut bytes).await?;
-                    Ok::<Bytes, AgentError>(bytes.into())
-                }
-                .await;
-                drop(stdout);
-                // Stop decoding the remainder of a large Git blob, then reap it.
-                let _ = child.start_kill();
-                let _ = child.wait().await?;
-                read?
-            }
-            Source::Pointer(source) => source.read(start, length as u32).await?,
+            Source::Git { root, oid } => self.read_git(root, oid, start, length).await?,
+            Source::Pointer { reader, .. } => reader.read(start, length as u32).await?,
             Source::Remote { snapshot, path } => {
                 let options = ReadOptions::default()
                     .with_operation(self.scope.options())
                     .with_range(start..end)?;
-                let mut stream = snapshot
-                    .open_file(path.clone())
-                    .with_options(options)
-                    .await?;
-                let mut bytes = Vec::with_capacity(length);
-                let result = async {
-                    while let Some(chunk) = stream.next().await? {
-                        if chunk.len() > length - bytes.len() {
-                            return Err(AgentError::Other(
-                                "range stream exceeded requested length".into(),
-                            ));
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    Ok(())
-                }
-                .await;
-                let close = stream.close().await;
-                result?;
-                close?;
-                bytes.into()
+                remote_bytes(snapshot, path, options, length).await?
             }
         };
         self.scope.check()?;
@@ -294,12 +300,182 @@ impl FileSource {
         }
         Ok(bytes)
     }
+    pub(crate) async fn read_complete(&self, maximum: usize) -> Result<Bytes> {
+        self.scope.check()?;
+        let maximum = maximum.min(MAX_COMPLETE_BYTES);
+        if self.size > maximum as u64 {
+            return Err(AgentError::Other(format!(
+                "complete read exceeds {maximum} bytes"
+            )));
+        }
+        let length = self.size as usize;
+        match &self.source {
+            Source::Remote { snapshot, path } => {
+                // Let the SDK observe verified whole-file EOF instead of
+                // assembling this response from independently requested ranges.
+                let options = ReadOptions::default().with_operation(self.scope.options());
+                return remote_bytes(snapshot, path, options, length).await;
+            }
+            Source::Git { root, oid } => return self.read_git(root, oid, 0, length).await,
+            _ => {}
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(length)
+            .map_err(std::io::Error::other)?;
+        if length == 0 {
+            self.read_range(0, 0).await?;
+        }
+        while output.len() < length {
+            let count = (length - output.len()).min(MAX_RANGE_BYTES as usize) as u32;
+            output.extend_from_slice(&self.read_range(output.len() as u64, count).await?);
+        }
+        if let Source::Pointer { identity, .. } = &self.source {
+            let identity = *identity;
+            // Native ranges authenticate their selected chunks/blocks. Binding
+            // the assembled response to its whole-file identity is a separate
+            // check, including empty pointers and ranges stitched across calls.
+            let output = tokio::task::spawn_blocking(move || {
+                identity.verify(&output)?;
+                Ok::<_, AgentError>(Bytes::from(output))
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            self.scope.check()?;
+            return Ok(output);
+        }
+        self.scope.check()?;
+        Ok(output.into())
+    }
+
+    async fn read_git(&self, root: &Path, oid: &str, start: u64, length: usize) -> Result<Bytes> {
+        let mut child = shellout::git_command()
+            .args(["cat-file", "blob", oid])
+            .current_dir(root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::Other("Git stdout unavailable".into()))?;
+        let read = async {
+            let mut remaining = start;
+            let mut discard = vec![0; (1024 * 1024_u64).min(start) as usize];
+            while remaining > 0 {
+                self.scope.check()?;
+                let take = remaining.min(discard.len() as u64) as usize;
+                stdout.read_exact(&mut discard[..take]).await?;
+                remaining -= take as u64;
+            }
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length)
+                .map_err(std::io::Error::other)?;
+            bytes.resize(length, 0);
+            for chunk in bytes.chunks_mut(1024 * 1024) {
+                self.scope.check()?;
+                stdout.read_exact(chunk).await?;
+            }
+            if start + length as u64 == self.size {
+                let mut extra = [0];
+                if stdout.read(&mut extra).await? != 0 {
+                    return Err(AgentError::Other("Git blob exceeds captured size".into()));
+                }
+            }
+            self.scope.check()?;
+            Ok::<Bytes, AgentError>(bytes.into())
+        }
+        .await;
+        drop(stdout);
+        let complete = read.is_ok() && start + length as u64 == self.size;
+        let killed = if !complete {
+            child.start_kill()
+        } else {
+            Ok(())
+        };
+        let waited = child.wait_with_output().await;
+        let bytes = read?;
+        killed?;
+        let output = waited?;
+        if complete && !output.status.success() {
+            return Err(AgentError::Cli {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(bytes)
+    }
 }
 
-fn pointer_size(bytes: &[u8]) -> Option<u64> {
+async fn remote_bytes(
+    snapshot: &Snapshot,
+    path: &GitPath,
+    options: ReadOptions,
+    length: usize,
+) -> Result<Bytes> {
+    let mut stream = snapshot
+        .open_file(path.clone())
+        .with_options(options)
+        .await?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(std::io::Error::other)?;
+    let result = async {
+        while let Some(chunk) = stream.next().await? {
+            if chunk.len() > length - bytes.len() {
+                return Err(AgentError::Other(
+                    "content stream exceeded captured length".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() != length {
+            return Err(AgentError::Other(
+                "content stream ended before captured length".into(),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    let closed = stream.close().await;
+    closed?;
+    result?;
+    Ok(bytes.into())
+}
+
+#[derive(Clone, Copy)]
+enum Identity {
+    Blake3([u8; 32]),
+    Sha256([u8; 32]),
+}
+
+impl Identity {
+    fn verify(self, bytes: &[u8]) -> Result<()> {
+        use sha2::Digest as _;
+        let (algorithm, expected, actual) = match self {
+            Self::Blake3(expected) => ("BLAKE3", expected, *blake3::hash(bytes).as_bytes()),
+            Self::Sha256(expected) => ("SHA-256", expected, sha2::Sha256::digest(bytes).into()),
+        };
+        if expected != actual {
+            return Err(AgentError::Integrity {
+                algorithm,
+                expected: crab_git::lfs_pointer::hex_encode(&expected),
+                actual: crab_git::lfs_pointer::hex_encode(&actual),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn pointer_metadata(bytes: &[u8]) -> Option<(u64, Identity)> {
     match crab_git::classify(bytes) {
-        crab_git::PointerKind::Crab(pointer) => Some(pointer.size),
-        crab_git::PointerKind::Lfs(pointer) => Some(pointer.size),
+        crab_git::PointerKind::Crab(pointer) => {
+            Some((pointer.size, Identity::Blake3(pointer.file_hash)))
+        }
+        crab_git::PointerKind::Lfs(pointer) => Some((pointer.size, Identity::Sha256(pointer.oid))),
         crab_git::PointerKind::NotAPointer => None,
     }
 }
