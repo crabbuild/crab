@@ -3,8 +3,7 @@
  *
  * Exercises the WorkspaceSessionManager directly — simulating the
  * save/flush/reload cycle that occurs when the app restarts. Validates
- * that workspace-level state (active repo, tab bar order, terminal panel,
- * sidebar width) survives a full restart.
+ * that workspace-level state (active repo, tab bar order, and sidebar width) survives a full restart.
  *
  * Validates: Requirements 5.4
  */
@@ -51,7 +50,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("Workspace session restore on restart", () => {
-  it("restores workspace with active repo, terminal panel, and tab bar order after restart", () => {
+  it("restores workspace with active repo and tab bar order after restart", () => {
     const workspaceRoot = "/Users/dev/my-workspace";
 
     // Step 1: Create a WorkspaceSessionManager and save workspace state.
@@ -59,7 +58,6 @@ describe("Workspace session restore on restart", () => {
     mgr1.save(workspaceRoot, {
       activeRepoRelativePath: "repo-b",
       tabBarOrder: ["repo-a", "repo-b", "repo-c"],
-      terminalPanelOpen: true,
       sidebarWidth: 280,
     });
 
@@ -77,7 +75,6 @@ describe("Workspace session restore on restart", () => {
     expect(restored!.workspaceRoot).toBe(workspaceRoot);
     expect(restored!.activeRepoRelativePath).toBe("repo-b");
     expect(restored!.tabBarOrder).toEqual(["repo-a", "repo-b", "repo-c"]);
-    expect(restored!.terminalPanelOpen).toBe(true);
     expect(restored!.sidebarWidth).toBe(280);
     expect(restored!.savedAt).toBeTypeOf("number");
   });
@@ -91,14 +88,12 @@ describe("Workspace session restore on restart", () => {
     mgr1.save(workspaceRoot, {
       activeRepoRelativePath: "repo-a",
       tabBarOrder: ["repo-a", "repo-b", "repo-c"],
-      terminalPanelOpen: false,
       sidebarWidth: 260,
     });
 
-    // User switches to repo-b and opens terminal panel.
+    // User switches to repo-b and resizes the sidebar.
     mgr1.save(workspaceRoot, {
       activeRepoRelativePath: "repo-b",
-      terminalPanelOpen: true,
       sidebarWidth: 280,
     });
 
@@ -112,29 +107,7 @@ describe("Workspace session restore on restart", () => {
     expect(restored).not.toBeNull();
     expect(restored!.activeRepoRelativePath).toBe("repo-b");
     expect(restored!.tabBarOrder).toEqual(["repo-a", "repo-b", "repo-c"]);
-    expect(restored!.terminalPanelOpen).toBe(true);
     expect(restored!.sidebarWidth).toBe(280);
-  });
-
-  it("handles restart with terminal panel closed", () => {
-    const workspaceRoot = "/Users/dev/no-terminal";
-
-    const mgr1 = new WorkspaceSessionManager();
-    mgr1.save(workspaceRoot, {
-      activeRepoRelativePath: "repo-c",
-      tabBarOrder: ["repo-a", "repo-b", "repo-c"],
-      terminalPanelOpen: false,
-      sidebarWidth: 320,
-    });
-    mgr1.flush();
-
-    const mgr2 = new WorkspaceSessionManager();
-    const restored = mgr2.restore(workspaceRoot);
-
-    expect(restored).not.toBeNull();
-    expect(restored!.activeRepoRelativePath).toBe("repo-c");
-    expect(restored!.terminalPanelOpen).toBe(false);
-    expect(restored!.sidebarWidth).toBe(320);
   });
 
   it("returns null for a workspace that was never saved", () => {
@@ -150,7 +123,6 @@ describe("Workspace session restore on restart", () => {
     mgr1.save(workspaceRoot, {
       activeRepoRelativePath: "repo-b",
       tabBarOrder: ["repo-a", "repo-b", "repo-c"],
-      terminalPanelOpen: true,
       sidebarWidth: 280,
     });
 
@@ -164,7 +136,6 @@ describe("Workspace session restore on restart", () => {
     expect(restored).not.toBeNull();
     expect(restored!.activeRepoRelativePath).toBe("repo-b");
     expect(restored!.tabBarOrder).toEqual(["repo-a", "repo-b", "repo-c"]);
-    expect(restored!.terminalPanelOpen).toBe(true);
     expect(restored!.sidebarWidth).toBe(280);
   });
 });

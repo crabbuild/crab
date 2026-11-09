@@ -147,6 +147,11 @@ import { usePtyMode } from "../lib/pty-mode-context";
 
 // --- Types ---
 
+export type TerminalStartupRequest = Pick<
+  import("../lib/terminal-presets").StartupCommand,
+  "name" | "command" | "cwd" | "env" | "agentMeta"
+>;
+
 export interface SshTerminalRequest {
   profileId: string;
   hostname: string;
@@ -157,7 +162,8 @@ export interface SshTerminalRequest {
 interface Props {
   sshRequest?: SshTerminalRequest | null;
   onSshRequestHandled?: () => void;
-  globalTerminal?: boolean;
+  startupRequest?: TerminalStartupRequest | null;
+  onStartupRequestHandled?: () => void;
   repo: OpenRepo;
   /**
    * Optional — when provided, non-zero exit codes surface a "Send error
@@ -519,7 +525,7 @@ function savePasteGuardConfig(config: PasteGuardConfig) {
  * - Export output (text / HTML)
  * - Copy all output, rename tabs, search, context menu
  */
-export function TerminalView({ repo, onSendErrorToAgent, visible = true, defaultSessionType, sshRequest, onSshRequestHandled, globalTerminal = false }: Props) {
+export function TerminalView({ repo, onSendErrorToAgent, visible = true, defaultSessionType, sshRequest, onSshRequestHandled, startupRequest, onStartupRequestHandled }: Props) {
   const initialLeaf = createLeaf();
   const [splitTree, setSplitTree] = useState<SplitNode>(initialLeaf);
   const [activePaneId, setActivePaneId] = useState(initialLeaf.id);
@@ -978,7 +984,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
   const spawningRef = useRef(false);
   const suppressNextAutoSpawnRef = useRef(false);
   useEffect(() => {
-    if (!initialRestoreComplete || !visible) return;
+    if (!initialRestoreComplete || !visible || startupRequest || sshRequest) return;
     const activeLeaf = findLeaf(splitTree, activePaneId);
     if (activeLeaf && activeLeaf.tabs.length === 0 && !spawningRef.current) {
       if (suppressNextAutoSpawnRef.current) {
@@ -991,43 +997,36 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId, initialRestoreComplete, visible]);
+  }, [splitTree, activePaneId, initialRestoreComplete, visible, startupRequest, sshRequest]);
 
-  // Listen for agent terminal spawn requests from the TopBar dropdown.
+  // Restore owns the initial layout; append requests only after it completes
+  // so a late restore cannot replace the new tab or race normal auto-spawn.
   useEffect(() => {
-    function handleAgentSpawn(e: Event) {
-      const cmd = (e as CustomEvent).detail as {
-        name: string;
-        command: string;
-        cwd?: string;
-        env?: Record<string, string>;
-        agentMeta?: AgentMeta;
-      } | undefined;
-      if (!cmd || !visible || !globalTerminal) return;
-      const leaf = findLeaf(splitTreeRef.current, activePaneId) ?? getAllLeaves(splitTreeRef.current)[0];
-      if (!leaf) return;
-      void spawnTab(leaf.id, undefined, {
-        name: cmd.name,
-        shell: "",
-        cwd: cmd.cwd,
-        env: cmd.env,
-        startupCommand: cmd.command,
-        agentMeta: cmd.agentMeta,
-      });
-    }
-    window.addEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
-    return () => window.removeEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
+    if (!startupRequest || !visible || !initialRestoreComplete) return;
+    const leaf = findLeaf(splitTreeRef.current, activePaneId) ?? getAllLeaves(splitTreeRef.current)[0];
+    if (!leaf) return;
+    spawningRef.current = true;
+    void spawnTab(leaf.id, undefined, {
+      name: startupRequest.name,
+      shell: "",
+      cwd: startupRequest.cwd,
+      env: startupRequest.env,
+      startupCommand: startupRequest.command,
+      agentMeta: startupRequest.agentMeta,
+    }).finally(() => { spawningRef.current = false; });
+    onStartupRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId, visible, globalTerminal]);
+  }, [startupRequest, visible, initialRestoreComplete]);
 
   // App queues this request until the active global terminal has mounted.
   // Hidden repo and task terminals must never consume another terminal's request.
   useEffect(() => {
-    if (!sshRequest || !visible || !globalTerminal) return;
-    void spawnSshTab(sshRequest.profileId, sshRequest.hostname, sshRequest.cwd, sshRequest.colour);
+    if (!sshRequest || !visible || !initialRestoreComplete) return;
+    spawningRef.current = true;
+    void spawnSshTab(sshRequest.profileId, sshRequest.hostname, sshRequest.cwd, sshRequest.colour).finally(() => { spawningRef.current = false; });
     onSshRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sshRequest, visible, globalTerminal]);
+  }, [sshRequest, visible, initialRestoreComplete]);
 
   // Cmd+Shift+T: open a remote terminal on the most recently used SSH connection.
   useEffect(() => {

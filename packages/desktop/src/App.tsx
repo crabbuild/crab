@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelGroupHandle } from "react-resizable-panels";
 import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
 import { PtyModeProvider } from "./lib/pty-mode-context";
@@ -29,7 +28,7 @@ import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
 import { localPathName } from "./lib/local-path-name";
-import type { SshTerminalRequest } from "./views/TerminalView";
+import type { SshTerminalRequest, TerminalStartupRequest } from "./views/TerminalView";
 import type { StartupCommand } from "./lib/terminal-presets";
 
 // Side-effect imports: register commands in the command-registry at startup.
@@ -43,6 +42,7 @@ function Shell() {
   const { state, dispatch, addRepo, setActive, setMaxLogLines } = useStore();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const maxLogLines = useSetting("maxLogLines");
+  const showActivityBar = useSetting("showActivityBar");
   const reopenReposOnStartup = useSetting("reopenReposOnStartup");
 
   // Workspace tab bar state.
@@ -89,7 +89,6 @@ function Shell() {
   const nav = useNavHistory({
     onRepoSwitch: selectWorkspaceRepo,
   });
-  const isRestoringRef = useRef(false);
 
   // Tab bar select handler: dispatches tab-bar-activate and switches repo.
   // Also pushes a navigation entry so ⌘[ / ⌘] can restore the switch.
@@ -142,27 +141,14 @@ function Shell() {
     return saved == null ? true : saved === "1";
   });
 
-  // Bottom terminal panel state (VS Code-style Ctrl+` toggle).
-  const [bottomTerminalOpen, setBottomTerminalOpen] = useState(false);
-  const [terminalMaximized, setTerminalMaximized] = useState(false);
+  const [terminalRepoId, setTerminalRepoId] = useState<string | null>(null);
+  const terminalActive = active != null && terminalRepoId === active.repo_id;
   const [terminalActivated, setTerminalActivated] = useState(false);
   const [sshTerminalRequest, setSshTerminalRequest] = useState<SshTerminalRequest | null>(null);
-  const terminalPanelsRef = useRef<ImperativePanelGroupHandle>(null);
-  const terminalLayoutRef = useRef([70, 30]);
-  const toggleTerminal = useCallback(() => {
-    if (bottomTerminalOpen && !terminalMaximized && terminalPanelsRef.current) {
-      terminalLayoutRef.current = terminalPanelsRef.current.getLayout();
-    }
-    setBottomTerminalOpen((open) => !open);
-  }, [bottomTerminalOpen, terminalMaximized]);
-  useEffect(() => {
-    if (bottomTerminalOpen) setTerminalActivated(true);
-    else setTerminalMaximized(false);
-    const panels = terminalPanelsRef.current;
-    if (!panels) return;
-    const layout = bottomTerminalOpen ? (terminalMaximized ? [0, 100] : terminalLayoutRef.current) : [100, 0];
-    panels.setLayout(layout);
-  }, [bottomTerminalOpen, terminalMaximized]);
+  const [startupRequest, setStartupRequest] = useState<TerminalStartupRequest | null>(null);
+  const openTerminal = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("crab:open-terminal"));
+  }, []);
 
   // ── Session persistence: deactivate/activate on repo switch ──────
   const sessionManager = useSession();
@@ -208,16 +194,25 @@ function Shell() {
         wsSessionManager.save(activeWs.rootPath, {
           activeRepoRelativePath: activeWorkspaceRelativePath ?? null,
           tabBarOrder: state.tabBar,
-          terminalPanelOpen: bottomTerminalOpen,
           sidebarWidth: repoSidebarOpen ? 260 : 0,
         });
       }
       wsSessionManager.flush();
+      // A first-open repository may never have been deactivated. Snapshot its
+      // route before flushing so it restores just like a switched-away repo.
+      if (activeRepoPath) {
+        const snapshot = nav.getState();
+        sessionManager.deactivate(activeRepoPath, {
+          activeView: snapshot.entries[snapshot.index].view,
+          navHistory: snapshot.entries,
+          navIndex: snapshot.index,
+        });
+      }
       sessionManager.flush();
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [sessionManager, wsSessionManager, state.workspaces, activeWorkspaceRelativePath, state.tabBar, bottomTerminalOpen, repoSidebarOpen]);
+  }, [sessionManager, wsSessionManager, state.workspaces, activeWorkspaceRelativePath, state.tabBar, repoSidebarOpen, activeRepoPath, nav.getState]);
 
   // ── Worktree session cleanup on app start ──────────────────────────
   // Cross-reference persisted sessions against currently known repo paths.
@@ -251,7 +246,6 @@ function Shell() {
       wsSessionManager.save(prevRoot, {
         activeRepoRelativePath: activeWorkspaceRelativePath ?? null,
         tabBarOrder: state.tabBar,
-        terminalPanelOpen: bottomTerminalOpen,
         sidebarWidth: repoSidebarOpen ? 260 : 0,
       });
       wsSessionManager.flush();
@@ -287,10 +281,7 @@ function Shell() {
           }
         }
 
-        // Restore terminal panel and sidebar layout state.
-        if (saved.terminalPanelOpen) {
-          setBottomTerminalOpen(true);
-        }
+        // The active view is restored by the per-repository session.
         if (typeof saved.sidebarWidth === "number") {
           setRepoSidebarOpen(saved.sidebarWidth > 0);
         }
@@ -323,12 +314,7 @@ function Shell() {
           }
         }
 
-        // Restore terminal panel and sidebar layout state.
-        if (saved.terminalPanelOpen) {
-          setBottomTerminalOpen(true);
-        } else {
-          setBottomTerminalOpen(false);
-        }
+        // The active view is restored by the per-repository session.
         if (typeof saved.sidebarWidth === "number") {
           setRepoSidebarOpen(saved.sidebarWidth > 0);
         }
@@ -345,7 +331,7 @@ function Shell() {
     }
 
     prevWorkspaceRootRef.current = currentRoot;
-  }, [state.workspaces, wsSessionManager, dispatch, selectWorkspaceRepo, activeWorkspaceRelativePath, state.tabBar, bottomTerminalOpen, repoSidebarOpen, state.repos]);
+  }, [state.workspaces, wsSessionManager, dispatch, selectWorkspaceRepo, activeWorkspaceRelativePath, state.tabBar, repoSidebarOpen, state.repos]);
 
   // Command palette state + global keyboard shortcuts.
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -515,31 +501,21 @@ function Shell() {
   }, [sessionManager, sessionPersistence.enabled]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === "`") {
-        e.preventDefault();
-        toggleTerminal();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [toggleTerminal]);
-
-  // Listen for programmatic terminal open requests (e.g. from the orchestrator
-  // when spawning a terminal-only agent).
-  useEffect(() => {
-    const handler = () => setBottomTerminalOpen(true);
     const openSsh = (event: Event) => {
       setSshTerminalRequest((event as CustomEvent<SshTerminalRequest>).detail);
-      setBottomTerminalOpen(true);
+      openTerminal();
     };
-    window.addEventListener("crab:open-terminal", handler);
+    const spawnAgent = (event: Event) => {
+      setStartupRequest((event as CustomEvent<TerminalStartupRequest>).detail);
+      openTerminal();
+    };
     window.addEventListener("crab:open-ssh-terminal-here", openSsh);
+    window.addEventListener("crab:spawn-agent-terminal", spawnAgent);
     return () => {
-      window.removeEventListener("crab:open-terminal", handler);
       window.removeEventListener("crab:open-ssh-terminal-here", openSsh);
+      window.removeEventListener("crab:spawn-agent-terminal", spawnAgent);
     };
-  }, []);
+  }, [openTerminal]);
 
   // Evict repos from terminal keep-alive when they're removed from the store.
   // Skip eviction during workspace switches — the suspend/resume flow handles that.
@@ -560,21 +536,16 @@ function Shell() {
     prevRepoIdsRef.current = state.repos.map((r) => r.repo_id);
   }, [state.repos]);
 
-  // When the terminal panel opens, ensure the active repo is in the keep-alive set.
-  const prevTerminalOpenRef = useRef(bottomTerminalOpen);
-  useEffect(() => {
-    if (bottomTerminalOpen && !prevTerminalOpenRef.current && active) {
-      terminalKeepAliveRef.current?.addToKeepAlive(active.repo_id);
-    }
-    prevTerminalOpenRef.current = bottomTerminalOpen;
-  }, [bottomTerminalOpen, active]);
-
   // handleNavigate, handleBack, handleForward use the nav instance declared above.
   const handleNavigate = useCallback((entry: NavEntry) => {
-    if (isRestoringRef.current) return; // Don't push when restoring
+    setTerminalRepoId(entry.view === "terminal" ? active?.repo_id ?? null : null);
+    if (entry.view === "terminal") setTerminalActivated(true);
+    // Restored entries already own this position in history. Compare routes
+    // instead of suppressing user navigation until the next animation frame.
+    if (entry.view === nav.current?.view && (entry.commit ?? null) === (nav.current.commit ?? null)) return;
     // Attach the current workspace repo path to the entry for cross-repo nav.
     nav.push({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
-  }, [nav, activeWorkspaceRelativePath]);
+  }, [nav, activeWorkspaceRelativePath, active?.repo_id]);
 
   const handleBack = useCallback(() => {
     nav.back();
@@ -596,28 +567,12 @@ function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [handleBack, handleForward]);
 
-  // Handler for spawning a terminal with an agent preset command.
-  // Opens the terminal panel (if closed) and dispatches a custom event
-  // that TerminalView listens for to spawn a new tab with the command.
-  // Also pins the repo in the keep-alive set so agent sessions are never
-  // evicted by LRU pressure.
-  const handleSpawnAgentTerminal = useCallback((cmd: StartupCommand) => {
-    setBottomTerminalOpen(true);
-    // Pin the active repo so its terminal survives LRU eviction while
-    // the agent session is running.
-    if (active) {
-      terminalKeepAliveRef.current?.pin(active.repo_id);
-    }
-    // Small delay to ensure the terminal panel is mounted before dispatching
-    setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent("crab:spawn-agent-terminal", { detail: cmd }),
-      );
-    }, 50);
-  }, [active]);
+  const handleSpawnAgentTerminal = useCallback((command: StartupCommand) => {
+    window.dispatchEvent(new CustomEvent("crab:spawn-agent-terminal", { detail: command }));
+  }, []);
 
   return (
-    <div className="flex h-full w-full flex-col bg-gx-bg text-gx-text">
+    <div className={`flex h-full w-full flex-col bg-gx-bg text-gx-text ${showActivityBar ? "[--activity-bar-width:3rem]" : "[--activity-bar-width:0px]"}`}>
       <TopBar
         repoSidebarOpen={repoSidebarOpen}
         onExpandRepoSidebar={() => setRepoSidebarOpen(true)}
@@ -626,17 +581,9 @@ function Shell() {
         canForward={nav.canForward}
         onBack={handleBack}
         onForward={handleForward}
-        terminalMaximized={terminalMaximized}
-        onToggleTerminalMaximized={() => {
-          if (!terminalMaximized && terminalPanelsRef.current) terminalLayoutRef.current = terminalPanelsRef.current.getLayout();
-          setTerminalMaximized((value) => !value);
-        }}
-        onShowOverview={() => {
-          setTerminalMaximized(false);
-          window.dispatchEvent(new CustomEvent("crab:show-repository-overview"));
-        }}
-        terminalOpen={bottomTerminalOpen}
-        onToggleTerminal={toggleTerminal}
+        onShowOverview={() => window.dispatchEvent(new CustomEvent("crab:show-repository-overview"))}
+        terminalActive={terminalActive}
+        onOpenTerminal={openTerminal}
         onSpawnAgentTerminal={handleSpawnAgentTerminal}
         workspaceName={workspaceActive ? (getActiveWorkspace(state)?.name ?? null) : null}
         workspaceRepos={workspaceActive ? activeWorkspaceRepos : undefined}
@@ -651,41 +598,38 @@ function Shell() {
         {repoSidebarOpen && (
           <Sidebar onCollapse={() => setRepoSidebarOpen(false)} />
         )}
-        <PanelGroup ref={terminalPanelsRef} direction="vertical" className="min-w-0 flex-1">
-          <Panel minSize={terminalMaximized ? 0 : 20} collapsible collapsedSize={0} className={terminalMaximized ? "hidden" : "min-h-0"}>
-            <main className="h-full w-full overflow-hidden">
-              {active ? (
-                <RepoDetail
-                  key={active.repo_id}
-                  repo={active}
-                  navEntry={nav.current}
-                  onNavigate={handleNavigate}
-                  isRestoringRef={isRestoringRef}
-                  activityDrawerOpen={drawerOpen}
-                  onToggleActivityDrawer={() => setDrawerOpen((v) => !v)}
-                />
-              ) : state.workspaces.length > 0 ? (
-                <WorkspaceDashboardView workspace={getActiveWorkspace(state)!} />
-              ) : (
-                <EmptyState />
-              )}
-            </main>
-          </Panel>
-          <PanelResizeHandle disabled={!bottomTerminalOpen || terminalMaximized} tabIndex={bottomTerminalOpen && !terminalMaximized ? 0 : -1} className={bottomTerminalOpen && !terminalMaximized ? "h-px cursor-row-resize bg-gx-border hover:bg-gx-accent/50" : "pointer-events-none h-0"} />
-          <Panel defaultSize={0} minSize={bottomTerminalOpen ? 10 : 0} maxSize={terminalMaximized ? 100 : 80} collapsible collapsedSize={0} className={bottomTerminalOpen ? "min-h-0 bg-gx-bg-sub" : "hidden"}>
-            {/* Closing or maximizing changes visibility, never PTY ownership. */}
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+          {active ? (
+            <RepoDetail
+              key={active.repo_id}
+              repo={active}
+              navEntry={nav.current}
+              onNavigate={handleNavigate}
+              activityDrawerOpen={drawerOpen}
+              onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
+            />
+          ) : state.workspaces.length > 0 ? (
+            <WorkspaceDashboardView workspace={getActiveWorkspace(state)!} />
+          ) : (
+            <EmptyState />
+          )}
+          {/* Share the rail width with WorkspaceShell; keep one host mounted
+              across page and repository changes so PTYs are never recreated. */}
+          <section aria-label="Terminal page" className={terminalActive ? "absolute inset-y-0 right-0 left-[var(--activity-bar-width)] flex min-h-0 bg-gx-bg-sub" : "hidden"}>
             {terminalActivated && (
               <TerminalKeepAlive
                 ref={terminalKeepAliveRef}
                 repos={state.repos}
-                activeRepoId={bottomTerminalOpen ? active?.repo_id ?? null : null}
+                activeRepoId={terminalActive ? active?.repo_id ?? null : null}
                 maxKeptAlive={effectiveKeepAliveLimit}
                 sshRequest={sshTerminalRequest}
                 onSshRequestHandled={() => setSshTerminalRequest(null)}
+                startupRequest={startupRequest}
+                onStartupRequestHandled={() => setStartupRequest(null)}
               />
             )}
-          </Panel>
-        </PanelGroup>
+          </section>
+        </main>
       </div>
       <ProgressDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <TelemetryOptInModal />

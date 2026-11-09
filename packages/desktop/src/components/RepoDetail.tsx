@@ -43,7 +43,6 @@ interface RepoDetailProps {
   repo: OpenRepo;
   navEntry?: NavEntry;
   onNavigate?: (entry: NavEntry) => void;
-  isRestoringRef?: React.MutableRefObject<boolean>;
   /** Whether the activity drawer is open. */
   activityDrawerOpen?: boolean;
   /** Toggle the activity drawer. */
@@ -59,7 +58,7 @@ interface RepoDetailProps {
  * render editor tabs (path+rev) and diff tabs (path+base/head) side
  * by side. That mirrors VS Code's mixed "editor group" behaviour.
  */
-export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
+export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
   const sessionManager = useSession();
 
   const [rev, setRev] = useState<string | null>(null);
@@ -74,7 +73,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         // there was no active file, the user was likely seeing the dashboard
         // fallback. Restore to "dashboard" so the indicator matches reality.
         const fullPaneViews: SidebarView[] = [
-          "settings", "dashboard", "crab",
+          "settings", "dashboard", "terminal", "crab",
           "workflows", "orchestrator", "changes", "timeline",
           "pull-requests", "worktrees",
         ];
@@ -208,20 +207,42 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     return () => window.removeEventListener("crab:active-view-changed", handler);
   }, [repo.path, sessionManager]);
 
+  const terminalReturnView = useRef<SidebarView>("dashboard");
+  useEffect(() => {
+    if (activeView !== "terminal") terminalReturnView.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    const openTerminal = () => setActiveView("terminal");
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key === "`") {
+        event.preventDefault();
+        setActiveView(activeView === "terminal" ? terminalReturnView.current : "terminal");
+      }
+    };
+    window.addEventListener("crab:open-terminal", openTerminal);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("crab:open-terminal", openTerminal);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [activeView, setActiveView]);
+
   useEffect(() => {
     const showOverview = () => setActiveView("dashboard");
     window.addEventListener("crab:show-repository-overview", showOverview);
     return () => window.removeEventListener("crab:show-repository-overview", showOverview);
   }, [setActiveView]);
 
-  // Restore view when navEntry changes (back/forward triggered).
+  // The initial view belongs to this repo's session. Only later history
+  // changes may replace it; the shell can still hold the departing repo's entry.
+  const previousNavEntryRef = useRef(navEntry);
   useEffect(() => {
-    if (!navEntry || !isRestoringRef) return;
-    isRestoringRef.current = true;
+    if (navEntry === previousNavEntryRef.current) return;
+    previousNavEntryRef.current = navEntry;
+    if (!navEntry) return;
     if (isSidebarView(navEntry.view)) setActiveView(navEntry.view);
     if (navEntry.commit !== undefined) setSelectedCommit(navEntry.commit ?? null);
-    // Allow the next render cycle to complete before re-enabling push.
-    requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [navEntry]);
 
   useEffect(() => {
@@ -793,7 +814,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   // When the active view is NOT one of these and there are no open tabs,
   // we show the Dashboard as a landing page instead of a blank screen.
   const fullPaneActiveViews: SidebarView[] = [
-    "settings", "dashboard", "crab",
+    "settings", "dashboard", "terminal", "crab",
     "workflows", "orchestrator", "changes", "timeline",
     "pull-requests", "worktrees",
   ];
@@ -812,12 +833,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
           views={views}
           onViewChange={setActiveView}
           activeView={activeView}
-          fullPaneViews={["settings", "dashboard", "crab", "workflows", "orchestrator", "changes", "ssh"]}
+          fullPaneViews={["settings", "dashboard", "terminal", "crab", "workflows", "orchestrator", "changes", "ssh"]}
           hiddenViews={hiddenViews}
           badges={conflictCount > 0 ? { timeline: conflictCount } : undefined}
           main={
             <div className="relative flex h-full w-full min-w-0 flex-col">
-              {activeView === "settings" ? (
+              {activeView === "terminal" ? null : activeView === "settings" ? (
                 <SettingsView />
               ) : activeView === "ssh" ? (
                 <SshView />
@@ -1013,22 +1034,23 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         />
       </div>
 
-      <StatusBar
-        summary={hydration.summary}
-        loading={hydration.loading}
-        onRefresh={hydration.refresh}
-        syncToolbar={branchInfo ? {
-          repoId: repo.repo_id,
-          currentBranch: branchInfo.currentBranch,
-          ahead: branchInfo.ahead,
-          behind: branchInfo.behind,
-          upstream: branchInfo.upstream,
-        } : null}
-        onCommandExecuted={handleCommandExecuted}
-        activityDrawerOpen={activityDrawerOpen}
-        onToggleActivityDrawer={onToggleActivityDrawer}
-      />
-
+      <div className={activeView === "terminal" ? "hidden" : undefined}>
+        <StatusBar
+          summary={hydration.summary}
+          loading={hydration.loading}
+          onRefresh={hydration.refresh}
+          syncToolbar={branchInfo ? {
+            repoId: repo.repo_id,
+            currentBranch: branchInfo.currentBranch,
+            ahead: branchInfo.ahead,
+            behind: branchInfo.behind,
+            upstream: branchInfo.upstream,
+          } : null}
+          onCommandExecuted={handleCommandExecuted}
+          activityDrawerOpen={activityDrawerOpen}
+          onToggleActivityDrawer={onToggleActivityDrawer}
+        />
+      </div>
       <QuickOpen
         entries={entries}
         open={quickOpen}

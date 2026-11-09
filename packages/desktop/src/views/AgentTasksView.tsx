@@ -1925,26 +1925,21 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
         const command = parts.join(" ");
 
-        // Dispatch to the terminal view via the same event the TopBar uses.
-        // Open the terminal panel first, then dispatch the spawn event after
-        // a short delay to ensure the terminal is mounted.
-        window.dispatchEvent(new CustomEvent("crab:open-terminal"));
-        setTimeout(() => {
-          window.dispatchEvent(
-            new CustomEvent("crab:spawn-agent-terminal", {
-              detail: {
-                name: `${agent.name} · Task`,
-                command,
-                cwd: taskCwd,
-                agentMeta: {
-                  taskId: optimisticId,
-                  agentType: agent.type,
-                  worktreePath: taskCwd ?? "",
-                },
+        // The shell opens Terminal and delivers this after session restore.
+        window.dispatchEvent(
+          new CustomEvent("crab:spawn-agent-terminal", {
+            detail: {
+              name: `${agent.name} · Task`,
+              command,
+              cwd: taskCwd,
+              agentMeta: {
+                taskId: optimisticId,
+                agentType: agent.type,
+                worktreePath: taskCwd ?? "",
               },
-            }),
-          );
-        }, 50);
+            },
+          }),
+        );
         return;
       }
 

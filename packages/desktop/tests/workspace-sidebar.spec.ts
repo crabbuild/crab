@@ -112,6 +112,9 @@ describe("workspace repository navigation", () => {
 });
 
 describe("canonical view ownership", () => {
+  it("keeps dedicated terminal, workflow and SSH destinations outside Files and Git", () => {
+    expect(["terminal", "workflows", "ssh"].map((view) => isSidebarView(view) && navigationGroup(view) === undefined)).toEqual([true, true, true]);
+  });
   it("groups every Files and Git destination while retiring duplicate routes", () => {
     expect(
       [
@@ -124,7 +127,7 @@ describe("canonical view ownership", () => {
       ].map((view) => (isSidebarView(view) ? navigationGroup(view) : null)),
     ).toEqual(["files", "files", "git", "git", "git", "git"]);
     expect(
-      ["terminal", "branches", "conflicts", "health", "skills"].some(
+      ["branches", "conflicts", "health", "skills"].some(
         isSidebarView,
       ),
     ).toBe(false);

@@ -9,17 +9,17 @@ CLI on the user's PATH cannot override the bundled runtime.
 
 ## Navigation
 
-The primary rail contains **Chat**, **Files**, **Git**, and **Large Files**.
+The primary rail contains **Chat**, **Files**, **Git**, **Large Files**,
+**Data Workflows**, **SSH Connections** (when enabled), and **Terminal**.
 Files switches between Explorer and Search; Git switches between Changes,
 History, Branches & Worktrees, and Pull Requests (when a forge is detected).
-**More tools** opens Data Workflows and, when enabled, SSH Connections.
 Settings stays at the bottom. Click the repository name in the title bar for
 its Overview; the adjacent arrow switches workspace repositories.
 
 Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
-The title-bar Terminal control owns the global terminal, with maximize/restore
-and Ctrl+` to show/hide it. Hiding or maximizing preserves its sessions; agent
-chat terminals remain scoped to their tasks.
+Terminal opens as a full page from its rail entry or the title-bar control.
+Ctrl+` switches between Terminal and the previous view. Navigating away keeps
+its sessions alive; agent chat terminals remain scoped to their tasks.
 
 The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
 then More actions. Filter repositories by name or path; Escape clears the filter.

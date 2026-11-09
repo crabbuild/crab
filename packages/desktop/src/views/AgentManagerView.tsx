@@ -404,9 +404,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
   const handleRunInstall = useCallback(async (command: string, agentType: string) => {
     setInstalling(agentType);
     try {
-      // Dispatch an event to spawn a terminal tab with the install command.
-      // The TerminalView (always mounted in RepoDetail) picks this up,
-      // creates a visible tab, and runs the command.
+      // The shell opens Terminal and delivers this after session restore.
       const syntheticTaskId = `install-${agentType}-${Date.now()}`;
       window.dispatchEvent(
         new CustomEvent("crab:spawn-agent-terminal", {
@@ -421,9 +419,6 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
           },
         }),
       );
-
-      // Switch to the terminal view so the user sees the install output.
-      window.dispatchEvent(new Event("crab:open-ssh-terminal-here"));
 
       // Listen for any terminal exit and re-detect agents. We don't have
       // the exact terminal ID (it's created by TerminalView), so we

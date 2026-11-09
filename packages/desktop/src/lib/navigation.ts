@@ -7,6 +7,7 @@ export const VIEW_LABELS = {
   "pull-requests": "Pull Requests",
   crab: "Large Files",
   workflows: "Data Workflows",
+  terminal: "Terminal",
   dashboard: "Overview",
   orchestrator: "Chat",
   ssh: "SSH Connections",

@@ -4,7 +4,6 @@ export interface WorkspaceSession {
   workspaceRoot: string;
   activeRepoRelativePath: string | null;
   tabBarOrder: string[];
-  terminalPanelOpen: boolean;
   sidebarWidth: number;
   savedAt: number;
 }
@@ -86,7 +85,6 @@ export class WorkspaceSessionManager implements IWorkspaceSessionManager {
       workspaceRoot,
       activeRepoRelativePath: null,
       tabBarOrder: [],
-      terminalPanelOpen: false,
       sidebarWidth: 260,
       ...existing,
       ...session,
@@ -232,7 +230,6 @@ export class WorkspaceSessionManager implements IWorkspaceSessionManager {
         workspaceRoot,
         activeRepoRelativePath: legacyActiveRepo ?? null,
         tabBarOrder,
-        terminalPanelOpen: false,
         sidebarWidth: 260,
         savedAt: Date.now(),
       };
