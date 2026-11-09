@@ -255,6 +255,10 @@ tests and packaged storage qualification.
   events, and displays execution errors even when the CLI fails before a stage
   starts. Structured CLI stdout and live command logs on stderr stay separate.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
+- Native capability discovery returns `protocol: 1`, the runtime version, and
+  registered RPC method names from the dispatcher itself. SSH negotiation uses
+  the attached channel during deployment; feature gates require the methods
+  actually used by each operation, without inferred minimum versions.
 - Closing a remote session drains its SDK client. Agent shutdown cancels and joins outstanding requests
   before closing its SDK clients and SlateDB index.
 

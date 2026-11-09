@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Client, Server, utils, type ClientChannel } from "ssh2";
 import { extractFile } from "@electron/asar";
+import type { CapabilityNegotiator } from "../../electron/ssh-capabilities";
 import type { RpcRouter } from "../../electron/ssh-router";
 import type { SshSessionManager } from "../../electron/ssh-manager";
 import { packagedExecutable } from "./packaged-app";
@@ -49,6 +50,9 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
   const routerPath = path.join(root, "ssh-router.cjs");
   writeFileSync(routerPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-router.cjs"));
+  const capabilitiesPath = path.join(root, "ssh-capabilities.cjs");
+  writeFileSync(capabilitiesPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-capabilities.cjs"));
+  const { CapabilityNegotiator: PackagedNegotiator } = createRequire(__filename)(capabilitiesPath) as { CapabilityNegotiator: typeof CapabilityNegotiator };
   const { RpcRouter: PackagedRouter } = createRequire(__filename)(routerPath) as { RpcRouter: typeof RpcRouter };
   const key = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "pkcs1", format: "pem" } });
   const host = utils.parseKey(key.privateKey);
@@ -117,8 +121,10 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
     if (typeof address !== "object" || !address) throw new Error("Missing SSH listener address");
     const channels = new Map<string, ClientChannel>();
     const profiles = new Map<string, { operationTimeoutMs?: number }>();
-    const manager = { getStatus: () => "connected", getConnection: (id: string) => ({ channels: { agent: channels.get(id) }, profile: profiles.get(id) }) };
+    const statuses = new Map<string, string>();
+    const manager = { getStatus: (id: string) => statuses.get(id) ?? "disconnected", getConnection: (id: string) => ({ channels: { agent: channels.get(id) }, profile: profiles.get(id) }) };
     const router = new PackagedRouter(manager as unknown as SshSessionManager, { request: async () => { throw new Error("Remote operation reached local agent"); } });
+    const negotiator = new PackagedNegotiator(router);
     const connect = async (profile: string) => {
       const client = new Client(); clients.push(client); client.on("error", error => transportErrors.push(error));
       client.connect({ host: "127.0.0.1", port: address.port, username: "crab-test", password, hostVerifier: (key: Buffer) => key.length === hostPublic.length && timingSafeEqual(key, hostPublic) });
@@ -129,6 +135,12 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
         catch { splitUtf8Observed = true; }
       });
       profiles.set(profile, {}); channels.set(profile, channel); router.attachChannel(profile, channel);
+      statuses.set(profile, "deploying");
+      const capabilities = await negotiator.negotiate(profile);
+      expect(capabilities).toMatchObject({ protocol: 1, version: expect.any(String) });
+      expect(negotiator.isSupported(profile, "file_open", "read_range", "file_materialize", "rpc/cancel", "file_close")).toBe(true);
+      expect(negotiator.isSupported(profile, "compress_file")).toBe(false);
+      statuses.set(profile, "connected");
       const repo_id = `ssh://${profile}/source`;
       await router.route(repo_id, "open_local", { repo_id, path: source });
       return { repo_id, channel, child: children[children.length - 1] };
@@ -170,7 +182,7 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
     await router.route(second.repo_id, "close", { repo_id: second.repo_id }); await cleanExit(second.child);
     expect(splitUtf8Observed).toBe(true);
     expect(transportErrors).toEqual([]);
-    writeFileSync(test.info().outputPath("ssh-native-proof.json"), JSON.stringify({ bytesPerFile: content.length, formats: ["crab", "lfs"], timeout: "native-terminal-before-rejection", eof: "child-joined-before-agent-exit", utf8: "actual-byte-fragmented-SSH", index: "pointer-preserved", platform: process.platform }, null, 2));
+    writeFileSync(test.info().outputPath("ssh-native-proof.json"), JSON.stringify({ bytesPerFile: content.length, formats: ["crab", "lfs"], timeout: "native-terminal-before-rejection", eof: "child-joined-before-agent-exit", utf8: "actual-byte-fragmented-SSH", capabilities: negotiator.getCached("two"), index: "pointer-preserved", platform: process.platform }, null, 2));
   } finally {
     if (writer) await cleanExit(writer);
     const exits = await Promise.allSettled(children.map(cleanExit)); clients.forEach(client => client.end());

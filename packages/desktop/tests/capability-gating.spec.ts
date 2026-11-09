@@ -53,20 +53,22 @@ function makeMockCapabilityNegotiator(options?: {
 
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return opts.fileWatching;
-      if (feature === "search") return opts.search;
-      if (feature === "buildRun") return opts.buildRun;
+      if (feature === "watch_start") return opts.fileWatching;
+      if (feature === "git_grep") return opts.search;
+      if (feature === "exec_command") return opts.buildRun;
       return false;
     }),
     getCached: vi.fn().mockReturnValue(
       opts.hasCached
         ? {
-            version: "1.2.0",
-            features: {
-              fileWatching: opts.fileWatching,
-              search: opts.search,
-              buildRun: opts.buildRun,
-            },
+            protocol: 1,
+            version: "2.0.0-alpha.1",
+            methods: [
+              "capabilities",
+              ...(opts.fileWatching ? ["watch_start", "watch_stop"] : []),
+              ...(opts.search ? ["git_grep"] : []),
+              ...(opts.buildRun ? ["exec_command"] : []),
+            ],
           }
         : null,
     ),

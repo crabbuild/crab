@@ -38,12 +38,13 @@ function makeMockGitManager() {
 function makeMockCapabilityNegotiator(supportsFileWatching = false) {
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return supportsFileWatching;
+      if (feature === "watch_start") return supportsFileWatching;
       return false;
     }),
     getCached: vi.fn().mockReturnValue({
-      version: "1.0.0",
-      features: { fileWatching: supportsFileWatching },
+      protocol: 1,
+      version: "2.0.0-alpha.1",
+      methods: supportsFileWatching ? ["capabilities", "watch_start", "watch_stop"] : ["capabilities"],
     }),
   };
 }
@@ -109,7 +110,7 @@ describe("RemoteProvider polling fallback", () => {
 
   it("uses native watch_start when agent supports fileWatching", async () => {
     mockCapNegotiator.isSupported.mockImplementation((_: string, feature: string) => {
-      return feature === "fileWatching";
+      return feature === "watch_start";
     });
 
     await provider.watchStart(REPO_ID);

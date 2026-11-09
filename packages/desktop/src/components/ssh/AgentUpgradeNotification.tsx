@@ -39,29 +39,12 @@ interface DisabledFeatureControlProps {
 
 // ── Capability Matrix ────────────────────────────────────────────
 
-const CAPABILITY_MIN_VERSIONS: Record<string, string> = {
-  fileWatching: "1.2.0",
-  deltaSync: "1.3.0",
-  compression: "1.3.0",
-  processManagement: "1.2.0",
-  environmentManagement: "1.2.0",
-  debugging: "1.4.0",
-  search: "1.2.0",
-  buildRun: "1.2.0",
-  logTailing: "1.2.0",
-};
-
-const FEATURE_LABELS: Record<string, string> = {
-  fileWatching: "File Watching",
-  deltaSync: "Delta Sync",
-  compression: "Compression",
-  processManagement: "Process Management",
-  environmentManagement: "Environment Management",
-  debugging: "Remote Debugging",
-  search: "Remote Search",
-  buildRun: "Build & Run",
-  logTailing: "Log Tailing",
-};
+const FEATURES = [
+  { label: "File watching", methods: ["watch_start", "watch_stop"] },
+  { label: "Remote search", methods: ["git_grep"] },
+  { label: "File materialization", methods: ["file_materialize"] },
+  { label: "Remote commands", methods: ["exec_command"] },
+];
 
 // ── Upgrade Notification ─────────────────────────────────────────
 
@@ -168,8 +151,8 @@ export function CapabilitySummary({ capabilities, currentVersion }: CapabilitySu
     );
   }
 
-  const features = Object.entries(capabilities.features) as Array<[string, boolean]>;
-  const unsupported = features.filter(([, supported]) => !supported);
+  const unsupported = FEATURES.filter(feature =>
+    !feature.methods.every(method => capabilities.methods.includes(method)));
 
   if (unsupported.length === 0) {
     return null; // All features supported, nothing to show
@@ -181,23 +164,16 @@ export function CapabilitySummary({ capabilities, currentVersion }: CapabilitySu
         Unavailable features (agent v{currentVersion}):
       </p>
       <div className="flex flex-wrap gap-1">
-        {unsupported.map(([feature]) => (
+        {unsupported.map(feature => (
           <span
-            key={feature}
+            key={feature.label}
             className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 rounded"
-            title={`Requires agent v${CAPABILITY_MIN_VERSIONS[feature] ?? "unknown"}`}
+            title={`Not supported by agent v${currentVersion}`}
           >
-            {FEATURE_LABELS[feature] ?? feature}
-            <span className="text-gray-400 dark:text-gray-500">
-              (v{CAPABILITY_MIN_VERSIONS[feature] ?? "?"})
-            </span>
+            {feature.label}
           </span>
         ))}
       </div>
     </div>
   );
 }
-
-// ── Exports for testing ──────────────────────────────────────────
-
-export { CAPABILITY_MIN_VERSIONS, FEATURE_LABELS };

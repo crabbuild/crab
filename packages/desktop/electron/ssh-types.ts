@@ -147,18 +147,9 @@ export interface ConnectionQuality {
 // ── Agent Capabilities Types ─────────────────────────────────────
 
 export interface AgentCapabilities {
+  protocol: 1;
   version: string;
-  features: {
-    fileWatching: boolean;
-    deltaSync: boolean;
-    compression: boolean;
-    processManagement: boolean;
-    environmentManagement: boolean;
-    debugging: boolean;
-    search: boolean;
-    buildRun: boolean;
-    logTailing: boolean;
-  };
+  methods: string[];
 }
 
 // ── Bookmark and Recent File Types ───────────────────────────────

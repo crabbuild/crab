@@ -133,7 +133,7 @@ export class RemoteProvider extends BaseProvider {
       debounceTimer: null,
     });
 
-    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop");
 
     if (canWatch) {
       // Agent supports native file watching — use watch_start RPC
@@ -168,7 +168,7 @@ export class RemoteProvider extends BaseProvider {
     const status = this.getConnectionStatus(parsed.profileId);
     if (status !== "connected") return;
 
-    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop");
     if (canWatch) {
       try {
         await this.router.route(repoId, "watch_stop", { repo_id: repoId });
@@ -318,13 +318,13 @@ export class RemoteProvider extends BaseProvider {
 
     return {
       canEdit: true,
-      canWatch: this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching"),
+      canWatch: this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop"),
       canStageHunks: true,
       canWorktree: true,
       canForge: true,
       canHydrate: false, // Remote repos don't support crab hydrate/dehydrate
-      canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "search"),
-      canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "buildRun"),
+      canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "git_grep"),
+      canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "exec_command"),
       canTrash: false, // Remote servers have no trash concept
     };
   }
@@ -444,7 +444,7 @@ export class RemoteProvider extends BaseProvider {
    * older agents).
    */
   private async restartWatching(repoId: string, profileId: string): Promise<void> {
-    const canWatch = this.capabilityNegotiator.isSupported(profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(profileId, "watch_start", "watch_stop");
 
     if (canWatch) {
       try {

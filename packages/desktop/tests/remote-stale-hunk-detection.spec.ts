@@ -49,12 +49,13 @@ function makeMockGitManager() {
 function makeMockCapabilityNegotiator(supportsFileWatching = true) {
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return supportsFileWatching;
+      if (feature === "watch_start") return supportsFileWatching;
       return false;
     }),
     getCached: vi.fn().mockReturnValue({
-      version: "1.0.0",
-      features: { fileWatching: supportsFileWatching },
+      protocol: 1,
+      version: "2.0.0-alpha.1",
+      methods: supportsFileWatching ? ["capabilities", "watch_start", "watch_stop"] : ["capabilities"],
     }),
   };
 }

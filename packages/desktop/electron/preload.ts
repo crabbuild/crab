@@ -832,8 +832,8 @@ contextBridge.exposeInMainWorld("crab", {
     },
 
     // Agent capabilities events (on/off pairs)
-    onAgentCapabilities: (listener: (payload: { profileId: string; capabilities: Record<string, boolean> }) => void) => {
-      const handler = (_e: unknown, payload: { profileId: string; capabilities: Record<string, boolean> }) => listener(payload);
+    onAgentCapabilities: (listener: (payload: { profileId: string; capabilities: import("./ssh-types").AgentCapabilities }) => void) => {
+      const handler = (_e: unknown, payload: { profileId: string; capabilities: import("./ssh-types").AgentCapabilities }) => listener(payload);
       ipcRenderer.on("ssh:agent-capabilities", handler);
       return () => { ipcRenderer.removeListener("ssh:agent-capabilities", handler); };
     },

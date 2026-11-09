@@ -788,3 +788,37 @@ pair delivery, capability negotiation, remote repository opening, selected
 storage identity forwarding, reconnect/disconnect ownership and cross-platform
 proof remain open, as does the empty-start SSH entry. The complete large-file
 acceptance matrix above remains the completion boundary.
+
+## Native SSH capability checkpoint
+
+- The native dispatcher now answers `capabilities` with protocol 1, its exact
+  package version and its registered method names. One dispatch table owns the
+  advertisement and handlers. A source comparison confirms all 193 pre-existing
+  handler arms are unchanged apart from macro-required comma separators.
+- SSH negotiation queries the attached channel while the session is deploying,
+  before repository routing is available. Malformed/incompatible responses fail;
+  clearing or superseding a session prevents late replies from restoring stale
+  capabilities. Feature checks require every RPC used by watching, compression
+  and delta operations. The nonexistent feature-flag/minimum-version protocol
+  and fabricated fallback capability response are removed.
+- Red evidence: the native regression fails with `UnknownMethod`; the prior
+  package fails the actual SSH transport smoke with `status: deploying`.
+  The new native regression and 129 focused desktop cases pass. Renderer and
+  Electron builds, type checks, strict integration-spec type probes, formatting
+  and the optimized native build pass.
+- The unsigned macOS arm64 package passes real authenticated SSH in 8.8 seconds:
+  two independently indexed sessions negotiate before opening repositories,
+  then repeat exact 4 MiB Crab/LFS ranges and materialization, unchanged index
+  pointers, actual progress, UTF-8 fragmentation, timeout cancellation behind a
+  live writer and EOF child cleanup. All 901 packaged renderer/Electron files
+  match build output; packaged native hashes match their runtime manifest.
+  Evidence: `ssh-capabilities-package-proof/`,
+  `ssh-capabilities-packaged-assets.json`, `ssh-capabilities-dispatch-proof.json`
+  and `ssh-capabilities-qualification.json` in the external build directory.
+  The peer desktop application remains running on port 17789.
+- This resolves the capability negotiation blockers recorded above. Complete
+  desktop SSH startup still needs deployment dependency injection, paired native
+  runtime delivery, remote repository registration and profile/provider identity
+  qualification. Empty-start SSH navigation, remote index ownership and the rest
+  of the acceptance matrix remain open. This transport fixture supplies the real
+  native process through SSH; it does not qualify the application's deployer.

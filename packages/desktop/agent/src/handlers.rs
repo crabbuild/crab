@@ -140,25 +140,44 @@ pub async fn handle(state: &State, mut req: Request, out: SharedStdout) -> Resul
     crate::storage_auth::scope(auth, handle_request(state, req, out)).await
 }
 
+// Keep discovery and dispatch in one table so an advertised method always has
+// a handler. Session bootstrap uses this before any repository is opened.
+macro_rules! dispatch_methods {
+    ($method:expr, $( $name:literal => $work:expr ),* $(,)?) => {
+        match $method {
+            "capabilities" => {
+                const METHODS: &[&str] = &["capabilities", $( $name ),*];
+                Ok(json!({
+                    "protocol": 1,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "methods": METHODS,
+                }))
+            },
+            $( $name => $work, )*
+            other => Err(AgentError::UnknownMethod(other.to_owned())),
+        }
+    };
+}
+
 async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Result<Value> {
     let Request { method, params, .. } = req;
     crate::storage_auth::validate_target(state, &method, &params).await?;
-    match method.as_str() {
+    dispatch_methods! { method.as_str(),
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
         "managed_profiles" => crate::managed_service::profiles(),
         "managed_select_profile" => {
             crate::managed_service::select_profile(decode(&method, params)?)
-        }
+        },
         "managed_login" => crate::managed_service::login(decode(&method, params)?, out).await,
         "managed_organizations" => {
             crate::managed_service::organizations(decode(&method, params)?).await
-        }
+        },
         "managed_repositories" => {
             crate::managed_service::repositories(decode(&method, params)?).await
-        }
+        },
         "managed_create_repository" => {
             crate::managed_service::create_repository(decode(&method, params)?).await
-        }
+        },
         "open_local" => open_local(state, decode(&method, params)?).await,
         "open_url" => open_url(state, decode(&method, params)?).await,
         "close" => close(state, decode(&method, params)?).await,
@@ -176,16 +195,16 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "preview_parquet" => preview_parquet(state, decode(&method, params)?).await,
         "preview_safetensors" => {
             preview_fmt(state, decode(&method, params)?, preview::safetensors).await
-        }
+        },
         "preview_npy" => preview_fmt(state, decode(&method, params)?, preview::numpy_npy).await,
         "preview_npz" => preview_fmt(state, decode(&method, params)?, preview::numpy_npz).await,
         "preview_zip" => preview_fmt(state, decode(&method, params)?, preview::zip_archive).await,
         "preview_notebook_meta" => {
             preview_fmt(state, decode(&method, params)?, preview::notebook_meta).await
-        }
+        },
         "preview_torch_checkpoint" => {
             preview_fmt(state, decode(&method, params)?, preview::torch_checkpoint).await
-        }
+        },
         "repo_summary" => repo_summary(state, decode(&method, params)?, out).await,
         "git_status_porcelain" => git_status_porcelain(state, decode(&method, params)?).await,
         "file_diff" => file_diff(state, decode(&method, params)?).await,
@@ -205,7 +224,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::git_commit::GitCommitParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_commit::git_commit(&work_dir, &p).await
-        }
+        },
         "git_diff_index_patch" => git_diff_index_patch(state, decode(&method, params)?).await,
         "git_diff_cached_patch" => git_diff_cached_patch(state, decode(&method, params)?).await,
         "git_apply_patch" => git_apply_patch(state, decode(&method, params)?).await,
@@ -225,14 +244,14 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 crate::cache::Operation::Stats,
             )
             .await
-        }
+        },
         "cache_clean" => {
             let params: CacheParams = decode(&method, params)?;
             let operation = crate::cache::Operation::Clean {
                 dry_run: params.dry_run,
             };
             cache_operation(state, params, operation).await
-        }
+        },
         "clone" => clone_repo(decode(&method, params)?, out).await,
         "status" => status(decode(&method, params)?, out).await,
         "hydrate" => hydrate(decode(&method, params)?, out).await,
@@ -243,49 +262,49 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: CrabAddAutoParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_add_auto(&work_dir, p).await
-        }
+        },
         "crab_track_and_add" => {
             let p: CrabTrackAndAddParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_track_and_add(&work_dir, p).await
-        }
+        },
         "crab_add_structured" => {
             let p: CrabAddStructuredParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             let job_id = p.job_id.clone();
             run_cancellable(state, Some(job_id), crab_add_structured(&work_dir, p, out)).await
-        }
+        },
         "crab_push_structured" => {
             let p: CrabPushStructuredParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             let job_id = p.job_id.clone();
             run_cancellable(state, Some(job_id), crab_push_structured(&work_dir, p, out)).await
-        }
+        },
         "staging_stats" => {
             let p: StagingStatsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             staging_stats(&work_dir).await
-        }
+        },
         "staging_clean" => {
             let p: StagingCleanParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             staging_clean(&work_dir, p.prune_abandoned).await
-        }
+        },
         "crab_reset_files" => {
             let p: CrabResetFilesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_reset_files(&work_dir, &p.paths).await
-        }
+        },
         "crab_init" => {
             let p: CrabInitParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_init(&work_dir, p).await
-        }
+        },
         "storage_config_get" => {
             let p: RepoIdParams = decode(&method, params)?;
             let repo = state.get(&p.repo_id).await?;
             crate::storage_auth::repository_config(repo.work_dir.as_deref(), &repo.url).await
-        }
+        },
         "storage_config_verify" => {
             let p: StorageVerifyParams = decode(&method, params)?;
             let repo = state.get(&p.repo_id).await?;
@@ -295,154 +314,154 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 p.remote.as_deref(),
             )
             .await
-        }
+        },
         "storage_connection_test" => crate::storage_auth::test_connection().await,
         "git_checkout" => {
             let p: crate::git_branches::CheckoutParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_checkout(&work_dir, &p).await
-        }
+        },
         "git_branch_create" => {
             let p: crate::git_branches::BranchCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_create(&work_dir, &p).await
-        }
+        },
         "git_branch_delete" => {
             let p: crate::git_branches::BranchDeleteParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_delete(&work_dir, &p).await
-        }
+        },
         "git_branch_rename" => {
             let p: crate::git_branches::BranchRenameParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_rename(&work_dir, &p).await
-        }
+        },
         "git_set_upstream" => {
             let p: crate::git_branches::SetUpstreamParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_set_upstream(&work_dir, &p).await
-        }
+        },
         "git_worktree_list" => {
             let p: crate::git_worktree::WorktreeListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_list(&work_dir).await
-        }
+        },
         "git_worktree_add" => {
             let p: crate::git_worktree::WorktreeAddParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_add(&work_dir, &p).await
-        }
+        },
         "git_worktree_remove" => {
             let p: crate::git_worktree::WorktreeRemoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_remove(&work_dir, &p).await
-        }
+        },
         "git_worktree_move" => {
             let p: crate::git_worktree::WorktreeMoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_move(&work_dir, &p).await
-        }
+        },
         "git_worktree_prune" => {
             let p: crate::git_worktree::WorktreePruneParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_prune(&work_dir, &p).await
-        }
+        },
         "git_worktree_lock" => {
             let p: crate::git_worktree::WorktreeLockParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_lock(&work_dir, &p).await
-        }
+        },
         "git_worktree_unlock" => {
             let p: crate::git_worktree::WorktreeUnlockParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_unlock(&work_dir, &p).await
-        }
+        },
         "git_worktree_repair" => {
             let p: crate::git_worktree::WorktreeRepairParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_repair(&work_dir, &p).await
-        }
+        },
         "worktree_list" => {
             let p: WorktreeListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_list(&work_dir).await
-        }
+        },
         "worktree_add" => {
             let p: WorktreeAddManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_add(state, &work_dir, p).await
-        }
+        },
         "worktree_remove" => {
             let p: WorktreeRemoveManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_remove(state, &work_dir, p).await
-        }
+        },
         "worktree_move" => {
             let p: WorktreeMoveManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_move(&work_dir, p).await
-        }
+        },
         "worktree_lock" => {
             let p: WorktreeLockManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_lock(&work_dir, p).await
-        }
+        },
         "worktree_unlock" => {
             let p: WorktreeUnlockManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_unlock(&work_dir, p).await
-        }
+        },
         "worktree_prune" => {
             let p: WorktreePruneManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_prune(&work_dir).await
-        }
+        },
         "worktree_repair" => {
             let p: WorktreeRepairManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_repair(&work_dir, p).await
-        }
+        },
         "worktree_status" => {
             let p: WorktreeStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_status(&work_dir, p).await
-        }
+        },
         "worktree_set_meta" => {
             let p: WorktreeSetMetaParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_set_meta(&work_dir, p).await
-        }
+        },
         "worktree_push_estimate" => {
             let p: WorktreePushEstimateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_push_estimate(&work_dir, p).await
-        }
+        },
         "worktree_create" => {
             let p: WorktreeCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_create(&work_dir, p).await
-        }
+        },
         "worktree_destroy" => {
             let p: WorktreeDestroyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_destroy(&work_dir, p).await
-        }
+        },
         "task_compute_diff" => {
             let p: TaskComputeDiffParams = decode(&method, params)?;
             task_compute_diff(p).await
-        }
+        },
         "task_apply" => {
             let p: TaskApplyParams = decode(&method, params)?;
             task_apply(p).await
-        }
+        },
         "task_discard" => {
             let p: TaskDiscardParams = decode(&method, params)?;
             task_discard(p).await
-        }
+        },
         "task_check_orphaned" => {
             let p: TaskCheckOrphanedParams = decode(&method, params)?;
             task_check_orphaned(p).await
-        }
+        },
         "git_tag_add" => git_tag_add(state, decode(&method, params)?).await,
         "git_tag_delete" => git_tag_delete(state, decode(&method, params)?).await,
         "git_cherry_pick" => git_cherry_pick(state, decode(&method, params)?).await,
@@ -459,32 +478,32 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::git_remote::FetchAllParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_fetch_all(&work_dir, &p).await
-        }
+        },
         "git_pull_mode" => {
             let p: crate::git_remote::PullParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_pull(&work_dir, &p).await
-        }
+        },
         "git_push_remote" => {
             let p: crate::git_remote::PushParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_push(&work_dir, &p).await
-        }
+        },
         "git_remote_add" => {
             let p: crate::git_remote::RemoteAddParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_add(&work_dir, &p).await
-        }
+        },
         "git_remote_remove" => {
             let p: crate::git_remote::RemoteRemoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_remove(&work_dir, &p).await
-        }
+        },
         "git_remote_set_url" => {
             let p: crate::git_remote::RemoteSetUrlParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_set_url(&work_dir, &p).await
-        }
+        },
         "git_config_get" => git_config_get(state, decode(&method, params)?).await,
         "git_activity" => git_activity(state, decode(&method, params)?).await,
         "git_contributors" => git_contributors(state, decode(&method, params)?).await,
@@ -504,45 +523,45 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::ops::handlers::OpStartParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_start(&work_dir, p).await
-        }
+        },
         "op_continue" => {
             let p: crate::ops::handlers::OpContinueParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_continue(&work_dir, p).await
-        }
+        },
         "op_abort" => {
             let p: crate::ops::handlers::OpAbortParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_abort(&work_dir, p).await
-        }
+        },
         "op_status" => {
             let p: crate::ops::handlers::OpStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_status(&work_dir, p).await
-        }
+        },
         "op_edit_todo" => {
             let p: crate::ops::handlers::OpEditTodoParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_edit_todo(&work_dir, p).await
-        }
+        },
         "conflict_list" => {
             let p: crate::conflicts::ConflictListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::conflict_list(&work_dir).await
-        }
+        },
         "conflict_read_sides" => {
             let p: crate::conflicts::ConflictReadSidesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::conflict_read_sides(&work_dir, &p).await
-        }
+        },
         "git_apply_resolution" => {
             let p: crate::conflicts::ApplyResolutionParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::git_apply_resolution(&work_dir, &p).await
-        }
+        },
         "experiments_runs_for_commit" => {
             experiments_runs_for_commit(decode(&method, params)?).await
-        }
+        },
         "experiments_runs_recent" => experiments_runs_recent(decode(&method, params)?).await,
         "experiments_run_detail" => experiments_run_detail(decode(&method, params)?).await,
         "experiments_configure" => experiments_configure(decode(&method, params)?).await,
@@ -550,7 +569,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::notebook_strip::NotebookStripParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::notebook_strip::notebook_strip_outputs(&work_dir, &p).await
-        }
+        },
         "storage_summary" => {
             let p: RepoIdParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -559,13 +578,13 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 shellout::run_json(Some(&work_dir), &["metadb", "diagnose", "--json"], &[]),
             )?;
             Ok(json!({ "usage": usage, "metadata": metadata }))
-        }
+        },
         "indexer_status" => indexer_status(state).await,
         "rpc/cancel" => rpc_cancel(state, decode(&method, params)?).await,
         "forge_auth_start" => {
             let p: crate::forge::auth::ForgeAuthStartParams = decode(&method, params)?;
             crate::forge::auth::forge_auth_start(p, out).await
-        }
+        },
         "auth_token_updated" => {
             // Called by the main process after successfully storing an
             // OAuth token in the keychain. The agent can use this to
@@ -581,67 +600,67 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             )
             .await?;
             Ok(json!({ "ok": true }))
-        }
+        },
         "forge_list_prs" => {
             let p: crate::forge::handlers::ForgeListPrsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_prs(&work_dir).await
-        }
+        },
         "forge_create_pr" => {
             let p: crate::forge::handlers::ForgeCreatePrParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_create_pr(&work_dir, p).await
-        }
+        },
         "forge_pr_detail" => {
             let p: crate::forge::handlers::ForgePrDetailParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_pr_detail(&work_dir, p).await
-        }
+        },
         "forge_pr_comment" => {
             let p: crate::forge::handlers::ForgePrCommentParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_pr_comment(&work_dir, p).await
-        }
+        },
         "forge_submit_review" => {
             let p: crate::forge::handlers::ForgeSubmitReviewParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_submit_review(&work_dir, p).await
-        }
+        },
         "forge_list_checks" => {
             let p: crate::forge::handlers::ForgeListChecksParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_checks(&work_dir, p).await
-        }
+        },
         "forge_list_issues" => {
             let p: crate::forge::handlers::ForgeListIssuesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_issues(&work_dir, p).await
-        }
+        },
         "workflow_list" => {
             let p: crate::workflow::WorkflowListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_list(&work_dir).await
-        }
+        },
         "workflow_get" => {
             let p: crate::workflow::WorkflowGetParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_get(&work_dir, p).await
-        }
+        },
         "workflow_save" => {
             let p: crate::workflow::WorkflowSaveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_save(&work_dir, p).await
-        }
+        },
         "workflow_create" => {
             let p: crate::workflow::WorkflowCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_create(&work_dir, p).await
-        }
+        },
         "workflow_delete" => {
             let p: crate::workflow::WorkflowDeleteParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_delete(&work_dir, p).await
-        }
+        },
         "workflow_run" => {
             let p: crate::workflow::WorkflowRunParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -652,96 +671,95 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 crate::workflow::workflow_run(&work_dir, p, out),
             )
             .await
-        }
+        },
         "workflow_cancel" => {
             let p: crate::workflow::WorkflowCancelParams = decode(&method, params)?;
             state.get_work_dir(&p.repo_id).await?;
             Ok(json!({ "cancelled": state.cancel_registry.cancel(&p.run_id).await }))
-        }
+        },
         "workflow_validate" => {
             let p: crate::workflow::WorkflowValidateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_validate(&work_dir, p).await
-        }
+        },
         // ── SDK-backed workflow builder verbs ────────────────────────
         "workflow_status" => {
             let p: crate::workflow::WorkflowStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_status(&work_dir, p).await
-        }
+        },
         "workflow_dag" => {
             let p: crate::workflow::WorkflowDagParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_dag(&work_dir, p).await
-        }
+        },
         "workflow_resolve_template" => {
             let p: crate::workflow::WorkflowResolveTemplateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_resolve_template(&work_dir, p).await
-        }
+        },
         "workflow_template_completions" => {
             let p: crate::workflow::WorkflowTemplateCompletionsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_template_completions(&work_dir, p).await
-        }
+        },
         "workflow_exp_list" => {
             let p: crate::workflow::WorkflowExpListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_list(&work_dir).await
-        }
+        },
         "workflow_exp_enqueue" => {
             let p: crate::workflow::WorkflowExpEnqueueParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_enqueue(&work_dir, p).await
-        }
+        },
         "workflow_exp_start" => {
             let p: crate::workflow::WorkflowExpStartParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_start(&work_dir, p, out).await
-        }
+        },
         "workflow_exp_stop" => {
             let p: crate::workflow::WorkflowExpStopParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_stop(&work_dir).await
-        }
+        },
         "workflow_migrate_preview" => {
             let p: crate::workflow::WorkflowMigratePreviewParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_migrate_preview(&work_dir, p).await
-        }
+        },
         "workflow_migrate_apply" => {
             let p: crate::workflow::WorkflowMigrateApplyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_migrate_apply(&work_dir, p).await
-        }
+        },
         "write_text" => write_text(state, decode(&method, params)?).await,
         "write_bytes" => write_bytes(state, decode(&method, params)?).await,
         "dedup_savings" => {
             let p: DedupSavingsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             dedup_savings(&work_dir, p).await
-        }
+        },
         "git_release_timeline" => git_release_timeline(state, decode(&method, params)?).await,
         "repo_size_history" => repo_size_history(state, decode(&method, params)?).await,
         "git_commit_size_distribution" => {
             git_commit_size_distribution(state, decode(&method, params)?).await
-        }
+        },
         "git_contributor_growth" => git_contributor_growth(state, decode(&method, params)?).await,
         "git_blame" => git_blame(state, decode(&method, params)?).await,
         "git_diff_name_only" => git_diff_name_only(state, decode(&method, params)?).await,
         "system_health" => {
             let p: crate::system_health::SystemHealthParams = decode(&method, params)?;
             crate::system_health::system_health(p).await
-        }
+        },
         "discover_repos" => {
             let p: crate::workspace_discovery::DiscoverReposParams = decode(&method, params)?;
             crate::workspace_discovery::discover_repos(p).await
-        }
+        },
         "batch_git_status" => {
             let p: crate::batch_git_status::BatchGitStatusParams = decode(&method, params)?;
             crate::batch_git_status::batch_git_status(&state.git_status_cache, p).await
-        }
-        other => Err(AgentError::UnknownMethod(other.to_owned())),
+        },
     }
 }
 
@@ -5554,6 +5572,62 @@ mod tests {
         let _ = sh(&root, &["config", "user.email", "test@example.com"]);
         let _ = sh(&root, &["config", "user.name", "Test User"]);
         (td, root)
+    }
+
+    #[tokio::test]
+    async fn capabilities_describe_the_native_dispatcher_without_a_repository() {
+        let state = State::new();
+        let out = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+        let request = |method: &str| Request {
+            jsonrpc: Some("2.0".into()),
+            id: Some(json!(1)),
+            method: method.into(),
+            params: json!({}),
+        };
+        let result = handle(&state, request("capabilities"), out.clone())
+            .await
+            .unwrap();
+        assert_eq!(result["protocol"], 1);
+        assert_eq!(result["version"], env!("CARGO_PKG_VERSION"));
+        let methods = result["methods"].as_array().unwrap();
+        for method in [
+            "capabilities",
+            "ping",
+            "open_local",
+            "file_open",
+            "file_chunks",
+            "read_range",
+            "file_materialize",
+            "rpc/cancel",
+            "close",
+        ] {
+            assert!(methods.contains(&json!(method)), "missing {method}");
+        }
+        assert_eq!(
+            methods.len(),
+            methods
+                .iter()
+                .map(Value::to_string)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+        for method in [
+            "compress_file",
+            "chunk_signatures",
+            "watch_start",
+            "unknown",
+        ] {
+            assert!(!methods.contains(&json!(method)));
+            assert!(matches!(
+                handle(&state, request(method), out.clone()).await,
+                Err(AgentError::UnknownMethod(_))
+            ));
+        }
+        assert_eq!(
+            handle(&state, request("ping"), out).await.unwrap()["pong"],
+            result["version"]
+        );
+        state.shutdown().await.unwrap();
     }
 
     #[tokio::test]

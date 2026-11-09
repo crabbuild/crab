@@ -388,18 +388,9 @@ describe("sshEnhancedReducer", () => {
 
   describe("CAPABILITIES actions", () => {
     const caps: AgentCapabilities = {
-      version: "1.3.0",
-      features: {
-        fileWatching: true,
-        deltaSync: true,
-        compression: true,
-        processManagement: true,
-        environmentManagement: true,
-        debugging: false,
-        search: true,
-        buildRun: true,
-        logTailing: true,
-      },
+      protocol: 1,
+      version: "2.0.0-alpha.1",
+      methods: ["capabilities", "ping", "read_range"],
     };
 
     it("CAPABILITIES_SET stores capabilities for a profile", () => {
