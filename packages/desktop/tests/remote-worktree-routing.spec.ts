@@ -218,30 +218,6 @@ describe("Remote worktree RPC routing", () => {
     });
   });
 
-  describe("worktree methods are not blocked during reconnection (read-only)", () => {
-    it("queues git_worktree_list during reconnection (read-only method)", async () => {
-      const { provider, sessionManager } = createTestSetup();
-
-      // Simulate connection loss
-      sessionManager.setStatus(TEST_PROFILE_ID, "reconnecting");
-
-      const params = { repo_id: TEST_REPO_ID };
-
-      // git_worktree_list is not in the WRITE_METHODS set, so it should
-      // be queued (not rejected) during reconnection.
-      const resultPromise = provider.request("git_worktree_list", params);
-
-      // The promise should be pending (queued), not rejected
-      let settled = false;
-      resultPromise.then(() => { settled = true; }).catch(() => { settled = true; });
-
-      // Give microtasks a chance to run
-      await new Promise((r) => setTimeout(r, 10));
-      // It should still be pending (queued for replay)
-      expect(settled).toBe(false);
-    });
-  });
-
   describe("RemoteProvider capabilities include canWorktree", () => {
     it("reports canWorktree: true when connected", async () => {
       const { provider } = createTestSetup();

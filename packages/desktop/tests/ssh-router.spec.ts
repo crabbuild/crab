@@ -327,13 +327,13 @@ describe("RpcRouter — call queuing during reconnection", () => {
     expect(result).toEqual({ status: "clean" });
   });
 
-  it("rejects write operations immediately during reconnection", async () => {
+  it("rejects live operations immediately during reconnection", async () => {
     const sm = new MockSessionManager();
     sm.setStatus("server", "reconnecting");
 
     const { router } = createRouter(sm);
 
-    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range", "read_bytes", "read_text", "preview_parquet", "rpc/cancel", "unknown_operation"]) {
+    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range", "read_bytes", "read_text", "preview_parquet", "rpc/cancel", "forge_list_prs", "staging_stats", "git_worktree_list", "git_stash_list", "unknown_operation"]) {
       await expect(
         router.route("ssh://server/repo", method, { repo_id: "ssh://server/repo" }),
       ).rejects.toThrow("Connection lost: live operations are unavailable during reconnection");

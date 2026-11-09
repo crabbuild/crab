@@ -28,7 +28,7 @@ beforeEach(async () => {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing test SSH address");
-  profile = { id: randomUUID(), label: "Host verification fixture", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "password" }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: false, tags: [], portForwards: [], createdAt: Date.now(), connectionTimeoutMs: 100 };
+  profile = { id: randomUUID(), label: "Host verification fixture", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "password" }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: false, tags: [], portForwards: [], createdAt: Date.now(), connectionTimeoutMs: 2000 };
 });
 
 afterEach(async () => {
@@ -43,8 +43,8 @@ describe("SSH host identity before authentication", () => {
     manager = new SshSessionManager(undefined, verify);
     const connected = manager.connect(profile);
     const outcome = connected.catch(error => error);
-    await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce(), { timeout: 1000 });
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce(), { timeout: profile.connectionTimeoutMs });
+    await new Promise(resolve => setTimeout(resolve, profile.connectionTimeoutMs! + 100));
     expect(passwordAttempts).toBe(0);
     accept!(true);
     await connected;

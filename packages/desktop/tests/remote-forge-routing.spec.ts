@@ -389,27 +389,6 @@ describe("Remote forge/PR RPC routing", () => {
     });
   });
 
-  describe("forge methods are queued (not rejected) during reconnection", () => {
-    it("queues forge_list_prs during reconnection (network-based read)", async () => {
-      const { provider, sessionManager } = createTestSetup();
-
-      sessionManager.setStatus(TEST_PROFILE_ID, "reconnecting");
-
-      const params = { repo_id: TEST_REPO_ID };
-
-      // forge_list_prs is not a write method, so it should be queued
-      // (not rejected) during reconnection.
-      const resultPromise = provider.request("forge_list_prs", params);
-
-      let settled = false;
-      resultPromise.then(() => { settled = true; }).catch(() => { settled = true; });
-
-      // Give microtasks a chance to run
-      await new Promise((r) => setTimeout(r, 10));
-      expect(settled).toBe(false);
-    });
-  });
-
   describe("PullRequestsView calls forge methods with repo_id (routing verification)", () => {
     it("forge methods accept repo_id as the routing key", () => {
       // The PullRequestsView calls rpc.forgeListPrs(repo.repo_id) which

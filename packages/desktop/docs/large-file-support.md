@@ -822,3 +822,14 @@ acceptance matrix above remains the completion boundary.
   qualification. Empty-start SSH navigation, remote index ownership and the rest
   of the acceptance matrix remain open. This transport fixture supplies the real
   native process through SSH; it does not qualify the application's deployer.
+- Follow-up broad Linux CI for `6b8a8ce059a` passes the native tests, packaging
+  and packaged smoke, then fails six obsolete replay/message expectations and
+  three real-network host tests using a 100 ms handshake budget. The routing
+  failures reproduce locally. The removed non-cacheable replay tests are
+  consolidated into the router's explicit rejection table, including forge,
+  staging, worktree and stash methods; cacheable metadata replay remains tested.
+  Error assertions use the stable `SSH_RECONNECTING` code. The host fixture uses
+  a two-second network deadline and holds trust longer than that deadline, so it
+  still proves the human-review pause. All 108 cases across those seven files
+  pass locally. This corrects the test contract; it does not widen replay or
+  change production connection deadlines. Broad CI still needs a green rerun.

@@ -386,22 +386,4 @@ describe("Remote Push Flow Panel — staging_stats routing", () => {
       expect(parsed).not.toBeNull();
     });
   });
-
-  describe("staging_stats is queued during reconnection (not rejected)", () => {
-    it("queues staging_stats during reconnection since it is a read operation", async () => {
-      const { provider, sessionManager } = createTestSetup();
-
-      sessionManager.setStatus(TEST_PROFILE_ID, "reconnecting");
-
-      const params = { repo_id: TEST_REPO_ID };
-      const resultPromise = provider.request("staging_stats", params);
-
-      let settled = false;
-      resultPromise.then(() => { settled = true; }).catch(() => { settled = true; });
-
-      // Give microtasks a chance to run
-      await new Promise((r) => setTimeout(r, 10));
-      expect(settled).toBe(false);
-    });
-  });
 });
