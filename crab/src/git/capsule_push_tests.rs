@@ -996,7 +996,75 @@ async fn sibling_ref_objects_are_not_used_as_a_fast_forward_visibility_delta() {
 }
 
 #[test]
-fn non_fast_forward_visibility_keeps_removed_objects() {
+fn force_rewrite_visibility_preserves_complete_history() {
+    let source = tempfile::tempdir().expect("source repository");
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let first = commit(source.path(), "A");
+    let second = commit(source.path(), "B");
+    let third = commit(source.path(), "A");
+    git(source.path(), &["checkout", "--detach", &second]);
+    let sibling = commit(source.path(), "C");
+    git(source.path(), &["checkout", "--detach", &first]);
+    commit(source.path(), "B");
+    git(source.path(), &["commit", "--amend", "-m", "replacement B"]);
+    let replacement = commit(source.path(), "C");
+    let directory = source.path().join(".git");
+
+    for (old, new) in [(&third, &sibling), (&second, &replacement)] {
+        let closure = |tip: &str| {
+            git(
+                source.path(),
+                &["rev-list", "--objects", "--no-object-names", tip],
+            )
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+        };
+        let prior = closure(old);
+        let expected = closure(new);
+        for refs in [1, 2] {
+            let edits = ["refs/heads/main", "refs/heads/side"][..refs]
+                .iter()
+                .map(|name| {
+                    crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                        *name,
+                        Some(old.clone()),
+                        Some(new.clone()),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let visibility = prepare_visibility_delta(
+                &directory,
+                &edits,
+                &BTreeSet::new(),
+                None,
+                &CancellationToken::new(),
+            )
+            .expect("prepare valid forced rewrite")
+            .expect("forced rewrite has visibility evidence");
+            for evidence in visibility.edits().values() {
+                assert_eq!(
+                    evidence
+                        .apply(Some(&prior))
+                        .expect("apply rewrite evidence"),
+                    expected,
+                    "old={old}, new={new}, refs={refs}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rewinding_ref_preserves_ancestor_visibility() {
     let source = tempfile::tempdir().expect("source repository");
     git(source.path(), &["init", "--initial-branch=main"]);
     git(source.path(), &["config", "user.name", "Crab Test"]);
@@ -1027,24 +1095,21 @@ fn non_fast_forward_visibility_keeps_removed_objects() {
         .edits()
         .get(ref_name)
         .expect("main visibility evidence");
-    let expected_removed = super::super::push::enumerate_visibility_difference(
-        &git_dir,
-        &old_oid,
-        Some(&new_oid),
-        usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
-            .expect("visibility limit fits usize"),
+    let expected = git(
+        source.path(),
+        &["rev-list", "--objects", "--no-object-names", &new_oid],
     )
-    .expect("enumerate no-longer-reachable objects")
-    .expect("visibility is below its limit")
+    .lines()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>()
     .into_iter()
-    .collect::<BTreeSet<_>>();
-
-    assert!(!expected_removed.is_empty());
+    .collect::<Vec<_>>();
     assert_eq!(
-        evidence.removed.iter().cloned().collect::<BTreeSet<_>>(),
-        expected_removed
+        evidence
+            .apply(None)
+            .expect("apply complete rewrite evidence"),
+        expected
     );
-    evidence.validate().expect("visibility edit remains valid");
 }
 
 #[tokio::test]

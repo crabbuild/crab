@@ -54,6 +54,11 @@ push can reuse ancestry already published at its excluded remote tip. Crab leave
 local Git history settings unchanged. The supported shallow/deepen fetch profile
 below retains its explicit client boundary.
 
+Visibility publication reuses a prior ref closure only for a proven fast-forward.
+A forced rewrite publishes its complete new closure, including shared historical
+trees and blobs, even when the old tip is available locally. Git's negative
+revision ranges are packing inputs, not exact sets of objects to revoke.
+
 Recursive submodule operations need explicit trust for a custom transport,
 as required by [Git's protocol policy](https://git-scm.com/docs/git-config#Documentation/git-config.txt-protocolallow).
 For repositories whose submodule URLs have been reviewed, scope that trust to
