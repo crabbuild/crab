@@ -50,6 +50,8 @@ type Action =
   | { type: "set_dirty"; dirty: boolean }
   | { type: "run_started"; run_id: string; stages: string[] }
   | { type: "stage_status"; name: string; status: StageRunStatus; duration_ms?: number; error?: string }
+  | { type: "run_output"; text: string; error?: boolean }
+  | { type: "clear_output" }
   | { type: "run_done"; status: "done" | "failed" | "cancelled"; error?: string }
   | { type: "set_error"; message: string }
   | { type: "reset_run" }
@@ -171,6 +173,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
           run_id: action.run_id,
           status: "running",
           stages,
+          output: [],
           started_at: Date.now(),
         },
       };
@@ -188,6 +191,24 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
         runState: { ...state.runState, stages },
       };
     }
+
+    case "run_output":
+      if (!state.runState) return state;
+      return {
+        ...state,
+        runState: {
+          ...state.runState,
+          output: [...state.runState.output, {
+            id: (state.runState.output.at(-1)?.id ?? 0) + 1,
+            text: action.text,
+            error: action.error,
+          }].slice(-500),
+        },
+      };
+
+    case "clear_output":
+      if (!state.runState) return state;
+      return { ...state, runState: { ...state.runState, output: [] } };
 
     case "run_done":
       if (!state.runState) return state;
@@ -250,6 +271,8 @@ export function useWorkflowEditor(repoId: string) {
 
   // Load workflow list + active workflow.
   const load = useCallback(async (filePath?: string) => {
+    runIdRef.current = null;
+    dispatch({ type: "reset_run" });
     dispatch({ type: "set_loading" });
     try {
       const { files } = await rpc.workflowList(repoId);
@@ -402,28 +425,44 @@ export function useWorkflowEditor(repoId: string) {
   // Subscribe to workflow execution events.
   useEffect(() => {
     const unsub = onAgentEvent((evt) => {
+      // Own logs alongside run state: fast CLI notifications can arrive before
+      // the output pane renders, and another repository's jobs must stay separate.
+      if (evt.method === "progress/line") {
+        const line = evt.params as { job_id?: string; line?: string };
+        if (line.job_id === runIdRef.current && typeof line.line === "string") {
+          dispatch({ type: "run_output", text: line.line });
+        }
+        return;
+      }
       if (evt.method !== "workflow/event") return;
-      const event = evt.params as { job_id: string; schema: string; data: Record<string, unknown> };
-      if (event.job_id !== runIdRef.current) return;
+      const { job_id, schema, data } = evt.params as { job_id: string; schema: string; data: Record<string, unknown> | null };
+      // Terminal error frames carry `error` instead of stage `data`; the RPC
+      // rejection reports them without treating them as a stage update.
+      if (job_id !== runIdRef.current || !data) return;
       const statuses: Record<string, StageRunStatus> = {
         "workflow.stage.started": "running",
         "workflow.stage.running": "running",
-        "workflow.stage.committed": event.data.cache_hit ? "cached" : "done",
+        "workflow.stage.committed": data.cache_hit ? "cached" : "done",
         "workflow.stage.failed": "failed",
         "workflow.stage.not_started": "pending",
       };
-      const status = statuses[event.schema];
-      if (!status || typeof event.data.stage !== "string") return;
+      const status = statuses[schema];
+      if (!status || typeof data.stage !== "string") return;
       // Recursive CLI stage names include the workflow directory/name prefix.
       const parts = state.workflow?.path.replace(/\\/g, "/").split("/") ?? [];
       const filename = parts.pop();
       if (filename?.endsWith(".workflow.yaml")) parts.push(filename.slice(0, -".workflow.yaml".length));
       const prefix = parts.filter(part => part && part !== ".").join(".");
-      const stage = state.workflow?.stages.find(({ name }) => event.data.stage === (prefix ? `${prefix}.${name}` : name));
+      const stage = state.workflow?.stages.find(({ name }) => data.stage === (prefix ? `${prefix}.${name}` : name));
       if (!stage) return;
+      const labels: Partial<Record<StageRunStatus, string>> = {
+        running: "Started", cached: "Cached", done: "Completed", failed: "Failed", pending: "Not started",
+      };
+      const reason = status === "failed" && typeof data.reason === "string" ? `: ${data.reason}` : "";
+      dispatch({ type: "run_output", text: `${stage.name}: ${labels[status]}${reason}`, error: status === "failed" });
       dispatch({ type: "stage_status", name: stage.name, status,
-        duration_ms: event.data.duration_ms as number | undefined,
-        error: event.data.reason as string | undefined });
+        duration_ms: data.duration_ms as number | undefined,
+        error: data.reason as string | undefined });
     });
     return unsub;
   }, [state.workflow]);
@@ -451,6 +490,7 @@ export function useWorkflowEditor(repoId: string) {
       removeStage: (name: string) => dispatch({ type: "remove_stage", name }),
       setStages: (stages: WorkflowStage[]) => dispatch({ type: "set_stages", stages }),
       resetRun: () => dispatch({ type: "reset_run" }),
+      clearOutput: () => dispatch({ type: "clear_output" }),
       switchFile: (path: string) => {
         dispatch({ type: "set_active_file", path });
         load(path);

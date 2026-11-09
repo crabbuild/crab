@@ -38,9 +38,9 @@ import {
   SendToBack,
 } from "lucide-react";
 import { OpenRepo } from "../state";
-import { mainProcess, onAgentEvent } from "../ipc";
+import { mainProcess } from "../ipc";
 import { useWorkflowEditor } from "../hooks/useWorkflowEditor";
-import { WorkflowStage, StageRunStatus } from "../lib/workflow-types";
+import { WorkflowStage, StageRunStatus, WorkflowRunState } from "../lib/workflow-types";
 import { StageNode } from "../components/workflow/StageNode";
 import { StagePropertiesPanel } from "../components/workflow/StagePropertiesPanel";
 import { NewStageDialog } from "../components/workflow/NewStageDialog";
@@ -978,7 +978,7 @@ function WorkflowEditorInner({ repo }: Props) {
           </div>
 
           {/* Output pane */}
-          <WorkflowOutputPane />
+          <WorkflowOutputPane runState={state.runState} onClear={actions.clearOutput} />
         </div>
       )}
 
@@ -1144,39 +1144,27 @@ function LegendPanel() {
 
 // ─── Workflow Output Pane ────────────────────────────────────────────────────
 
-function WorkflowOutputPane() {
-  const [lines, setLines] = useState<Array<{ id: string; text: string; stream: string }>>([]);
+function WorkflowOutputPane({ runState, onClear }: { runState: WorkflowRunState | null; onClear: () => void }) {
+  const lines = runState?.output ?? [];
   const [collapsed, setCollapsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const unsub = onAgentEvent((event) => {
-      if (event.method === "progress/line") {
-        const data = event.params as { op?: string; job_id?: string; line?: string; stream?: string };
-        if (data.job_id?.startsWith("workflow_run") || data.op === "workflow_run") {
-          setLines((prev) => {
-            const next = [...prev, { id: `${Date.now()}-${prev.length}`, text: data.line ?? "", stream: data.stream ?? "stdout" }];
-            return next.length > 500 ? next.slice(-500) : next;
-          });
-        }
-      }
-    });
-    return unsub;
-  }, []);
+  useEffect(() => { setCollapsed(false); }, [runState?.run_id, runState?.error]);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [lines]);
+  }, [lines, runState?.error]);
 
   return (
-    <div className={clsx("shrink-0 border-t border-gx-border bg-gx-surface", collapsed ? "h-7" : "h-[160px]")}>
+    <div role="region" aria-label="Workflow output" className={clsx("shrink-0 border-t border-gx-border bg-gx-surface", collapsed ? "h-7" : "h-[160px]")}>
       <div className="flex h-7 items-center justify-between border-b border-gx-border px-3">
         <button
           type="button"
           className="flex items-center gap-1.5 text-[11px] font-medium text-gx-muted hover:text-gx-text"
           onClick={() => setCollapsed(!collapsed)}
+          aria-expanded={!collapsed}
         >
           <ChevronDown size={12} className={clsx("transition", collapsed && "-rotate-90")} />
           Output
@@ -1187,25 +1175,26 @@ function WorkflowOutputPane() {
           )}
         </button>
         {!collapsed && lines.length > 0 && (
-          <button type="button" className="text-[10px] text-gx-muted hover:text-gx-text" onClick={() => setLines([])}>
+          <button type="button" className="text-[10px] text-gx-muted hover:text-gx-text" onClick={onClear}>
             Clear
           </button>
         )}
       </div>
       {!collapsed && (
         <div ref={scrollRef} className="h-[calc(100%-28px)] overflow-auto px-3 py-1 font-mono text-[11px]">
-          {lines.length === 0 ? (
-            <div className="py-4 text-center text-gx-muted/60">Run a workflow to see output here.</div>
+          {lines.length === 0 && !runState?.error ? (
+            <div className="py-4 text-center text-gx-muted">{runState?.status === "running" ? "Waiting for workflow output…" : runState ? "No command output for this run." : "Run a workflow to see output here."}</div>
           ) : (
             lines.map((line) => (
               <div
                 key={line.id}
-                className={clsx("whitespace-pre-wrap break-all leading-relaxed", line.stream === "stderr" ? "text-gx-error/80" : "text-gx-text/80")}
+                className={clsx("whitespace-pre-wrap break-all leading-relaxed", line.error ? "text-gx-error" : "text-gx-text/80")}
               >
                 {line.text}
               </div>
             ))
           )}
+          {runState?.error && <div role="alert" className="whitespace-pre-wrap break-words py-1 text-gx-error">{runState.error}</div>}
         </div>
       )}
     </div>

@@ -117,6 +117,7 @@ export interface WorkflowRunState {
   run_id: string;
   status: "idle" | "running" | "done" | "failed" | "cancelled";
   stages: StageRunState[];
+  output: Array<{ id: number; text: string; error?: boolean }>;
   started_at?: number;
   finished_at?: number;
   error?: string;
