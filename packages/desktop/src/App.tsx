@@ -671,7 +671,7 @@ function Shell() {
               )}
             </main>
           </Panel>
-          <PanelResizeHandle className={bottomTerminalOpen && !terminalMaximized ? "h-px cursor-row-resize bg-gx-border hover:bg-gx-accent/50" : "pointer-events-none h-0"} />
+          <PanelResizeHandle disabled={!bottomTerminalOpen || terminalMaximized} tabIndex={bottomTerminalOpen && !terminalMaximized ? 0 : -1} className={bottomTerminalOpen && !terminalMaximized ? "h-px cursor-row-resize bg-gx-border hover:bg-gx-accent/50" : "pointer-events-none h-0"} />
           <Panel defaultSize={0} minSize={bottomTerminalOpen ? 10 : 0} maxSize={terminalMaximized ? 100 : 80} collapsible collapsedSize={0} className={bottomTerminalOpen ? "min-h-0 bg-gx-bg-sub" : "hidden"}>
             {/* Closing or maximizing changes visibility, never PTY ownership. */}
             {terminalActivated && (

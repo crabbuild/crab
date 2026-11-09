@@ -1031,6 +1031,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
 
   // Cmd+Shift+T: open a remote terminal on the most recently used SSH connection.
   useEffect(() => {
+    if (!visible) return;
     function handleQuickSshTerminal(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "T") {
         e.preventDefault();
@@ -1051,7 +1052,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
     window.addEventListener("keydown", handleQuickSshTerminal);
     return () => window.removeEventListener("keydown", handleQuickSshTerminal);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId]);
+  }, [splitTree, activePaneId, visible]);
 
   const getActivePane = useCallback(() => {
     return findLeaf(splitTree, activePaneId) ?? getAllLeaves(splitTree)[0] ?? null;
@@ -1644,8 +1645,9 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
   }
 
 
-  // Keyboard shortcuts.
+  // Hidden kept-alive terminals retain PTYs, but must not consume app shortcuts.
   useEffect(() => {
+    if (!visible) return;
     function handleKeyDown(e: KeyboardEvent) {
       const meta = e.metaKey || e.ctrlKey;
 
@@ -1698,7 +1700,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePaneId, splitTree, searchVisible, quickCmdOpen]);
+  }, [activePaneId, splitTree, searchVisible, quickCmdOpen, visible]);
 
   function switchTab(direction: number) {
     const activeLeaf = findLeaf(splitTree, activePaneId);

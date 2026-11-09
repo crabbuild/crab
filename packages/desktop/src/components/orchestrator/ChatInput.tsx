@@ -585,7 +585,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="relative rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
+      className="relative isolate rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown

@@ -21,6 +21,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import clsx from "clsx";
 import {
   AtSign,
@@ -147,7 +148,7 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
 
   if (!open) return null;
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[8vh]"
       onClick={onClose}
@@ -354,7 +355,8 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

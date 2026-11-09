@@ -142,6 +142,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     }
     const composer = page.getByPlaceholder("Ask anything. / for commands, @ for context, # for files…");
     const draft = "Keep this draft while managing skills @";
+    await page.setViewportSize({ width: 880, height: 560 });
     await composer.fill(draft);
     const chatNavigation = page.getByRole("navigation", { name: "Agent chat", exact: true });
     await chatNavigation.getByRole("button", { name: "Skills", exact: true }).click();
@@ -161,6 +162,13 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await page.screenshot({ path: test.info().outputPath("skills-in-chat.png") });
     await chatNavigation.getByRole("button", { name: "Chats", exact: true }).click();
     await expect(composer).toHaveValue(draft);
+    await page.getByRole("button", { name: "Add context", exact: true }).click();
+    await page.getByRole("button", { name: /^Instructions/ }).click();
+    const contextDialog = page.getByRole("dialog", { name: "Add context", exact: true });
+    await expect(contextDialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(contextDialog).toBeHidden();
+    await page.setViewportSize({ width: 1280, height: 820 });
     await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Health & Diagnostics", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Diagnostics", exact: true }).click();
@@ -214,6 +222,8 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("main")).toBeVisible();
     await page.getByRole("button", { name: "Toggle Terminal", exact: true }).click();
     await expect(page.locator(".xterm-screen").first()).toBeHidden();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+t" : "Control+t");
+    await page.getByRole("button", { name: "Repository overview", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Terminal", exact: true }).click();
     const reopenedProof = path.join(root, "terminal-reopened-proof.txt");
     await terminal.focus();

@@ -298,7 +298,8 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <nav aria-label="Agent chat" className="flex shrink-0 border-b border-gx-border bg-gx-surface">
+      {/* Composer suggestions stay below navigation; modal dialogs use the document layer. */}
+      <nav aria-label="Agent chat" className="relative z-10 flex shrink-0 border-b border-gx-border bg-gx-surface">
         {([
           { id: "chats", label: "Chats", icon: MessageSquare },
           { id: "skills", label: "Skills", icon: Puzzle },
@@ -2689,7 +2690,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                 {Array.from(activatedTerminalTasks).map((taskId) => {
                   const task = tasks.find((t) => t.id === taskId);
                   if (!task?.worktreePath) return null;
-                  const isVisible = activeTab === "terminal" && selectedTaskId === taskId;
+                  const isVisible = active && activeTab === "terminal" && selectedTaskId === taskId;
                   return (
                     <div
                       key={task.worktreePath}
