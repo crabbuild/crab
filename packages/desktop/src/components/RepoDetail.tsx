@@ -12,7 +12,8 @@ import { ChangesAndStashesView } from "../views/ChangesAndStashesView";
 import { SearchView } from "../views/SearchView";
 import { SettingsView } from "../views/SettingsView";
 import { WorktreeDetailPanel } from "../views/WorktreeDetailPanel";
-import { WorktreesAndBranchesView } from "../views/WorktreesAndBranchesView";
+import { BranchesView } from "../views/BranchesView";
+import { WorktreeView } from "../views/WorktreeView";
 import { TimelineAndConflictsView } from "../views/TimelineAndConflictsView";
 import { DashboardView } from "../views/DashboardView";
 import { CommitDetailView } from "../views/CommitDetailView";
@@ -75,7 +76,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
         const fullPaneViews: SidebarView[] = [
           "settings", "dashboard", "terminal", "crab",
           "workflows", "orchestrator", "changes", "timeline",
-          "pull-requests", "worktrees",
+          "pull-requests", "branches", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
           return "dashboard";
@@ -85,46 +86,16 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     }
     return "dashboard";
   });
-  const [worktreesBranchesTab, setWorktreesBranchesTabRaw] = useState<"worktrees" | "branches">(() => {
-    // Restore from per-repo session viewState first, fall back to global localStorage.
-    if (repo.path) {
-      const session = sessionManager.activate(repo.path);
-      const saved = session?.viewState?.worktreesBranchesTab;
-      if (saved === "branches" || saved === "worktrees") return saved;
-    }
-    const stored = localStorage.getItem("crab.worktreesBranches.tab");
-    return stored === "branches" ? "branches" : "worktrees";
-  });
   const [timelineConflictsTab, setTimelineConflictsTabRaw] = useState<"timeline" | "conflicts">(() => {
     const stored = localStorage.getItem("crab.timelineConflicts.tab");
     return stored === "conflicts" ? "conflicts" : "timeline";
   });
 
-  // Track which tab is active (for sidebar content only — does NOT
-  // affect the main pane). The main pane switches only when the user
-  // explicitly selects a branch or worktree item.
-  const handleTabChange = useCallback((tab: "worktrees" | "branches") => {
-    setWorktreesBranchesTabRaw(tab);
-  }, []);
-
   const handleTimelineConflictsTabChange = useCallback((tab: "timeline" | "conflicts") => {
     setTimelineConflictsTabRaw(tab);
   }, []);
 
-  // When a branch is selected, clear worktree selection so the main
-  // pane shows BranchDetailView. Vice versa for worktree selection.
-  const handleSelectBranch = useCallback((name: string | null) => {
-    setSelectedBranch(name);
-    if (name) setSelectedWorktree(null);
-  }, []);
-
-  const handleSelectWorktree = useCallback((wt: HydratedWorktreeEntry | null) => {
-    setSelectedWorktree(wt);
-    if (wt) setSelectedBranch(null);
-  }, []);
-
   const setActiveView = useCallback((view: SidebarView) => {
-    if (view !== "worktrees") setSelectedBranch(null);
     if (view !== "timeline") setConflictPath(null);
     setActiveViewRaw(view);
   }, []);
@@ -163,9 +134,8 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
   const [timelineCommits, setTimelineCommits] = useState<CommitRow[]>([]);
   const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(() => {
-    // Restore the branch selection owned by the worktrees view.
-    // so the user returns to the exact branch they were looking at.
-    if (activeView === "worktrees" && repo.path) {
+    // Branch selection belongs to its own route, independently of worktrees.
+    if (repo.path) {
       const session = sessionManager.activate(repo.path);
       const savedBranch = session?.viewState?.selectedBranch;
       if (typeof savedBranch === "string" && savedBranch.length > 0) {
@@ -310,7 +280,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
   // context — not just the view, but the item within the view.
   useSessionSubView("selectedCommit", selectedCommit);
   useSessionSubView("selectedBranch", selectedBranch);
-  useSessionSubView("worktreesBranchesTab", worktreesBranchesTab);
 
   // Conflict resolution: selected file in ConflictsView opens MergeEditor.
   const [conflictPath, setConflictPath] = useState<string | null>(null);
@@ -742,17 +711,16 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
       />
     ),
     crab: <CrabFlowView repo={repo} onSelectCommit={(sha) => { setSelectedCommit(sha); setActiveView("timeline"); }} onOpenFile={openFile} />,
+    branches: (
+      <BranchesView repo={repo} selectedBranch={selectedBranch} onSelectBranch={setSelectedBranch} />
+    ),
     worktrees: (
-      <WorktreesAndBranchesView
+      <WorktreeView
         repo={repo}
-        onSelectWorktree={handleSelectWorktree}
+        onSelectWorktree={setSelectedWorktree}
         selectedWorktree={selectedWorktree}
         statusMap={worktreeStatusMap}
         onStatusMapChange={setWorktreeStatusMap}
-        selectedBranch={selectedBranch}
-        onSelectBranch={handleSelectBranch}
-        requestedTab={worktreesBranchesTab}
-        onTabChange={handleTabChange}
       />
     ),
     timeline: (
@@ -816,7 +784,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
   const fullPaneActiveViews: SidebarView[] = [
     "settings", "dashboard", "terminal", "crab",
     "workflows", "orchestrator", "changes", "timeline",
-    "pull-requests", "worktrees",
+    "pull-requests", "branches", "worktrees",
   ];
   const showDashboardFallback =
     !hasOpenTabs &&
@@ -872,8 +840,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
                   }}
                   onSelectBranch={(name) => {
                     setSelectedBranch(name);
-                    setWorktreesBranchesTabRaw("branches");
-                    setActiveView("worktrees");
+                    setActiveView("branches");
                   }}
                 />
             ) : activeView === "timeline" && selectedCommit ? (
@@ -884,7 +851,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
                   onSelectCommit={setSelectedCommit}
                   onOpenFileAtRev={openFileAtRev}
                 />
-            ) : selectedBranch && !selectedWorktree ? (
+            ) : activeView === "branches" && selectedBranch ? (
               <BranchDetailView
                   repo={repo}
                   branchName={selectedBranch}
@@ -970,8 +937,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
                 }}
                 onSelectBranch={(name) => {
                   setSelectedBranch(name);
-                  setWorktreesBranchesTabRaw("branches");
-                    setActiveView("worktrees");
+                  setActiveView("branches");
                 }}
               />
             ) : splitTab ? (

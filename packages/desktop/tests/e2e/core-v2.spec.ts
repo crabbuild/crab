@@ -109,6 +109,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
   git(["add", "desktop-smoke.txt"]);
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
+  git(["branch", "topic"]);
   const application = await electron.launch({
     executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
     env: { ...process.env, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
@@ -203,10 +204,33 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     const gitNavigation = page.getByRole("navigation", { name: "Git", exact: true });
     await gitNavigation.getByRole("button", { name: "History", exact: true }).click();
     await expect(gitNavigation.getByRole("button", { name: "History", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await gitNavigation.getByRole("button", { name: "Branches & Worktrees", exact: true }).click();
-    await expect(primary.getByRole("button", { name: "Git", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(gitNavigation.getByRole("button")).toHaveText(["Changes", "History", "Branches", "Worktrees"]);
+    await gitNavigation.getByRole("button", { name: "Branches", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Branches & Worktrees", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Branches", exact: true })).toHaveCount(0);
+    await page.getByRole("option").filter({ hasText: "topic" }).click();
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-branches.png") });
+    await gitNavigation.getByRole("button", { name: "Worktrees", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Worktrees", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: `View worktree ${path.basename(root)}`, exact: true }).click();
+    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-worktrees.png") });
+    await page.setViewportSize({ width: 880, height: 560 });
+    await expect(gitNavigation.getByRole("button", { name: "Branches", exact: true })).toBeVisible();
+    await expect(gitNavigation.getByRole("button", { name: "Worktrees", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-tabs-compact.png") });
+    await page.setViewportSize({ width: 1280, height: 820 });
     await page.getByRole("button", { name: "Go back", exact: true }).click();
-    await expect(gitNavigation.getByRole("button", { name: "History", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(gitNavigation.getByRole("button", { name: "Branches", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toBeVisible();
+    await page.getByRole("button", { name: "Go forward", exact: true }).click();
+    await expect(gitNavigation.getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await expect(primary.getByRole("button", { name: "Git", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.reload();
+    await expect(page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
     await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
     await expect(page.getByRole("button", { name: "Create Workflow", exact: true })).toBeVisible();
     await primary.getByRole("button", { name: "SSH Connections", exact: true }).click();

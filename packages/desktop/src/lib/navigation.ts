@@ -2,7 +2,8 @@ export const VIEW_LABELS = {
   explorer: "Explorer",
   search: "Search",
   changes: "Changes",
-  worktrees: "Branches & Worktrees",
+  branches: "Branches",
+  worktrees: "Worktrees",
   timeline: "History",
   "pull-requests": "Pull Requests",
   crab: "Large Files",
@@ -18,7 +19,7 @@ export type SidebarView = keyof typeof VIEW_LABELS;
 export type NavigationGroup = "files" | "git";
 export const VIEW_GROUPS: Record<NavigationGroup, readonly SidebarView[]> = {
   files: ["explorer", "search"],
-  git: ["changes", "timeline", "worktrees", "pull-requests"],
+  git: ["changes", "timeline", "branches", "worktrees", "pull-requests"],
 };
 
 export function isSidebarView(view: string): view is SidebarView {
