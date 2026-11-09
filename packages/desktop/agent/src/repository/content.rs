@@ -1,4 +1,4 @@
-use std::{process::Stdio, time::SystemTime};
+use std::time::SystemTime;
 
 use crab_sdk::operation::{Cancellation, Options, ReadOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -6,6 +6,8 @@ use tokio::sync::Mutex;
 
 use super::*;
 
+mod command;
+pub(crate) mod diff;
 mod materialize;
 use materialize::WorkingPointer;
 
@@ -102,7 +104,7 @@ enum Source {
         oid: String,
     },
     Pointer {
-        reader: super::native::NativeFile,
+        reader: super::native::CapturedRead,
         identity: Identity,
         target: Option<WorkingPointer>,
     },
@@ -116,6 +118,17 @@ enum Source {
 
 impl FileSource {
     pub(crate) async fn capture(
+        repo: &BrowseSession,
+        path: &str,
+        rev: Option<&str>,
+        scope: ReadScope,
+    ) -> Result<Self> {
+        let source = Self::capture_metadata(repo, path, rev, scope).await?;
+        source.prepare_content().await?;
+        Ok(source)
+    }
+
+    async fn capture_metadata(
         repo: &BrowseSession,
         path: &str,
         rev: Option<&str>,
@@ -148,33 +161,16 @@ impl FileSource {
             // Resolve the index or revision once; a later checkout cannot redirect reads.
             let object = format!("{rev}:{path}");
             let oid = String::from_utf8(
-                git(
+                command::run(
                     root,
                     &["rev-parse", "--verify", "--end-of-options", &object],
+                    &scope,
                 )
                 .await?,
             )?
             .trim()
             .to_owned();
-            let size = String::from_utf8(git(root, &["cat-file", "-s", &oid]).await?)?
-                .trim()
-                .parse::<u64>()
-                .map_err(std::io::Error::other)?;
-            if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
-                let bytes = git(root, &["cat-file", "blob", &oid]).await?;
-                if let Some((size, identity)) = pointer_metadata(&bytes) {
-                    return Self::pointer(repo, root, bytes.into(), size, identity, None, scope)
-                        .await;
-                }
-            }
-            return Ok(Self {
-                scope,
-                size,
-                source: Arc::new(Source::Git {
-                    root: root.clone(),
-                    oid,
-                }),
-            });
+            return Self::git_blob(repo, root, oid, scope).await;
         }
         let absolute = tokio::fs::canonicalize(root.join(path))
             .await
@@ -220,7 +216,7 @@ impl FileSource {
                 } else {
                     None
                 };
-                return Self::pointer(repo, root, bytes, size, identity, target, scope).await;
+                return Self::pointer(repo, root, bytes, size, identity, target, scope);
             }
         }
         Ok(Self {
@@ -233,7 +229,47 @@ impl FileSource {
         })
     }
 
-    async fn pointer(
+    // Blob size probes and later reads both bypass replace refs. A captured
+    // physical object must not change when a user edits refs/replace.
+    async fn git_blob(
+        repo: &BrowseSession,
+        root: &Path,
+        oid: String,
+        scope: ReadScope,
+    ) -> Result<Self> {
+        let size = String::from_utf8(
+            command::run(
+                root,
+                &["--no-replace-objects", "cat-file", "-s", &oid],
+                &scope,
+            )
+            .await?,
+        )?
+        .trim()
+        .parse::<u64>()
+        .map_err(std::io::Error::other)?;
+        if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
+            let bytes = command::run(
+                root,
+                &["--no-replace-objects", "cat-file", "blob", &oid],
+                &scope,
+            )
+            .await?;
+            if let Some((size, identity)) = pointer_metadata(&bytes) {
+                return Self::pointer(repo, root, bytes.into(), size, identity, None, scope);
+            }
+        }
+        Ok(Self {
+            scope,
+            size,
+            source: Arc::new(Source::Git {
+                root: root.into(),
+                oid,
+            }),
+        })
+    }
+
+    fn pointer(
         repo: &BrowseSession,
         root: &Path,
         bytes: Bytes,
@@ -242,17 +278,7 @@ impl FileSource {
         target: Option<WorkingPointer>,
         scope: ReadScope,
     ) -> Result<Self> {
-        let source = repo
-            .readers
-            .open(root, bytes, scope.stop.clone(), scope.id.clone())
-            .await?;
-        if source.size != size {
-            let closed = source.close().await;
-            closed?;
-            return Err(AgentError::Other(
-                "native reader opened a different file size".into(),
-            ));
-        }
+        let source = repo.readers.capture(root, bytes, size, scope.id.clone())?;
         Ok(Self {
             scope,
             size,
@@ -298,6 +324,14 @@ impl FileSource {
         );
         json!({ "kind": kind, "representation": representation, "size": self.size, "can_materialize": can_materialize,
             "content_hash": hash, "git_oid": oid })
+    }
+
+    async fn prepare_content(&self) -> Result<()> {
+        self.scope.check()?;
+        if let Source::Pointer { reader, .. } = self.source.as_ref() {
+            reader.open(&self.scope.stop).await?;
+        }
+        Ok(())
     }
 
     pub(super) fn query(&self) -> Self {
@@ -358,7 +392,13 @@ impl FileSource {
                 reader,
                 identity: Identity::Blake3(_),
                 ..
-            } => reader.chunks(start, limit, &self.scope.stop).await?,
+            } => {
+                reader
+                    .open(&self.scope.stop)
+                    .await?
+                    .chunks(start, limit, &self.scope.stop)
+                    .await?
+            }
             Source::Remote { snapshot, path, .. } => {
                 self.scope
                     .run(async {
@@ -452,7 +492,11 @@ impl FileSource {
             }
             Source::Git { root, oid } => self.read_git(root, oid, start, length).await?,
             Source::Pointer { reader, .. } => {
-                reader.read(start, length as u32, &self.scope.stop).await?
+                reader
+                    .open(&self.scope.stop)
+                    .await?
+                    .read(start, length as u32, &self.scope.stop)
+                    .await?
             }
             Source::Remote { snapshot, path, .. } => {
                 let options = self.content_options()?.with_range(start..end)?;
@@ -521,63 +565,7 @@ impl FileSource {
     }
 
     async fn read_git(&self, root: &Path, oid: &str, start: u64, length: usize) -> Result<Bytes> {
-        let mut child = shellout::git_command()
-            .args(["cat-file", "blob", oid])
-            .current_dir(root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AgentError::Other("Git stdout unavailable".into()))?;
-        let read = async {
-            let mut remaining = start;
-            let mut discard = vec![0; (1024 * 1024_u64).min(start) as usize];
-            while remaining > 0 {
-                self.scope.check()?;
-                let take = remaining.min(discard.len() as u64) as usize;
-                stdout.read_exact(&mut discard[..take]).await?;
-                remaining -= take as u64;
-            }
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(length)
-                .map_err(std::io::Error::other)?;
-            bytes.resize(length, 0);
-            for chunk in bytes.chunks_mut(1024 * 1024) {
-                self.scope.check()?;
-                stdout.read_exact(chunk).await?;
-            }
-            if start + length as u64 == self.size {
-                let mut extra = [0];
-                if stdout.read(&mut extra).await? != 0 {
-                    return Err(AgentError::Other("Git blob exceeds captured size".into()));
-                }
-            }
-            self.scope.check()?;
-            Ok::<Bytes, AgentError>(bytes.into())
-        }
-        .await;
-        drop(stdout);
-        let complete = read.is_ok() && start + length as u64 == self.size;
-        let killed = if !complete {
-            child.start_kill()
-        } else {
-            Ok(())
-        };
-        let waited = child.wait_with_output().await;
-        let bytes = read?;
-        killed?;
-        let output = waited?;
-        if complete && !output.status.success() {
-            return Err(AgentError::Cli {
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
-        Ok(bytes)
+        command::blob(root, oid, start, length, self.size, &self.scope).await
     }
 }
 

@@ -156,7 +156,7 @@ crab-cache = { workspace = true, features = ["local-cache", "remote-client", "xe
 crab-cache-store = { workspace = true, features = ["remote-client"] }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-diff = { workspace = true }
-crab-git = { workspace = true }
+crab-git = { workspace = true, features = ["process"] }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
 crab-read = { workspace = true, features = ["local-staging"] }
@@ -180,7 +180,6 @@ xet-runtime = { workspace = true }
 # Async runtime.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs", "time", "signal", "process"] }
 tokio-util = { workspace = true, features = ["rt", "io"] }
-process-wrap = { version = "10.0.0", default-features = false, features = ["std", "process-group", "job-object"] }
 
 # Object storage abstraction.
 object_store = { workspace = true, features = [

@@ -12,7 +12,7 @@ completion. This record tracks implementation and qualification separately.
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
-| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
+| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured comparisons replace size-only reports and error fallbacks; actual ordered chunk metrics, explicit versions, same-size LFS identities and empty Git patches have focused proof. Packaged UI and remote/profile/format comparison qualification are being completed. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
@@ -524,3 +524,51 @@ remain bounded to 8 MiB, and complete preview responses retain their 200 MiB cap
   package passed. The policy adds no runtime configuration or dependency/API
   surface. Packaged remote cold-read progress, interruption, slow transfers and
   the remaining acceptance matrix still require qualification.
+
+## Captured comparison checkpoint
+
+`file_diff` now owns explicit working, index, revision and empty-side captures.
+Local refs resolve once, Git blobs retain physical object identity, and native
+pointer readers open only when actual content or recipes are needed. Matching
+pointer identities return without fetching a recipe. Ordinary Git patches,
+including textconv, remain Git's responsibility; comparison errors remain errors.
+
+Crab comparisons read actual ordered chunk pages and use the shared `crab-diff`
+engine. Hydrated working files use the canonical Gear chunker. Metrics describe
+ordered matching content independently of xorb placement; they are not network
+transfer estimates. Same-size LFS changes compare SHA-256 identities and leave
+Crab chunk metrics unknown. Existence is separate from zero size, including
+unborn HEAD and initial commits. Changed ranges have accessible pagination.
+
+The desktop's Git read/compare supervisor and CLI now share the same owned
+process-group/job-object boundary in `crab-git`. Cancellation and output limits
+stop descendants before joining pipe readers; partial Git ranges discard input
+incrementally and complete reads retain their separate 200 MiB ceiling.
+
+- Focused captured-source/comparison tests passed: twelve cases plus the real
+  native recipe fixture, two shared process-owner cases and nine ordered chunk
+  comparison cases. Existing native materialization and pointer-preview fixtures
+  passed after the deferred-reader change. Four SSH/provider transport test
+  files passed with 86 cases; live comparisons are never replayed from cache.
+- Dedicated RustFS comparison/materialization proof passed through a write-denying
+  proxy: local lazy clone and direct remote, Crab and LFS, same-size revisions,
+  empty baselines, exact materialization and unchanged index pointers. Equal
+  pointer comparisons made no storage requests. The read phase recorded 290
+  GET/HEAD requests and zero write attempts. Evidence:
+  `large-files-diff-proof.fhs5ucge/report.json` in the external build directory.
+- SDK CI exposed provider body retries escaping a completed header-admission
+  scope. The shared storage wrapper now scopes every payload poll, preserving
+  request/byte limits and cancellation during provider range resumes. The exact
+  S3 fixture failed before this fix and passed afterward against isolated RustFS;
+  its filesystem sibling, nineteen storage admission cases and storage Clippy
+  also passed. Typed rejection sources remain available through transport wrappers.
+- Hydration outside a Git worktree again preserves the original remote failure;
+  real local staging still restores an unpushed pointer. Both focused regression
+  tests passed. Shared chunk-page Clippy and wire-contract admission checks pass.
+- Packaged comparison screenshots currently cover chunk metrics, more than fifty
+  changed ranges, same-size LFS and initial commits. The full GUI rerun and final
+  matching package are still pending. Ordinary Git patches still read the live
+  index/worktree through Git, so concurrent mutation needs capture validation.
+  Notebook, inline staging/review, mode-only large-file changes, format comparisons
+  and remaining provider/profile surfaces still require implementation or
+  qualification; this does not close the matrix.

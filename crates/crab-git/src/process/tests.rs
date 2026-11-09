@@ -1,4 +1,5 @@
 use super::*;
+use std::{io::Read as _, process::Stdio};
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -11,13 +12,8 @@ fn cleanup_accepts_a_group_exiting_before_waitid_can_report_it() {
             .args(["-c", "65536", "/dev/zero"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut process = CommandWrap::from(process);
-        process.wrap(process_wrap::std::ProcessGroup::leader());
-        let mut child = OwnedChild {
-            inner: process.spawn().unwrap(),
-            finished: false,
-        };
-        let mut stdout = child.inner.stdout().take().unwrap();
+        let mut child = OwnedChild::spawn(process).unwrap();
+        let mut stdout = child.take_stdout().unwrap();
         stdout.read_exact(&mut [0; 65536]).unwrap();
         child.stop().unwrap();
     }
@@ -28,12 +24,7 @@ fn cleanup_accepts_a_group_exiting_before_waitid_can_report_it() {
 fn cleanup_does_not_hide_permission_errors_for_a_live_group() {
     let mut process = Command::new("/bin/sleep");
     process.arg("30");
-    let mut process = CommandWrap::from(process);
-    process.wrap(process_wrap::std::ProcessGroup::leader());
-    let mut child = OwnedChild {
-        inner: process.spawn().unwrap(),
-        finished: false,
-    };
+    let mut child = OwnedChild::spawn(process).unwrap();
     let result = child.signal_result(Err(io::Error::from_raw_os_error(libc::EPERM)));
     child.stop().unwrap();
     assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPERM));

@@ -315,7 +315,7 @@ describe("Provider Resolution Integration — remote repos", () => {
     const methods = [
       "git_status_porcelain",
       "git_log",
-      "git_diff_file",
+      "file_diff",
       "git_stage",
       "git_commit",
       "list_refs",

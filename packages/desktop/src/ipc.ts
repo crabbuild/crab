@@ -1659,12 +1659,51 @@ export function searchReplaceCancellable(
   return callCancellable("search_replace", { repo_id, query, replacement, ...opts });
 }
 
-export function gitDiffFileCancellable(
+export type DiffVersion =
+  | { kind: "working" | "index" | "empty" }
+  | { kind: "revision"; rev: string };
+
+export interface ChunkDiffMetrics {
+  old_source: "committed" | "staged" | "worktree";
+  new_source: "committed" | "staged" | "worktree";
+  old_chunks: number;
+  new_chunks: number;
+  unchanged_chunks: number;
+  removed_chunks: number;
+  added_chunks: number;
+  old_bytes: number;
+  new_bytes: number;
+  unchanged_bytes: number;
+  removed_bytes: number;
+  added_bytes: number;
+  signed_delta_bytes: number;
+  reuse_ratio: number;
+  changed_byte_ranges_old: Array<[number, number]>;
+  changed_byte_ranges_new: Array<[number, number]>;
+}
+
+export interface LargeFileDiff {
+  kind: "large_file";
+  path: string;
+  status: "unchanged" | "added" | "deleted" | "modified";
+  before: { kind: "crab" | "lfs"; size: number; hash: string } | null;
+  after: { kind: "crab" | "lfs"; size: number; hash: string } | null;
+  before_exists: boolean;
+  after_exists: boolean;
+  old_size: number | null;
+  new_size: number | null;
+  chunk_metrics: ChunkDiffMetrics | null;
+  metrics_note: string;
+}
+
+export type FileComparison = { kind: "git"; path: string; patch: string } | LargeFileDiff;
+
+export function fileDiffCancellable(
   repo_id: string,
   path: string,
-  opts: { base?: string; head?: string } = {},
-): CancellableCall<{ path: string; patch: string }> {
-  return callCancellable("git_diff_file", { repo_id, path, ...opts });
+  opts: { before: DiffVersion; after: DiffVersion; old_path?: string },
+): CancellableCall<FileComparison> {
+  return callCancellable("file_diff", { repo_id, path, ...opts });
 }
 
 // Naive unique id for repo handles. Collisions are harmless (the
@@ -1790,16 +1829,6 @@ export const rpc = {
 
   gitStatus: (repo_id: string) =>
     call<{ entries: Array<{ path: string; code: string }> }>("git_status_porcelain", { repo_id }),
-
-  gitDiffFile: (repo_id: string, path: string, opts: { base?: string; head?: string } = {}) =>
-    call<{ path: string; patch: string }>("git_diff_file", { repo_id, path, ...opts }),
-
-  crabDiffFile: (repo_id: string, path: string, opts: { base?: string; head?: string } = {}) =>
-    call<{ path: string; patch: string; backend: string; crab_diff?: string }>("crab_diff_file", {
-      repo_id,
-      path,
-      ...opts,
-    }),
 
   /** Working-tree-vs-index diff as a single unified patch. Used by
    *  the Changes view's right pane so the user sees exactly what

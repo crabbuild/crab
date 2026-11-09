@@ -499,7 +499,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     const key = `diff::${path}`;
     setDiffTabs((prev) => (prev.some((t) => t.key === key) ? prev : [...prev, { key, path }]));
     setActiveKey(key);
-  }, []);
+    // Changes occupies the main pane; selecting a tab alone leaves it hidden.
+    setActiveView("explorer");
+  }, [setActiveView]);
 
   // --- Tab context menu operations ---
 

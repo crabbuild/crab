@@ -12,13 +12,15 @@ path = "src/main.rs"
 [dependencies]
 # Read-side verbs go through the SDK.
 crab-sdk = { workspace = true, features = ["files", "service", "local"] }
-crab-git = { workspace = true }
+crab-git = { workspace = true, features = ["process"] }
 crab-types = { workspace = true }
 crab-storage = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
 crab-auth = { workspace = true }
 crab-auth-store = { workspace = true, features = ["managed-service"] }
 crab-workflow = { workspace = true }
+crab-diff = { workspace = true }
+crab-xet = { workspace = true, features = ["chunker"] }
 
 # Async runtime. We pin the same major as the rest of the workspace so
 # the shared lock stays narrow.

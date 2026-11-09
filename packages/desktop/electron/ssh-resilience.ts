@@ -169,7 +169,6 @@ export class ResilienceManager extends EventEmitter {
   private isReadOnly(method: string): boolean {
     const readMethods = new Set([
       "git_status_porcelain",
-      "git_diff_file",
       "git_log",
       "git_stash_list",
       "list_refs",

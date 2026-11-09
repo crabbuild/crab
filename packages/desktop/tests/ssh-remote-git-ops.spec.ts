@@ -104,9 +104,9 @@ describe("Remote Git Operations via RPC Router", () => {
       expect(written.method).toBe("git_status_porcelain");
     });
 
-    it("routes git_diff_file to remote agent", async () => {
+    it("routes file_diff to remote agent", async () => {
       const repoId = "ssh://gpu-server/home/user/repo";
-      const promise = router.route(repoId, "git_diff_file", { repo_id: repoId, path: "src/main.rs" });
+      const promise = router.route(repoId, "file_diff", { repo_id: repoId, path: "src/main.rs" });
 
       const written = JSON.parse(channel.written[0]);
       simulateResponse(channel, written.id, { diff: "@@ -1,3 +1,4 @@\n+new line" });
@@ -357,7 +357,7 @@ describe("Remote Git Operations via RPC Router", () => {
     it("handles large diff responses without truncation at router level", async () => {
       const repoId = "ssh://gpu-server/home/user/repo";
       const largeDiff = "a".repeat(10_000_000); // 10MB
-      const promise = router.route(repoId, "git_diff_file", { repo_id: repoId, path: "big.rs" });
+      const promise = router.route(repoId, "file_diff", { repo_id: repoId, path: "big.rs" });
 
       const written = JSON.parse(channel.written[0]);
       simulateResponse(channel, written.id, { diff: largeDiff });

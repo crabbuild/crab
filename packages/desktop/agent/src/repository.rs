@@ -11,11 +11,12 @@ use crab_sdk::{Client, GitPath, OpenOptions, RepositoryLocator, Revision};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::{AgentError, Result, shellout};
+use crate::{AgentError, Result};
 
 mod content;
 mod files;
 mod native;
+pub(crate) use content::diff;
 pub(crate) use content::{FileSource, MAX_COMPLETE_BYTES, ReadScope};
 
 #[derive(Clone)]

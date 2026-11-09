@@ -168,6 +168,10 @@ I/O, cancellation or child-exit failure, and enforce aggregate inventory limits.
 ## Feature flags and boundaries
 
 - Default features keep the crate on the focused `gix-*` building blocks.
+- `process` exposes `process::OwnedChild`: Unix process-group and Windows job
+  ownership with non-releasing exit polling, tree signalling and reaping. Callers
+  select cancellation/grace/output limits and join pipe workers after stopping
+  on errors. The CLI and desktop share its Darwin exit-race handling.
 - `facade` enables the optional high-level `gix` repository facade for callers
   that need it.
 - LFS pointer parsing belongs here, but LFS object bytes belong to

@@ -134,7 +134,7 @@ describe("isWriteMethod", () => {
   it("identifies read methods", () => {
     expect(isWriteMethod("git_status_porcelain")).toBe(false);
     expect(isWriteMethod("git_log")).toBe(false);
-    expect(isWriteMethod("git_diff_file")).toBe(false);
+    expect(isWriteMethod("file_diff")).toBe(true);
     expect(isWriteMethod("list_refs")).toBe(false);
     expect(isWriteMethod("repo_summary")).toBe(false);
   });
@@ -362,7 +362,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     const { router } = createRouter(sm);
 
-    for (const method of ["git_commit", "cache_clean", "file_open", "file_chunks", "file_close", "file_materialize", "read_range"]) {
+    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range"]) {
       await expect(
         router.route("ssh://server/repo", method, { repo_id: "ssh://server/repo" }),
       ).rejects.toThrow("Connection lost: write operations are unavailable during reconnection");

@@ -12,7 +12,7 @@ use crab_types::pointer_read::{Request, Response};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout},
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, OnceCell, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,41 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(super) struct NativeReads(Arc<Runtime>);
+
+pub(super) struct CapturedRead {
+    runtime: NativeReads,
+    root: PathBuf,
+    pointer: Bytes,
+    selected: Option<Connection>,
+    options: Option<DirectStoreOptions>,
+    size: u64,
+    id: String,
+    opened: OnceCell<NativeFile>,
+}
+
+impl CapturedRead {
+    pub(super) async fn open(&self, stop: &CancellationToken) -> Result<&NativeFile> {
+        self.opened
+            .get_or_try_init(|| async {
+                let file = self.runtime.open(self, stop).await?;
+                if file.size != self.size {
+                    file.close().await?;
+                    return Err(AgentError::Other(
+                        "native reader opened a different file size".into(),
+                    ));
+                }
+                Ok(file)
+            })
+            .await
+    }
+
+    pub(super) async fn close(&self) -> Result<()> {
+        if let Some(file) = self.opened.get() {
+            file.close().await?;
+        }
+        Ok(())
+    }
+}
 
 struct Runtime {
     workers: Mutex<Workers>,
@@ -53,17 +88,39 @@ impl NativeReads {
         self.0.stop.child_token()
     }
 
-    pub(super) async fn open(
+    pub(super) fn capture(
         &self,
         root: &Path,
         pointer: Bytes,
-        capture_stop: CancellationToken,
+        size: u64,
         id: String,
-    ) -> Result<NativeFile> {
-        // Storage identity is task-local. Capture it before the actor leaves
-        // request scope; validate Ready before any native range may access it.
+    ) -> Result<CapturedRead> {
+        // Metadata-only comparisons need no actor. Capture task-local identity
+        // now, so later data preparation on a blocking parser cannot select
+        // ambient credentials or a different connection.
         let selected = crate::storage_auth::current();
         let options = selected.as_ref().map(Connection::options).transpose()?;
+        Ok(CapturedRead {
+            runtime: self.clone(),
+            root: root.to_owned(),
+            pointer,
+            selected,
+            options,
+            size,
+            id,
+            opened: OnceCell::new(),
+        })
+    }
+
+    async fn open(
+        &self,
+        capture: &CapturedRead,
+        capture_stop: &CancellationToken,
+    ) -> Result<NativeFile> {
+        let id = capture.id.clone();
+        let selected = capture.selected.clone();
+        let options = capture.options.clone();
+        let pointer = capture.pointer.clone();
         let (send, receive) = mpsc::channel(8);
         let (ready, opened) = oneshot::channel();
         let (finished, completion) = watch::channel(Completion::Running);
@@ -72,7 +129,7 @@ impl NativeReads {
         // belongs to its request; cancellation must drain a late handshake.
         let source_stop = self.read_token();
         let stop = source_stop.clone();
-        let root = root.to_owned();
+        let root = capture.root.clone();
         let mut workers = self.0.workers.lock().await;
         if workers.closed {
             return Err(cancelled(&id));

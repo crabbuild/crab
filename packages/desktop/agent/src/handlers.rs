@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::repository::{BrowseSession, BrowserEntry, EntryKind, FileMetadata};
-use crab_sdk::remote::ContentKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, mpsc};
@@ -183,7 +182,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         }
         "repo_summary" => repo_summary(state, decode(&method, params)?, out).await,
         "git_status_porcelain" => git_status_porcelain(state, decode(&method, params)?).await,
-        "git_diff_file" => git_diff_file(state, decode(&method, params)?).await,
+        "file_diff" => file_diff(state, decode(&method, params)?).await,
         "git_grep" => git_grep(state, decode(&method, params)?).await,
         "search_replace" => search_replace(state, decode(&method, params)?).await,
         "git_log" => git_log(state, decode(&method, params)?).await,
@@ -210,7 +209,6 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "git_add_paths" => git_add_paths(state, decode(&method, params)?).await,
         "git_reset_paths" => git_reset_paths(state, decode(&method, params)?).await,
         "resolve_ref" => resolve_ref(state, decode(&method, params)?).await,
-        "crab_diff_file" => crab_diff_file(state, decode(&method, params)?).await,
         "hydration_status" => hydration_status(state, decode(&method, params)?).await,
         "about" => about().await,
         "agent_health" => agent_health().await,
@@ -2854,21 +2852,6 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
     }))
 }
 
-#[derive(Debug, Deserialize)]
-struct GitDiffFileParams {
-    repo_id: String,
-    path: String,
-    /// Compare against this ref. `None` = working tree vs HEAD.
-    #[serde(default)]
-    base: Option<String>,
-    /// Compare HEAD (or base) with this ref. `None` = working tree.
-    #[serde(default)]
-    head: Option<String>,
-    /// When present, the operation is cancellable via `rpc/cancel`.
-    #[serde(default)]
-    op_id: Option<String>,
-}
-
 /// Return `git status --porcelain=v1 -z` parsed into a map of
 /// `{path → two-letter code}`. The working-tree entry loses its two
 /// NUL-separated "new path" companion for renames — we keep the new
@@ -2921,183 +2904,11 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     Ok(json!({ "entries": entries }))
 }
 
-/// Return `git diff` for a single path as a unified patch string.
-/// If both `base` and `head` are provided, runs `git diff base..head
-/// -- path`. Otherwise defaults to working tree vs HEAD.
-async fn git_diff_file(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let op_id = p.op_id.clone();
-    let work = git_diff_file_work(state, p);
-
-    run_cancellable(state, op_id, work).await
-}
-
-async fn git_diff_file_work(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let mut args: Vec<String> = vec!["diff".into(), "--no-color".into(), "--no-renames".into()];
-    match (p.base.as_deref(), p.head.as_deref()) {
-        (Some(b), Some(h)) => args.push(format!("{b}..{h}")),
-        (Some(b), None) => args.push(b.to_owned()),
-        (None, _) => {}
-    }
-    args.push("--".into());
-    args.push(p.path.clone());
-
-    let out = crate::shellout::git_command()
-        .args(&args)
-        .current_dir(&work_dir)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-    if !out.status.success() {
-        return Err(AgentError::Cli {
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    let patch = String::from_utf8_lossy(&out.stdout).into_owned();
-    Ok(json!({ "path": p.path, "patch": patch }))
-}
-
-/// `crab diff` for a single path. Returns structured chunk-level
-/// diff data as JSON. For crab-tracked files this shows which chunks
-/// were added/removed/modified between two refs. For git-native files
-/// it falls back gracefully. If the CLI isn't installed we surface a
-/// clean error so the UI can fall back to `git_diff_file`.
-async fn crab_diff_file(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-
-    // Fast-fail: only attempt crab diff if the repo has crab configured.
-    // Without a remote, `crab diff` hangs trying to connect to S3.
-    let has_crab = work_dir.join(".crab").join("remote").is_file()
-        || work_dir.join(".crab").join("config.toml").is_file();
-    if !has_crab {
-        return Err(AgentError::Cli {
-            status: -1,
-            stderr: "not a crab-configured repository".to_owned(),
-        });
-    }
-
-    // `crab diff` takes ref1 and ref2 as separate positional arguments
-    // (not the git `base..head` range syntax). ref2 defaults to HEAD when
-    // omitted.
-    let mut args: Vec<String> = vec!["diff".into(), "--json".into(), "--no-color".into()];
-    match (p.base.as_deref(), p.head.as_deref()) {
-        (Some(b), Some(h)) => {
-            args.push(b.to_owned());
-            args.push(h.to_owned());
-        }
-        (Some(b), None) => {
-            args.push(b.to_owned());
-        }
-        (None, Some(h)) => {
-            args.push("HEAD".to_owned());
-            args.push(h.to_owned());
-        }
-        (None, None) => {
-            args.push("HEAD".to_owned());
-        }
-    }
-    args.push("--".into());
-    args.push(p.path.clone());
-
-    // Allow up to 60s for shard resolution from S3.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        shellout::command()?
-            .args(&args)
-            .current_dir(&work_dir)
-            .output(),
-    )
-    .await;
-
-    // If the CLI diff succeeds and found crab-tracked files, return
-    // the rich JSON output. An empty files array means the specific
-    // file isn't pointer-tracked — fall through to git diff.
-    if let Ok(Ok(out)) = &result {
-        if out.status.success() {
-            let body = String::from_utf8_lossy(&out.stdout).into_owned();
-            if body.contains("\"files\":[{") {
-                return Ok(
-                    json!({ "path": p.path, "patch": "", "backend": "crab", "crab_diff": body }),
-                );
-            }
-        }
-    }
-
-    // CLI diff didn't produce results for this file. Check if it's a
-    // pointer via the SDK (instant, local-only) and produce a synthetic
-    // size-based diff so the UI shows something useful.
-    let repo = match state.get(&p.repo_id).await {
-        Ok(r) => r,
-        Err(_) => {
-            return Err(AgentError::Cli {
-                status: -1,
-                stderr: "crab diff produced no results for this file".to_owned(),
-            });
-        }
-    };
-
-    let old_rev = p.base.as_deref();
-    let new_rev = p.head.as_deref().or(Some("HEAD"));
-
-    let new_stat = repo.stat(&p.path, new_rev).await.ok();
-    let old_stat = repo.stat(&p.path, old_rev).await.ok();
-
-    let is_pointer = new_stat
-        .as_ref()
-        .map(|s| s.kind == ContentKind::Crab || s.kind == ContentKind::Lfs)
-        .unwrap_or(false)
-        || old_stat
-            .as_ref()
-            .map(|s| s.kind == ContentKind::Crab || s.kind == ContentKind::Lfs)
-            .unwrap_or(false);
-
-    if !is_pointer {
-        return Err(AgentError::Cli {
-            status: -1,
-            stderr: "file is not a crab/lfs pointer".to_owned(),
-        });
-    }
-
-    // Build a synthetic diff from pointer sizes.
-    let old_size = old_stat.as_ref().map(|s| s.size).unwrap_or(0);
-    let new_size = new_stat.as_ref().map(|s| s.size).unwrap_or(0);
-    let status = if old_size == 0 && new_size > 0 {
-        "added"
-    } else if old_size > 0 && new_size == 0 {
-        "deleted"
-    } else {
-        "modified"
-    };
-    let delta_bytes = if new_size > old_size {
-        new_size - old_size
-    } else {
-        old_size - new_size
-    };
-
-    let synthetic = json!({
-        "files": [{
-            "path": p.path,
-            "status": status,
-            "old_size": old_size,
-            "new_size": new_size,
-            "delta_bytes": delta_bytes,
-            "chunks_added": null,
-            "chunks_removed": null,
-            "chunks_unchanged": null,
-            "old_file_hash": old_stat.as_ref().map(|s| s.pointer_hash.clone()),
-            "new_file_hash": new_stat.as_ref().map(|s| s.pointer_hash.clone()),
-        }],
-        "summary": {
-            "files_changed": 1,
-            "total_delta_bytes": delta_bytes,
-        }
-    });
-
-    Ok(
-        json!({ "path": p.path, "patch": "", "backend": "crab", "crab_diff": synthetic.to_string() }),
-    )
+async fn file_diff(state: &State, p: crate::repository::diff::Params) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let operation = crate::repository::diff::compare(&repo, &p, scope.clone());
+    cancellable_read(state, p.op_id.clone(), &scope, operation).await
 }
 
 // ---- Hunk-level staging ---------------------------------------------

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { SafePatchDiff } from "../components/SafePatchDiff";
-import { CrabDiffView } from "../components/DiffView";
+import { LargeFileDiffView } from "../components/LargeFileDiffView";
 import {
   FileTree as PierreFileTree,
   useFileTree,
@@ -18,14 +18,19 @@ import {
   GitMerge,
   List,
   Loader2,
-  Package,
   ScrollText,
 } from "lucide-react";
 import { DirEntry } from "../ipc";
 import { OpenRepo } from "../state";
-import { CommitChanges, CommitFileChange, CommitRow, rpc } from "../ipc";
+import { CommitChanges, CommitFileChange, CommitRow, rpc, fileDiffCancellable, type FileComparison, type DiffVersion } from "../ipc";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import { diffOptions } from "../lib/diffTheme";
+
+interface FilePatchState {
+  result: FileComparison | null;
+  err: string | null;
+  loading: boolean;
+}
 
 interface Props {
   repo: OpenRepo;
@@ -74,7 +79,7 @@ export function CommitDetailView({
   const effective = useEffectiveTheme();
 
   // All-diffs state: patches for every file, rendered in a scrollable pane
-  const [allPatches, setAllPatches] = useState<Map<string, { body: string | null; err: string | null; loading: boolean; crabDiff?: string; loadingChunkDiff?: boolean }>>(new Map());
+  const [allPatches, setAllPatches] = useState<Map<string, FilePatchState>>(new Map());
   const allDiffsRef = useRef<{ scrollToFile: (path: string) => void } | null>(null);
 
   const scrollToFileInUnified = useCallback((path: string) => {
@@ -528,7 +533,7 @@ function UnifiedFileNav({
   entries: CommitFileChange[];
   active: string | null;
   onSelect: (path: string) => void;
-  patches: Map<string, { body: string | null; err: string | null; loading: boolean; crabDiff?: string; loadingChunkDiff?: boolean }>;
+  patches: Map<string, FilePatchState>;
 }) {
   return (
     <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface">
@@ -561,7 +566,6 @@ function UnifiedFileNav({
                     <span className="text-gx-error">−{e.deletions}</span>
                   )}
                   {state?.loading && <Loader2 size={9} className="animate-spin text-gx-muted" />}
-                  {state?.loadingChunkDiff && <Package size={9} className="text-gx-accent" />}
                 </span>
               </button>
             </li>
@@ -591,8 +595,8 @@ const AllDiffsPane = forwardRef<
     activeFile: string | null;
     onSelectFile: (path: string) => void;
     theme: "dark" | "light";
-    patches: Map<string, { body: string | null; err: string | null; loading: boolean; crabDiff?: string; loadingChunkDiff?: boolean }>;
-    setPatches: React.Dispatch<React.SetStateAction<Map<string, { body: string | null; err: string | null; loading: boolean; crabDiff?: string; loadingChunkDiff?: boolean }>>>;
+    patches: Map<string, FilePatchState>;
+    setPatches: React.Dispatch<React.SetStateAction<Map<string, FilePatchState>>>;
   }
 >(function AllDiffsPane(
   { repo, entries, selectedSha, parentSha, activeFile, onSelectFile, theme, patches, setPatches },
@@ -617,65 +621,32 @@ const AllDiffsPane = forwardRef<
   // strings in memory at once.
   useEffect(() => {
     let cancelled = false;
-    const initial = new Map<string, { body: string | null; err: string | null; loading: boolean; loadingChunkDiff?: boolean }>();
-    for (const e of entries) {
-      // Binary/large files have additions=0 && deletions=0 in git numstat.
-      // Show an instant placeholder instead of "Loading diff…" for these.
-      const isBinary = e.additions === 0 && e.deletions === 0;
-      initial.set(e.path, { body: null, err: null, loading: !isBinary, loadingChunkDiff: isBinary });
-    }
-    setPatches(new Map(initial));
-
-    const opts = parentSha ? { base: parentSha, head: selectedSha } : { head: selectedSha };
-
-    // Process entries in batches of 3 to bound memory and IPC load.
+    const requests = new Set<() => void>();
+    const initial = new Map<string, FilePatchState>();
+    for (const entry of entries) initial.set(entry.path, { result: null, err: null, loading: true });
+    setPatches(initial);
+    const before: DiffVersion = parentSha ? { kind: "revision", rev: parentSha } : { kind: "empty" };
+    const after: DiffVersion = { kind: "revision", rev: selectedSha };
     const CONCURRENCY = 3;
     let idx = 0;
-
     const fetchDiff = async (entry: CommitFileChange) => {
-      // Try crab diff first only for files that look like they could
-      // be crab/lfs pointers (small files with no additions/deletions
-      // are binary; skip crab diff for files with many line changes
-      // since those are clearly regular text files).
-      const looksLikePointer = entry.additions <= 2 && entry.deletions <= 2;
-      if (looksLikePointer) {
-        try {
-          const r = await rpc.crabDiffFile(repo.repo_id, entry.path, opts);
-          if (!cancelled) {
-            setPatches((prev) => {
-              const next = new Map(prev);
-              next.set(entry.path, {
-                body: r.patch || null,
-                err: null,
-                loading: false,
-                loadingChunkDiff: false,
-                crabDiff: r.crab_diff ?? undefined,
-              });
-              return next;
-            });
-          }
-          return;
-        } catch {
-          // Not a crab file — fall through to git diff.
-        }
-      }
+      const request = fileDiffCancellable(repo.repo_id, entry.path, { before, after, old_path: entry.old_path ?? undefined });
+      requests.add(request.cancel);
       try {
-        const r = await rpc.gitDiffFile(repo.repo_id, entry.path, opts);
-        if (!cancelled) {
-          setPatches((prev) => {
-            const next = new Map(prev);
-            next.set(entry.path, { body: r.patch, err: null, loading: false, loadingChunkDiff: false });
-            return next;
-          });
-        }
-      } catch (e: unknown) {
-        if (!cancelled) {
-          setPatches((prev) => {
-            const next = new Map(prev);
-            next.set(entry.path, { body: null, err: e instanceof Error ? e.message : String(e), loading: false, loadingChunkDiff: false });
-            return next;
-          });
-        }
+        const result = await request.promise;
+        if (!cancelled) setPatches((prev) => {
+          const next = new Map(prev);
+          next.set(entry.path, { result, err: null, loading: false });
+          return next;
+        });
+      } catch (error) {
+        if (!cancelled) setPatches((prev) => {
+          const next = new Map(prev);
+          next.set(entry.path, { result: null, err: error instanceof Error ? error.message : String(error), loading: false });
+          return next;
+        });
+      } finally {
+        requests.delete(request.cancel);
       }
     };
 
@@ -690,7 +661,7 @@ const AllDiffsPane = forwardRef<
     const workers = Array.from({ length: Math.min(CONCURRENCY, entries.length) }, runNext);
     void Promise.all(workers);
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; for (const cancel of requests) cancel(); };
   }, [repo.repo_id, selectedSha, parentSha, entries, setPatches]);
 
   const setFileRef = useCallback((path: string, el: HTMLDivElement | null) => {
@@ -744,56 +715,16 @@ const AllDiffsPane = forwardRef<
               <div className="flex items-center justify-center gap-2 py-8 text-sm text-gx-muted">
                 <Loader2 size={14} className="animate-spin" /> Loading diff…
               </div>
-            ) : state?.loadingChunkDiff ? (
-              <div className="p-4">
-                <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="shrink-0 rounded-lg bg-gx-accent/10 p-2">
-                      <Package size={18} className="text-gx-accent" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gx-text">Large File Change</span>
-                        <span className="rounded border border-gx-border px-1.5 py-0.5 text-[10px] text-gx-muted">Modified</span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-gx-muted">
-                        This file is tracked by Crab. Loading chunk-level diff details…
-                      </p>
-                      <div className="mt-2 flex items-center gap-1.5 text-[10px] text-gx-muted">
-                        <Loader2 size={10} className="animate-spin" />
-                        <span>Resolving chunk metadata from cloud storage</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
             ) : state?.err ? (
               <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
                 {state.err}
               </div>
-            ) : state?.crabDiff ? (
-              <CrabDiffView data={state.crabDiff} path={entry.path} />
-            ) : state?.body != null && state.body.trim().length === 0 ? (
-              <div className="p-4">
-                <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="shrink-0 rounded-lg bg-gx-accent/10 p-2">
-                      <Package size={18} className="text-gx-accent" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gx-text">Large File Change</span>
-                        <span className="rounded border border-gx-border px-1.5 py-0.5 text-[10px] text-gx-muted">Modified</span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-gx-muted">
-                        This file is tracked by Crab. Standard text-based diff rendering is not available for this file type. The file content is stored as content-addressed chunks in cloud object storage.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : state?.body ? (
-              <SafePatchDiff patch={state.body} options={diffOptions(theme)} />
+            ) : state?.result?.kind === "large_file" ? (
+              <LargeFileDiffView data={state.result} />
+            ) : state?.result?.kind === "git" ? (
+              state.result.patch.trim().length === 0 ? (
+                <p className="px-4 py-6 text-xs text-gx-muted">No changes for this file.</p>
+              ) : <SafePatchDiff patch={state.result.patch} options={diffOptions(theme)} />
             ) : null}
           </div>
         );

@@ -1,8 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { PatchDiff, type DiffLineAnnotation } from "@pierre/diffs/react";
 import type { SelectedLineRange } from "@pierre/diffs";
-import { FileCode2, Package } from "lucide-react";
-import { isPointerPatch, pointerKindLabel } from "../lib/pointer-detection";
+import { FileCode2 } from "lucide-react";
 import { parsePatch, type ParsedFile, type ParsedHunk } from "../lib/parse-patch";
 
 /**
@@ -33,15 +32,9 @@ interface State {
 /**
  * Error-boundary wrapper around `<PatchDiff />` from @pierre/diffs.
  *
- * Handles three cases:
- * 1. Crab/LFS pointer patches — detected up front and rendered as
- *    a purpose-built card showing pointer metadata instead of a
- *    broken unified diff.
- * 2. Binary diffs — shown as a simple info card.
- * 3. Large patches that crash PatchDiff — split into per-hunk
- *    sub-patches and rendered individually with PatchDiff, giving
- *    the same syntax-highlighted, line-numbered, word-level diff
- *    experience as smaller files.
+ * Preserves Git patches and binary summaries without inferring storage from
+ * their text. Captured source comparisons own Crab/LFS classification.
+ * Large patches render per hunk; failed renderers retain the raw patch.
  */
 export class SafePatchDiff extends Component<Props, State> {
   state: State = { error: null };
@@ -56,14 +49,6 @@ export class SafePatchDiff extends Component<Props, State> {
 
   render(): ReactNode {
     const { patch, className, options, lineAnnotations, renderAnnotation, selectedLines } = this.props;
-
-    // Detect pointer patches before attempting to render — these
-    // will always fail in PatchDiff because the "diff" is just hex
-    // pointer metadata, not a real unified patch.
-    const detection = isPointerPatch(patch);
-    if (detection.isPointer) {
-      return <PointerDiffCard patch={patch} kind={detection.kind} />;
-    }
 
     // Detect binary file diffs that git outputs as
     // "Binary files a/... and b/... differ"
@@ -150,39 +135,15 @@ function PerHunkFallback({
   const parsed = parsePatch(patch);
 
   if (parsed.hunks.length === 0) {
-    // Edge case: patch has no parseable hunks (mode-only change, or
-    // the synthesized patch format doesn't match what the parser
-    // expects). Try rendering with PatchDiff directly — it handles
-    // more formats than our parser. Only show the "no changes" card
-    // when there's genuinely no diff content.
-    const path = extractPath(patch);
-    const hasContent = patch.trim().split("\n").some(
-      (l) => l.startsWith("+") || l.startsWith("-"),
-    );
-    if (hasContent) {
-      // Attempt PatchDiff directly — it may handle formats our
-      // parser doesn't recognise. Wrap in a per-hunk error boundary
-      // so a crash still degrades gracefully.
-      return (
-        <HunkErrorBoundary fallbackPatch={patch}>
-          <PatchDiff
-            patch={patch}
-            className={className}
-            options={options}
-            lineAnnotations={lineAnnotations}
-            renderAnnotation={renderAnnotation}
-            selectedLines={selectedLines}
-          />
-        </HunkErrorBoundary>
-      );
-    }
-    return (
-      <div className="flex items-center justify-center gap-2 py-6 text-sm text-gx-muted">
-        <FileCode2 size={14} />
-        <span>
-          {path ? `${path} — ` : ""}No displayable changes
-        </span>
-      </div>
+    // Mode-only or unfamiliar Git output must remain visible. An unparsed
+    // nonempty patch is not evidence that the file has no changes.
+    return patch.trim().length === 0 ? (
+      <div className="py-6 text-center text-sm text-gx-muted">No changes.</div>
+    ) : (
+      <HunkErrorBoundary fallbackPatch={patch}>
+        <PatchDiff patch={patch} className={className} options={options}
+          lineAnnotations={lineAnnotations} renderAnnotation={renderAnnotation} selectedLines={selectedLines} />
+      </HunkErrorBoundary>
     );
   }
 
@@ -284,11 +245,8 @@ class HunkErrorBoundary extends Component<
 
 /** Check if the patch is a binary file diff that git can't show as text. */
 function isBinaryDiff(patch: string): boolean {
-  const lower = patch.toLowerCase();
-  return (
-    lower.includes("binary files") && lower.includes("differ")
-  ) || (
-    lower.includes("git binary patch")
+  return patch.split("\n").some((line) =>
+    /^Binary files .+ and .+ differ$/.test(line) || line === "GIT binary patch",
   );
 }
 
@@ -320,99 +278,6 @@ function buildHunkPatch(fileHeader: string, hunk: ParsedHunk): string {
   const newPart = hunk.newLines === 1 ? String(hunk.newStart) : `${hunk.newStart},${hunk.newLines}`;
   const hunkHdr = `@@ -${oldPart} +${newPart} @@`;
   return `${fileHeader}${hunkHdr}\n${hunk.body}`;
-}
-
-/** Parse pointer lines from the patch body (added/removed lines). */
-function parsePointerLines(patch: string): { added: string[]; removed: string[] } {
-  const added: string[] = [];
-  const removed: string[] = [];
-  for (const line of patch.split("\n")) {
-    if (line.startsWith("@@")) continue;
-    if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) continue;
-    if (line.startsWith("+") && line.length > 1) added.push(line.slice(1));
-    else if (line.startsWith("-") && line.length > 1) removed.push(line.slice(1));
-  }
-  return { added, removed };
-}
-
-// ── Pointer & Binary cards ───────────────────────────────────────────
-
-/** Purpose-built card for crab/LFS pointer file diffs. */
-function PointerDiffCard({ patch, kind }: { patch: string; kind: "crab" | "lfs" | null }) {
-  const path = extractPath(patch);
-  const label = pointerKindLabel(kind);
-  const { added, removed } = parsePointerLines(patch);
-  const isNew = removed.length === 0 && added.length > 0;
-  const isDeleted = added.length === 0 && removed.length > 0;
-  const isModified = added.length > 0 && removed.length > 0;
-
-  return (
-    <div className="flex flex-col gap-3 p-5">
-      {/* Header */}
-      <div className="flex items-start gap-3">
-        <div className="shrink-0 rounded-lg bg-gx-accent/10 p-2.5">
-          <Package size={20} className="text-gx-accent" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gx-text">{label}</span>
-            <span className="rounded border border-gx-border px-1.5 py-0.5 text-[10px] text-gx-muted">
-              {isNew ? "Added" : isDeleted ? "Removed" : isModified ? "Modified" : "Changed"}
-            </span>
-          </div>
-          {path && (
-            <div className="mt-1 truncate font-mono text-[11px] text-gx-muted" title={path}>
-              {path}
-            </div>
-          )}
-          <p className="mt-2 text-[11px] leading-relaxed text-gx-muted">
-            This file is tracked by {kind === "lfs" ? "Git LFS" : "Crab"} as a content-addressed pointer.
-            The actual file content is stored in cloud object storage — only the pointer metadata is committed to git.
-          </p>
-        </div>
-      </div>
-
-      {/* Pointer metadata comparison */}
-      <div className="rounded-lg border border-gx-border bg-gx-bg-sub">
-        {removed.length > 0 && (
-          <div className="border-b border-gx-border/50 px-3 py-2">
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gx-error/80">
-              {isDeleted ? "Removed Pointer" : "Previous Version"}
-            </div>
-            <div className="space-y-0.5 font-mono text-[11px]">
-              {removed.slice(0, 8).map((line, i) => (
-                <div key={i} className="truncate text-gx-muted">
-                  <span className="mr-2 inline-block w-3 text-center text-gx-error">−</span>
-                  {line}
-                </div>
-              ))}
-              {removed.length > 8 && (
-                <div className="text-[10px] text-gx-muted">… {removed.length - 8} more lines</div>
-              )}
-            </div>
-          </div>
-        )}
-        {added.length > 0 && (
-          <div className="px-3 py-2">
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gx-success/80">
-              {isNew ? "New Pointer" : "New Version"}
-            </div>
-            <div className="space-y-0.5 font-mono text-[11px]">
-              {added.slice(0, 8).map((line, i) => (
-                <div key={i} className="truncate text-gx-text">
-                  <span className="mr-2 inline-block w-3 text-center text-gx-success">+</span>
-                  {line}
-                </div>
-              ))}
-              {added.length > 8 && (
-                <div className="text-[10px] text-gx-muted">… {added.length - 8} more lines</div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 /** Card for binary file diffs that git can't render as text. */

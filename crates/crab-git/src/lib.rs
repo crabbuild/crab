@@ -15,6 +15,8 @@ pub mod pack_writer;
 pub mod pointer_detect;
 pub mod pointer_ref;
 pub mod pre_push;
+#[cfg(feature = "process")]
+pub mod process;
 pub mod push_state;
 pub mod receive_plan;
 pub mod receive_wire;

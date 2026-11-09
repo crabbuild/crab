@@ -65,6 +65,7 @@ type JsonRpcFrame = JsonRpcResponse | JsonRpcNotification;
 const WRITE_METHODS = new Set([
   "cache_clean",
   "file_open",
+  "file_diff",
   "file_chunks",
   "file_close",
   "file_materialize",
@@ -91,7 +92,6 @@ const WRITE_METHODS = new Set([
 const CACHEABLE_READ_METHODS = new Set([
   "git_status_porcelain",
   "git_log",
-  "git_diff_file",
   "list_refs",
   "repo_summary",
   "hydration_status",

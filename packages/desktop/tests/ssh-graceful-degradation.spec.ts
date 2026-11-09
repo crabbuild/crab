@@ -74,13 +74,13 @@ describe("isCacheableReadMethod", () => {
   it("identifies cacheable read methods", () => {
     expect(isCacheableReadMethod("git_status_porcelain")).toBe(true);
     expect(isCacheableReadMethod("git_log")).toBe(true);
-    expect(isCacheableReadMethod("git_diff_file")).toBe(true);
     expect(isCacheableReadMethod("list_refs")).toBe(true);
     expect(isCacheableReadMethod("repo_summary")).toBe(true);
     expect(isCacheableReadMethod("hydration_status")).toBe(true);
   });
 
   it("rejects non-cacheable methods", () => {
+    expect(isCacheableReadMethod("file_diff")).toBe(false);
     expect(isCacheableReadMethod("git_commit")).toBe(false);
     expect(isCacheableReadMethod("ping")).toBe(false);
     expect(isCacheableReadMethod("git_stash_list")).toBe(false);

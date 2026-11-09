@@ -165,7 +165,10 @@ async fn retained_file_queries_cancel_independently_and_close_drains_readers() {
     assert!(repo.files.get("capture").await.is_err());
 }
 
-async fn working_pointer(kind: &str, size: u64) -> (tempfile::TempDir, BrowseSession, Bytes) {
+pub(super) async fn working_pointer(
+    kind: &str,
+    size: u64,
+) -> (tempfile::TempDir, BrowseSession, Bytes) {
     use std::io::Write as _;
     let (directory, repo) = repository().await;
     let root = directory.path();
@@ -530,4 +533,53 @@ async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn captured_git_ranges_keep_physical_identity_and_support_large_complete_reads() {
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let mut original = vec![b'a'; 9 * 1024 * 1024];
+    original[..4].copy_from_slice(b"head");
+    let size = original.len();
+    original[size - 4..].copy_from_slice(b"tail");
+    tokio::fs::write(root.join("file.bin"), &original)
+        .await
+        .unwrap();
+    git(root, &["add", "file.bin"]).await.unwrap();
+    let source = FileSource::capture(&repo, "file.bin", Some(""), repo.read_scope())
+        .await
+        .unwrap();
+    let Source::Git { oid, .. } = source.source.as_ref() else {
+        panic!("expected captured Git blob");
+    };
+    tokio::fs::write(root.join("file.bin"), b"replacement")
+        .await
+        .unwrap();
+    git(root, &["add", "file.bin"]).await.unwrap();
+    let replacement =
+        String::from_utf8(git(root, &["rev-parse", ":file.bin"]).await.unwrap()).unwrap();
+    git(root, &["replace", oid, replacement.trim()])
+        .await
+        .unwrap();
+    let native_replacement = git(root, &["cat-file", "blob", oid]).await.unwrap();
+    let prefix = source.read_range(0, 4).await.unwrap();
+    let suffix = source.read_range(size as u64 - 4, 10).await.unwrap();
+    let complete = source.read_complete(size).await.unwrap();
+    assert_eq!(
+        (
+            native_replacement.as_slice(),
+            prefix.as_ref(),
+            suffix.as_ref(),
+            complete.as_ref()
+        ),
+        (
+            b"replacement".as_slice(),
+            b"head".as_slice(),
+            b"tail".as_slice(),
+            original.as_slice()
+        )
+    );
+    source.close().await.unwrap();
+    repo.close().await.unwrap();
 }

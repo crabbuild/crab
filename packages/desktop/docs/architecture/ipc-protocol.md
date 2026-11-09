@@ -120,7 +120,7 @@ reports and their issues. Cleanup failures are errors, with no filesystem
 deletion fallback; retained, unknown and busy state stays with its owner.
 
 ### File Operations
-- `list`, `stat`, `file_open`, `file_chunks`, `file_close`, `file_materialize`
+- `list`, `stat`, `file_open`, `file_chunks`, `file_close`, `file_materialize`, `file_diff`
 - `read_text`, `read_bytes`, `read_range`
 - `preview_parquet`, `preview_safetensors`, `preview_npy`, `preview_npz`
 - `preview_zip`, `preview_notebook_meta`, `preview_torch_checkpoint`
@@ -179,8 +179,38 @@ Tab cleanup cancels and drains active queries before closing the captured file;
 repository close, navigation, renderer failure and application exit also drain
 owned media. URLs expire on close and never contain a file path or credentials.
 
+### Captured file comparisons
+
+`file_diff {repo_id, path, old_path?, before, after, op_id?}` uses explicit
+versions: `{kind:"working"}`, `{kind:"index"}`, `{kind:"revision", rev}` or
+`{kind:"empty"}`. Root commits use the empty version; a proven unborn symbolic
+HEAD also resolves to empty. Invalid revisions and failed metadata reads remain
+errors. Renames can select a distinct old path. Working/index/committed Crab
+and LFS identity capture does not prepare or download payloads merely to classify
+them. Changed working bytes are streamed when their content identity is needed.
+
+The result is `{kind:"git", path, patch}` for ordinary Git, preserving Git's
+patch and textconv handling. Untracked additions use bounded `--no-index` output.
+Each output pipe is capped at 8 MiB and the process has a five-minute deadline;
+limits fail explicitly. Cancellation stops the owned process group/job and
+joins both pipes before replying.
+
+Large-file results use `kind:"large_file"`, content `status`, before/after
+identities and presence/sizes, nullable `chunk_metrics`, and `metrics_note`.
+Different Crab content resolves actual ordered chunk pages (or streams the
+captured working file through the same Gear chunker as clean). Recipes must
+cover all bytes and occurrences. Each version is limited to 262144 chunks;
+the shared comparator independently bounds matching work. Ordered reuse and
+added/removed chunk bytes are not network/upload cost or size delta. Identical
+content identities need no recipe fetch. LFS identity changes do not invent Crab
+chunk metrics. Unsupported mixed representations retain unknown metrics.
+
+Cancellation drains blocking hashing/comparison and native/SDK reads before
+closing both sources. SSH comparisons are live captures: they are neither
+replayed nor served as stale cache results during reconnection.
+
 ### Git Operations
-- `git_status_porcelain`, `git_diff_file`, `git_grep`
+- `git_status_porcelain`, `git_grep`
 - `git_log`, `git_commit`, `git_commit_changes`
 - `git_add_paths`, `git_reset_paths`
 - `git_stage_hunks`, `git_unstage_hunks`, `git_discard_hunks`
@@ -192,7 +222,7 @@ owned media. URLs expire on close and never contain a file path or credentials.
 ### Crab Operations
 - `clone`, `push`, `add`, `hydrate`, `dehydrate`, `status`
 - `crab_add_auto`, `crab_add_structured`, `crab_push_structured`
-- `crab_diff_file`, `hydration_status`
+- `hydration_status`
 - `staging_stats`, `staging_clean`
 
 ### Merge/Rebase Operations

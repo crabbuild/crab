@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { SafePatchDiff } from "../components/SafePatchDiff";
-import { CrabDiffView } from "../components/DiffView";
+import { LargeFileDiffView } from "../components/LargeFileDiffView";
 import { FileMinus, GitCompareArrows, Loader2 } from "lucide-react";
 import { OpenRepo } from "../state";
-import { rpc, gitDiffFileCancellable, isCancelledError } from "../ipc";
+import { fileDiffCancellable, isCancelledError, type FileComparison, type DiffVersion } from "../ipc";
 import { useSetting } from "../settings";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import { diffOptions } from "../lib/diffTheme";
@@ -16,6 +16,8 @@ import {
 } from "../components/CommentGutter";
 
 export type { DiffComment, CommentsByLine };
+
+type Comparison = "working" | "unstaged" | "staged";
 
 interface Props {
   repo: OpenRepo;
@@ -77,21 +79,31 @@ function DiffHeader({
   badge,
   base,
   head,
+  comparison,
+  onComparisonChange,
 }: {
   path: string;
   badge: string;
+  comparison?: Comparison;
+  onComparisonChange?: (value: Comparison) => void;
   base?: string | null;
   head?: string | null;
 }) {
   return (
     <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
       <GitCompareArrows size={13} className="text-gx-accent" />
-      <span className="font-mono text-gx-text">{path}</span>
+      <span className="min-w-0 truncate font-mono text-gx-text" title={path}>{path}</span>
       <span className="chip text-[9px]">{badge}</span>
       <span className="ml-auto">
-        {base || head ? (
+        {onComparisonChange && comparison ? (
+          <select aria-label="Compare file versions" className="rounded border border-gx-border bg-gx-surface px-2 py-1 text-gx-text" value={comparison} onChange={(event) => onComparisonChange(event.target.value as Comparison)}>
+            <option value="working">HEAD → Working tree</option>
+            <option value="unstaged">Index → Working tree</option>
+            <option value="staged">HEAD → Index</option>
+          </select>
+        ) : base || head ? (
           <>
-            {base ?? "HEAD"} … {head ?? "(working tree)"}
+            {base ?? (head ? "Empty tree" : "HEAD")} … {head ?? "(working tree)"}
           </>
         ) : (
           "Working tree vs HEAD"
@@ -106,11 +118,12 @@ function DiffHeader({
  * return in `DiffView` doesn't violate React's rules of hooks.
  */
 function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }: Props) {
-  const [patch, setPatch] = useState<string | null>(null);
-  const [crabDiff, setCrabDiff] = useState<string | null>(null);
+  const [result, setResult] = useState<FileComparison | null>(null);
+  const patch = result?.kind === "git" ? result.patch : null;
+  const largeFileDiff = result?.kind === "large_file" ? result : null;
   const [err, setErr] = useState<string | null>(null);
-  const [backend, setBackend] = useState<"crab" | "git">("git");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [comparison, setComparison] = useState<Comparison>("working");
   const minimap = useSetting("editorMinimap");
   const effective = useEffectiveTheme();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -122,41 +135,19 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
   useEffect(() => {
     let cancelFn: (() => void) | null = null;
     let cancelled = false;
-    setPatch(null);
-    setCrabDiff(null);
+    setResult(null);
     setErr(null);
 
     const attempt = async () => {
-      // Always try crab diff first — it handles large/pointer
-      // files with chunk-level comparison and falls back internally
-      // for git-native files. Any failure (CLI missing, non-pointer
-      // file, user has no crab config) falls through to plain
-      // `git diff` so the diff always renders something useful.
-      try {
-        const r = await rpc.crabDiffFile(repo.repo_id, path, {
-          base: base ?? undefined,
-          head: head ?? undefined,
-        });
-        if (!cancelled) {
-          setPatch(r.patch || null);
-          setCrabDiff(r.crab_diff ?? null);
-          setBackend("crab");
-        }
-        return;
-      } catch {
-        // fall through
-      }
-      // Use cancellable git diff.
-      const { promise, cancel } = gitDiffFileCancellable(repo.repo_id, path, {
-        base: base ?? undefined,
-        head: head ?? undefined,
-      });
+      const before: DiffVersion = base ? { kind: "revision", rev: base }
+        : head ? { kind: "empty" } : comparison === "unstaged" ? { kind: "index" } : { kind: "revision", rev: "HEAD" };
+      const after: DiffVersion = head ? { kind: "revision", rev: head } : comparison === "staged" ? { kind: "index" } : { kind: "working" };
+      const { promise, cancel } = fileDiffCancellable(repo.repo_id, path, { before, after });
       cancelFn = cancel;
       try {
         const r = await promise;
         if (!cancelled) {
-          setPatch(r.patch);
-          setBackend("git");
+          setResult(r);
         }
       } catch (e) {
         if (!cancelled && !isCancelledError(e)) {
@@ -169,14 +160,14 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
       cancelled = true;
       cancelFn?.();
     };
-  }, [repo.repo_id, path, base, head, refreshKey]);
+  }, [repo.repo_id, path, base, head, comparison, refreshKey]);
 
   const hasComments =
     commentsByLine != null && Object.keys(commentsByLine).length > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
-      <DiffHeader path={path} badge={backend} base={base} head={head} />
+      <DiffHeader path={path} badge={result?.kind === "large_file" ? "large file" : result?.kind ?? "diff"} base={base} head={head} comparison={comparison} onComparisonChange={!base && !head ? setComparison : undefined} />
       <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
           {err && (
@@ -184,20 +175,20 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
               {err}
             </div>
           )}
-          {!err && patch == null && !crabDiff && (
+          {!err && patch == null && !largeFileDiff && (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
               <Loader2 size={14} className="animate-spin" /> Running diff…
             </div>
           )}
-          {!err && crabDiff && (
-            <CrabDiffView data={crabDiff} path={path} repoId={repo.repo_id} onRefresh={handleRefresh} />
+          {!err && largeFileDiff && (
+            <LargeFileDiffView data={largeFileDiff} repoId={head ? undefined : repo.repo_id} onRefresh={handleRefresh} />
           )}
-          {!err && !crabDiff && patch != null && patch.trim().length === 0 && (
+          {!err && !largeFileDiff && patch != null && patch.trim().length === 0 && (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
               <FileMinus size={14} /> No changes for this file.
             </div>
           )}
-          {!err && !crabDiff && patch != null && patch.trim().length > 0 && (
+          {!err && !largeFileDiff && patch != null && patch.trim().length > 0 && (
             <SafePatchDiff
               patch={patch}
               className="gx-patch-diff"
@@ -211,7 +202,7 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
             />
           )}
         </div>
-        {minimap && !crabDiff && patch != null && patch.trim().length > 0 && (
+        {minimap && !largeFileDiff && patch != null && patch.trim().length > 0 && (
           <PatchMinimap patch={patch} scrollContainer={scrollRef.current} />
         )}
       </div>
