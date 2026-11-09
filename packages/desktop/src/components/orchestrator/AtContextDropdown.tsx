@@ -340,7 +340,7 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
       ref={listRef}
       role="listbox"
       aria-label="Context mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[280px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(280px,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
     >
       {/* Kind filter header — shows when narrowed to a specific type */}
       {kindFilter && (

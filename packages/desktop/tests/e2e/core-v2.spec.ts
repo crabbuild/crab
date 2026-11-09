@@ -163,7 +163,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await chatNavigation.getByRole("button", { name: "Chats", exact: true }).click();
     await expect(composer).toHaveValue(draft);
     await page.getByRole("button", { name: "Add context", exact: true }).click();
-    await page.getByRole("button", { name: /^Instructions/ }).click();
+    await page.getByRole("menuitem", { name: /^Instructions/ }).click();
     const contextDialog = page.getByRole("dialog", { name: "Add context", exact: true });
     await expect(contextDialog).toBeVisible();
     await page.keyboard.press("Escape");

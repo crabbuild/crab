@@ -191,7 +191,7 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
       ref={listRef}
       role="listbox"
       aria-label="Slash commands"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,40vh)] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,40vh,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
     >
       {/* Header */}
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gx-border/50 bg-gx-bg/95 backdrop-blur-sm px-3 py-1.5">

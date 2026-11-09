@@ -322,7 +322,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
         ))}
       </nav>
       {/* Keep the chat mounted so Skills navigation preserves drafts and live sessions. */}
-      <div className={section === "chats" ? "min-h-0 flex-1" : "hidden"}>
+      <div data-chat-content className={section === "chats" ? "min-h-0 flex-1" : "hidden"}>
         <AgentTasksWorkspace repo={repo} onOpenAgentManager={onOpenAgentManager} active={section === "chats"} />
       </div>
       {section === "skills" && (
