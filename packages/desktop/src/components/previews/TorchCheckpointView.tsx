@@ -12,10 +12,13 @@ export function TorchCheckpointView({ repoId, path, rev }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    rpc.previewTorchCheckpoint(repoId, path, { rev: rev ?? undefined })
+    const controller = new AbortController();
+    setData(null);
+    setErr(null);
+    rpc.previewTorchCheckpoint(repoId, path, { rev: rev ?? undefined, signal: controller.signal })
       .then(d => { if (!cancelled) setData(d); })
       .catch((e: Error) => { if (!cancelled) setErr(e.message); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [repoId, path, rev]);
 
   if (err) return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;

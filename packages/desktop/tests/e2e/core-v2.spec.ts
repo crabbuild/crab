@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
@@ -30,6 +30,91 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
     return bridge.rpc(method, params);
   }, { method, params });
 }
+
+test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydration", async () => {
+  test.setTimeout(240_000);
+  const executablePath = packagedExecutable();
+  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
+  const crab = path.join(resources, "agent", process.platform === "win32" ? "crab.exe" : "crab");
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-large-files-"));
+  const source = path.join(root, "source");
+  mkdirSync(source);
+  writeFileSync(path.join(root, "gitconfig"), "");
+  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_INDEX_FILE;
+  const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
+  const pointers = new Map<string, Buffer>();
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    git(["init", "--initial-branch=main"]);
+    const driver = `'${crab.replaceAll("\\", "/").replaceAll("'", "'\\''")}' filter-process`;
+    for (const kind of ["crab", "lfs"]) {
+      git(["config", `filter.${kind}.process`, driver]);
+      git(["config", `filter.${kind}.required`, "true"]);
+    }
+    writeFileSync(path.join(source, ".gitignore"), ".crab/\n");
+    writeFileSync(path.join(source, ".gitattributes"), "large.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\n");
+    const sizes = { "large.safetensors": 3 * 1024 ** 3, "lfs.safetensors": 4 * 1024 ** 2 };
+    for (const [file, size] of Object.entries(sizes)) {
+      const header = Buffer.from(JSON.stringify({ weights: { dtype: "U8", shape: [size], data_offsets: [0, size] } }));
+      const prefix = Buffer.alloc(8);
+      prefix.writeBigUInt64LE(BigInt(header.length));
+      writeFileSync(path.join(source, file), Buffer.concat([prefix, header]));
+      const descriptor = openSync(path.join(source, file), "r+");
+      try { ftruncateSync(descriptor, prefix.length + header.length + size); }
+      finally { closeSync(descriptor); }
+      git(["add", file]);
+      const pointer = git(["show", `:${file}`]);
+      expect(pointer.length).toBeLessThan(1024);
+      pointers.set(file, pointer);
+      writeFileSync(path.join(source, file), pointer);
+    }
+    git(["add", ".gitattributes", ".gitignore"]);
+    git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Captured large-file fixture"]);
+    application = await electron.launch({ executablePath, env, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+    const handle = await call(page, "open_local", { repo_id: "large-files", path: source });
+    await page.evaluate(({ handle, source }) => {
+      window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } }));
+    }, { handle, source });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+    for (const [file, size] of Object.entries(sizes)) {
+      await page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
+      await expect(page.getByText("Safetensors · ML weights", { exact: true })).toBeVisible();
+      await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
+      const metadata = await call(page, "preview_safetensors", { repo_id: "large-files", path: file, rev: "HEAD" });
+      expect((metadata.tensors as { nbytes: number }[])[0].nbytes).toBe(size);
+      const range = await call(page, "read_range", { repo_id: "large-files", path: file, offset: size - 16, length: 16 });
+      expect(Buffer.from(range.bytes_b64 as string, "base64")).toEqual(Buffer.alloc(16));
+      expect(readFileSync(path.join(source, file))).toEqual(pointers.get(file));
+      await page.screenshot({ path: test.info().outputPath(`${file}.png`) });
+    }
+    const pointer = pointers.get("lfs.safetensors")!.toString();
+    const oid = /^oid sha256:([0-9a-f]{64})$/m.exec(pointer)![1];
+    const payload = path.join(source, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
+    const original = readFileSync(payload);
+    const corrupt = Buffer.from(original);
+    corrupt[corrupt.length - 1] ^= 1;
+    writeFileSync(payload, corrupt);
+    await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
+    await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
+    await expect(page.getByText(/native content read failed/i)).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("lfs-integrity-error.png") });
+    writeFileSync(payload, original);
+    await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
+    await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
+    await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
+  } finally {
+    await application?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");

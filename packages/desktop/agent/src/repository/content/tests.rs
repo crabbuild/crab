@@ -1,4 +1,5 @@
 use super::*;
+use tokio::io::AsyncWriteExt;
 
 async fn repository() -> (tempfile::TempDir, BrowseSession) {
     let directory = tempfile::tempdir().unwrap();
@@ -25,7 +26,9 @@ async fn sparse_multi_gib_file_reads_only_requested_bytes_and_clamps_at_eof() {
     file.seek(std::io::SeekFrom::Start(size - 7)).await.unwrap();
     file.write_all(b"preview").await.unwrap();
     file.flush().await.unwrap();
-    let source = FileSource::capture(&repo, "large.bin", None).await.unwrap();
+    let source = FileSource::capture(&repo, "large.bin", None, repo.read_scope())
+        .await
+        .unwrap();
     assert_eq!(
         (source.size, source.read_range(size - 7, 100).await.unwrap()),
         (size, Bytes::from_static(b"preview"))
@@ -39,7 +42,9 @@ async fn local_source_rejects_truncation_and_retains_opened_content_after_replac
     let (directory, repo) = repository().await;
     let path = directory.path().join("file.txt");
     tokio::fs::write(&path, b"captured").await.unwrap();
-    let source = FileSource::capture(&repo, "file.txt", None).await.unwrap();
+    let source = FileSource::capture(&repo, "file.txt", None, repo.read_scope())
+        .await
+        .unwrap();
     let replacement = directory.path().join("replacement");
     tokio::fs::write(&replacement, b"replacement")
         .await
@@ -49,7 +54,9 @@ async fn local_source_rejects_truncation_and_retains_opened_content_after_replac
         source.read_range(0, 8).await.unwrap(),
         b"captured".as_slice()
     );
-    let source = FileSource::capture(&repo, "file.txt", None).await.unwrap();
+    let source = FileSource::capture(&repo, "file.txt", None, repo.read_scope())
+        .await
+        .unwrap();
     tokio::fs::write(&path, b"short").await.unwrap();
     assert!(
         source
@@ -76,15 +83,17 @@ async fn index_and_committed_sources_remain_distinct_from_working_content() {
     .unwrap();
     tokio::fs::write(&path, b"index").await.unwrap();
     git(root, &["add", "file.txt"]).await.unwrap();
-    let index = FileSource::capture(&repo, "file.txt", Some(""))
+    let index = FileSource::capture(&repo, "file.txt", Some(""), repo.read_scope())
         .await
         .unwrap();
-    let committed = FileSource::capture(&repo, "file.txt", Some("HEAD"))
+    let committed = FileSource::capture(&repo, "file.txt", Some("HEAD"), repo.read_scope())
         .await
         .unwrap();
     tokio::fs::write(&path, b"working").await.unwrap();
     git(root, &["add", "file.txt"]).await.unwrap();
-    let working = FileSource::capture(&repo, "file.txt", None).await.unwrap();
+    let working = FileSource::capture(&repo, "file.txt", None, repo.read_scope())
+        .await
+        .unwrap();
     assert_eq!(index.read_range(0, 10).await.unwrap(), b"index".as_slice());
     assert_eq!(
         committed.read_range(0, 10).await.unwrap(),
@@ -95,12 +104,12 @@ async fn index_and_committed_sources_remain_distinct_from_working_content() {
         b"working".as_slice()
     );
     assert!(
-        FileSource::capture(&repo, "missing", Some("HEAD"))
+        FileSource::capture(&repo, "missing", Some("HEAD"), repo.read_scope())
             .await
             .is_err()
     );
     assert!(
-        FileSource::capture(&repo, "../outside", None)
+        FileSource::capture(&repo, "../outside", None, repo.read_scope())
             .await
             .is_err()
     );
@@ -152,13 +161,34 @@ async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
             crab_git::PointerKind::NotAPointer
         ));
         std::fs::write(root.join(path), &pointer).unwrap();
-        let source = FileSource::capture(&repo, path, None).await.unwrap();
-        let reader = crate::preview::PreviewReader::new(source);
-        let preview = tokio::task::spawn_blocking(move || crate::preview::safetensors(reader))
+        let source = FileSource::capture(&repo, path, None, repo.read_scope())
+            .await
+            .unwrap();
+        let source = Arc::new(source);
+        let reader = crate::preview::PreviewReader::new(source.clone());
+        let parser = reader.clone();
+        let preview = tokio::task::spawn_blocking(move || crate::preview::safetensors(parser))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(preview["tensors"][0]["nbytes"], size);
+        source.close().await.unwrap();
         assert_eq!(std::fs::read(root.join(path)).unwrap(), pointer);
     }
+    let source = FileSource::capture(&repo, "crab.safetensors", None, repo.read_scope())
+        .await
+        .unwrap();
+    let lfs = FileSource::capture(&repo, "lfs.safetensors", None, repo.read_scope())
+        .await
+        .unwrap();
+    repo.close().await.unwrap();
+    source.close().await.unwrap();
+    lfs.close().await.unwrap();
+    assert!(source.read_range(0, 8).await.is_err());
+    assert!(lfs.read_range(0, 8).await.is_err());
+    assert!(
+        FileSource::capture(&repo, "crab.safetensors", None, repo.read_scope())
+            .await
+            .is_err()
+    );
 }

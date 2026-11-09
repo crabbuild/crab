@@ -13,6 +13,8 @@ Owns shared serialized contracts and provider identity; keep runtime, storage tr
 2. `crates/crab-types/src/pointer.rs` — `Pointer::parse / serialize / is_pointer`: wire serialization, parsing, and the separate detection heuristic.
 3. `crates/crab-types/src/storage.rs` — `BucketIdentity / StorageScope`: provider aliases, bucket identity, and issued scopes.
 4. `crates/crab-types/src/error.rs` — `ErrorCategory`: cross-crate error categories.
+5. `crates/crab-types/src/pointer_read.rs` — native reader messages consumed by
+   `crab/src/cmd/read_pointer.rs` and the desktop sidecar's owned reader runtime.
 
 Trace one path: `crates/crab-git/src/pointer_detect.rs` (`classify`) →
 `Pointer::parse` in `crates/crab-types/src/pointer.rs` → its `parse_hex32`

@@ -1478,19 +1478,23 @@ declare global {
   }
 }
 
-async function call<T>(method: string, params: unknown = {}): Promise<T> {
-  return (await window.crab.rpc(method, params)) as T;
+async function call<T>(method: string, params: unknown = {}, signal?: AbortSignal): Promise<T> {
+  if (!signal) return (await window.crab.rpc(method, params)) as T;
+  signal.throwIfAborted();
+  const operation = callCancellable<T>(method, params);
+  const cancel = () => operation.cancel();
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await operation.promise;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
 }
 
 // ── Cancellable RPC ─────────────────────────────────────────────────
 
 /** JSON-RPC error code the agent uses for cancelled operations. */
 export const OP_CANCELLED_RPC_CODE = 1010;
-
-let opIdCounter = 0;
-function nextOpId(): string {
-  return `op-${Date.now()}-${++opIdCounter}`;
-}
 
 /**
  * Returns true when an RPC error represents a cancelled operation.
@@ -1512,48 +1516,25 @@ export interface CancellableCall<T> {
   cancel: () => void;
 }
 
-/**
- * Issue a cancellable RPC. The returned `cancel()` sends `rpc/cancel`
- * to the agent and rejects the promise with a recognizable cancelled
- * error. Long-running handlers (git_log, git_grep, git_diff_file)
- * cooperate by selecting on the cancel channel.
- */
+/** Request cancellation; the original native reply remains the terminal result. */
 export function callCancellable<T>(
   method: string,
   params: unknown = {},
 ): CancellableCall<T> {
-  const op_id = nextOpId();
+  const op_id = crypto.randomUUID();
   let cancelled = false;
-  let rejectFn: ((reason: unknown) => void) | null = null;
-
-  const promise = new Promise<T>((resolve, reject) => {
-    rejectFn = reject;
-    const enriched = typeof params === "object" && params !== null
-      ? { ...params, op_id }
-      : { op_id };
-    window.crab.rpc(method, enriched).then(
-      (result) => {
-        if (!cancelled) resolve(result as T);
-      },
-      (err) => {
-        if (!cancelled) reject(err);
-      },
-    );
-  });
-
+  let settled = false;
+  const enriched = typeof params === "object" && params !== null
+    ? { ...params, op_id }
+    : { op_id };
+  const promise = (window.crab.rpc(method, enriched) as Promise<T>).finally(() => { settled = true; });
   const cancel = () => {
-    if (cancelled) return;
+    if (cancelled || settled) return;
     cancelled = true;
-    // Fire-and-forget the cancel signal to the agent.
-    window.crab.rpc("rpc/cancel", { op_id }).catch(() => undefined);
-    // Reject the promise so callers can clean up immediately.
-    const err = Object.assign(new Error("Operation cancelled"), {
-      code: OP_CANCELLED_RPC_CODE,
-      data: { kind: "op_cancelled", op_id },
-    });
-    rejectFn?.(err);
+    // Sending the signal does not establish cancellation. The work may have
+    // already completed; only its reply establishes success, failure or cancel.
+    void window.crab.rpc("rpc/cancel", { op_id }).catch(() => undefined);
   };
-
   return { promise, cancel };
 }
 
@@ -1695,7 +1676,7 @@ export const rpc = {
     path: string,
     offset: number,
     length: number,
-    opts: { rev?: string } = {},
+    { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {},
   ) =>
     call<{ offset: number; length: number; bytes_b64: string; file_size: number }>("read_range", {
       repo_id,
@@ -1703,25 +1684,25 @@ export const rpc = {
       offset,
       length,
       ...opts,
-    }),
+    }, signal),
 
   previewParquet: (
     repo_id: string,
     path: string,
-    opts: { rev?: string; max_rows?: number } = {},
-  ) => call<ParquetPreview>("preview_parquet", { repo_id, path, ...opts }),
+    { signal, ...opts }: { rev?: string; max_rows?: number; signal?: AbortSignal } = {},
+  ) => call<ParquetPreview>("preview_parquet", { repo_id, path, ...opts }, signal),
 
-  previewSafetensors: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<SafetensorsPreview>("preview_safetensors", { repo_id, path, ...opts }),
+  previewSafetensors: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<SafetensorsPreview>("preview_safetensors", { repo_id, path, ...opts }, signal),
 
-  previewNpy: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<NpyPreview>("preview_npy", { repo_id, path, ...opts }),
+  previewNpy: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<NpyPreview>("preview_npy", { repo_id, path, ...opts }, signal),
 
-  previewNpz: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<NpzPreview>("preview_npz", { repo_id, path, ...opts }),
+  previewNpz: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<NpzPreview>("preview_npz", { repo_id, path, ...opts }, signal),
 
-  previewZip: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<ZipPreview>("preview_zip", { repo_id, path, ...opts }),
+  previewZip: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<ZipPreview>("preview_zip", { repo_id, path, ...opts }, signal),
 
   repoSummary: (repo_id: string, opts: { rev?: string } = {}) =>
     call<RepoSummary>("repo_summary", { repo_id, ...opts }),
@@ -2179,7 +2160,7 @@ export const rpc = {
       h5dump_available: boolean;
     }>("preview_hdf5", { repo_id, path, ...opts }),
 
-  previewTorchCheckpoint: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
+  previewTorchCheckpoint: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
     call<{
       kind: "torch_checkpoint";
       file_size: number;
@@ -2187,7 +2168,7 @@ export const rpc = {
       tensor_count: number;
       has_optimizer_state: boolean;
       zip_entries: Array<{ name: string; size: number }>;
-    }>("preview_torch_checkpoint", { repo_id, path, ...opts }),
+    }>("preview_torch_checkpoint", { repo_id, path, ...opts }, signal),
 
   previewProtobuf: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
     call<{

@@ -1,12 +1,13 @@
-//! Bounded pointer reads for the matching desktop native runtime.
+//! Owned pointer reads for the matching native runtime.
 
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf, sync::Arc};
 
-use clap::Args;
-use crab_git::PointerKind;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crab_lfs::LfsReadSession;
+use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_read::PointerReader;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crab_types::pointer_read::{Request, Response};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{
@@ -15,137 +16,327 @@ use crate::core::{
 };
 use crate::git::url::{ObjectUrl, UrlForm};
 use crate::git::worktree::WorktreeContext;
-use crab_metadata::file_index_lookup::SharedFileIndexLookup;
-use std::sync::Arc;
 
 const MAX_PREVIEW_METADATA_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
 
-/// Parameters for the private desktop range-read protocol.
-#[derive(Debug, Args)]
-pub struct ReadPointerArgs {
-    #[arg(long, default_value_t = 0)]
-    pub offset: u64,
-    #[arg(long, default_value_t = 0)]
-    pub length: u32,
-    #[arg(long)]
-    pub inspect: bool,
-    #[arg(long)]
-    pub expected_remote: Option<String>,
+/// Serve one pointer until close, EOF or cancellation; drain before acknowledging close.
+pub async fn run(cancel: &CancellationToken) -> Result<()> {
+    let mut input = Input {
+        reader: BufReader::new(tokio::io::stdin()),
+        bytes: Vec::new(),
+    };
+    let first = tokio::select! {
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        first = input.next() => first?,
+    };
+    let Some(Request::Open { pointer_b64 }) = first else {
+        return Err(invalid("the first reader command must open a pointer"));
+    };
+    let bytes = STANDARD
+        .decode(pointer_b64)
+        .map_err(std::io::Error::other)?;
+    let mut session = Session::open(&bytes).await?;
+    let mut output = tokio::io::stdout();
+    let result = async {
+        emit(
+            &mut output,
+            Response::Ready {
+                size: session.size(),
+                remote_url: session.config.remote_url.clone(),
+            },
+        )
+        .await?;
+        serve(&mut session, &mut input, &mut output, cancel).await
+    }
+    .await;
+    let closed = session.close().await;
+    let terminal = result.and(closed);
+    match terminal {
+        Ok(()) => emit(&mut output, Response::Closed).await,
+        Err(error) => emit(&mut output, failure(&error)).await,
+    }
 }
 
-/// Read a pointer from stdin and emit verified range bytes after cleanup.
-pub async fn run(args: &ReadPointerArgs, cancel: &CancellationToken) -> Result<()> {
-    if args.length > 8 * 1024 * 1024 {
-        return Err(invalid("range length exceeds 8 MiB"));
-    }
-    let mut bytes = Vec::new();
-    tokio::io::stdin()
-        .take(crab_git::MAX_LFS_POINTER_SIZE as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await?;
-    let pointer = crab_git::classify(&bytes);
-    let size = match &pointer {
-        PointerKind::Crab(pointer) => pointer.size,
-        PointerKind::Lfs(pointer) if pointer.extensions.is_empty() => pointer.size,
-        PointerKind::Lfs(_) => {
-            return Err(invalid("LFS extensions require a smudge implementation"));
+async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    session: &mut Session,
+    input: &mut Input<R>,
+    output: &mut W,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        let command = tokio::select! {
+            () = cancel.cancelled() => break,
+            command = input.next() => command?,
+        };
+        let Some(command) = command else {
+            break;
+        };
+        match command {
+            Request::Open { .. } => return Err(invalid("the reader already owns a pointer")),
+            Request::Close => break,
+            // A completed range can race its cancellation command. Its data or
+            // failure already acknowledges completion; do not enqueue another reply.
+            Request::Cancel => continue,
+            Request::Range { offset, length } => {
+                let token = cancel.child_token();
+                let work = session.read(offset, length, &token);
+                tokio::pin!(work);
+                let mut stop = false;
+                let result = tokio::select! {
+                    biased;
+                    result = &mut work => result,
+                    () = cancel.cancelled() => {
+                        token.cancel();
+                        stop = true;
+                        work.await
+                    }
+                    command = input.next() => {
+                        token.cancel();
+                        let result = work.await;
+                        match command? {
+                            None | Some(Request::Close) => stop = true,
+                            Some(Request::Cancel) => {},
+                            _ => return Err(invalid("only cancel or close may interrupt a range")),
+                        }
+                        result
+                    }
+                };
+                if stop {
+                    // Cancellation is advisory; preserve a real integrity/transport
+                    // failure after the in-flight worker has fully drained.
+                    if let Err(error) = result {
+                        if !cancelled(&error, &token) {
+                            return Err(error);
+                        }
+                    }
+                    break;
+                }
+                let reply = match result {
+                    Ok((offset, bytes)) => Response::Data {
+                        offset,
+                        bytes_b64: STANDARD.encode(bytes),
+                    },
+                    Err(error) if cancelled(&error, &token) => Response::Cancelled,
+                    Err(error) => failure(&error),
+                };
+                emit(output, reply).await?;
+            }
         }
-        PointerKind::NotAPointer => {
-            return Err(invalid("stdin is not a supported content pointer"));
-        }
-    };
-    check_cancelled(cancel)?;
-    if args.inspect {
-        let config = Config::resolve_local()?;
-        let output = serde_json::to_vec(&serde_json::json!({ "remote_url": config.remote_url }))
-            .map_err(std::io::Error::other)?;
-        tokio::io::stdout().write_all(&output).await?;
-        return Ok(());
     }
-    let expected: Option<Option<String>> = args
-        .expected_remote
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(std::io::Error::other)?;
-    let start = args.offset.min(size);
-    let end = start.saturating_add(u64::from(args.length)).min(size);
-    let output = read(&pointer, start..end, expected.as_ref(), cancel).await?;
-    check_cancelled(cancel)?;
-    tokio::io::stdout().write_all(&output).await?;
     Ok(())
 }
 
-async fn read(
-    pointer: &PointerKind,
-    range: Range<u64>,
-    expected_remote: Option<&Option<String>>,
-    cancel: &CancellationToken,
-) -> Result<Vec<u8>> {
-    if range.is_empty() {
-        return Ok(Vec::new());
+enum Pointer {
+    Crab(crab_types::pointer::Pointer),
+    Lfs(crab_git::LfsPointer),
+}
+
+struct Session {
+    pointer: Pointer,
+    config: Config,
+    local: PointerReader,
+    staging: PathBuf,
+    storage: PathBuf,
+    pin: Option<crab_staging::StagedFilePin>,
+    lfs: LfsReadSession,
+    remote: Option<PointerReader>,
+    lookup: Option<SharedFileIndexLookup>,
+}
+
+impl Session {
+    async fn open(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > crab_git::MAX_LFS_POINTER_SIZE {
+            return Err(invalid("pointer exceeds its size limit"));
+        }
+        let first = bytes
+            .split(|&byte| byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        let crab =
+            std::str::from_utf8(first).is_ok_and(crab_types::pointer::is_supported_version_line);
+        let pointer = if crab {
+            Pointer::Crab(crab_types::pointer::Pointer::parse(bytes)?)
+        } else {
+            Pointer::Lfs(crab_git::LfsPointer::parse(bytes)?)
+        };
+        if matches!(&pointer, Pointer::Lfs(pointer) if !pointer.extensions.is_empty()) {
+            return Err(invalid("LFS extensions require a smudge implementation"));
+        }
+        let config = Config::resolve_local()?;
+        let context = WorktreeContext::resolve_from_path(&std::env::current_dir()?)?;
+        let staging = context.shared_staging_dir();
+        let git_dir = context.per_worktree_git_dir;
+        let storage =
+            tokio::task::spawn_blocking(move || crab_lfs::local::storage_from_git(&git_dir))
+                .await
+                .map_err(std::io::Error::other)??;
+        let local = PointerReader::new(None, Some(staging.clone()), Some(storage.clone()));
+        let pin = match &pointer {
+            Pointer::Crab(pointer) => local.pin_file(pointer).await?,
+            _ => None,
+        };
+        Ok(Self {
+            pointer,
+            config,
+            local,
+            staging,
+            storage,
+            pin,
+            lfs: LfsReadSession::default(),
+            remote: None,
+            lookup: None,
+        })
     }
-    let context = WorktreeContext::resolve()?;
-    let staging = context.shared_staging_dir();
-    let git_dir = context.per_worktree_git_dir.clone();
-    let storage = tokio::task::spawn_blocking(move || crab_lfs::local::storage_from_git(&git_dir))
-        .await
-        .map_err(std::io::Error::other)??;
-    let local = PointerReader::new(None, Some(staging.clone()), Some(storage.clone()));
-    let session = LfsReadSession::default();
-    let mut lookup = None;
-    let result = async {
-        // Unpublished ownership is verified locally before remote discovery.
-        // Absence alone selects the store; corrupt selected local bytes fail.
-        match pointer {
-            PointerKind::Crab(pointer) => {
-                if let Some(_pin) = local.pin_file(pointer).await? {
-                    return Ok(local
-                        .read_range(pointer, range, cancel)
-                        .await?
-                        .bytes
-                        .to_vec());
-                }
+
+    fn size(&self) -> u64 {
+        match &self.pointer {
+            Pointer::Crab(pointer) => pointer.size,
+            Pointer::Lfs(pointer) => pointer.size,
+        }
+    }
+
+    async fn read(
+        &mut self,
+        offset: u64,
+        length: u32,
+        cancel: &CancellationToken,
+    ) -> Result<(u64, Vec<u8>)> {
+        if length > MAX_RANGE_BYTES {
+            return Err(invalid("range length exceeds 8 MiB"));
+        }
+        check_cancelled(cancel)?;
+        let start = offset.min(self.size());
+        let end = start.saturating_add(u64::from(length)).min(self.size());
+        if start == end {
+            return Ok((start, Vec::new()));
+        }
+        let bytes = self.range(start..end, cancel).await?;
+        if bytes.len() as u64 != end - start {
+            return Err(invalid("pointer reader returned an incomplete range"));
+        }
+        check_cancelled(cancel)?;
+        Ok((start, bytes))
+    }
+
+    async fn range(&mut self, range: Range<u64>, cancel: &CancellationToken) -> Result<Vec<u8>> {
+        match &self.pointer {
+            Pointer::Crab(pointer) if self.pin.is_some() => {
+                return Ok(self
+                    .local
+                    .read_range(pointer, range, cancel)
+                    .await?
+                    .bytes
+                    .to_vec());
             }
-            PointerKind::Lfs(pointer) => {
-                if let Some(bytes) = session
-                    .read_local_range(&storage, &pointer.oid, pointer.size, range.clone(), cancel)
+            Pointer::Lfs(pointer) => {
+                if let Some(bytes) = self
+                    .lfs
+                    .read_local_range(
+                        &self.storage,
+                        &pointer.oid,
+                        pointer.size,
+                        range.clone(),
+                        cancel,
+                    )
                     .await?
                 {
                     return Ok(bytes.to_vec());
                 }
             }
-            PointerKind::NotAPointer => return Err(invalid("not a content pointer")),
+            _ => {}
         }
-        let config = Config::resolve_local()?;
-        if expected_remote.is_some_and(|expected| expected != &config.remote_url) {
-            return Err(invalid("content repository changed; reopen the preview"));
+        if self.remote.is_none() {
+            let (hydrator, lookup) = remote_capture(&self.config, cancel).await?;
+            self.lookup = Some(lookup);
+            self.remote = Some(PointerReader::new(
+                Some(hydrator),
+                Some(self.staging.clone()),
+                Some(self.storage.clone()),
+            ));
         }
-        let (hydrator, index) = remote_capture(&config, cancel).await?;
-        lookup = Some(index);
-        let reader = PointerReader::new(Some(hydrator), Some(staging), Some(storage));
-        let output = match pointer {
-            PointerKind::Crab(pointer) => reader.read_range(pointer, range, cancel).await?,
-            PointerKind::Lfs(pointer) => {
+        let reader = self
+            .remote
+            .as_ref()
+            .ok_or_else(|| invalid("missing captured reader"))?;
+        let bytes = match &self.pointer {
+            Pointer::Crab(pointer) => reader.read_range(pointer, range, cancel).await?,
+            Pointer::Lfs(pointer) => {
                 reader
-                    .read_lfs_range(pointer, range, cancel, &session)
+                    .read_lfs_range(pointer, range, cancel, &self.lfs)
                     .await?
             }
-            PointerKind::NotAPointer => return Err(invalid("not a content pointer")),
         };
-        Ok(output.bytes.to_vec())
+        Ok(bytes.bytes.to_vec())
     }
-    .await;
-    session.close().await;
-    // Native reconstruction must finish before closing its captured lookup.
-    let closed = match lookup {
-        Some(lookup) => lookup.close().await.map_err(CrabError::from),
-        None => Ok(()),
-    };
-    result.and_then(|bytes| {
-        closed?;
-        Ok(bytes)
-    })
+
+    async fn close(self) -> Result<()> {
+        self.lfs.close().await;
+        if let Some(lookup) = self.lookup {
+            lookup.close().await?;
+        }
+        Ok(())
+    }
+}
+
+struct Input<R> {
+    reader: R,
+    bytes: Vec<u8>,
+}
+
+impl<R: AsyncBufRead + Unpin> Input<R> {
+    async fn next(&mut self) -> Result<Option<Request>> {
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                return if self.bytes.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(invalid("incomplete reader command"))
+                };
+            }
+            let length = chunk
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(chunk.len(), |at| at + 1);
+            if self.bytes.len() + length > MAX_REQUEST_BYTES {
+                return Err(invalid("reader command exceeds 16 KiB"));
+            }
+            let complete = chunk[length - 1] == b'\n';
+            self.bytes.extend_from_slice(&chunk[..length]);
+            self.reader.consume(length);
+            // The buffer belongs to Input, so selecting away from next() loses no
+            // partial frame while a range races its cancel/close command.
+            if complete {
+                let bytes = std::mem::take(&mut self.bytes);
+                return serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|error| std::io::Error::other(error).into());
+            }
+        }
+    }
+}
+
+async fn emit(output: &mut (impl AsyncWrite + Unpin), response: Response) -> Result<()> {
+    let mut bytes = serde_json::to_vec(&response).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+    Ok(())
+}
+
+fn failure(error: &CrabError) -> Response {
+    Response::Failed {
+        code: crate::core::error_catalog::error_code(error).into(),
+        message: error.to_string().chars().take(4096).collect(),
+    }
+}
+
+fn cancelled(error: &CrabError, token: &CancellationToken) -> bool {
+    matches!(error, CrabError::Cancelled)
+        || (token.is_cancelled()
+            && matches!(error, CrabError::Io(source) if source.kind() == std::io::ErrorKind::Interrupted))
 }
 
 async fn remote_capture(

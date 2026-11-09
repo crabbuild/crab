@@ -520,18 +520,22 @@ function ParquetMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     rpc
-      .previewParquet(repo.repo_id, path, { max_rows: 0 })
+      .previewParquet(repo.repo_id, path, { max_rows: 0, signal: controller.signal })
       .then((p) => {
+        if (controller.signal.aborted) return;
         setPreview(p);
         setLoading(false);
       })
       .catch((e) => {
+        if (controller.signal.aborted) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoading(false);
       });
+    return () => controller.abort();
   }, [repo.repo_id, path]);
 
   if (loading) return <MetadataLoading />;
@@ -574,18 +578,22 @@ function SafetensorsMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     rpc
-      .previewSafetensors(repo.repo_id, path)
+      .previewSafetensors(repo.repo_id, path, { signal: controller.signal })
       .then((p) => {
+        if (controller.signal.aborted) return;
         setPreview(p);
         setLoading(false);
       })
       .catch((e) => {
+        if (controller.signal.aborted) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoading(false);
       });
+    return () => controller.abort();
   }, [repo.repo_id, path]);
 
   if (loading) return <MetadataLoading />;

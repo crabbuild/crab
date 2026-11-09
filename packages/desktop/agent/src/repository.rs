@@ -14,13 +14,15 @@ use tokio::io::AsyncWriteExt;
 use crate::{AgentError, Result, shellout};
 
 mod content;
-pub(crate) use content::FileSource;
+mod native;
+pub(crate) use content::{FileSource, ReadScope};
 
 #[derive(Clone)]
 pub struct BrowseSession {
     pub url: String,
     pub work_dir: Option<PathBuf>,
     remote: Option<Arc<RemoteSession>>,
+    readers: native::NativeReads,
 }
 
 struct RemoteSession {
@@ -71,6 +73,10 @@ pub fn token_cache_directory() -> Result<PathBuf> {
 }
 
 impl BrowseSession {
+    pub(crate) fn read_scope(&self) -> ReadScope {
+        ReadScope::new(self.readers.read_token())
+    }
+
     pub async fn open_local(path: &Path) -> Result<Self> {
         let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
         let root = PathBuf::from(String::from_utf8(root)?.trim());
@@ -89,6 +95,7 @@ impl BrowseSession {
             url,
             work_dir: Some(root),
             remote: None,
+            readers: native::NativeReads::default(),
         })
     }
 
@@ -178,14 +185,17 @@ impl BrowseSession {
             url: url.to_owned(),
             work_dir: None,
             remote: Some(Arc::new(RemoteSession { client, repository })),
+            readers: native::NativeReads::default(),
         })
     }
 
     pub async fn close(&self) -> Result<()> {
-        if let Some(remote) = &self.remote {
-            remote.client.close().await?;
-        }
-        Ok(())
+        let native = self.readers.close().await;
+        let remote = match &self.remote {
+            Some(remote) => remote.client.close().await.map_err(AgentError::from),
+            None => Ok(()),
+        };
+        native.and(remote)
     }
 
     pub async fn refs(&self) -> Result<crab_sdk::remote::References> {
@@ -615,6 +625,7 @@ mod tests {
             let session = BrowseSession {
                 url: "test".into(),
                 work_dir: None,
+                readers: native::NativeReads::default(),
                 remote: Some(Arc::new(RemoteSession {
                     client: client.clone(),
                     repository,

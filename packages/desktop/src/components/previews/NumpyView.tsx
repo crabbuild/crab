@@ -18,10 +18,11 @@ function NpyView({ repoId, path, rev }: { repoId: string; path: string; rev: str
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewNpy(repoId, path, { rev: rev ?? undefined })
+      .previewNpy(repoId, path, { rev: rev ?? undefined, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -30,6 +31,7 @@ function NpyView({ repoId, path, rev }: { repoId: string; path: string; rev: str
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [repoId, path, rev]);
 
@@ -63,10 +65,11 @@ function NpzView({ repoId, path, rev }: { repoId: string; path: string; rev: str
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewNpz(repoId, path, { rev: rev ?? undefined })
+      .previewNpz(repoId, path, { rev: rev ?? undefined, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -75,6 +78,7 @@ function NpzView({ repoId, path, rev }: { repoId: string; path: string; rev: str
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [repoId, path, rev]);
 

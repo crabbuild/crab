@@ -2547,36 +2547,28 @@ async fn read_bytes_from_worktree(state: &State, p: &ReadTextParams) -> Result<V
 
 #[derive(Debug, Deserialize)]
 struct ReadRangeParams {
-    repo_id: String,
-    path: String,
+    #[serde(flatten)]
+    file: PreviewParams,
     offset: u64,
-    /// Cap at 8 MiB per request — large enough for a Parquet footer or
-    /// a thumbnail, small enough that the renderer stays responsive.
     length: u32,
-    #[serde(default)]
-    rev: Option<String>,
 }
 
-/// Read a byte range from `(path, rev)`. Returns base64-encoded.
-///
 async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
     use base64::Engine as _;
 
     if p.length > 8 * 1024 * 1024 {
-        return Err(AgentError::Other(format!(
-            "read_range length {} exceeds 8 MiB cap",
-            p.length
-        )));
+        return Err(AgentError::Other("read_range length exceeds 8 MiB".into()));
     }
-    let repo = state.get(&p.repo_id).await?;
-    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
-    let bytes = source.read_range(p.offset, p.length).await?;
-    Ok(json!({
-        "offset": p.offset.min(source.size),
-        "length": bytes.len(),
-        "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-        "file_size": source.size,
-    }))
+    read_source(state, p.file, |source| async move {
+        let bytes = source.read_range(p.offset, p.length).await?;
+        Ok(json!({
+            "offset": p.offset.min(source.size),
+            "length": bytes.len(),
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "file_size": source.size,
+        }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2585,6 +2577,57 @@ struct PreviewParams {
     path: String,
     #[serde(default)]
     rev: Option<String>,
+    #[serde(default)]
+    op_id: Option<String>,
+}
+
+async fn read_source<F, W>(state: &State, p: PreviewParams, work: F) -> Result<Value>
+where
+    F: FnOnce(Arc<crate::repository::FileSource>) -> W,
+    W: std::future::Future<Output = Result<Value>>,
+{
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let id = p.op_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut signal = state.cancel_registry.register(id.clone()).await;
+    let result = async {
+        let capture =
+            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone());
+        tokio::pin!(capture);
+        let mut cancelled = false;
+        let captured = tokio::select! {
+            biased;
+            result = &mut capture => result,
+            _ = &mut signal => { scope.cancel(); cancelled = true; capture.await },
+        };
+        let source = match captured {
+            Ok(source) => Arc::new(source),
+            Err(error @ AgentError::Shared(_)) => return Err(error),
+            Err(_) if cancelled => return Err(AgentError::OpCancelled { op_id: id.clone() }),
+            Err(error) => return Err(error),
+        };
+        if cancelled {
+            source.close().await?;
+            return Err(AgentError::OpCancelled { op_id: id.clone() });
+        }
+        let work = work(source.clone());
+        tokio::pin!(work);
+        let result = tokio::select! {
+            biased;
+            result = &mut work => result,
+            _ = &mut signal => { scope.cancel(); cancelled = true; work.await },
+        };
+        // Cancellation never abandons blocking parsers, native children or SDK
+        // streams. Close errors take precedence over the cancellation result.
+        source.close().await?;
+        if cancelled {
+            return Err(AgentError::OpCancelled { op_id: id.clone() });
+        }
+        result
+    }
+    .await;
+    state.cancel_registry.unregister(&id).await;
+    result
 }
 
 async fn preview_fmt(
@@ -2592,32 +2635,32 @@ async fn preview_fmt(
     p: PreviewParams,
     f: fn(preview::PreviewReader) -> Result<Value>,
 ) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
-    let reader = preview::PreviewReader::new(source);
-    tokio::task::spawn_blocking(move || f(reader))
-        .await
-        .map_err(std::io::Error::other)?
+    read_source(state, p, |source| async move {
+        let reader = preview::PreviewReader::new(source);
+        tokio::task::spawn_blocking(move || f(reader))
+            .await
+            .map_err(std::io::Error::other)?
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
 struct ParquetPreviewParams {
-    repo_id: String,
-    path: String,
-    #[serde(default)]
-    rev: Option<String>,
+    #[serde(flatten)]
+    file: PreviewParams,
     #[serde(default)]
     max_rows: Option<usize>,
 }
 
 async fn preview_parquet(state: &State, p: ParquetPreviewParams) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    let source = crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref()).await?;
-    let reader = preview::PreviewReader::new(source);
     let max_rows = p.max_rows.unwrap_or(preview::DEFAULT_PARQUET_PREVIEW_ROWS);
-    tokio::task::spawn_blocking(move || preview::parquet(reader, max_rows))
-        .await
-        .map_err(std::io::Error::other)?
+    read_source(state, p.file, |source| async move {
+        let reader = preview::PreviewReader::new(source);
+        tokio::task::spawn_blocking(move || preview::parquet(reader, max_rows))
+            .await
+            .map_err(std::io::Error::other)?
+    })
+    .await
 }
 
 /// Repository summary: total files, by kind, by top-level extension,
@@ -5651,6 +5694,52 @@ mod tests {
         let _ = sh(&root, &["config", "user.email", "test@example.com"]);
         let _ = sh(&root, &["config", "user.name", "Test User"]);
         (td, root)
+    }
+
+    #[tokio::test]
+    async fn file_read_cancellation_waits_for_work_and_closes_its_source() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"content").unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root).await.unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        let (entered, source) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let worker_state = state.clone();
+        let operation = tokio::spawn(async move {
+            read_source(
+                &worker_state,
+                PreviewParams {
+                    repo_id: "test".into(),
+                    path: "file.txt".into(),
+                    rev: None,
+                    op_id: Some("preview".into()),
+                },
+                |source| async move {
+                    assert!(entered.send(source).is_ok());
+                    released.await.unwrap();
+                    Ok(json!({ "finished": true }))
+                },
+            )
+            .await
+        });
+        let source = source.await.unwrap();
+        assert!(state.cancel_registry.cancel("preview").await);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while source.check_cancelled().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!operation.is_finished());
+        release.send(()).unwrap();
+        assert!(
+            matches!(operation.await.unwrap(), Err(AgentError::OpCancelled { op_id }) if op_id == "preview")
+        );
+        assert!(source.read_range(0, 1).await.is_err());
+        assert!(!state.cancel_registry.cancel("preview").await);
+        state.shutdown().await.unwrap();
     }
 
     #[tokio::test]

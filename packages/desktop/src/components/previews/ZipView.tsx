@@ -16,10 +16,11 @@ export function ZipView({ repoId, path, rev }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewZip(repoId, path, { rev: rev ?? undefined })
+      .previewZip(repoId, path, { rev: rev ?? undefined, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -28,6 +29,7 @@ export function ZipView({ repoId, path, rev }: Props) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [repoId, path, rev]);
 

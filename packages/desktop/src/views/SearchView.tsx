@@ -141,6 +141,8 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
     cancelRef.current = null;
 
     if (!query.trim()) {
+      setLoading(false);
+      setWorkspaceLoading(false);
       setMatches(null);
       setWorkspaceResults(null);
       setErr(null);
@@ -221,19 +223,30 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
     cancelRef.current = cancel;
     promise
       .then((r) => {
+        if (cancelRef.current !== cancel) return;
         setMatches(r.matches);
         setTruncated(r.truncated);
       })
       .catch((e: unknown) => {
+        if (cancelRef.current !== cancel) return;
         if (!isCancelledError(e)) setErr(e instanceof Error ? e.message : String(e));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (cancelRef.current === cancel) {
+          cancelRef.current = null;
+          setLoading(false);
+        }
+      });
   }, [repo.repo_id, query, caseSensitive, wholeWord, useRegex, includeInput, excludeInput, searchAllRepos, workspace]);
 
   // Debounce the search.
   useEffect(() => {
     const t = setTimeout(run, 250);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      cancelRef.current?.();
+      cancelRef.current = null;
+    };
   }, [run]);
 
   // ── Grouped results ─────────────────────────────────────────────

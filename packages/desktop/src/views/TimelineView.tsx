@@ -375,6 +375,7 @@ export function TimelineView({
     cancelRef.current = cancel;
     promise
       .then((r) => {
+        if (cancelRef.current !== cancel) return;
         const elapsed = performance.now() - t0;
         console.debug(
           `[timeline] git_log resolved: ${r.commits.length} commits, ` +
@@ -385,6 +386,7 @@ export function TimelineView({
         onCommitsLoaded?.(r.commits);
       })
       .catch((e: unknown) => {
+        if (cancelRef.current !== cancel) return;
         if (!isCancelledError(e)) {
           console.error(`[timeline] git_log error:`, e);
           setErr(e instanceof Error ? e.message : String(e));
@@ -393,6 +395,7 @@ export function TimelineView({
         }
       })
       .finally(() => {
+        if (cancelRef.current !== cancel) return;
         setLoading(false);
         // Clear ref after completion so stale cancel isn't called on unmount.
         cancelRef.current = null;

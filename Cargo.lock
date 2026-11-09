@@ -2819,6 +2819,7 @@ dependencies = [
  "crab-metadata",
  "crab-sdk",
  "crab-storage",
+ "crab-types",
  "crab-workflow",
  "dirs 5.0.1",
  "duckdb",

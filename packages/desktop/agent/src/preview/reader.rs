@@ -28,9 +28,9 @@ pub(crate) struct PreviewReader {
 }
 
 impl PreviewReader {
-    pub(crate) fn new(source: FileSource) -> Self {
+    pub(crate) fn new(source: Arc<FileSource>) -> Self {
         Self {
-            source: Arc::new(source),
+            source,
             runtime: tokio::runtime::Handle::current(),
             remaining: Arc::new(AtomicU64::new(PREVIEW_READ_BUDGET)),
             offset: 0,
@@ -42,6 +42,9 @@ impl PreviewReader {
 
 impl Read for PreviewReader {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        self.source
+            .check_cancelled()
+            .map_err(std::io::Error::other)?;
         if output.is_empty() || self.offset >= self.source.size {
             return Ok(0);
         }

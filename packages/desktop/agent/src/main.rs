@@ -93,6 +93,12 @@ pub enum AgentError {
     #[error("crab CLI exited with status {status}: {stderr}")]
     Cli { status: i32, stderr: String },
 
+    #[error("native content read failed ({code}): {message}")]
+    NativeRead { code: String, message: String },
+
+    #[error(transparent)]
+    Shared(Arc<AgentError>),
+
     #[error("unknown method: {0}")]
     UnknownMethod(String),
 

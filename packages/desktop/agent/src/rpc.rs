@@ -128,7 +128,11 @@ impl RpcError {
 impl From<crate::AgentError> for RpcError {
     fn from(err: crate::AgentError) -> Self {
         use crate::AgentError as E;
-        let (code, data) = match &err {
+        let mut detail = &err;
+        while let E::Shared(source) = detail {
+            detail = source;
+        }
+        let (code, data) = match detail {
             E::UnknownMethod(_) => (-32601, None),
             E::InvalidParams { .. } => (-32602, None),
             E::Sdk(_) => (1001, Some(serde_json::json!({ "kind": "sdk" }))),
@@ -141,6 +145,10 @@ impl From<crate::AgentError> for RpcError {
                 })),
             ),
             E::Io(_) => (1003, None),
+            E::NativeRead { code, .. } => (
+                1012,
+                Some(serde_json::json!({ "kind": "content_read", "code": code })),
+            ),
             E::Decode(_) => (-32700, None),
             E::RepoNotOpen(_) => (1004, None),
             E::StaleHunk {
@@ -189,6 +197,7 @@ impl From<crate::AgentError> for RpcError {
             | E::Config(_)
             | E::Workflow(_)
             | E::Yaml(_)
+            | E::Shared(_)
             | E::Other(_) => (1000, None),
         };
         Self {

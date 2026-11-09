@@ -1,7 +1,7 @@
 use std::{process::Stdio, time::SystemTime};
 
-use crab_sdk::operation::ReadOptions;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use crab_sdk::operation::{Cancellation, Options, ReadOptions};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
 use super::*;
@@ -10,7 +10,43 @@ pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
 
 pub(crate) struct FileSource {
     source: Source,
+    scope: ReadScope,
     pub size: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReadScope {
+    sdk: Cancellation,
+    stop: tokio_util::sync::CancellationToken,
+    id: String,
+}
+
+impl ReadScope {
+    pub(super) fn new(stop: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            sdk: Cancellation::default(),
+            stop,
+            id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.sdk.cancel();
+        self.stop.cancel();
+    }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.stop.is_cancelled() {
+            return Err(AgentError::OpCancelled {
+                op_id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn options(&self) -> Options {
+        Options::default().with_cancellation(self.sdk.clone())
+    }
 }
 
 enum Source {
@@ -22,12 +58,7 @@ enum Source {
         root: PathBuf,
         oid: String,
     },
-    Pointer {
-        root: PathBuf,
-        bytes: Bytes,
-        connection: Option<DirectStoreOptions>,
-        remote: Option<String>,
-    },
+    Pointer(super::native::NativeFile),
     Remote {
         snapshot: Snapshot,
         path: GitPath,
@@ -39,12 +70,18 @@ impl FileSource {
         repo: &BrowseSession,
         path: &str,
         rev: Option<&str>,
+        scope: ReadScope,
     ) -> Result<Self> {
+        scope.check()?;
         let validated = GitPath::new(path.as_bytes().to_vec())?;
         let Some(root) = &repo.work_dir else {
             let snapshot = repo.snapshot(rev).await?;
-            let metadata = snapshot.file_metadata(validated.clone()).await?;
+            let metadata = snapshot
+                .file_metadata(validated.clone())
+                .with_options(ReadOptions::default().with_operation(scope.options()))
+                .await?;
             return Ok(Self {
+                scope,
                 size: metadata.size,
                 source: Source::Remote {
                     snapshot,
@@ -71,10 +108,11 @@ impl FileSource {
             if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
                 let bytes = git(root, &["cat-file", "blob", &oid]).await?;
                 if let Some(size) = pointer_size(&bytes) {
-                    return Self::pointer(root, bytes.into(), size).await;
+                    return Self::pointer(repo, root, bytes.into(), size, scope).await;
                 }
             }
             return Ok(Self {
+                scope,
                 size,
                 source: Source::Git {
                     root: root.clone(),
@@ -111,10 +149,11 @@ impl FileSource {
                 return Err(changed());
             }
             if let Some(size) = pointer_size(&bytes) {
-                return Self::pointer(root, bytes.into(), size).await;
+                return Self::pointer(repo, root, bytes.into(), size, scope).await;
             }
         }
         Ok(Self {
+            scope,
             size,
             source: Source::Local {
                 file: Mutex::new(file),
@@ -123,41 +162,45 @@ impl FileSource {
         })
     }
 
-    async fn pointer(root: &Path, bytes: Bytes, size: u64) -> Result<Self> {
-        #[derive(serde::Deserialize)]
-        struct Configuration {
-            remote_url: Option<String>,
-        }
-        // Parsing runs outside the request's task-local scope. Capture both its
-        // credentials and the native configuration owner before leaving it.
-        let selected = crate::storage_auth::current();
-        let connection = selected
-            .as_ref()
-            .map(|connection| connection.options())
-            .transpose()?;
-        let output = native_pointer(
-            root,
-            &bytes,
-            connection.as_ref(),
-            &["read-pointer", "--inspect"],
-        )
-        .await?;
-        let configuration: Configuration = serde_json::from_slice(&output)?;
-        if let (Some(selected), Some(remote)) = (&selected, &configuration.remote_url) {
-            selected.repository_prefix(remote)?;
+    async fn pointer(
+        repo: &BrowseSession,
+        root: &Path,
+        bytes: Bytes,
+        size: u64,
+        scope: ReadScope,
+    ) -> Result<Self> {
+        let source = repo
+            .readers
+            .open(root, bytes, scope.stop.clone(), scope.id.clone())
+            .await?;
+        if source.size != size {
+            let closed = source.close().await;
+            closed?;
+            return Err(AgentError::Other(
+                "native reader opened a different file size".into(),
+            ));
         }
         Ok(Self {
+            scope,
             size,
-            source: Source::Pointer {
-                root: root.to_owned(),
-                bytes,
-                connection,
-                remote: configuration.remote_url,
-            },
+            source: Source::Pointer(source),
         })
     }
 
+    pub(crate) async fn close(&self) -> Result<()> {
+        self.scope.cancel();
+        if let Source::Pointer(source) = &self.source {
+            source.close().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        self.scope.check()
+    }
+
     pub(crate) async fn read_range(&self, offset: u64, length: u32) -> Result<Bytes> {
+        self.scope.check()?;
         if length > MAX_RANGE_BYTES {
             return Err(AgentError::Other("range length exceeds 8 MiB".into()));
         }
@@ -196,11 +239,13 @@ impl FileSource {
                     .take()
                     .ok_or_else(|| AgentError::Other("Git stdout unavailable".into()))?;
                 let read = async {
-                    let skipped =
-                        tokio::io::copy(&mut (&mut stdout).take(start), &mut tokio::io::sink())
-                            .await?;
-                    if skipped != start {
-                        return Err(AgentError::Other("Git blob ended before range".into()));
+                    let mut remaining = start;
+                    let mut discard = vec![0; (1024 * 1024_u64).min(start) as usize];
+                    while remaining > 0 {
+                        self.scope.check()?;
+                        let take = remaining.min(discard.len() as u64) as usize;
+                        stdout.read_exact(&mut discard[..take]).await?;
+                        remaining -= take as u64;
                     }
                     let mut bytes = vec![0; length];
                     stdout.read_exact(&mut bytes).await?;
@@ -213,33 +258,11 @@ impl FileSource {
                 let _ = child.wait().await?;
                 read?
             }
-            Source::Pointer {
-                root,
-                bytes,
-                connection,
-                remote,
-            } => {
-                let offset = start.to_string();
-                let length = length.to_string();
-                let expected = serde_json::to_string(remote)?;
-                native_pointer(
-                    root,
-                    bytes,
-                    connection.as_ref(),
-                    &[
-                        "read-pointer",
-                        "--offset",
-                        &offset,
-                        "--length",
-                        &length,
-                        "--expected-remote",
-                        &expected,
-                    ],
-                )
-                .await?
-            }
+            Source::Pointer(source) => source.read(start, length as u32).await?,
             Source::Remote { snapshot, path } => {
-                let options = ReadOptions::default().with_range(start..end)?;
+                let options = ReadOptions::default()
+                    .with_operation(self.scope.options())
+                    .with_range(start..end)?;
                 let mut stream = snapshot
                     .open_file(path.clone())
                     .with_options(options)
@@ -263,6 +286,7 @@ impl FileSource {
                 bytes.into()
             }
         };
+        self.scope.check()?;
         if bytes.len() != length {
             return Err(AgentError::Other(
                 "range source returned an incomplete range".into(),
@@ -270,43 +294,6 @@ impl FileSource {
         }
         Ok(bytes)
     }
-}
-
-async fn native_pointer(
-    root: &Path,
-    bytes: &[u8],
-    connection: Option<&DirectStoreOptions>,
-    args: &[&str],
-) -> Result<Bytes> {
-    let mut command = tokio::process::Command::new(shellout::resolve_crab_bin());
-    if let Some(connection) = connection {
-        connection.configure_command(command.as_std_mut())?;
-    }
-    let mut child = command
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| AgentError::Other("Crab stdin unavailable".into()))?;
-    let write = async move {
-        stdin.write_all(bytes).await?;
-        drop(stdin);
-        Ok::<_, std::io::Error>(())
-    };
-    let (_, output) = tokio::try_join!(write, child.wait_with_output())?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(output.stdout.into())
 }
 
 fn pointer_size(bytes: &[u8]) -> Option<u64> {

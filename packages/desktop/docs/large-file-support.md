@@ -10,7 +10,7 @@ completion. This record tracks implementation and qualification separately.
 | Capability | Required behavior | Current gap / qualification |
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | `repository.rs::pointer_info` currently returns no chunk/xorb metadata. |
-| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Implemented captured sources and a native pointer bridge; operation cancellation, selected-connection scope and real native/cloud qualification remain open. |
+| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Captured sources now retain native sessions and acknowledge cancellation/close. Selected-connection and read-only S3-compatible RPC proof passed. Packaged UI, cold/large content and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Parser and desktop qualification are in progress; media and query paths still need audit. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Existing workflows need qualification together, including uncommitted staged content and failures. |
@@ -88,10 +88,6 @@ completion. This record tracks implementation and qualification separately.
 
 ## Open implementation details
 
-- The native pointer bridge currently starts one bounded request per process.
-  Retain a native read session for the full preview lifetime before claiming
-  efficient repeated LFS reads or active-content pinning. Reuse its verified LFS
-  session, staged pin, captured configuration/catalog and cancellation owner.
 - Existing whole-file `read_text` / `read_bytes` still validate against index
   metadata and use a separate read path. Move these onto the captured source;
   a grown working file must not bypass its response limit, and complete reads
@@ -113,22 +109,39 @@ completion. This record tracks implementation and qualification separately.
   S3-compatible fixture; archived-content restoration and other provider/profile
   qualification remain open.
 
-### Next reader lifecycle change
+### Owned reader lifecycle
 
-The one-shot bridge is an implementation checkpoint, not the final lifecycle.
-Replace it with one private native reader session per captured pointer source.
-The initial handshake captures configuration and reports its remote before any
-network access; the desktop validates the selected connection against that
-target. Keep the staged pin, verified LFS session and captured remote runtime
-until explicit close. This removes repeated LFS verification and configuration
-recapture between requests.
+Each captured local pointer owns one private native reader session. The opening
+handshake captures configuration and reports its content remote before storage
+reads; the desktop validates it against the selected connection. The session
+retains its staged recipe pin, verified LFS read session and captured read-only
+catalog until close. Ranges remain capped at 8 MiB.
 
-Own native session actors in a per-browse-session runtime with a cancellation
-token and task tracker. Dropped requests signal cancellation and actors drain
-native cleanup; `BrowseSession::close` must await them before Tokio shuts down.
-The native protocol needs range, cancel and close acknowledgements. A cancelled
-range must finish its reconstruction/verification workers before acknowledging
-cancellation; an abandoned source must release its staging pin and close its
-captured lookup. Preview handlers must await close so cleanup failures remain visible.
-Remove the one-shot/inspect/expected-remote path in the same change; it is an
-unreleased private protocol, so no compatibility alias is needed.
+A per-browse-session actor set owns native children and stderr readers. Closing
+one source or its repository cancels and drains active work, acknowledges native
+close, reaps processes and awaits tracked tasks. Unexpected termination, protocol
+errors and cleanup timeouts remain failures. Repository shutdown also closes the
+SDK client even when native cleanup fails. The old one-shot/inspect/expected-remote
+protocol was removed; it was an unreleased private implementation.
+
+RPC reads and supported format previews register cancellation before capture.
+They await parsers, range workers and source close before returning cancellation.
+Preview components and dataset metadata panels pass abort signals on replacement
+or unmount. The renderer keeps the native terminal result instead of rejecting
+optimistically; search and timeline callers reject stale results independently.
+
+- `cargo test -p crab --locked --test e2e_read_pointer -- --nocapture`
+  passed (5 tests): repeated Crab/LFS ranges, full LFS integrity rejection,
+  captured configuration, cancel/EOF reuse and pin retention through confirmed
+  publication retirement plus staging maintenance/compaction.
+- The real native desktop parser test passed again, including repository close
+  with open Crab/LFS sources and rejection of subsequent reads/admission.
+- Captured-content tests passed (3); parser tests passed (5). The RPC cancellation
+  test proves cancellation awaits admitted work and closes its source.
+- Matching debug CLI/agent repeated the isolated read-only RustFS proof:
+  `large-files-proof.gptg8ywb/report.json`, 136 GET/HEAD requests, zero writes.
+- Renderer cancellation tests passed; TypeScript renderer/Electron checks passed.
+  Matching release CLI/agent/NFS, renderer, Electron and unsigned macOS arm64 ZIP
+  builds passed. Packaged GUI cancellation and complete feature qualification
+  remain open; the focused packaged smoke now covers a real staged 3 GiB Crab
+  file, LFS previews and visible integrity failure/repair.

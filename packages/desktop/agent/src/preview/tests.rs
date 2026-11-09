@@ -46,10 +46,10 @@ async fn safetensors_preview_reads_multi_gib_metadata_without_materializing_payl
         .set_len(header.len() as u64 + 3 * 1024 * 1024 * 1024)
         .unwrap();
     let repo = BrowseSession::open_local(root).await.unwrap();
-    let source = FileSource::capture(&repo, "weights.safetensors", None)
+    let source = FileSource::capture(&repo, "weights.safetensors", None, repo.read_scope())
         .await
         .unwrap();
-    let reader = PreviewReader::new(source);
+    let reader = PreviewReader::new(Arc::new(source));
     let preview = tokio::task::spawn_blocking(move || safetensors(reader))
         .await
         .unwrap()
@@ -86,10 +86,10 @@ async fn safetensors_preview_honors_committed_revision_after_working_file_change
     std::fs::write(&path, working).unwrap();
     let repo = BrowseSession::open_local(root).await.unwrap();
     for (rev, expected) in [(Some("HEAD"), "committed"), (None, "working")] {
-        let source = FileSource::capture(&repo, "weights.safetensors", rev)
+        let source = FileSource::capture(&repo, "weights.safetensors", rev, repo.read_scope())
             .await
             .unwrap();
-        let reader = PreviewReader::new(source);
+        let reader = PreviewReader::new(Arc::new(source));
         let preview = tokio::task::spawn_blocking(move || safetensors(reader))
             .await
             .unwrap()
@@ -119,10 +119,10 @@ async fn parquet_preview_reads_schema_and_requested_sample_through_captured_sour
     writer.write(&batch).unwrap();
     writer.close().unwrap();
     let repo = BrowseSession::open_local(root).await.unwrap();
-    let source = FileSource::capture(&repo, "data.parquet", None)
+    let source = FileSource::capture(&repo, "data.parquet", None, repo.read_scope())
         .await
         .unwrap();
-    let reader = PreviewReader::new(source);
+    let reader = PreviewReader::new(Arc::new(source));
     let preview = tokio::task::spawn_blocking(move || parquet(reader, 2))
         .await
         .unwrap()

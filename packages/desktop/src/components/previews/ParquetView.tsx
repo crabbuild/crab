@@ -24,10 +24,11 @@ export function ParquetView({ repoId, path, rev }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewParquet(repoId, path, { rev: rev ?? undefined, max_rows: maxRows })
+      .previewParquet(repoId, path, { rev: rev ?? undefined, max_rows: maxRows, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -36,6 +37,7 @@ export function ParquetView({ repoId, path, rev }: Props) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [repoId, path, rev, maxRows]);
 
