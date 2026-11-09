@@ -20,7 +20,7 @@ User,
 X
 } from "lucide-react";
 import { DEFAULT_SETTINGS,Settings,useSettings } from "../settings";
-import { dialogs,mainProcess,rpc } from "../ipc";
+import { call,dialogs,mainProcess,rpc } from "../ipc";
 import { usePrefetchProfiles } from "../lib/prefetch-profiles";
 import { useActiveRepo } from "../state";
 import { telemetry } from "../lib/telemetry";
@@ -1027,7 +1027,7 @@ function ForgeAuthentication() {
     setDeviceFlow({ provider, userCode: "", verificationUri: "", polling: true });
 
     try {
-      const result = await window.crab.rpc("forge_auth_start", {
+      const result = await call("forge_auth_start", {
         provider,
         client_id: providerInfo.defaultClientId,
         scopes: providerInfo.defaultScopes,

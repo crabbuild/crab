@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import clsx from "clsx";
+import { call } from "../../ipc";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ export function RemoteFileEditor({
       setLoading(true);
       setError(null);
       try {
-        const result = await (window as any).crab.rpc("ssh_read_file", {
+        const result = await call("ssh_read_file", {
           profile_id: profileId,
           path: filePath,
         });
@@ -121,7 +122,7 @@ export function RemoteFileEditor({
 
     setSaveState("saving");
     try {
-      const result = await (window as any).crab.rpc("ssh_write_file", {
+      const result = await call("ssh_write_file", {
         profile_id: profileId,
         path: filePath,
         content,
@@ -151,7 +152,7 @@ export function RemoteFileEditor({
   const handleOverwrite = useCallback(async () => {
     setSaveState("saving");
     try {
-      const result = await (window as any).crab.rpc("ssh_write_file", {
+      const result = await call("ssh_write_file", {
         profile_id: profileId,
         path: filePath,
         content,
@@ -174,7 +175,7 @@ export function RemoteFileEditor({
     setLoading(true);
     setSaveState("idle");
     try {
-      const result = await (window as any).crab.rpc("ssh_read_file", {
+      const result = await call("ssh_read_file", {
         profile_id: profileId,
         path: filePath,
       });

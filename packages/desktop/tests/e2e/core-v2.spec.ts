@@ -106,6 +106,18 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
     await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
     await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
     await expect(page.getByText(/native content read failed/i)).toBeVisible();
+    await expect(page.getByText(/native content read failed/i)).not.toContainText("Error invoking remote method");
+    const failure = await page.evaluate(async () => {
+      const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<unknown> } }).crab;
+      try {
+        await bridge.rpc("preview_safetensors", { repo_id: "large-files", path: "lfs.safetensors" });
+        return null;
+      } catch (error) {
+        const detail = error as { code?: number; message?: string; data?: unknown };
+        return { code: detail.code, message: detail.message, data: detail.data };
+      }
+    });
+    expect(failure).toMatchObject({ code: 1012, data: { kind: "content_read" } });
     await page.screenshot({ path: test.info().outputPath("lfs-integrity-error.png") });
     writeFileSync(payload, original);
     await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();

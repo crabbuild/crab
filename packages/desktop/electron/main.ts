@@ -5,6 +5,7 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { rpcReply } from "./rpc-transport";
 import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
@@ -317,7 +318,7 @@ function registerIpc(skillManager: SkillManager) {
   // ProviderRegistry based on the repo_id in params. For open_local
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
-  ipcMain.handle("crab:rpc", async (_evt, method: string, params: unknown) => {
+  ipcMain.handle("crab:rpc", (_evt, method: string, params: unknown) => rpcReply(async () => {
     await agentReady;
     if (!agent) throw new Error("agent not running");
 
@@ -386,7 +387,7 @@ function registerIpc(skillManager: SkillManager) {
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
     return agent.request(method, params);
-  });
+  }));
 
   ipcMain.handle("crab:dialog-open-repo", async () => {
     if (!mainWindow) return null;

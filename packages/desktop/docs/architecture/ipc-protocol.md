@@ -75,17 +75,29 @@ The agent speaks newline-delimited JSON-RPC 2.0 over stdio.
 
 ## Error Codes
 
+The Electron `crab:rpc` channel carries `{ ok: true, value }` or
+`{ ok: false, error: { message, code?, data? } }`. Electron serializes thrown
+Errors as messages only. Preload preserves the plain rejection data across
+the context bridge, and `src/ipc.ts` reconstructs a renderer `Error` with its
+classification. Renderer callers use that common client; the agent NDJSON
+contract remains JSON-RPC 2.0. Cancellation requests do not settle work;
+the original native response supplies its acknowledged terminal result.
+
 | Code | Meaning |
 |------|---------|
 | -32700 | Parse error (malformed JSON) |
 | -32601 | Method not found |
 | -32602 | Invalid params |
-| 1001 | Repository not open |
+| 1000 | Other agent failure |
+| 1001 | SDK failure |
 | 1002 | CLI exited with non-zero status |
-| 1003 | SDK error |
-| 1004 | Stale hunk anchor |
-| 1005 | Patch apply failed |
+| 1003 | I/O failure |
+| 1004 | Repository not open or path not found |
+| 1005 | Stale hunk anchor |
+| 1006 | Patch apply failed |
 | 1010 | Operation cancelled |
+| 1011 | Managed-service failure with remediation |
+| 1012 | Native content read or integrity failure |
 
 ## IPC Whitelist (Preload)
 

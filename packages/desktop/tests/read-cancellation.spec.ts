@@ -24,7 +24,7 @@ describe("read cancellation", () => {
     expect(settled).toBe(false);
     const failure = { code: 1012, message: "Content hash differs", data: { kind: "content_read" } };
     work.reject(failure);
-    await expect(operation.promise).rejects.toEqual(failure);
+    await expect(operation.promise).rejects.toMatchObject(failure);
     await terminal;
   });
 

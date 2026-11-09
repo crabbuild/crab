@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { RpcReply } from "./rpc-transport";
 
 // Whitelist of RPC method names the renderer is allowed to invoke.
 // Any new agent verb must be added here; unknown calls are rejected
@@ -251,7 +252,11 @@ contextBridge.exposeInMainWorld("crab", {
     if (!ALLOWED_METHODS.has(method)) {
       throw new Error(`method not allowed: ${method}`);
     }
-    return ipcRenderer.invoke("crab:rpc", method, params);
+    const reply: RpcReply<unknown> = await ipcRenderer.invoke("crab:rpc", method, params);
+    // Promise rejection with a plain value preserves code/data through the
+    // context bridge; throwing an Error here would discard custom properties.
+    if (!reply.ok) return Promise.reject(reply.error);
+    return reply.value;
   },
   pickRepoDirectory: () => ipcRenderer.invoke("crab:dialog-open-repo"),
   pickCloneDestination: () => ipcRenderer.invoke("crab:dialog-select-destination"),

@@ -207,6 +207,26 @@ cleanup is rejected during reconnection instead of queued for replay.
   Matching package build and GUI cleanup proof are pending. Cache budget
   editing/enforcement, SDK namespace lifecycle, offline retention and durable
   operation ownership remain open acceptance work.
+
+### Structured desktop errors
+
+The native JSON-RPC error's code and details now cross Electron IPC as plain
+reply data. Preload rejects with a plain value; the renderer client reconstructs
+an `Error` without discarding classification. Direct renderer callers now use
+that client. This removes Electron's transport prefix from ordinary native
+failures and preserves integrity and cancellation data for UI policy.
+
+- The installed Electron runtime probe preserved a rejected plain object's
+  code, message and nested data across its sandboxed context bridge. The main
+  IPC envelope, renderer error reconstruction and domain payload distinction
+  passed focused tests; 41 renderer/router tests and typechecks passed.
+- Renderer and Electron production builds passed. Packaged integrity and cache
+  GUI verification is pending the matching native release build.
+- Documentation link validation requires a built Next.js site. Dependencies
+  were installed and the check retried; it stops because this checkout has no
+  production `.next` build. The PR documentation-quality CI job builds the site
+  before running that check. Installer-only lock metadata was restored; no web
+  dependency versions changed.
   Evidence: `large-files-proof._xhbivbf/report.json` in the external build root;
   payload SHA-256 `4c22df11d3ecfef30df347707e9070fd9f96a0112170cb85b736818ef56001fd`.
   Renderer/Electron type checks passed; repeat packaged proof remains required.

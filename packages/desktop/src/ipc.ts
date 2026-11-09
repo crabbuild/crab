@@ -1506,8 +1506,23 @@ declare global {
   }
 }
 
-async function call<T>(method: string, params: unknown = {}, signal?: AbortSignal): Promise<T> {
-  if (!signal) return (await window.crab.rpc(method, params)) as T;
+async function request<T>(method: string, params: unknown): Promise<T> {
+  try {
+    return (await window.crab.rpc(method, params)) as T;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+      const failure = new Error(error.message);
+      if ("code" in error) Object.assign(failure, { code: error.code });
+      if ("data" in error) Object.assign(failure, { data: error.data });
+      throw failure;
+    }
+    throw error;
+  }
+}
+
+export async function call<T>(method: string, params: unknown = {}, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request<T>(method, params);
   signal.throwIfAborted();
   const operation = callCancellable<T>(method, params);
   const cancel = () => operation.cancel();
@@ -1557,13 +1572,13 @@ export function callCancellable<T>(
     : { op_id };
   const cancellation: { op_id: string; repo_id?: string } = { op_id };
   if (typeof enriched.repo_id === "string") cancellation.repo_id = enriched.repo_id;
-  const promise = (window.crab.rpc(method, enriched) as Promise<T>).finally(() => { settled = true; });
+  const promise = request<T>(method, enriched).finally(() => { settled = true; });
   const cancel = () => {
     if (cancelled || settled) return;
     cancelled = true;
     // Sending the signal does not establish cancellation. The work may have
     // already completed; only its reply establishes success, failure or cancel.
-    void window.crab.rpc("rpc/cancel", cancellation).catch(() => undefined);
+    void request("rpc/cancel", cancellation).catch(() => undefined);
   };
   return { promise, cancel };
 }

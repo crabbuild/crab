@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import clsx from "clsx";
+import { call } from "../../ipc";
 import {
   FileTree as PierreFileTree,
   useFileTree,
@@ -1625,7 +1626,7 @@ function ConflictBanner({
         href="#"
         onClick={(e) => {
           e.preventDefault();
-          (window as any).crab.rpc("conflict_list", {});
+          call("conflict_list", {});
         }}
         className="shrink-0 text-gx-accent hover:underline"
       >
