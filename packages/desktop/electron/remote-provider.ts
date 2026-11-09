@@ -113,6 +113,10 @@ export class RemoteProvider extends BaseProvider {
       throw new Error(`RemoteProvider.request() called with non-remote repo_id: ${repoId}`);
     }
 
+    if (method === "close") {
+      this.sessionManager.forgetRepository(parsed.profileId, repoId);
+      if (this.getConnectionStatus(parsed.profileId) !== "connected") return {};
+    }
     return this.router.route(repoId, method, params);
   }
 

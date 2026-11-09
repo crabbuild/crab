@@ -31,7 +31,7 @@
     "start": "electron .",
     "postinstall": "node scripts/install-native.mjs",
     "package:dir": "npm run build && node scripts/package.mjs --dir",
-    "test:build": "node --test scripts/native-build.test.mjs scripts/assemble-release.test.mjs scripts/version-bump.test.mjs scripts/bundle-ssh-runtime.test.mjs"
+    "test:build": "npm run build:electron && node --test scripts/native-build.test.mjs scripts/assemble-release.test.mjs scripts/version-bump.test.mjs scripts/bundle-ssh-runtime.test.mjs"
   },
   "dependencies": {
     "@bufbuild/cel": "^0.5.0",

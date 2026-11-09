@@ -36,6 +36,7 @@ function statusColor(status: SshConnectionState["status"] | undefined): string {
     case "connected":
       return "text-green-500 dark:text-green-400";
     case "connecting":
+    case "disconnecting":
     case "deploying":
     case "reconnecting":
       return "text-yellow-500 dark:text-yellow-400";
@@ -52,6 +53,8 @@ function statusLabel(status: SshConnectionState["status"] | undefined): string {
       return "Connected";
     case "connecting":
       return "Connecting...";
+    case "disconnecting":
+      return "Disconnecting...";
     case "deploying":
       return "Deploying agent...";
     case "reconnecting":
@@ -127,7 +130,7 @@ export function ConnectionCard({
 }: ConnectionCardProps) {
   const status = connectionState?.status ?? "disconnected";
   const isConnected = status === "connected";
-  const isConnecting = status === "connecting" || status === "deploying" || status === "reconnecting";
+  const isConnecting = status === "disconnecting" || status === "connecting" || status === "deploying" || status === "reconnecting";
 
   // Convert health data for the SystemHealth compact component
   const healthData: SystemHealthData | undefined =

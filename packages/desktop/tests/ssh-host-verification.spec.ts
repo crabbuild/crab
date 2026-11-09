@@ -40,7 +40,7 @@ describe("SSH host identity before authentication", () => {
   it("withholds credentials while trust is pending, pauses the deadline, then connects", async () => {
     let accept: ((accepted: boolean) => void) | undefined;
     const verify = vi.fn(async () => new Promise<boolean>(resolve => { accept = resolve; }));
-    manager = new SshSessionManager(undefined, verify);
+    manager = new SshSessionManager(verify);
     const connected = manager.connect(profile);
     const outcome = connected.catch(error => error);
     await vi.waitFor(() => expect(verify).toHaveBeenCalledOnce(), { timeout: profile.connectionTimeoutMs });
@@ -54,13 +54,13 @@ describe("SSH host identity before authentication", () => {
 
   it("rejects an untrusted host before sending credentials", async () => {
     const verify = vi.fn(async () => false);
-    manager = new SshSessionManager(undefined, verify);
+    manager = new SshSessionManager(verify);
     await expect(manager.connect(profile)).rejects.toThrow(/verification failed/i);
     expect(passwordAttempts).toBe(0);
   });
   it("verifies host identity again when the authenticated connection rekeys", async () => {
     const verify = vi.fn(async () => true);
-    manager = new SshSessionManager(undefined, verify);
+    manager = new SshSessionManager(verify);
     await manager.connect(profile);
     let finished = false;
     remote.rekey(() => { finished = true; });
@@ -71,7 +71,7 @@ describe("SSH host identity before authentication", () => {
 
   it("re-verifies a reconnect before sending credentials to its replacement connection", async () => {
     const verify = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
-    manager = new SshSessionManager(undefined, verify);
+    manager = new SshSessionManager(verify);
     profile.autoReconnect = true;
     await manager.connect(profile);
     remote.end();

@@ -35,8 +35,10 @@ export async function bundleSshRuntime(directory, output) {
     const payload = { version: runtime.version, platform: runtime.platform, arch: runtime.arch, hashes };
     await writeFile(path.join(temporary, "runtime.json"), JSON.stringify(payload) + "\n");
     await new Promise((resolve, reject) => {
-      const child = spawn("tar", ["--format=ustar", "-czf", archive, "-C", temporary, "crab", "crab-desktop-agent", "runtime.json"], {
-        stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, COPYFILE_DISABLE: "1" },
+      // GNU tar treats a colon in an archive name as a remote host separator.
+      // A relative name keeps Windows drive letters out of that parser.
+      const child = spawn("tar", ["--format=ustar", "-czf", path.basename(archive), "crab", "crab-desktop-agent", "runtime.json"], {
+        cwd: temporary, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, COPYFILE_DISABLE: "1" },
       });
       let stderr = "";
       child.stderr.on("data", data => { stderr = (stderr + data.toString()).slice(-8192); });

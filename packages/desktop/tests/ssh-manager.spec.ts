@@ -48,6 +48,7 @@ class MockClientChannel extends EventEmitter {
 class MockClient extends EventEmitter {
   connect = vi.fn();
   end = vi.fn();
+  destroy = vi.fn();
   exec = vi.fn();
   shell = vi.fn();
   forwardOut = vi.fn();
@@ -80,7 +81,7 @@ function makeProfile(overrides: Partial<SshProfile> = {}): SshProfile {
     compression: false,
     keepAliveInterval: 15,
     autoReconnect: true,
-    autoDeployAgent: true,
+    autoDeployAgent: false,
     tags: [],
     portForwards: [],
     createdAt: Date.now(),
@@ -324,6 +325,21 @@ describe("SshSessionManager", () => {
       expect(manager.getStatus("test-profile-1")).toBe("connected");
     });
 
+    it("disconnect revokes a reconnect awaiting authentication", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      initial.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+
+      await manager.disconnect(profile.id);
+      expect(replacement.destroy).toHaveBeenCalled();
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getStatus(profile.id)).toBe("disconnected");
+    });
+
     it("after 60s total failure, gives up and transitions to 'disconnected'", async () => {
       const profile = makeProfile({ autoReconnect: true });
       const connectPromise = manager.connect(profile);
@@ -351,76 +367,6 @@ describe("SshSessionManager", () => {
       }
 
       expect(manager.getStatus("test-profile-1")).toBe("disconnected");
-    });
-
-    it("pending calls are queued and replayed on reconnection", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
-      client.emit("end");
-
-      // Queue some calls
-      const call1 = manager.queueCall("test-profile-1", "method1", { a: 1 });
-      const call2 = manager.queueCall("test-profile-1", "method2", { b: 2 });
-
-      // Reconnect successfully
-      await vi.advanceTimersByTimeAsync(1000);
-      const newClient = mockClientInstances[mockClientInstances.length - 1];
-      await vi.waitFor(() => expect(newClient.connect).toHaveBeenCalled());
-      newClient.emit("ready");
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Pending calls should resolve with replayed data
-      const result1 = await call1;
-      const result2 = await call2;
-      expect(result1).toEqual({ method: "method1", params: { a: 1 }, replayed: true });
-      expect(result2).toEqual({ method: "method2", params: { b: 2 }, replayed: true });
-    });
-
-    it("oldest calls are dropped when queue overflows (max 50)", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
-      client.emit("end");
-
-      // Queue 51 calls — the first should be dropped
-      const calls: Promise<unknown>[] = [];
-      for (let i = 0; i < 51; i++) {
-        calls.push(manager.queueCall("test-profile-1", `method${i}`, { i }));
-      }
-
-      // The first call should be rejected due to overflow
-      await expect(calls[0]).rejects.toThrow("queue overflow");
-    });
-
-    it("cancelReconnection stops attempts and rejects pending calls", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
-      client.emit("end");
-
-      // Queue a call
-      const call = manager.queueCall("test-profile-1", "method1", {});
-
-      // Cancel reconnection
-      manager.cancelReconnection("test-profile-1");
-
-      await expect(call).rejects.toThrow("Reconnection cancelled");
     });
   });
 

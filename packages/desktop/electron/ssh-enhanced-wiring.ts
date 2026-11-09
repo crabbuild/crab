@@ -24,8 +24,6 @@ import type { RemoteEnvironmentManager } from "./ssh-environment-manager";
 import type { RemoteToolManager } from "./ssh-tool-manager";
 import type { ConnectionQualityMonitor } from "./ssh-connection-quality";
 import type { BookmarkManager } from "./ssh-bookmarks";
-import type { AgentDeployer } from "./ssh-deployer";
-import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { RemoteWorkspaceManager } from "./ssh-remote-workspace";
 import type { RemoteGitManager } from "./ssh-remote-git";
 import type { RemoteDebugManager } from "./ssh-remote-debug";
@@ -47,8 +45,6 @@ export interface EnhancedModules {
   toolManager: RemoteToolManager;
   connectionQualityMonitor: ConnectionQualityMonitor;
   bookmarkManager: BookmarkManager;
-  agentDeployer: AgentDeployer;
-  capabilityNegotiator: CapabilityNegotiator;
   workspaceManager: RemoteWorkspaceManager;
   gitManager: RemoteGitManager;
   debugManager: RemoteDebugManager;
@@ -114,8 +110,6 @@ export function wireEnhancedIpcHandlers(modules: EnhancedModules): void {
     toolManager,
     connectionQualityMonitor,
     bookmarkManager,
-    agentDeployer,
-    capabilityNegotiator,
     workspaceManager,
     gitManager,
     debugManager,
@@ -164,9 +158,6 @@ export function wireEnhancedIpcHandlers(modules: EnhancedModules): void {
     "ssh:bookmark-list",
     "ssh:recent-list",
     "ssh:transfer-security",
-    "ssh:capabilities",
-    "ssh:deploy-agent",
-    "ssh:agent-status",
     "ssh:workspace-open",
     "ssh:workspace-search",
     "ssh:workspace-exec",
@@ -557,39 +548,9 @@ export function wireEnhancedIpcHandlers(modules: EnhancedModules): void {
 
   // ─── Capabilities ────────────────────────────────────────────
 
-  ipcMain.handle("ssh:capabilities", async (_event, profileId: string) => {
-    return wrapHandler(async () => {
-      const cached = capabilityNegotiator.getCached(profileId);
-      if (cached) return cached;
-      return capabilityNegotiator.negotiate(profileId);
-    });
-  });
 
   // ─── Agent Deployment ────────────────────────────────────────
 
-  ipcMain.handle("ssh:deploy-agent", async (_event, profileId: string) => {
-    return wrapHandler(async () => {
-      const conn = sessionManager.getConnection(profileId);
-      if (!conn || !conn.client) {
-        throw new Error(`No active SSH connection for profile: ${profileId}`);
-      }
-      await agentDeployer.ensureAgent(conn.client);
-    });
-  });
-
-  ipcMain.handle("ssh:agent-status", async (_event, profileId: string) => {
-    return wrapHandler(async () => {
-      const cached = capabilityNegotiator.getCached(profileId);
-      if (!cached) {
-        return { deployed: false };
-      }
-      return {
-        deployed: true,
-        version: cached.version,
-        capabilities: cached,
-      };
-    });
-  });
 
   // ─── Remote Workspace IDE ────────────────────────────────────
 

@@ -37,6 +37,7 @@ import { getProviderRegistry } from "./provider-registry";
 import { LocalProvider } from "./local-provider";
 import { RemoteProvider } from "./remote-provider";
 import { AgentDeployer } from "./ssh-deployer";
+import { RemoteFileBrowser } from "./ssh-file-browser";
 import { CapabilityNegotiator } from "./ssh-capabilities";
 import { WorkspaceSyncEngine } from "./ssh-workspace-sync";
 import { FileTransferManager } from "./ssh-file-transfer";
@@ -1838,14 +1839,18 @@ app.whenReady().then(async () => {
   registerFileWatcher(() => mainWindow);
 
   // SSH subsystem initialization
-  const sshProfileManager = new SshProfileManager();
-  const sshDatabase = new SshDatabase();
+  // v2.0.0-alpha.1 stores the default SSH data here. Custom app profiles must
+  // stay isolated; moving default data requires an explicit migration.
+  const sshDataDirectory = app.commandLine.hasSwitch("user-data-dir")
+    ? app.getPath("userData") : path.join(os.homedir(), ".crab", "desktop");
+  const sshProfileManager = new SshProfileManager(path.join(sshDataDirectory, "ssh-profiles.json"));
+  const sshDatabase = new SshDatabase(path.join(sshDataDirectory, "ssh-enhanced.db"));
   const db = sshDatabase.getDb();
 
   // Core SSH modules
   const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
   const verifyHostKey = knownHosts.authorize.bind(knownHosts);
-  const sshSessionManager = new SshSessionManager(undefined, verifyHostKey);
+  const sshSessionManager = new SshSessionManager(verifyHostKey);
   knownHosts.on("ssh:host-key-request", (prompt: HostKeyRequest) => {
     if (!mainWindow || mainWindow.isDestroyed()) { void knownHosts.answer(prompt.requestId, false); return; }
     mainWindow.webContents.send("ssh:host-key-request", prompt);
@@ -1864,20 +1869,36 @@ app.whenReady().then(async () => {
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
-  registerSshIpcHandlers(sshProfileManager, sshSessionManager, sshTerminalManager, sshPortForwardManager);
 
-  // Enhanced SSH modules — wired after basic handlers so the app starts
-  // even if any enhanced module fails to initialize.
+  const rpcRouter = new RpcRouter(sshSessionManager, {
+    request: async (method: string, params: unknown) => {
+      if (!agent) throw new Error("agent not running");
+      return agent.request(method, params);
+    },
+  });
+  _rpcRouter = rpcRouter;
+  const runtimeRoot = app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "resources", "native");
+  const agentDeployer = new AgentDeployer(path.join(runtimeRoot, "ssh-runtimes"), app.getVersion());
+  const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
+  sshSessionManager.configureAgentDeployment({ agentDeployer, capabilityNegotiator, rpcRouter });
+  const fileEditor = new RemoteFileEditor(rpcRouter, sshSessionManager);
+  const gitManager = new RemoteGitManager(rpcRouter, sshSessionManager);
+  const remoteProvider = new RemoteProvider({
+    router: rpcRouter,
+    fileEditor,
+    gitManager,
+    capabilityNegotiator,
+    sessionManager: sshSessionManager,
+  });
+  const registry = getProviderRegistry();
+
+  const fileBrowser = new RemoteFileBrowser(sshSessionManager, registry, remoteProvider);
+  registerSshIpcHandlers(sshProfileManager, sshSessionManager, fileBrowser, sshTerminalManager, sshPortForwardManager);
+
+  bridgeAgentDeployToRenderer(sshSessionManager);
+
+  // Optional SSH IDE services cannot prevent native bootstrap or repository browsing.
   try {
-    const rpcRouter = new RpcRouter(sshSessionManager, {
-      request: async (method: string, params: unknown) => {
-        if (!agent) throw new Error("agent not running");
-        return agent.request(method, params);
-      },
-    });
-    _rpcRouter = rpcRouter;
-    const agentDeployer = new AgentDeployer();
-    const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
     const fileTransferManager = new FileTransferManager(sshSessionManager);
     const deltaSyncEngine = new DeltaSyncEngine(rpcRouter);
     const workspaceSyncEngine = new WorkspaceSyncEngine(
@@ -1898,22 +1919,8 @@ app.whenReady().then(async () => {
     const toolManager = new RemoteToolManager(rpcRouter, sshSessionManager);
     const connectionQualityMonitor = new ConnectionQualityMonitor(latencyMonitor, rpcRouter, sshSessionManager);
     const bookmarkManager = new BookmarkManager(db);
-    const fileEditor = new RemoteFileEditor(rpcRouter, sshSessionManager);
     const workspaceManager = new RemoteWorkspaceManager(rpcRouter, sshSessionManager, fileEditor);
-    const gitManager = new RemoteGitManager(rpcRouter, sshSessionManager);
     const debugManager = new RemoteDebugManager(rpcRouter, sshSessionManager);
-
-    // Create the RemoteProvider singleton and register it with the
-    // ProviderRegistry. All remote repos share a single RemoteProvider
-    // instance that routes through the RpcRouter.
-    const remoteProvider = new RemoteProvider({
-      router: rpcRouter,
-      fileEditor,
-      gitManager,
-      capabilityNegotiator,
-      sessionManager: sshSessionManager,
-    });
-    const registry = getProviderRegistry();
 
     // Bridge RemoteProvider's fs/changed events to the renderer so the
     // useFileWatcher hook picks them up. This mirrors how the local
@@ -1937,60 +1944,6 @@ app.whenReady().then(async () => {
       });
     });
 
-    // Register the ssh:open-as-repo IPC handler with provider registration.
-    // This replaces the stub handler (if any) and ensures the RemoteProvider
-    // is registered for the repo_id before the handle is returned to the renderer.
-    try { ipcMain.removeHandler("ssh:open-as-repo"); } catch { /* no existing handler */ }
-    ipcMain.handle(
-      "ssh:open-as-repo",
-      async (_event: unknown, profileId: string, remotePath: string) => {
-        const status = sshSessionManager.getStatus(profileId);
-        if (status !== "connected") {
-          throw new Error(`SSH connection not available (status: ${status})`);
-        }
-
-        const result = await rpcRouter.sendToRemoteAgent(profileId, "open_local", {
-          path: remotePath,
-        });
-
-        // Register the RemoteProvider for this repo_id BEFORE returning
-        // the handle to the renderer (prevents race conditions).
-        const repoId = `ssh://${profileId}${remotePath}`;
-        if (!registry.has(repoId)) {
-          registry.register(repoId, remoteProvider);
-        }
-
-        // Populate forge_provider on the RepoHandle if the remote agent
-        // didn't return it (older agent versions or detection failure).
-        const handle = result as Record<string, unknown> | null;
-        if (handle && !handle.forge_provider) {
-          const { detectForgeFromUrl } = await import("./forge-detect.js");
-          try {
-            const configResult = await rpcRouter.sendToRemoteAgent(
-              profileId,
-              "git_config_get",
-              { repo_id: repoId, keys: ["remote.origin.url"] },
-            ) as { values?: Record<string, string | null> };
-            const remoteUrl = configResult?.values?.["remote.origin.url"];
-            if (remoteUrl) {
-              const forgeProvider = detectForgeFromUrl(remoteUrl);
-              if (forgeProvider) {
-                handle.forge_provider = forgeProvider;
-              }
-            }
-          } catch {
-            // Forge detection is best-effort — don't block repo open.
-          }
-        }
-
-        // Start remote file watching automatically when a remote repo
-        // is opened. Fire-and-forget — watching is a UX enhancement.
-        void remoteProvider.watchStart(repoId);
-
-        return result;
-      },
-    );
-
     wireEnhancedIpcHandlers({
       fileTransferManager,
       bandwidthThrottler,
@@ -2003,8 +1956,6 @@ app.whenReady().then(async () => {
       toolManager,
       connectionQualityMonitor,
       bookmarkManager,
-      agentDeployer,
-      capabilityNegotiator,
       workspaceManager,
       gitManager,
       debugManager,
@@ -2013,7 +1964,6 @@ app.whenReady().then(async () => {
 
     // Bridge sync and deploy events to the renderer
     bridgeSyncEventsToRenderer(workspaceSyncEngine, fileTransferManager);
-    bridgeAgentDeployToRenderer(sshSessionManager);
 
     // Remote workspace orchestrator — multi-repo discovery and polling
     // for remote workspace sources over SSH.

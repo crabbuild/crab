@@ -25,7 +25,7 @@ test("SSH archives carry the verified native pair and their own metadata", async
   const archive = path.join(output, "linux-arm64.tar.gz");
   const archived = await readFile(archive);
   assert.deepEqual(descriptor.archive, { sha256: createHash("sha256").update(archived).digest("hex"), bytes: archived.length });
-  execFileSync("tar", ["-xzf", archive, "-C", extracted]);
+  execFileSync("tar", ["-xzf", path.relative(extracted, archive).split(path.sep).join("/")], { cwd: extracted });
   assert.deepEqual((await readdir(extracted)).sort(), ["crab", "crab-desktop-agent", "runtime.json"]);
   assert.deepEqual(JSON.parse(await readFile(path.join(extracted, "runtime.json"), "utf8")), runtime);
   for (const [name, bytes] of Object.entries(files)) assert.deepEqual(await readFile(path.join(extracted, name)), bytes);

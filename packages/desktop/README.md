@@ -119,6 +119,15 @@ platform, architecture, and SHA-256 hashes. Missing or mixed artifacts fail the
 build. The PTY daemon loads from ASAR; native terminal modules and helpers
 remain unpacked for execution.
 `build:electron` also copies the agent manifests and verifies the daemon entry.
+Packages also carry checksummed CLI/sidecar archives for SSH hosts. CI assembles
+macOS and Linux arm64/x64 archives into every desktop package; signed releases
+reject an incomplete catalog. Local Linux/macOS builds include their current
+native target. Local Windows packaging needs the POSIX runtime archives and
+JSON descriptors from CI in `resources/native/ssh-runtimes/`.
+Connecting with agent deployment enabled verifies and atomically installs that
+pair under the remote user's `.crab/desktop/runtimes/`, then negotiates the real
+native methods before reporting the connection ready. Each session has its own
+index directory; disconnect waits for native shutdown before removing it.
 
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
@@ -262,6 +271,13 @@ tests and packaged storage qualification.
   registered RPC method names from the dispatcher itself. SSH negotiation uses
   the attached channel during deployment; feature gates require the methods
   actually used by each operation, without inferred minimum versions.
+- SSH repository browsing uses SFTP for directory navigation and the native
+  agent for repository operations, bounded previews and materialization. Opened
+  repository identities are restored before queued metadata requests replay on
+  reconnect. Live content requests belong to the interrupted session and fail.
+- Explicit `--user-data-dir` profiles isolate SSH profiles, the SSH database and
+  host trust. The default SSH profile/database location remains `.crab/desktop/`
+  under the user's home directory, as shipped in `v2.0.0-alpha.1`.
 - Closing a remote session drains its SDK client. Agent shutdown cancels and joins outstanding requests
   before closing its SDK clients and SlateDB index.
 

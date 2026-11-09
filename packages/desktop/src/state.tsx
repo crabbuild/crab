@@ -98,7 +98,7 @@ export interface DetectedAgentCli {
 
 export interface SshConnectionState {
   profileId: string;
-  status: "disconnected" | "connecting" | "deploying" | "connected" | "reconnecting" | "error";
+  status: "disconnected" | "disconnecting" | "connecting" | "deploying" | "connected" | "reconnecting" | "error";
   error?: string;
   serverInfo?: {
     os: string;

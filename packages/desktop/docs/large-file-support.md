@@ -16,7 +16,7 @@ completion. This record tracks implementation and qualification separately.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Verify provider routing and remote RPC parity; do not silently change credentials or claim unqualified profiles. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, Safetensors preview, exact materialization, independent sessions and reconnect metadata replay are qualified. Complete RPC parity, persistence, multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Ownership
@@ -853,3 +853,44 @@ acceptance matrix above remains the completion boundary.
 - This is the deployment input producer. The application's deployer still uses
   its old binary-only path; archive consumption, all-target assembly and actual
   desktop bootstrap remain open. No remote-deployment completion is claimed.
+
+## Native SSH bootstrap checkpoint
+
+- The application now consumes the verified archive catalog. One session owner
+  performs connect, manual deployment and reconnect bootstrap. It verifies the
+  local archive and remote native pair, uploads through SFTP into a unique
+  temporary directory, and atomically publishes an immutable runtime directory.
+  Repeated profiles reuse the pair without uploading again. Each native process
+  receives an absolute `CRAB_BIN`, a matching helper path and a private index;
+  shutdown drains the process before the shell removes that index.
+- Native routing, deployment and SFTP repository browsing initialize before
+  optional SSH IDE services. Opening a repository sends its actual `ssh://`
+  identity to `open_local`, registers the remote provider, and opens it in the
+  main Files view. Reconnect reopens tracked identities before metadata replay.
+  Disconnect revokes pending reconnect authentication and joins native cleanup.
+- The real packaged macOS arm64 UI smoke passes in 11.7 seconds: key-file SSH,
+  actual host trust, 85,257,915 uploaded bytes, remote repository navigation,
+  a 4 MiB Safetensors preview through native RPC, and user-triggered hydration
+  producing byte-identical content while preserving the Git index pointer.
+  The smoke exposed and fixed a zero-height remote file tree. It also verifies
+  custom app-profile isolation without changing `HOME` or saving a password.
+- The production manager/router/deployer smoke passes in 9.7 seconds: Crab and
+  LFS EOF ranges, exact materialization, two independent sessions, runtime reuse,
+  explicit reconnect, automatic reconnect and queued Git metadata replay. Both
+  sessions drain; no upload/index temporary directories or SFTP handles remain.
+  Evidence lives in `ssh-bootstrap-ui-proof-v6/` and
+  `ssh-bootstrap-reconnect-proof-v2/` in the external build directory.
+- CI now produces five native payloads and assembles all four POSIX SSH archives
+  into each desktop package. This workflow change still needs fresh CI proof.
+  The Windows archive test exposed GNU tar interpreting a drive letter as a
+  remote host; archive creation and extraction now use relative archive names.
+  All 22 build-script cases and 156 related SSH cases passed locally, including
+  pending-authentication disconnect. The user approved exactly three production
+  dependency inventory entries for the shared comparator/chunker/contracts;
+  the actual 164-edge workspace inventory and its two focused tests pass.
+- This does not complete the acceptance matrix. Empty-start SSH navigation,
+  persisted SSH repository reopening, complete remote file-operation parity,
+  visible remote transfer progress/cancellation and multi-hop ownership remain
+  open. Unknown pointer formats, including plain `.txt`, currently open metadata
+  rather than a bounded text preview. Cross-OS/architecture and provider proof
+  remains required; this local package contains only macOS arm64 native payloads.

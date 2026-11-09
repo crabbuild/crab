@@ -229,7 +229,7 @@ export function TransferDropZone({
 
   return (
     <div
-      className="relative h-full w-full"
+      className="relative flex min-h-0 h-full w-full flex-col"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

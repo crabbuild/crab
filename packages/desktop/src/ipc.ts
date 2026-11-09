@@ -1312,6 +1312,11 @@ declare global {
       ssh: {
         openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => Promise<{ terminalId: string }>;
         detachTerminal: (terminalId: string) => Promise<void>;
+        listProfiles: () => Promise<import("../electron/ssh-manager").SshProfile[]>;
+        saveProfile: (profile: Partial<import("../electron/ssh-manager").SshProfile> & { host: string; username: string; password?: string }) => Promise<import("../electron/ssh-manager").SshProfile>;
+        connect: (profileId: string) => Promise<void>;
+        disconnect: (profileId: string) => Promise<void>;
+        getStatus: (profileId: string) => Promise<import("../electron/ssh-manager").SshConnectionStatus>;
         openAsRepo: (profileId: string, path: string) => Promise<RepoHandle>;
         // Sync operations
         syncAddPair: (config: { profileId: string; localDir: string; remoteDir: string; ignorePatterns?: string[] }) => Promise<{ syncPairId: string }>;

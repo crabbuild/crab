@@ -61,10 +61,10 @@ export const ExplorerView = memo(function ExplorerView({
   // Resolve the repo root filesystem path for file operations.
   // Local repos use repo.path; remote repos extract the path from repo_id.
   const repoRootPath = useMemo(() => {
-    if (repo.path) return repo.path;
     if (repo.is_remote && repo.repo_id.startsWith("ssh://")) {
       return repo.repo_id.slice(repo.repo_id.indexOf("/", "ssh://".length));
     }
+    if (repo.path) return repo.path;
     return undefined;
   }, [repo.path, repo.is_remote, repo.repo_id]);
 

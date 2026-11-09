@@ -37,7 +37,55 @@ concurrency:
   group: desktop-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  runtime:
+    name: Native runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: mac-arm64 }
+          - { os: macos-15-intel, target: mac-x64 }
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: windows-2022, target: win-x64 }
+    env:
+      CARGO_INCREMENTAL: 0
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Set isolated Cargo target directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-native-runtime-target" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Install Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build the matching native CLI and sidecar
+        run: node scripts/build-native.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Crab-native-${{ matrix.target }}
+          path: packages/desktop/resources/native/${{ matrix.target }}/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
+        with:
+          name: Crab-ssh-runtime-${{ matrix.target }}
+          path: packages/desktop/resources/native/ssh-runtimes/
+          if-no-files-found: error
   build:
+    needs: runtime
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
@@ -45,7 +93,11 @@ jobs:
       fail-fast: false
       matrix:
         # Electron's node-gyp recognizes Visual Studio 2022, not the 2026 toolset.
-        os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2022]
+        include:
+          - { os: macos-15, target: mac-arm64 }
+          - { os: macos-15-intel, target: mac-x64 }
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: windows-2022, target: win-x64 }
     env:
       CARGO_INCREMENTAL: 0
       # Every release channel needs a stable signing identity for auto-updates.
@@ -79,6 +131,18 @@ jobs:
       - name: Install desktop dependencies
         # Electron's install script downloads its runtime outside npm's cache.
         run: npm ci || npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: Crab-native-${{ matrix.target }}
+          path: packages/desktop/resources/native/${{ matrix.target }}/
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Crab-ssh-runtime-*
+          path: packages/desktop/resources/native/ssh-runtimes/
+          merge-multiple: true
+      - name: Restore native executable permissions
+        if: runner.os != 'Windows'
+        run: chmod +x resources/native/${{ matrix.target }}/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
       - name: Validate release version
         if: ${{ inputs.release }}
         env:
@@ -108,23 +172,23 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
-      - name: Build desktop runtime and application
-        run: npm run build
+      - name: Build desktop application
+        run: npm run build:renderer && npm run build:electron
       - name: Test native desktop integration
         # Worktree integration tests invoke the same CLI bundled with the app.
         run: |
           extension=
           if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
+          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
             cargo test --release -p crab-desktop-agent --locked
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
+          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
             cargo test --release -p crab-desktop-agent --locked native_crab_and_lfs_pointer_previews_use_staging_without_hydrating -- --ignored
           cargo test --release -p crab-git --locked --features process --lib process::tests
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
+          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
             cargo test --release -p crab-desktop-agent --locked native_crab_comparison_ -- --ignored --test-threads=1
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
+          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
             cargo test --release -p crab-desktop-agent --locked materialization_ -- --ignored --test-threads=1
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
+          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
             cargo test --release -p crab-desktop-agent --locked native_cleanup_reports_usage_and_preserves_busy_and_retained_state -- --ignored
       - name: Build installers and unpacked application
         env:

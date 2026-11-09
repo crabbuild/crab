@@ -11,12 +11,9 @@
 import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DB_DIR = path.join(os.homedir(), ".crab", "desktop");
-const DB_PATH = path.join(DB_DIR, "ssh-enhanced.db");
 
 // ─── SshDatabase ─────────────────────────────────────────────────────────────
 
@@ -28,8 +25,7 @@ const DB_PATH = path.join(DB_DIR, "ssh-enhanced.db");
 export class SshDatabase {
   private db: Database.Database;
 
-  constructor(dbPath?: string) {
-    const resolvedPath = dbPath ?? DB_PATH;
+  constructor(resolvedPath: string) {
 
     // Ensure directory exists.
     fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
