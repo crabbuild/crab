@@ -162,6 +162,35 @@ fn staged_crab_and_lfs_ranges_are_byte_identical_without_hydrating_worktree() {
             let end = start.saturating_add(length as usize).min(original.len());
             assert_eq!(bytes, original[start..end]);
         }
+        if path.ends_with(".bin") {
+            let mut start = 0;
+            let mut offset = 0;
+            loop {
+                reader.send(Request::Chunks { start, limit: 3 });
+                let Response::Chunks { page } = reader.next() else {
+                    panic!("expected chunk metadata");
+                };
+                assert_eq!(page.xorb_count, None);
+                for chunk in &page.chunks {
+                    assert_eq!(chunk.offset, offset);
+                    offset += chunk.length;
+                    let bytes = &original[chunk.offset as usize..offset as usize];
+                    assert_eq!(chunk.hash, crab_xet::hash::compute_data_hash(bytes).hex());
+                }
+                let next = start + page.chunks.len() as u64;
+                let Some(cursor) = page.next else {
+                    assert_eq!(next, page.chunk_count);
+                    break;
+                };
+                assert!(cursor > start);
+                start = cursor;
+            }
+            assert_eq!(offset, original.len() as u64);
+        } else {
+            reader.send(Request::Chunks { start: 0, limit: 3 });
+            assert!(matches!(reader.next(), Response::Failed { .. }));
+        }
+        assert_eq!(reader.range(0, 8), original[..8]);
         reader.close();
         assert_eq!(std::fs::read(root.join(path)).unwrap(), pointer);
     }

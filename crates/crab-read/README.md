@@ -5,6 +5,14 @@ turns a Git/Xet pointer into verified bytes by combining manifest metadata,
 replica selection, cache-aware storage, shard coverage checks, and Xet file
 reconstruction.
 
+`ShardHydrator::chunk_page` inspects bounded ordered chunk metadata through an
+explicit or runtime-bound captured catalog. Pointer hints do not select its
+authority. Pages retain repeated occurrences, validate file byte coverage and
+expand actual chunk identities without reconstructing payloads.
+`PointerReader::chunk_page` uses retained local recipe pages for unpublished
+content and the same captured remote owner for published content. Local recipe
+inspection leaves published xorb placement unknown.
+
 ## Feature boundaries
 
 The default `hydration` feature supplies verified content reconstruction,

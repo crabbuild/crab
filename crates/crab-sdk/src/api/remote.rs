@@ -12,6 +12,8 @@ pub use crate::read_types::{
     FileMetadata, HistoryTraversal, Page, PageCursor, PageRequest, Signature, SignatureHeader,
     TreeEntry,
 };
+#[cfg(feature = "files")]
+pub use crab_types::file_layout::{Chunk, ChunkPage};
 
 #[cfg(feature = "publish")]
 pub mod write {

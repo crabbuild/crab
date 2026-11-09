@@ -75,6 +75,45 @@ pub struct StagedFileReader {
 }
 
 impl StagedFileReader {
+    /// Return the verified recipe's number of ordered chunk occurrences.
+    #[must_use]
+    pub fn chunk_count(&self) -> u64 {
+        self.recipe.chunk_count()
+    }
+
+    /// Inspect at most 512 ordered occurrences without reading chunk payloads.
+    ///
+    /// Rejects an out-of-range cursor or a limit outside `1..=512`. Recipe
+    /// ownership stays pinned while canonical page hashes and offsets are checked.
+    pub fn chunk_page(&self, start: u64, limit: u32) -> Result<Vec<crate::recipe::RecipeChunk>> {
+        if start > self.recipe.chunk_count() || !(1..=512).contains(&limit) {
+            return Err(StagingError::Configuration {
+                key: "invalid chunk page cursor or limit".into(),
+                origin: "staged recipe inspection".into(),
+            });
+        }
+        let end = start
+            .saturating_add(u64::from(limit))
+            .min(self.recipe.chunk_count());
+        let mut chunks = Vec::with_capacity((end - start) as usize);
+        let mut cursor = start;
+        while cursor < end {
+            let page_start = cursor / RECIPE_PAGE_ENTRIES as u64 * RECIPE_PAGE_ENTRIES as u64;
+            let page = self.staging.recipe_page(&self.recipe, page_start)?;
+            let offset = (cursor - page_start) as usize;
+            let count =
+                (end - cursor).min(page.chunks.len().saturating_sub(offset) as u64) as usize;
+            if count == 0 {
+                return Err(StagingError::StagingCorrupt(
+                    "recipe page does not cover its occurrence".into(),
+                ));
+            }
+            chunks.extend_from_slice(&page.chunks[offset..offset + count]);
+            cursor += count as u64;
+        }
+        Ok(chunks)
+    }
+
     /// Transfer this operation's recipe ownership into a lifetime pin without reading bytes.
     pub fn into_pin(self) -> Result<StagedFilePin> {
         self._snapshot.into_read_pin()

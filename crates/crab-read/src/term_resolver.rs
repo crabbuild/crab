@@ -598,7 +598,7 @@ async fn try_sequence_shard(
     })
 }
 
-async fn resolve_term_chunks(
+pub(crate) async fn resolve_term_chunks(
     store: &CachingStore,
     router: &StoreLayout,
     xorb_chunks: &Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>,
@@ -631,57 +631,63 @@ fn append_term_spans(
     chunks: &[XorbChunkSequenceEntry],
     shard_hash: &MerkleHash,
 ) -> Result<()> {
-    let start = usize::try_from(term.chunk_index_start).map_err(|_| ReadError::CorruptObject {
-        path: format!("shard:{}", shard_hash.hex()),
-        reason: "file term chunk start overflows usize".to_owned(),
-    })?;
-    let end = usize::try_from(term.chunk_index_end).map_err(|_| ReadError::CorruptObject {
-        path: format!("shard:{}", shard_hash.hex()),
-        reason: "file term chunk end overflows usize".to_owned(),
-    })?;
-    if start > end || end > chunks.len() {
-        return Err(ReadError::CorruptObject {
-            path: format!("shard:{}", shard_hash.hex()),
-            reason: format!(
-                "file term chunk range {}..{} outside xorb {} length {}",
-                term.chunk_index_start,
-                term.chunk_index_end,
-                term.xorb_hash.hex(),
-                chunks.len()
-            ),
-        });
+    for span in term_spans(term, chunks, *file_offset, shard_hash)? {
+        *file_offset += span.len;
+        spans.push(span);
     }
-
-    let mut term_bytes = 0u64;
-    for (offset, chunk) in chunks[start..end].iter().enumerate() {
-        let len = u64::from(chunk.unpacked_segment_bytes);
-        let xorb_chunk_index = term
-            .chunk_index_start
-            .saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
-        spans.push(ChunkSpan {
-            chunk_hash: chunk.chunk_hash,
-            offset: *file_offset,
-            len,
-            origin: ChunkOrigin {
-                xorb_hash: Some(term.xorb_hash),
-                xorb_chunk_index: Some(xorb_chunk_index),
-            },
-        });
-        *file_offset = file_offset.saturating_add(len);
-        term_bytes = term_bytes.saturating_add(len);
-    }
-
-    if term_bytes != u64::from(term.unpacked_segment_bytes) {
-        return Err(ReadError::CorruptObject {
-            path: format!("shard:{}", shard_hash.hex()),
-            reason: format!(
-                "file term byte count {} does not match expanded chunks {}",
-                term.unpacked_segment_bytes, term_bytes
-            ),
-        });
-    }
-
     Ok(())
+}
+
+pub(crate) fn term_spans<'a>(
+    term: &FileDataSequenceEntry,
+    chunks: &'a [XorbChunkSequenceEntry],
+    file_offset: u64,
+    shard_hash: &MerkleHash,
+) -> Result<impl Iterator<Item = ChunkSpan> + 'a> {
+    let corrupt = |reason: String| ReadError::CorruptObject {
+        path: format!("shard:{}", shard_hash.hex()),
+        reason,
+    };
+    let start = usize::try_from(term.chunk_index_start)
+        .map_err(|_| corrupt("file term chunk start overflows usize".into()))?;
+    let end = usize::try_from(term.chunk_index_end)
+        .map_err(|_| corrupt("file term chunk end overflows usize".into()))?;
+    let selected = chunks.get(start..end).ok_or_else(|| {
+        corrupt(format!(
+            "file term chunk range {start}..{end} outside xorb {} length {}",
+            term.xorb_hash.hex(),
+            chunks.len()
+        ))
+    })?;
+    let bytes = selected.iter().try_fold(0_u64, |total, chunk| {
+        total
+            .checked_add(u64::from(chunk.unpacked_segment_bytes))
+            .ok_or_else(|| corrupt("file term byte count overflow".into()))
+    })?;
+    if bytes != u64::from(term.unpacked_segment_bytes) || file_offset.checked_add(bytes).is_none() {
+        return Err(corrupt(
+            "file term byte count or offset disagrees with chunk metadata".into(),
+        ));
+    }
+    let xorb_hash = term.xorb_hash;
+    // Coverage and the final offset were checked above. Iteration retains no
+    // full-file chunk vector, so metadata pages stay bounded even for long terms.
+    Ok(selected
+        .iter()
+        .zip(term.chunk_index_start..term.chunk_index_end)
+        .scan(file_offset, move |offset, (chunk, index)| {
+            let span = ChunkSpan {
+                chunk_hash: chunk.chunk_hash,
+                offset: *offset,
+                len: u64::from(chunk.unpacked_segment_bytes),
+                origin: ChunkOrigin {
+                    xorb_hash: Some(xorb_hash),
+                    xorb_chunk_index: Some(index),
+                },
+            };
+            *offset += span.len;
+            Some(span)
+        }))
 }
 
 fn term_range_is_valid(term: &FileDataSequenceEntry, len: usize) -> bool {
@@ -761,7 +767,7 @@ async fn fetch_xorb_chunks_from_object(
 /// Get a shard reader, checking the in-memory dedup map first, then the
 /// unified `LocalCache` (which handles disk cache + hash verification),
 /// then downloading from the store.
-async fn get_or_download_shard(
+pub(crate) async fn get_or_download_shard(
     cache: &LocalCache,
     store: &CachingStore,
     router: &StoreLayout,

@@ -2,6 +2,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 mod buffer;
+mod chunk_page;
+pub use chunk_page::FileChunkPage;
 #[cfg(test)]
 mod cache_completion_tests;
 #[cfg(test)]
@@ -1538,7 +1540,48 @@ mod tests {
         let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
             router, captured,
         );
-        let hydrator = hydrator.with_file_index_lookup(lookup);
+        let hydrator = hydrator.with_file_index_lookup(lookup.clone());
+
+        let mut inspected = pointer.clone();
+        inspected.shard_hint = Some([0xff; 32]);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut actual = Vec::new();
+        let mut start = 0;
+        loop {
+            let page = hydrator
+                .chunk_page(&inspected, Some(&lookup), start, 2, &cancel)
+                .await
+                .unwrap();
+            assert_eq!((page.chunk_count, page.xorb_count), (4, Some(1)));
+            actual.extend(
+                page.chunks
+                    .into_iter()
+                    .map(|chunk| (chunk.offset, chunk.len, chunk.chunk_hash)),
+            );
+            let Some(next) = page.next else {
+                break;
+            };
+            start = next;
+        }
+        let expected_chunks = expected
+            .chunks(32 * 1024)
+            .enumerate()
+            .map(|(index, bytes)| {
+                (
+                    index as u64 * 32 * 1024,
+                    bytes.len() as u64,
+                    crab_xet::hash::compute_data_hash(bytes),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected_chunks);
+        inspected.size += 1;
+        assert!(matches!(
+            hydrator
+                .chunk_page(&inspected, Some(&lookup), 0, 2, &cancel)
+                .await,
+            Err(crate::ReadError::CorruptObject { .. })
+        ));
 
         assert_eq!(
             hydrator

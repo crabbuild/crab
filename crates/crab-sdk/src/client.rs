@@ -950,6 +950,97 @@ impl Snapshot {
             .await
     }
 
+    /// Inspect at most 512 ordered Crab chunk occurrences without reconstructing content.
+    ///
+    /// `start` is an occurrence index in this immutable snapshot's path. Git and
+    /// LFS files have no Crab chunk recipe and return unsupported-capability errors.
+    #[cfg(feature = "files")]
+    pub fn file_chunks(
+        &self,
+        path: GitPath,
+        start: u64,
+        limit: u32,
+    ) -> crate::Request<'_, crate::remote::ChunkPage, ReadOptions> {
+        crate::Request::new(move |options| {
+            Box::pin(self.file_chunks_with_options(path, start, limit, options))
+        })
+    }
+
+    #[cfg(feature = "files")]
+    async fn file_chunks_with_options(
+        &self,
+        path: GitPath,
+        start: u64,
+        limit: u32,
+        options: ReadOptions,
+    ) -> Result<crate::remote::ChunkPage> {
+        if !(1..=512).contains(&limit) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "chunk page limit must be in 1..=512",
+            ));
+        }
+        let repository = self.repository.owner.clone();
+        let snapshot = self.owner.clone();
+        let runtime = self.repository.content.clone();
+        self.repository
+            .client
+            .0
+            .operations
+            .run(options.operation.clone(), move |cancel| async move {
+                let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec())
+                    .map_err(remote_error)?;
+                let operation = repository
+                    .operation_with_limits(OperationKind::Content, &cancel, options.limits()?)
+                    .await
+                    .map_err(remote_error)?;
+                let result = async {
+                    let metadata = snapshot.blob_metadata(&path, &operation).await?;
+                    if metadata.classification
+                        != crab_remote_git::ContentClassification::CrabPointer
+                    {
+                        return Err(consumer_error(Error::new(
+                            ErrorKind::UnsupportedCapability,
+                            "file has no Crab chunk recipe",
+                        )));
+                    }
+                    let blob = snapshot.read_blob(&path, &operation).await?;
+                    let pointer =
+                        crab_types::pointer::Pointer::parse(&blob.bytes).map_err(|source| {
+                            consumer_error(Error::with_source(
+                                ErrorKind::Corruption,
+                                "invalid Crab pointer",
+                                source,
+                            ))
+                        })?;
+                    let page = runtime
+                        .chunks(&pointer, start, limit, &operation)
+                        .await
+                        .map_err(consumer_error)?;
+                    let response_bytes = std::mem::size_of::<crate::remote::ChunkPage>() as u64
+                        + page
+                            .chunks
+                            .iter()
+                            .map(|chunk| {
+                                std::mem::size_of::<crate::remote::Chunk>() as u64
+                                    + chunk.hash.len() as u64
+                                    + chunk.xorb_hash.as_ref().map_or(0, |hash| hash.len() as u64)
+                            })
+                            .sum::<u64>();
+                    operation
+                        .charge(
+                            crab_remote_git::BudgetDimension::ResponseBytes,
+                            response_bytes,
+                        )
+                        .await?;
+                    Ok(page)
+                }
+                .await;
+                operation.finish(result).await.map_err(remote_error)
+            })
+            .await
+    }
+
     /// Read exact Git bytes, including pointer text, within owner limits.
     pub fn read_blob(&self, path: GitPath) -> crate::Request<'_, Bytes, ReadOptions> {
         crate::Request::new(move |options| Box::pin(self.read_blob_with_options(path, options)))

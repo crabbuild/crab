@@ -15,8 +15,11 @@ format. The crate has no network, filesystem, object-store, or runtime policy.
 
 - `pointer` — the compact Crab pointer wire format: a BLAKE3 file hash, byte
   size, and optional shard hint.
+- `file_layout` — bounded ordered chunk metadata shared by native and SDK
+  read clients. Counts include repeated occurrences; absent xorb placement is
+  unknown, not zero.
 - `pointer_read` — native reader session messages shared by the CLI helper and
-  desktop sidecar. Range/cancel/close acknowledgements follow finished work;
+  desktop sidecar. Range/chunk/cancel/close acknowledgements follow finished work;
   process ownership and reconstruction policy stay with consumers.
 - `storage` — provider kinds, normalized bucket identity, and auth-issued
   path scopes.

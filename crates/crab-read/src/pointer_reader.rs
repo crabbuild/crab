@@ -30,6 +30,44 @@ enum PointerSource {
 }
 
 impl PointerReader {
+    /// Inspect ordered chunk metadata from retained staging or a captured remote.
+    ///
+    /// Limits pages to 512 occurrences; local recipe inspection reports no
+    /// published xorb count. No file payload is read or installed.
+    pub async fn chunk_page(
+        &self,
+        pointer: &Pointer,
+        start: u64,
+        limit: u32,
+        cancel: &CancellationToken,
+    ) -> Result<crate::FileChunkPage> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        let page = match self.source(pointer).await? {
+            PointerSource::Staged(local) => {
+                let chunks = local.chunk_page(start, limit)?;
+                let chunk_count = local.chunk_count();
+                let end = start + chunks.len() as u64;
+                crate::FileChunkPage {
+                    chunk_count,
+                    xorb_count: None,
+                    chunks,
+                    next: (end < chunk_count).then_some(end),
+                }
+            }
+            PointerSource::Store(pointer) => {
+                self.remote(&pointer)?
+                    .chunk_page(&pointer, None, start, limit, cancel)
+                    .await?
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        Ok(page)
+    }
+
     /// Bind staging, an optional captured remote view, and resolved local LFS storage.
     #[must_use]
     pub fn new(

@@ -79,9 +79,9 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             // A completed range can race its cancellation command. Its data or
             // failure already acknowledges completion; do not enqueue another reply.
             Request::Cancel => continue,
-            Request::Range { offset, length } => {
+            query @ (Request::Range { .. } | Request::Chunks { .. }) => {
                 let token = cancel.child_token();
-                let work = session.read(offset, length, &token);
+                let work = session.query(query, &token);
                 tokio::pin!(work);
                 let mut stop = false;
                 let result = tokio::select! {
@@ -98,7 +98,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
                         match command? {
                             None | Some(Request::Close) => stop = true,
                             Some(Request::Cancel) => {},
-                            _ => return Err(invalid("only cancel or close may interrupt a range")),
+                            _ => return Err(invalid("only cancel or close may interrupt a query")),
                         }
                         result
                     }
@@ -114,10 +114,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
                     break;
                 }
                 let reply = match result {
-                    Ok((offset, bytes)) => Response::Data {
-                        offset,
-                        bytes_b64: STANDARD.encode(bytes),
-                    },
+                    Ok(reply) => reply,
                     Err(error) if cancelled(&error, &token) => Response::Cancelled,
                     Err(error) => failure(&error),
                 };
@@ -197,6 +194,59 @@ impl Session {
         }
     }
 
+    async fn query(&mut self, request: Request, cancel: &CancellationToken) -> Result<Response> {
+        match request {
+            Request::Range { offset, length } => {
+                let (offset, bytes) = self.read(offset, length, cancel).await?;
+                Ok(Response::Data {
+                    offset,
+                    bytes_b64: STANDARD.encode(bytes),
+                })
+            }
+            Request::Chunks { start, limit } => {
+                if !(1..=512).contains(&limit) {
+                    return Err(invalid("chunk page limit must be in 1..=512"));
+                }
+                let pointer = match &self.pointer {
+                    Pointer::Crab(pointer) => pointer.clone(),
+                    Pointer::Lfs(_) => {
+                        return Err(invalid("Git LFS objects do not have Crab chunk recipes"));
+                    }
+                };
+                let page = if self.pin.is_some() {
+                    self.local
+                        .chunk_page(&pointer, start, limit, cancel)
+                        .await?
+                } else {
+                    self.ensure_remote(cancel).await?;
+                    self.remote
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing captured reader"))?
+                        .chunk_page(&pointer, start, limit, cancel)
+                        .await?
+                };
+                check_cancelled(cancel)?;
+                Ok(Response::Chunks { page: page.into() })
+            }
+            Request::Open { .. } | Request::Cancel | Request::Close => {
+                Err(invalid("reader control command cannot be queried"))
+            }
+        }
+    }
+
+    async fn ensure_remote(&mut self, cancel: &CancellationToken) -> Result<()> {
+        if self.remote.is_none() {
+            let (hydrator, lookup) = remote_capture(&self.config, cancel).await?;
+            self.lookup = Some(lookup);
+            self.remote = Some(PointerReader::new(
+                Some(hydrator),
+                Some(self.staging.clone()),
+                Some(self.storage.clone()),
+            ));
+        }
+        Ok(())
+    }
+
     async fn read(
         &mut self,
         offset: u64,
@@ -247,15 +297,7 @@ impl Session {
             }
             _ => {}
         }
-        if self.remote.is_none() {
-            let (hydrator, lookup) = remote_capture(&self.config, cancel).await?;
-            self.lookup = Some(lookup);
-            self.remote = Some(PointerReader::new(
-                Some(hydrator),
-                Some(self.staging.clone()),
-                Some(self.storage.clone()),
-            ));
-        }
+        self.ensure_remote(cancel).await?;
         let reader = self
             .remote
             .as_ref()

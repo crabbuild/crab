@@ -39,7 +39,9 @@ pub use fetch_admission::{
     FetchAdmissionPolicy, FetchAdmissionReject, FetchWant, validate_fetch_wants_with_manifest,
 };
 #[cfg(feature = "hydration")]
-pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ShardHydrator};
+pub use hydrator::{
+    FileChunkPage, ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ShardHydrator,
+};
 #[cfg(feature = "hydration")]
 pub use integrity::{verify_catalog_file_recipe, verify_origin_recipe};
 #[cfg(feature = "local-staging")]
