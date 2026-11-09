@@ -136,6 +136,11 @@ published xorb placement. Git and LFS files have no Crab recipe.
 that retained source. Byte ranges and chunk pages use independent query scopes;
 reopening a pathname is not part of range delivery.
 
+Remote LFS content reads allow the captured logical size plus the SDK's finite
+metadata/retry fetch allowance, because a cold partial read verifies the whole
+object. Checked arithmetic, unchanged response/decode limits and the read
+deadline still apply. Other content kinds retain SDK defaults.
+
 `file_close {repo_id, file_id}` cancels and drains active queries before releasing
 the native source. Repository close drains every retained file. Queries have
 independent cancellation; cancelling a page does not cancel its file. At most

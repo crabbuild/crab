@@ -386,6 +386,33 @@ impl FileSource {
             .map_err(|error| self.scope.record(error))
     }
 
+    fn content_options(&self) -> Result<ReadOptions> {
+        let mut options = ReadOptions::default().with_operation(self.scope.options());
+        if matches!(
+            self.source.as_ref(),
+            Source::Remote {
+                kind: ContentKind::Lfs,
+                ..
+            }
+        ) {
+            // A cold LFS range verifies the complete object before delivery.
+            // Keep the SDK's finite metadata/retry allowance plus this captured
+            // payload; response, decoding, request and deadline limits stay bounded.
+            let mut limits = options.read_limits();
+            limits.max_fetched_bytes =
+                limits
+                    .max_fetched_bytes
+                    .checked_add(self.size)
+                    .ok_or_else(|| {
+                        AgentError::Other(
+                            "captured LFS size exceeds the finite fetch budget".into(),
+                        )
+                    })?;
+            options = options.with_limits(limits)?;
+        }
+        Ok(options)
+    }
+
     async fn range(&self, offset: u64, length: u32) -> Result<Bytes> {
         self.scope.check()?;
         if length > MAX_RANGE_BYTES {
@@ -428,9 +455,7 @@ impl FileSource {
                 reader.read(start, length as u32, &self.scope.stop).await?
             }
             Source::Remote { snapshot, path, .. } => {
-                let options = ReadOptions::default()
-                    .with_operation(self.scope.options())
-                    .with_range(start..end)?;
+                let options = self.content_options()?.with_range(start..end)?;
                 self.scope
                     .run(remote_bytes(snapshot, path, options, length))
                     .await?
@@ -457,7 +482,7 @@ impl FileSource {
             Source::Remote { snapshot, path, .. } => {
                 // Let the SDK observe verified whole-file EOF instead of
                 // assembling this response from independently requested ranges.
-                let options = ReadOptions::default().with_operation(self.scope.options());
+                let options = self.content_options()?;
                 return self
                     .scope
                     .run(remote_bytes(snapshot, path, options, length))

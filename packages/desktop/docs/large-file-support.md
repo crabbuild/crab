@@ -10,7 +10,7 @@ completion. This record tracks implementation and qualification separately.
 | Capability | Required behavior | Current gap / qualification |
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
-| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold multi-GiB remote LFS costs, packaged interruption and other profiles remain open. |
+| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
@@ -492,3 +492,35 @@ appear in the inspector and redacted Activity log.
   status-only CLI call; it adds no second preview or reconstruction engine.
   Bulk LFS routing, decoded limits, diffs, durable transfers, cache budgets and
   the remaining acceptance matrix are still open.
+
+## Cold LFS read budget checkpoint
+
+A direct-remote LFS capture opened metadata for a 2,147,483,665-byte file, but
+its first 16-byte range failed. SDK reads default to 512 MiB fetched bytes;
+partial LFS delivery first verifies the complete SHA-256 object, so that finite
+default could not admit the cold object. The failure is recorded in
+`large-files-cold-lfs-proof.jk7ii6wh/report.json` in the external build directory.
+
+Desktop content options now add the captured LFS size to the SDK's existing
+finite metadata/retry allowance. Checked addition rejects overflow. This applies
+only to remote LFS content reads; SDK defaults, other content kinds, response and
+decode limits, request ceilings, deadlines and cancellation remain unchanged.
+The shared LFS reader still checks actual declared size before consuming body
+bytes and verifies the complete identity before partial delivery. Range replies
+remain bounded to 8 MiB, and complete preview responses retain their 200 MiB cap.
+
+- The same dedicated RustFS scenario passed after the caller policy changed:
+  a cold EOF range returned exactly 16 correct bytes after full verification in
+  6.398 seconds. An independently scoped warm query took 0.007 seconds and the
+  proxy forwarded only 16 payload bytes; no second full download was needed.
+- Observed sidecar peak RSS was 33,328 KiB, sampled every 100 ms. The qualification
+  proxy also streamed bounded windows rather than buffering its 2 GiB response.
+  The read phase used **19 GET/HEAD requests and zero storage writes**, despite
+  deliberately invalid ambient storage identity. Working-clone pointers stayed
+  unchanged. Report: `large-files-cold-lfs-fixed-proof.3bczcjt8/report.json` in
+  the external build directory. Its `sha256` field describes the small fixture
+  seed; the cold file's SHA-256 comes from its independently cleaned LFS pointer.
+- Four captured-source tests and the matching native release build/unpacked
+  package passed. The policy adds no runtime configuration or dependency/API
+  surface. Packaged remote cold-read progress, interruption, slow transfers and
+  the remaining acceptance matrix still require qualification.
