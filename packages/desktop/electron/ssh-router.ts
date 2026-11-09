@@ -63,6 +63,7 @@ type JsonRpcFrame = JsonRpcResponse | JsonRpcNotification;
 
 /** Methods that mutate state and must NOT be queued during reconnection. */
 const WRITE_METHODS = new Set([
+  "cache_clean",
   "add",
   "git_commit",
   "git_stage",

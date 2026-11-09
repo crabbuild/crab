@@ -145,6 +145,12 @@ impl From<crate::AgentError> for RpcError {
                 })),
             ),
             E::Io(_) => (1003, None),
+            E::Command {
+                status, details, ..
+            } => (
+                1002,
+                Some(serde_json::json!({ "kind": "cli", "status": status, "error": details })),
+            ),
             E::NativeRead { code, .. } => (
                 1012,
                 Some(serde_json::json!({ "kind": "content_read", "code": code })),

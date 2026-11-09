@@ -211,7 +211,21 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "hydration_status" => hydration_status(state, decode(&method, params)?).await,
         "about" => about().await,
         "agent_health" => agent_health().await,
-        "cache_clear" => cache_clear().await,
+        "cache_stats" => {
+            cache_operation(
+                state,
+                decode(&method, params)?,
+                crate::cache::Operation::Stats,
+            )
+            .await
+        }
+        "cache_clean" => {
+            let params: CacheParams = decode(&method, params)?;
+            let operation = crate::cache::Operation::Clean {
+                dry_run: params.dry_run,
+            };
+            cache_operation(state, params, operation).await
+        }
         "clone" => clone_repo(decode(&method, params)?, out).await,
         "status" => status(decode(&method, params)?, out).await,
         "hydrate" => hydrate(decode(&method, params)?, out).await,
@@ -4036,57 +4050,24 @@ async fn about() -> Result<Value> {
     }))
 }
 
-/// Clear the on-disk xorb/shard cache. We prefer the CLI's own
-/// `crab cache clear` when available so the cache-index bookkeeping
-/// stays consistent; if the subcommand doesn't exist, fall back to
-/// removing the cache dir directly (best-effort — partial deletions
-/// are acceptable here because the cache is by definition
-/// regeneratable).
-async fn cache_clear() -> Result<Value> {
-    // Try the CLI path first.
-    let cli_out = tokio::process::Command::new(shellout::resolve_crab_bin())
-        .args(["cache", "clear", "--yes"])
-        .output()
-        .await;
+#[derive(Deserialize)]
+struct CacheParams {
+    repo_id: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
 
-    if let Ok(out) = &cli_out {
-        if out.status.success() {
-            return Ok(json!({
-                "method": "cli",
-                "stdout": String::from_utf8_lossy(&out.stdout).into_owned(),
-            }));
-        }
-    }
-
-    // Fallback: remove the default cache directory directly. We only
-    // touch the crab subdirectory so we can't accidentally wipe
-    // something unrelated.
-    let root = if let Ok(dir) = std::env::var("CRAB_CACHE_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".cache/crab")
-    } else {
-        dirs::cache_dir()
-            .ok_or_else(|| AgentError::Other("platform cache dir not available".into()))?
-            .join("crab")
+async fn cache_operation(
+    state: &State,
+    params: CacheParams,
+    operation: crate::cache::Operation,
+) -> Result<Value> {
+    let repo = match params.repo_id {
+        Some(id) => Some(state.get(&id).await?),
+        None => None,
     };
-    if !root.exists() {
-        return Ok(json!({
-            "method": "noop",
-            "reason": "cache directory does not exist",
-        }));
-    }
-    tokio::task::spawn_blocking({
-        let root = root.clone();
-        move || std::fs::remove_dir_all(&root)
-    })
-    .await
-    .map_err(|e| AgentError::Other(format!("join error: {e}")))?
-    .map_err(AgentError::Io)?;
-    Ok(json!({
-        "method": "fs",
-        "cleared": root.display().to_string(),
-    }))
+    let cwd = repo.as_ref().and_then(|repo| repo.work_dir.as_deref());
+    crate::cache::run(cwd, operation).await
 }
 
 /// Health diagnostics for the renderer's Health panel. Returns

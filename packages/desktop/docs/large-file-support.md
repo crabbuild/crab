@@ -187,6 +187,26 @@ remote proof and packaged qualification after this consolidation.
 - Editor save concurrency and draft persistence still need qualification;
   reload notification alone does not make autosave conflict-safe. The packaged
   checkpoint predates this consolidation and must be rebuilt for GUI proof.
+
+### Cache cleanup checkpoint
+
+Desktop cache inspection and cleanup now use native `cache stats --json` and
+`cache clean --json`; the retired command and recursive directory-deletion
+fallback are removed. Settings reports real logical/allocated usage, configured
+budget, family availability and inspection issues. Cleanup preview and actual
+cleanup expose retained, busy and unsafe counts. Repository configuration is
+resolved by the native owner; SSH requests keep their repository route and
+cleanup is rejected during reconnection instead of queued for replay.
+
+- CLI cleanup integration passed (3 tests), including both command surfaces,
+  JSON/dry-run behavior, retained workspace preservation and active-mirror
+  refusal. The sidecar's real native integration and partial-report policy
+  passed (2 tests). Test caches use private owner-created payloads, matching
+  the native permissions contract; unsafe public paths remain unavailable.
+- Renderer/Electron typechecks and 38 focused renderer/router tests passed.
+  Matching package build and GUI cleanup proof are pending. Cache budget
+  editing/enforcement, SDK namespace lifecycle, offline retention and durable
+  operation ownership remain open acceptance work.
   Evidence: `large-files-proof._xhbivbf/report.json` in the external build root;
   payload SHA-256 `4c22df11d3ecfef30df347707e9070fd9f96a0112170cb85b736818ef56001fd`.
   Renderer/Electron type checks passed; repeat packaged proof remains required.

@@ -1212,7 +1212,7 @@ enum OptimizeCacheCmd {
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
-    Clean,
+    Clean(CacheCleanArgs),
     /// Evict local cache objects until configured budgets are satisfied.
     Prune {
         /// Report what would be pruned without deleting.
@@ -1442,7 +1442,8 @@ impl OptimizeCmd {
                     OutputMode::from_flags(*json, *jsonl)
                 }
                 OptimizeCacheCmd::Stats { json } => OutputMode::from_flags(*json, false),
-                OptimizeCacheCmd::Verify | OptimizeCacheCmd::Clean => OutputMode::Text,
+                OptimizeCacheCmd::Clean(args) => OutputMode::from_flags(args.json, false),
+                OptimizeCacheCmd::Verify => OutputMode::Text,
             },
             Self::Indexes(command) => match command {
                 OptimizeIndexesCmd::Diagnose { json, .. }
@@ -1476,7 +1477,7 @@ impl OptimizeCmd {
             Self::Cache(command) => match command {
                 OptimizeCacheCmd::Stats { .. } => "cache.stats",
                 OptimizeCacheCmd::Verify => "cache.verify",
-                OptimizeCacheCmd::Clean => "cache.clean",
+                OptimizeCacheCmd::Clean(_) => "cache.clean",
                 OptimizeCacheCmd::Prune { .. } => "prune",
                 OptimizeCacheCmd::Warm { .. } => "fetch",
             },
@@ -1899,7 +1900,17 @@ enum CacheCmd {
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
-    Clean,
+    Clean(CacheCleanArgs),
+}
+
+#[derive(clap::Args)]
+struct CacheCleanArgs {
+    /// Report eligible payloads without deleting them.
+    #[arg(long)]
+    dry_run: bool,
+    /// Structured JSON output with actual cleanup totals.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -2116,6 +2127,7 @@ impl Cmd {
             | Self::Prune { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
             Self::Optimize(command) => command.output_mode(),
             Self::Cache(CacheCmd::Stats { json }) => OutputMode::from_flags(*json, false),
+            Self::Cache(CacheCmd::Clean(args)) => OutputMode::from_flags(args.json, false),
             Self::Mirror(args) => args.output_mode(),
             Self::Push(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Ship { json, .. } => OutputMode::from_flags(*json, false),
@@ -2356,7 +2368,7 @@ impl Cmd {
             Self::Metadb(..) => "metadb",
             Self::Cache(CacheCmd::Stats { .. }) => "cache.stats",
             Self::Cache(CacheCmd::Verify) => "cache.verify",
-            Self::Cache(CacheCmd::Clean) => "cache.clean",
+            Self::Cache(CacheCmd::Clean(_)) => "cache.clean",
             Self::Config(ConfigCmd::Get { .. }) => "config.get",
             Self::Config(ConfigCmd::Set { .. }) => "config.set",
             Self::Replica(_) => "replica",
@@ -5371,7 +5383,7 @@ async fn run_optimize_command(
                 run_cache_command(CacheCmd::Stats { json }, cancel).await
             }
             OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
-            OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean, cancel).await,
+            OptimizeCacheCmd::Clean(args) => run_cache_command(CacheCmd::Clean(args), cancel).await,
             OptimizeCacheCmd::Prune {
                 dry_run,
                 verbose,
@@ -5784,9 +5796,9 @@ async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<
             let mode = OutputMode::from_flags(false, false);
             crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
         }
-        CacheCmd::Clean => {
-            let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_clean(false, mode, cancel).await?;
+        CacheCmd::Clean(args) => {
+            let mode = OutputMode::from_flags(args.json, false);
+            crab::cmd::cache::run_cache_clean(args.dry_run, mode, cancel).await?;
         }
     }
     Ok(ExitCode::SUCCESS)

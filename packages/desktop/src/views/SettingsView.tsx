@@ -7,7 +7,7 @@ Cloud,Copy,
 Eye,
 EyeOff,Folder,
 GitCompareArrows,GitPullRequest,
-HardDrive,Import,
+Import,
 Info,Loader2,
 type LucideIcon,
 Monitor,
@@ -22,7 +22,7 @@ X
 import { DEFAULT_SETTINGS,Settings,useSettings } from "../settings";
 import { dialogs,mainProcess,rpc } from "../ipc";
 import { usePrefetchProfiles } from "../lib/prefetch-profiles";
-import { useActiveRepo,useStore } from "../state";
+import { useActiveRepo } from "../state";
 import { telemetry } from "../lib/telemetry";
 import { DARK_THEMES,LIGHT_THEMES } from "../lib/editor-themes";
 import { StorageConfigSection } from "./StorageConfigSection";
@@ -33,6 +33,7 @@ import { ScopeChip } from "../components/ScopeChip";
 import { AgentManagerView } from "./AgentManagerView";
 import { DiagnosticsView } from "./DiagnosticsView";
 import { HealthView } from "./HealthView";
+import { CacheSettings } from "../components/CacheSettings";
 import { useSession } from "../lib/session-context";
 
 const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({ value: t.id, label: t.label }));
@@ -1359,36 +1360,12 @@ function ForgeAuthentication() {
 
 function StorageAndCache() {
   const { settings, update } = useSettings();
-  const { state } = useStore();
   const { profiles, add, remove } = usePrefetchProfiles();
   const activeRepo = useActiveRepo();
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newPatterns, setNewPatterns] = useState("");
   const [runningId, setRunningId] = useState<string | null>(null);
   const [prefetchErr, setPrefetchErr] = useState<string | null>(null);
-
-  async function clearCache() {
-    setBusy(true);
-    setMsg(null);
-    setErr(null);
-    try {
-      const res = await rpc.cacheClear();
-      setMsg(
-        res.method === "cli"
-          ? "Cleared via `crab cache clear`."
-          : res.method === "fs"
-            ? `Removed ${res.cleared}.`
-            : `No action: ${res.reason ?? "cache already clean"}.`,
-      );
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function runProfile(profileId: string, patterns: string[]) {
     if (!activeRepo?.path) {
@@ -1426,62 +1403,7 @@ function StorageAndCache() {
 
       {/* Local Cache */}
       <SubSection title="Local Cache">
-        <Row
-          label="Cache roots"
-          hint="One entry per open repository. Crab picks this based on the repo's URL or local path."
-        >
-          <div className="w-full space-y-2">
-            {state.repos.length === 0 ? (
-              <div className="text-[11px] text-gx-muted">No repositories open.</div>
-            ) : (
-              state.repos.map((r) => (
-                <div
-                  key={r.repo_id}
-                  className="flex items-center gap-2 rounded border border-gx-border bg-gx-surface px-2 py-1.5 text-[11px]"
-                >
-                  {r.is_remote ? (
-                    <Cloud size={11} className="shrink-0 text-gx-accent" />
-                  ) : (
-                    <HardDrive size={11} className="shrink-0 text-gx-muted" />
-                  )}
-                  <span className="shrink-0 font-medium text-gx-text">{r.label}</span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-gx-muted">
-                    {r.cache_dir}
-                  </span>
-                  <button
-                    type="button"
-                    className="shrink-0 text-gx-muted hover:text-gx-text"
-                    onClick={() => void navigator.clipboard.writeText(r.cache_dir)}
-                    title="Copy path"
-                    aria-label="Copy cache path"
-                  >
-                    <Copy size={11} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </Row>
-        <Row
-          label="Clear on-disk cache"
-          hint="Removes Crab's local xorb / shard cache. Data will be re-fetched from object storage on next read. Safe to run any time."
-        >
-          <div className="flex flex-col items-end gap-2">
-            <button type="button" className="btn text-xs" onClick={clearCache} disabled={busy}>
-              {busy ? (
-                <>
-                  <Loader2 size={12} className="animate-spin" /> Working…
-                </>
-              ) : (
-                <>
-                  <Trash2 size={12} /> Clear cache
-                </>
-              )}
-            </button>
-            {msg && <div className="text-[11px] text-gx-muted">{msg}</div>}
-            {err && <div className="text-[11px] text-gx-error">{err}</div>}
-          </div>
-        </Row>
+        <CacheSettings key={activeRepo?.repo_id ?? "local"} repoId={activeRepo?.repo_id} label={activeRepo?.label} />
       </SubSection>
 
       {/* Memory */}

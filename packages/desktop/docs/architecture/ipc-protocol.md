@@ -98,7 +98,14 @@ Categories of allowed methods:
 
 ### Repository Management
 - `open_local`, `open_url`, `close`
-- `auth_status`, `about`, `agent_health`, `cache_clear`
+- `auth_status`, `about`, `agent_health`, `cache_stats`, `cache_clean`
+
+Cache inspection and cleanup run the matching native `cache stats --json` and
+`cache clean --json` operations. An optional `repo_id` selects repository
+configuration and routes SSH requests to their host. `cache_clean` accepts
+`dry_run`; reports retain native cleanup counts. Inspection preserves partial
+reports and their issues. Cleanup failures are errors, with no filesystem
+deletion fallback; retained, unknown and busy state stays with its owner.
 
 ### File Operations
 - `list`, `stat`, `pointer_info`

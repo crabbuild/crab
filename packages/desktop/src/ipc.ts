@@ -71,6 +71,34 @@ export interface RepoHandle {
   forge_provider?: "github" | "gitlab" | "bitbucket" | "gitea" | null;
 }
 
+export interface CacheUsage {
+  files: number;
+  directories: number;
+  logical_bytes: number;
+  allocated_bytes: number;
+}
+
+export interface CacheStats {
+  root: string;
+  root_state: "missing" | "present" | "unavailable";
+  budget_bytes: number | null;
+  observed: CacheUsage;
+  scan_complete: boolean;
+  over_budget: boolean | null;
+  families: Record<string, CacheUsage & { complete: boolean; issues: number }>;
+  issues: Array<{ family: string | null; path: string; kind: string; error: string }>;
+  omitted_issues: number;
+}
+
+export interface CacheCleanResult {
+  files_removed: number;
+  bytes_reclaimed: number;
+  retained_entries: number;
+  busy_entries: number;
+  unsafe_entries: number;
+  dry_run: boolean;
+}
+
 export type EntryKind = "file" | "dir" | "pointer" | "lfs" | "submodule";
 export type PointerKind = "crab" | "lfs" | "git";
 export type RefKind = "branch" | "tag" | "head" | "remote" | "other";
@@ -1955,8 +1983,10 @@ export const rpc = {
   indexerStatus: () =>
     call<IndexerStatus>("indexer_status"),
 
-  cacheClear: () =>
-    call<{ method: string; stdout?: string; reason?: string; cleared?: string }>("cache_clear"),
+  cacheStats: (repo_id?: string) => call<CacheStats>("cache_stats", { repo_id }),
+
+  cacheClean: (repo_id?: string, dry_run = false) =>
+    call<CacheCleanResult>("cache_clean", { repo_id, dry_run }),
 
   clone: (url: string, dest: string, jobId = nextJobId("clone"), token?: string, provider?: string, storage_connection_id?: string) =>
     call<{ status: number; dest: string }>("clone", {

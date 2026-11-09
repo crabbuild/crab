@@ -10,6 +10,7 @@
 
 mod audit;
 mod batch_git_status;
+mod cache;
 mod cancel;
 #[cfg(test)]
 mod cancel_test;
@@ -92,6 +93,14 @@ pub enum AgentError {
 
     #[error("crab CLI exited with status {status}: {stderr}")]
     Cli { status: i32, stderr: String },
+
+    #[error("{message} ({code})")]
+    Command {
+        status: i32,
+        code: String,
+        message: String,
+        details: serde_json::Value,
+    },
 
     #[error("native content read failed ({code}): {message}")]
     NativeRead { code: String, message: String },

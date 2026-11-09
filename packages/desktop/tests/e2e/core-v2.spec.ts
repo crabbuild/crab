@@ -49,6 +49,8 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
     git(["init", "--initial-branch=main"]);
+    mkdirSync(path.join(source, ".crab"), { recursive: true });
+    writeFileSync(path.join(source, ".crab/config.toml"), `[cache]\nchunk_cache_dir = ${JSON.stringify(path.join(root, "cache/chunks").replaceAll("\\", "/"))}\n`);
     const driver = `'${crab.replaceAll("\\", "/").replaceAll("'", "'\\''")}' filter-process`;
     for (const kind of ["crab", "lfs"]) {
       git(["config", `filter.${kind}.process`, driver]);
@@ -110,6 +112,27 @@ test("packaged desktop previews a 3 GiB Crab file and LFS pointers without hydra
     await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
     await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
+    const cachePayload = path.join(root, "cache/chunks/aa", "a".repeat(64));
+    const retained = path.join(root, "cache/retained-workspace/user-file");
+    for (const file of [cachePayload, retained]) mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(cachePayload, "data", { mode: 0o600 });
+    writeFileSync(retained, "keep", { mode: 0o600 });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
+    const cache = page.getByRole("region", { name: "Cache usage", exact: true });
+    await expect(cache.getByRole("button", { name: "Refresh usage", exact: true })).toBeEnabled();
+    await cache.getByRole("button", { name: "Preview cleanup", exact: true }).click();
+    await expect(cache.getByRole("status")).toContainText("Would remove");
+    expect(existsSync(cachePayload)).toBe(true);
+    await cache.getByRole("button", { name: "Clean cache", exact: true }).click();
+    await expect(cache.getByRole("status")).toContainText("Removed");
+    expect(existsSync(cachePayload)).toBe(false);
+    expect(readFileSync(retained, "utf8")).toBe("keep");
+    await page.screenshot({ path: test.info().outputPath("cache-cleanup.png") });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+    await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
+    await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(pointers.get("large.safetensors"));
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });
