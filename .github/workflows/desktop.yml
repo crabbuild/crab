@@ -48,9 +48,9 @@ jobs:
         os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2022]
     env:
       CARGO_INCREMENTAL: 0
-      # Alpha installers are unsigned downloads; later release channels require signing.
-      SIGN_RELEASE: ${{ inputs.release && !contains(inputs.version, '-alpha.') }}
-      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && !contains(inputs.version, '-alpha.') && 'true' || 'false' }}
+      # Every release channel needs a stable signing identity for auto-updates.
+      SIGN_RELEASE: ${{ inputs.release }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && 'true' || 'false' }}
     defaults:
       run:
         shell: bash

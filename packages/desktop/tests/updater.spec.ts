@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { parse } from "yaml";
 import type { BrowserWindow } from "electron";
 
@@ -50,19 +49,6 @@ describe("desktop updates", () => {
       });
     },
   );
-
-  it("reports missing local build update configuration as unavailable", () => {
-    const error = Object.assign(new Error("missing local build config"), {
-      code: "ENOENT", path: join(process.resourcesPath, "app-update.yml"),
-    });
-    listeners.get("error")?.(error);
-    expect(send).toHaveBeenLastCalledWith("updater:unavailable", { message: "Automatic updates are not configured for this build." });
-  });
-
-  it("keeps unrelated missing-file failures visible", () => {
-    listeners.get("error")?.(Object.assign(new Error("missing download"), { code: "ENOENT", path: join(process.resourcesPath, "download.zip") }));
-    expect(send).toHaveBeenLastCalledWith("updater:error", { message: "Could not update Crab. Check your connection and try again." });
-  });
 
   it("keeps network and malformed metadata failures visible with concise copy", () => {
     listeners.get("error")?.(new Error("HTTP 503: response headers and internal stack"));

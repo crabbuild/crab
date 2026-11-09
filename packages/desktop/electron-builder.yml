@@ -27,6 +27,7 @@ extraResources:
   - from: resources/shell-integration
     to: shell-integration
 beforePack: scripts/verify-native.cjs
+afterPack: scripts/configure-updater.cjs
 artifactName: Crab-${version}-${os}-${arch}.${ext}
 icon: build/icon.png
 publish:

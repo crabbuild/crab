@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { parse } from "yaml";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -33,6 +34,11 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
   test.setTimeout(90_000);
+  const executablePath = packagedExecutable();
+  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
+  const updateConfig = parse(readFileSync(path.join(resources, "app-update.yml"), "utf8"));
+  expect(updateConfig).toMatchObject({ provider: "github", owner: "crabbuild", repo: "crab", channel: prerelease ? prerelease.split(".")[0] : "latest" });
+  expect(updateConfig.updaterCacheDirName).toBeTruthy();
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-updater-"));
   const requests: string[] = [];
   let metadata: "missing" | "published" | "invalid" = "missing";
@@ -266,26 +272,6 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
 });
 
 
-test("local build without updater configuration reports unavailable", async () => {
-  const executablePath = packagedExecutable();
-  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
-  test.skip(existsSync(path.join(resources, "app-update.yml")), "This build includes release updater configuration");
-  const root = mkdtempSync(path.join(tmpdir(), "crab-updater-unconfigured-"));
-  const application = await electron.launch({ executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`] });
-  try {
-    const page = await application.firstWindow();
-    await page.getByRole("button", { name: "Skip", exact: true }).click();
-    await page.getByRole("button", { name: "No thanks", exact: true }).click();
-    const result = await page.evaluate(() => window.crab.updater.checkForUpdate());
-    expect(result).toEqual({ success: false, error: "Automatic updates are not configured for this build." });
-    await expect(page.getByRole("status").filter({ hasText: result.error })).toBeVisible();
-    await expect(page.getByRole("alert")).toHaveCount(0);
-  } finally {
-    await application.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("terminal restore is isolated by profile and repository", async () => {
   test.setTimeout(60_000);
   const root = mkdtempSync(path.join(tmpdir(), "crab-terminal-isolation-"));
@@ -331,7 +317,8 @@ test("terminal restore is isolated by profile and repository", async () => {
     expect(existsSync(path.join(testHome, ".crab-desktop", "terminal-state.json"))).toBe(false);
   } finally {
     await application.close();
-    rmSync(root, { recursive: true, force: true });
+    // Agent version probes can finish writing their isolated HOME after Electron exits.
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
   }
 });
 

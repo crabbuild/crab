@@ -132,7 +132,7 @@ exercise electron-updater's real macOS architecture selection, including Rosetta
 and its Linux file selection. A local assembly also checked the existing macOS
 arm64 DMG, ZIP, and blockmaps; other platform inputs were fixtures. A rebuilt
 unsigned macOS arm64 app passed the packaged updater and repository smoke tests.
-The hosted release builds unsigned alpha artifacts; later channels require
+All hosted release channels, including alpha, now require
 signed macOS and Windows artifacts before publication.
 Actual signed cross-platform installation and updates still require configured
 signing credentials and qualification in the release environment.
