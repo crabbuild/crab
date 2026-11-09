@@ -250,6 +250,8 @@ pub type crab_sdk::operation::Request<'a, T, O>::IntoFuture = core::pin::Pin<all
 pub type crab_sdk::operation::Request<'a, T, O>::Output = core::result::Result<T, crab_sdk::Error>
 pub fn crab_sdk::operation::Request<'a, T, O>::into_future(self) -> Self::IntoFuture
 pub mod crab_sdk::remote
+pub use crab_sdk::remote::Chunk
+pub use crab_sdk::remote::ChunkPage
 pub mod crab_sdk::remote::write
 #[non_exhaustive] pub enum crab_sdk::remote::write::MutationOutcome
 pub crab_sdk::remote::write::MutationOutcome::Committed
@@ -322,6 +324,10 @@ pub crab_sdk::remote::Capability::CreateCommits
 pub crab_sdk::remote::Capability::ReadContent
 pub crab_sdk::remote::Capability::ReadGit
 pub crab_sdk::remote::Capability::UpdateRefs
+#[non_exhaustive] pub enum crab_sdk::remote::ContentKind
+pub crab_sdk::remote::ContentKind::Crab
+pub crab_sdk::remote::ContentKind::Git
+pub crab_sdk::remote::ContentKind::Lfs
 #[non_exhaustive] pub enum crab_sdk::remote::ContentMode
 pub crab_sdk::remote::ContentMode::Git
 pub crab_sdk::remote::ContentMode::Hydrated
@@ -376,6 +382,11 @@ pub crab_sdk::remote::DiffHunk::new_lines: u64
 pub crab_sdk::remote::DiffHunk::new_start: u64
 pub crab_sdk::remote::DiffHunk::old_lines: u64
 pub crab_sdk::remote::DiffHunk::old_start: u64
+pub struct crab_sdk::remote::FileMetadata
+pub crab_sdk::remote::FileMetadata::git_size: u64
+pub crab_sdk::remote::FileMetadata::id: crab_sdk::ObjectId
+pub crab_sdk::remote::FileMetadata::kind: crab_sdk::remote::ContentKind
+pub crab_sdk::remote::FileMetadata::size: u64
 pub struct crab_sdk::remote::Page<T>
 pub crab_sdk::remote::Page::items: alloc::vec::Vec<T>
 pub crab_sdk::remote::Page::next: core::option::Option<crab_sdk::remote::PageCursor>
@@ -416,6 +427,8 @@ pub fn crab_sdk::remote::Snapshot::blame(&self, crab_sdk::GitPath) -> crab_sdk::
 pub fn crab_sdk::remote::Snapshot::commit(&self) -> crab_sdk::operation::Request<'_, crab_sdk::remote::Commit, crab_sdk::operation::ReadOptions>
 pub fn crab_sdk::remote::Snapshot::commit_id(&self) -> crab_sdk::Result<crab_sdk::ObjectId>
 pub fn crab_sdk::remote::Snapshot::diff(&self, crab_sdk::Revision, crab_sdk::GitPath) -> crab_sdk::operation::Request<'_, crab_sdk::remote::Diff, crab_sdk::operation::ReadOptions>
+pub fn crab_sdk::remote::Snapshot::file_chunks(&self, crab_sdk::GitPath, u64, u32) -> crab_sdk::operation::Request<'_, crab_types::file_layout::ChunkPage, crab_sdk::operation::ReadOptions>
+pub fn crab_sdk::remote::Snapshot::file_metadata(&self, crab_sdk::GitPath) -> crab_sdk::operation::Request<'_, crab_sdk::remote::FileMetadata, crab_sdk::operation::ReadOptions>
 pub fn crab_sdk::remote::Snapshot::history(&self, crab_sdk::remote::HistoryTraversal, crab_sdk::remote::PageRequest) -> crab_sdk::operation::Request<'_, crab_sdk::remote::Page<crab_sdk::remote::Commit>, crab_sdk::operation::ReadOptions>
 pub fn crab_sdk::remote::Snapshot::open_file(&self, crab_sdk::GitPath) -> crab_sdk::operation::Request<'_, crab_sdk::remote::ContentStream, crab_sdk::operation::ReadOptions>
 pub fn crab_sdk::remote::Snapshot::read_blob(&self, crab_sdk::GitPath) -> crab_sdk::operation::Request<'_, bytes::bytes::Bytes, crab_sdk::operation::ReadOptions>
