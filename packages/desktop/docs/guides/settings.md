@@ -148,6 +148,17 @@ Configure which files to pre-download on clone/pull:
 - **Budget limits** — max tokens/cost per task
 - **Agent log level** — verbosity of agent output
 
+### Diagnostics
+
+- **Health & Diagnostics** — agent and CLI versions, cache and staging usage,
+  indexer status, repository information, and diagnostic reports
+- **Notifications** — notification preferences and Do Not Disturb
+- **Logs** — activity buffer size, agent log level, and developer tools
+- **PTY Daemon** — terminal daemon status and diagnostics
+- **Telemetry** — anonymous usage preferences and payload preview
+
+Health & Diagnostics is part of Settings and has no separate activity-bar button.
+
 ### Shortcuts
 
 - **Keybinding editor** — view and customize all keyboard shortcuts

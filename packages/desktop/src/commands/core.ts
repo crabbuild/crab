@@ -55,7 +55,7 @@ commands.register({
   id: "view.settings",
   title: "Open Settings",
   category: "View",
-  keywords: ["preferences", "config", "options"],
+  keywords: ["preferences", "config", "options", "diagnostics", "health"],
   run: async () => {
     // Dispatched via the app's navigation system once wired.
   },
@@ -126,14 +126,6 @@ commands.register({
   title: "Navigate to Experiments",
   category: "View",
   keywords: ["mlflow", "wandb", "runs", "metrics"],
-  run: async () => {},
-});
-
-commands.register({
-  id: "view.health",
-  title: "Navigate to Health & Diagnostics",
-  category: "View",
-  keywords: ["diagnostics", "status", "agent", "health"],
   run: async () => {},
 });
 

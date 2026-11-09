@@ -6,11 +6,9 @@ import {
   FolderTree,
   GitGraph,
   GitPullRequest,
-  HeartPulse,
   LayoutDashboard,
   Monitor,
   Package,
-  Puzzle,
   Search,
   Settings,
   SquareDot,
@@ -35,13 +33,11 @@ export type SidebarView =
   | "agent-workflows"
   | "terminal"
   | "dashboard"
-  | "health"
   | "orchestrator"
   | "agents"
   | "browser"
   | "ssh"
-  | "settings"
-  | "skills";
+  | "settings";
 
 interface ViewDef {
   id: SidebarView;
@@ -52,7 +48,6 @@ interface ViewDef {
 export const VIEWS: ViewDef[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "orchestrator", label: "Chat", icon: Bot },
-  { id: "skills", label: "Skills", icon: Puzzle },
   { id: "explorer", label: "Explorer", icon: Files },
   { id: "search", label: "Search", icon: Search },
   { id: "crab", label: "Large Files", icon: Package },
@@ -65,7 +60,6 @@ export const VIEWS: ViewDef[] = [
   { id: "browser", label: "Browser", icon: Globe },
     { id: "ssh", label: "SSH Connections", icon: Monitor },
   { id: "terminal", label: "Terminal", icon: Terminal },
-  { id: "health", label: "Health & Diagnostics", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

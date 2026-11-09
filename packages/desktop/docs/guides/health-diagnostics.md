@@ -1,13 +1,14 @@
-# Health and Diagnostics View
+# Health and Diagnostics
 
-The Health view provides system-level diagnostics for troubleshooting
+The Health & Diagnostics section provides system-level diagnostics for troubleshooting
 issues with Crab Desktop. It shows agent status, cache health, disk
 usage, and provides tools for generating diagnostic reports.
 
-## Accessing the Health View
+## Accessing Health & Diagnostics
 
-- Click the **HeartPulse** icon in the activity bar
-- Also accessible via Command Palette: "Show Health & Diagnostics"
+- Open **Settings** from the activity bar or press `Cmd+,` / `Ctrl+,`.
+- Select **Diagnostics**. The health report appears at the top, followed by
+  notification settings, logs, PTY daemon diagnostics, and telemetry.
 
 ## Layout
 

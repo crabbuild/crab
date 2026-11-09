@@ -1,13 +1,12 @@
 /**
  * Agent Tasks View (Orchestrator Mode).
  *
- * Three-column layout: task list (left, 220px) + workspace detail (right, tabbed).
- * Accessed via the "Tasks" activity bar entry, gated behind `orchestratorEnabled`.
+ * Chat workspace and skill management, accessed through the Chat activity entry.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Users, FolderTree } from "lucide-react";
+import { MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Puzzle, Users, FolderTree } from "lucide-react";
 import { OpenRepo } from "../state";
 import { TaskList } from "../components/orchestrator/TaskList";
 import { OrchestratorTask } from "../components/orchestrator/TaskCard";
@@ -15,6 +14,7 @@ import { NewTaskDialog, NewTaskData } from "../components/orchestrator/NewTaskDi
 import { ChatTab, ChatMessage, ToolEvent } from "../components/orchestrator/ChatTab";
 import { DiffTab } from "../components/orchestrator/DiffTab";
 import { TerminalView } from "./TerminalView";
+import { SkillsView } from "./SkillsView";
 import { ActionBar } from "../components/orchestrator/ActionBar";
 import { NewChatLanding } from "../components/orchestrator/NewChatLanding";
 import { AgentSetupWizard } from "../components/orchestrator/AgentSetupWizard";
@@ -294,6 +294,46 @@ function modelsForAgent(agentType: string): { value: string; label: string }[] {
 // ── Component ───────────────────────────────────────────────────────
 
 export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
+  const [section, setSection] = useState<"chats" | "skills">("chats");
+
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      <nav aria-label="Agent chat" className="flex shrink-0 border-b border-gx-border bg-gx-surface">
+        {([
+          { id: "chats", label: "Chats", icon: MessageSquare },
+          { id: "skills", label: "Skills", icon: Puzzle },
+        ] as const).map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={section === id}
+            onClick={() => setSection(id)}
+            className={clsx(
+              "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-gx-accent",
+              section === id
+                ? "border-gx-accent text-gx-text"
+                : "border-transparent text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            )}
+          >
+            <Icon size={13} />
+            {label}
+          </button>
+        ))}
+      </nav>
+      {/* Keep the chat mounted so Skills navigation preserves drafts and live sessions. */}
+      <div className={section === "chats" ? "min-h-0 flex-1" : "hidden"}>
+        <AgentTasksWorkspace repo={repo} onOpenAgentManager={onOpenAgentManager} active={section === "chats"} />
+      </div>
+      {section === "skills" && (
+        <div className="min-h-0 flex-1">
+          <SkillsView repoPath={repo.path} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { active: boolean }) {
   const sessionManager = useSession();
   const repoPath = useActiveRepoPath();
 
@@ -699,6 +739,8 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
 
   // ── Keyboard Shortcuts ────────────────────────────────────────────
   useEffect(() => {
+    // Hidden chats retain their state, but must not act on Skills keyboard input.
+    if (!active) return;
     const handler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
       if (meta && e.shiftKey && e.key === "N") {
@@ -738,7 +780,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedTaskId, selectedTask, dialogOpen, repo.repo_id]);
+  }, [active, selectedTaskId, selectedTask, dialogOpen, repo.repo_id]);
 
   // ── Status transitions → update task state + notifications ────────
   // Subscribes to `orchestrator:task-status` IPC events so that when a
@@ -2587,6 +2629,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
                 <DiffTab
                   task={selectedTask}
                   repo={repo}
+                  active={active}
                   initialActiveFile={selectedLiveFile}
                   checkpointSha={checkpointSha}
                   checkpointFromSha={checkpointFromSha}

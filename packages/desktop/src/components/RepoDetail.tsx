@@ -17,7 +17,6 @@ import { TimelineAndConflictsView } from "../views/TimelineAndConflictsView";
 import { DashboardView } from "../views/DashboardView";
 import { CommitDetailView } from "../views/CommitDetailView";
 import { BranchDetailView } from "../views/BranchDetailView";
-import { HealthView } from "../views/HealthView";
 import { SshView } from "../views/SshView";
 import { TerminalView } from "../views/TerminalView";
 import { CrabFlowView } from "../views/FlowView";
@@ -29,7 +28,6 @@ import { TimeMachineView } from "../views/TimeMachineView";
 import { WorktreeCompareView } from "../views/WorktreeCompareView";
 import { CrossRepoBranchCompareView, CrossRepoCompareTarget } from "../views/CrossRepoBranchCompareView";
 import { AgentTasksView } from "../views/AgentTasksView";
-import { SkillsView } from "../views/SkillsView";
 import { BrowserView } from "../views/BrowserView";
 import { MergeEditor } from "./MergeEditor";
 import { EditorPane, EditorTab } from "./EditorPane";
@@ -63,7 +61,6 @@ const KNOWN_VIEWS: SidebarView[] = [
   "agent-workflows",
   "terminal",
   "dashboard",
-  "health",
   "orchestrator",
   "agents",
   "ssh",
@@ -105,9 +102,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         // there was no active file, the user was likely seeing the dashboard
         // fallback. Restore to "dashboard" so the indicator matches reality.
         const fullPaneViews: SidebarView[] = [
-          "settings", "dashboard", "health", "terminal", "crab",
+          "settings", "dashboard", "terminal", "crab",
           "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
-          "pull-requests", "worktrees", "skills",
+          "pull-requests", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
           return "dashboard";
@@ -903,11 +900,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         <span className="kbd">⌘,</span> anytime to jump back.
       </div>
     ),
-    health: (
-      <div className="p-3 text-xs text-gx-muted">
-        Health &amp; Diagnostics open in the main area.
-      </div>
-    ),
   };
 
   const activeDiff = diffTabs.find((t) => t.key === activeKey);
@@ -918,9 +910,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   // When the active view is NOT one of these and there are no open tabs,
   // we show the Dashboard as a landing page instead of a blank screen.
   const fullPaneActiveViews: SidebarView[] = [
-    "settings", "dashboard", "health", "terminal", "crab",
+    "settings", "dashboard", "terminal", "crab",
     "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
-    "pull-requests", "worktrees", "browser", "skills",
+    "pull-requests", "worktrees", "browser",
   ];
   const showDashboardFallback =
     !hasOpenTabs &&
@@ -937,7 +929,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
           views={views}
           onViewChange={setActiveView}
           requestedView={requestedView}
-          fullPaneViews={["settings", "dashboard", "health", "terminal", "crab", "workflows", "agent-workflows", "orchestrator", "changes", "ssh", "browser", "skills"]}
+          fullPaneViews={["settings", "dashboard", "terminal", "crab", "workflows", "agent-workflows", "orchestrator", "changes", "ssh", "browser"]}
           hiddenViews={hiddenViews}
           badges={conflictCount > 0 ? { timeline: conflictCount } : undefined}
           main={
@@ -948,8 +940,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
               </div>
               {activeView === "settings" ? (
                 <SettingsView />
-              ) : activeView === "health" ? (
-                <HealthView />
               ) : activeView === "ssh" ? (
                 <SshView />
               ) : activeView === "crab" ? (
@@ -979,8 +969,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                 null
               ) : activeView === "browser" ? (
                 <BrowserView repoPath={repo.path} />
-              ) : activeView === "skills" ? (
-                <SkillsView repoPath={repo.path} />
               ) : activeView === "dashboard" ? (
                 <DashboardView
                   repo={repo}

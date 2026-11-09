@@ -40,6 +40,12 @@ The orchestrator supports multiple agent backends:
 
 ## Layout
 
+The Chat view has a local **Chats / Skills** switch. **Chats** contains your
+conversations and workspaces; **Skills** opens the skill library, including
+creation, URL installation, editing, and agent sync. Skills no longer has a
+separate activity-bar entry. Switching to Skills keeps the current chat, draft,
+and running agent session intact.
+
 The view uses a three-column layout:
 
 ```
