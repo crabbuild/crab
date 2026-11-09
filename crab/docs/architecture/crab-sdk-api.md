@@ -95,7 +95,7 @@ modules, but rustdoc exposes them only at these paths:
 | Namespace | Exported types |
 | --- | --- |
 | crate root | `Client`, `ClientBuilder`, `Repository`, `RepositoryMode`, `OpenOptions`, `RepositoryLocator`, `Revision`, `ObjectId`, `HashAlgorithm`, `GitPath`, `WritePolicy`, `Error`, `ErrorKind`, `Result` |
-| `remote` | `Remote`, `Snapshot`, `Capability`, `Reference`, `References`, `Commit`, `Signature`, `SignatureHeader`, `TreeEntry`, `EntryMode`, `HistoryTraversal`, `Page`, `PageCursor`, `PageRequest`, `Diff`, `DiffClassification`, `DiffHunk`, `Blame`, `BlameRange`, `ContentMode`, `ContentStream`, `ArchiveEvent`, `ArchiveStream` |
+| `remote` | `Remote`, `Snapshot`, `Capability`, `Reference`, `References`, `Commit`, `Signature`, `SignatureHeader`, `TreeEntry`, `EntryMode`, `ContentKind`, `FileMetadata`, `Chunk`, `ChunkPage`, `HistoryTraversal`, `Page`, `PageCursor`, `PageRequest`, `Diff`, `DiffClassification`, `DiffHunk`, `Blame`, `BlameRange`, `ContentMode`, `ContentStream`, `ArchiveEvent`, `ArchiveStream` |
 | `remote::write` | `PreparedMutation`, `CommitIdentity`, `CommitOptions`, `FileEdit`, `RefUpdate`, `RefBatch`, `MutationOutcome`, `Readiness`, `CommitReceipt`, `RefRejection`, `RecoveryToken` |
 | `local` | `Local`, `Options`, `Tools`, `Configuration`, `ExecutionPolicy`, `Snapshot`, `CloneOptions`, `FetchDepth`, `FetchOptions`, `FetchOutcome`, `Status`, `StatusEntry`, `StageOutcome`, `CommitOptions`, `CheckoutOptions`, `HydrationState`, `PullMode`, `PullOptions`, `PullOutcome`, `IntegrationId`, `IntegrationKind`, `ConflictState`, `PushOptions`, `PushRefspec`, `PreparedPush`, `PushOutcome`, `PushRecoveryToken` |
 | `managed` | `Managed`, `Options`, `Page`, `RepositoryInfo`, `RepositoryState` |
@@ -257,9 +257,20 @@ Its public methods are:
 | `reconcile` | Verify recovery evidence against this repository binding |
 
 `remote::Snapshot` exposes commit metadata, paginated tree/history, diff,
-blame, raw blob bytes, hydrated file streams, and archives. Remote reads retain
+blame, file metadata, raw blob bytes, ordered Crab chunk pages, hydrated file
+streams, and archives. Remote reads retain
 generation pinning, authorization roots, byte-path validation, aggregate request
 budgets, bounded streaming, integrity finalization, and explicit close behavior.
+
+`file_metadata` returns `FileMetadata`: the Git blob ID, physical Git size,
+logical content size and `ContentKind` (`Git`, `Crab`, or `Lfs`). It inspects
+pointer metadata without reconstructing content or decoding a large Git blob.
+`file_chunks(path, start, limit)` requires `files` and returns a `ChunkPage` of
+ordered occurrences from the pinned Crab recipe, including repeated chunks.
+The limit is 1–512; invalid limits/indices are rejected. Git and LFS have no
+Crab recipe and return `UnsupportedCapability`. `Chunk` and `ChunkPage` are
+exported only with `files`. Both requests use the caller's `ReadOptions`,
+aggregate budgets, cancellation and operation finalization.
 
 Remote publication types live in `remote::write` because they are meaningful
 only for remote state:

@@ -172,7 +172,7 @@ let outcome = push.execute().await?;
 | `Client` | `open`, `configure_local`, `clone_local`, `initialize_remote`, `managed`, family-specific recovery methods, `close` |
 | `Repository` | `mode`, synchronous `remote` and `local` interface selection |
 | `remote::Remote` | `refs`, `snapshot`, `refresh` returning a new repository, `capabilities`, `prepare_commit`, `prepare_ref_update`, `reconcile` |
-| `remote::Snapshot` | `commit`, paginated `tree`/`history`, `diff`, `blame`, `read_blob`, `open_file`, `archive` |
+| `remote::Snapshot` | `commit`, paginated `tree`/`history`, `diff`, `blame`, `file_metadata`, `read_blob`, `file_chunks`/`open_file` with `files`, `archive` |
 | `local::Local` | `status`, `snapshot`, `fetch`, `stage`, `commit`, `checkout`, `pull`, `prepare_push`, `hydrate`, `dehydrate`, `prefetch_content`, `continue_integration`, `abort_integration` |
 | `managed::Managed` | paginated `list`, `create`, `rename`, `archive`, `restore`; all use the existing managed service |
 | `remote::write::PreparedMutation` | stable `recovery_token`, request-building `execute`; owns prepared data and operation lifetime |
