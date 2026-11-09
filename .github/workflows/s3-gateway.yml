@@ -1597,6 +1597,49 @@ jobs:
           PY
           exit "${soak_status}"
 
+      - name: Capture sustained-write diagnostics before stopping services
+        if: ${{ !cancelled() && (steps.soak.outcome == 'success' || steps.soak.outcome == 'failure') }}
+        run: |
+          python3 -B - <<'PY'
+          from datetime import datetime, timezone
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "crab-s3-gateway-evidence"
+          credentials = [os.environ.get(name, "") for name in (
+              "RUSTFS_ACCESS_KEY", "RUSTFS_SECRET_KEY", "GATEWAY_ACCESS_KEY",
+              "GATEWAY_SECRET_KEY", "GATEWAY_SESSION_ACCESS_KEY",
+              "GATEWAY_SESSION_SECRET_KEY", "GATEWAY_SESSION_TOKEN",
+          )]
+
+          def retain(name, text):
+              for credential in sorted(filter(None, credentials), key=len, reverse=True):
+                  text = text.replace(credential, "<redacted>")
+              (root / name).write_text(text)
+
+          commands = {
+              "soak-gateway.log": ["docker", "logs", "--tail", "5000", "crab-s3-gateway"],
+              "soak-rustfs.log": ["docker", "logs", "--tail", "5000", "crab-s3-gateway-rustfs"],
+              "soak-container-state.json": ["docker", "inspect", "--format", "{{json .State}}", "crab-s3-gateway"],
+              "soak-container-stats.json": ["docker", "stats", "--no-stream", "--format", "{{json .}}", "crab-s3-gateway"],
+              "soak-filesystems.txt": ["df", "-B1"],
+              "soak-metrics.prom": ["curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:18081/metrics"],
+          }
+          capture = {"source": os.environ["GITHUB_SHA"], "captured_at": datetime.now(timezone.utc).isoformat(), "commands": {}}
+          for name, command in commands.items():
+              result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+              retain(name, result.stdout)
+              retain(name + ".stderr", result.stderr)
+              capture["commands"][name] = {"exit_code": result.returncode}
+          for name in ("owner.jsonl", "owner.stderr"):
+              path = Path(os.environ["RUNNER_TEMP"]) / "crab-s3-gateway-xet" / name
+              if path.is_file():
+                  retain("soak-" + name, path.read_text())
+          retain("soak-capture.json", json.dumps(capture, indent=2) + "\n")
+          PY
+
       - name: Verify multipart orphan cleanup after process kill
         id: cleanup
         run: >-
@@ -2022,5 +2065,6 @@ jobs:
             ${{ runner.temp }}/crab-s3-gateway-evidence/ecosystem-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/soak-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/owner-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/soak-*
           if-no-files-found: error
           retention-days: 90
