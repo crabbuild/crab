@@ -12,7 +12,7 @@ completion. This record tracks implementation and qualification separately.
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
-| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS comparisons have packaged macOS and real RustFS proof: working/index/revision/empty pairs, actual ordered chunk metrics, same-size identities, initial commits and paged ranges. Ordinary Git capture validation, notebooks, inline reviews, modes, formats and remaining profiles are open. |
+| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
@@ -569,7 +569,7 @@ incrementally and complete reads retain their separate 200 MiB ceiling.
   ranges, same-size LFS and initial commits. Final matching-package proof follows
   below. Ordinary Git patches still read the live
   index/worktree through Git, so concurrent mutation needs capture validation.
-  Notebook, inline staging/review, mode-only large-file changes, format comparisons
+  Inline staging/review, mode-only large-file changes, other format comparisons
   and remaining provider/profile surfaces still require implementation or
   qualification; this does not close the matrix.
 
@@ -615,3 +615,57 @@ current owned operations supply their existing cancellation token.
   Crab app was restored to its saved workflow, Save disabled, Activity empty and
   port 17789 listening. Package: `desktop-staging-admission/mac-arm64/Crab.app`.
   The failed prior smoke remains negative evidence, not a passing qualification.
+
+## Captured notebook comparison checkpoint
+
+Notebook comparisons use the same `file_diff` capture and cancellation owner as
+other files, including index and explicit empty sides. Plain Git blobs retain
+their physical object IDs; working files retain open descriptors; Crab/LFS
+content uses verified complete reads. Only a proven absent file becomes `null`.
+Empty files, malformed JSON, unsupported formats and failed reads remain errors.
+The 16 MiB combined input ceiling is checked before reading either complete
+document; parsing also caps the pair at 100,000 cells. Limits reject the request,
+never a partial notebook comparison.
+
+The parser follows [Jupyter's nbformat 4 description](https://nbformat.readthedocs.io/en/latest/format_description.html):
+string/list sources, unique IDs for 4.5+, code execution counts and preserved
+metadata, attachments and extension fields. Persistent IDs align edited cells.
+Earlier notebooks match source occurrences in order; an increasing subsequence
+keeps alignment monotonic in O(n log n) work and linear memory. This need not
+produce a minimal edit script, but retains both complete cell sequences.
+Object key order does not create false changes. Unsupported major versions
+report an error; no implicit conversion is performed.
+
+Parsing, equality, alignment and output serialization run in a dedicated worker.
+The UI renders 25 cells and bounded text pages with direct page selection.
+Unchanged cells and long outputs stay accessible, individual output toggles
+remain usable after Show all, and outputs are inert text. Cancel terminates the
+real worker; Retry and version changes create a new captured comparison.
+History uses the same notebook renderer and explicit initial-commit baseline.
+
+- Eight incorrect cases reproduced before the fix. The active desktop suite now
+  passes 22 notebook cases, including malformed input, absence, metadata, IDs,
+  duplicate/reordered sequence preservation and 40,000 repeated legacy cells.
+  This replaces the excluded source-tree test file and its obsolete empty-on-error
+  expectations. Ten focused native comparison cases pass; the native recipe
+  case is exercised separately by the packaged sibling smoke.
+- Matching-runtime RustFS proof passed for Crab/LFS notebooks in a lazy clone and
+  direct remote: exact captured old/new documents and initial comparisons,
+  retained pointer files, selected connection authentication, 397 GET/HEAD
+  requests and zero writes. Evidence: `large-files-notebook-proof.yafvncc4/report.json`.
+- The unsigned macOS arm64 package passed the notebook GUI smoke in 14.1 seconds:
+  all version selectors, 40,000 cells with page 1,600 reachable, output paging,
+  global/local toggles, inert output, additions/deletions, empty-notebook addition,
+  malformed/empty/unavailable/oversized errors and initial history. DevTools
+  paused the real worker at startup; clicking Cancel detached that worker, and
+  Retry completed. Application shutdown completed cleanly. The first run's
+  ambiguous test locator and interrupted cleanup remain negative evidence.
+- The same package passed the existing large-file comparison/materialization
+  smokes in 34.9 seconds. Native build, renderer/Electron builds, type checking
+  and formatting passed. Desktop ESLint is blocked by a missing configuration,
+  also absent on `origin/crab-v2`; no lint configuration or dependency changed.
+- Evidence: `notebook-ui-proof-v2/qualification.json`, six notebook screenshots
+  and fourteen sibling screenshots. Package: `desktop-notebook-comparison/mac-arm64/Crab.app`.
+  The peer app was restored to its saved workflow, Save disabled, Activity empty
+  and port 17789 listening. Cross-platform/current-head CI and the remaining
+  acceptance matrix remain open; this checkpoint does not close the feature.

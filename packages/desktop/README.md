@@ -38,6 +38,24 @@ Repository-local desktop state lives under `.crab/desktop/` at Git's worktree
 root, including when opening a subdirectory. Its scoped ignore file keeps
 generated state out of Git changes; existing tracked files and ignore rules remain.
 
+## File comparisons
+
+Use the file comparison selector for HEAD → Working tree, Index → Working tree,
+or HEAD → Index. History compares a commit with its first parent; an initial
+commit compares with an empty tree.
+
+Notebook comparisons show source, outputs, cell details and notebook metadata.
+Show unchanged cells to inspect them, and use the page controls to reach any
+cell or long text/output page. Outputs are displayed as text; comparison does
+not execute notebook code. Cancel stops the current read or comparison, and
+Retry starts it again. Read and parse failures stay visible.
+
+Structured notebook comparison supports nbformat 4, with a 16 MiB combined
+input limit and 100,000 combined cells. A file beyond either limit reports an
+error instead of comparing truncated content. Open or materialize the files to
+inspect their complete content. Other format and transfer qualification remains
+tracked in [the large-file acceptance matrix](docs/large-file-support.md).
+
 ## Build
 
 Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used

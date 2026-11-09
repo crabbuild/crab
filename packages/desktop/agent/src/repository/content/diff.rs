@@ -261,6 +261,12 @@ async fn comparison(
     after: &Side,
     scope: &ReadScope,
 ) -> Result<Value> {
+    if Path::new(&p.path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
+    {
+        return notebook(p, before, after, scope).await;
+    }
     let old_identity = identity(before).await?;
     let new_identity = identity(after).await?;
     let kind = old_identity
@@ -364,6 +370,39 @@ async fn comparison(
                 else { "Ordered matching chunk content, independent of xorb placement. This is not network transfer cost." }
         }),
     )
+}
+
+async fn notebook(p: &Params, before: &Side, after: &Side, scope: &ReadScope) -> Result<Value> {
+    // The renderer parses both complete JSON documents in a worker. Bound the
+    // pair before allocating or hydrating either side; never diff a truncation.
+    const MAX_NOTEBOOK_BYTES: usize = 16 * 1024 * 1024;
+    let mut size = 0_u64;
+    for side in [before, after] {
+        if side.exists && side.source.is_none() {
+            return Err(AgentError::Other(
+                "notebook comparisons require regular files".into(),
+            ));
+        }
+        size = size.saturating_add(side.source.as_ref().map_or(0, |source| source.size));
+    }
+    if size > MAX_NOTEBOOK_BYTES as u64 {
+        return Err(AgentError::Other(
+            "structured notebook comparison exceeds the 16 MiB combined input limit; open or materialize the files to inspect their complete content".into(),
+        ));
+    }
+    let mut texts = Vec::with_capacity(2);
+    for side in [before, after] {
+        let text = match &side.source {
+            Some(source) => {
+                let bytes = source.read_complete(MAX_NOTEBOOK_BYTES).await?;
+                Some(String::from_utf8(bytes.to_vec())?)
+            }
+            None => None,
+        };
+        texts.push(text);
+    }
+    scope.check()?;
+    Ok(json!({ "kind": "notebook", "path": p.path, "before": texts[0], "after": texts[1] }))
 }
 
 fn chunkable(source: &FileSource) -> bool {

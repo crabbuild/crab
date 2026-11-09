@@ -1,269 +1,180 @@
-// Cell-level diff engine for Jupyter notebooks (.ipynb).
-//
-// Parses both sides of a notebook as JSON and produces a cell-level
-// patch using a simple LCS (Longest Common Subsequence) algorithm on
-// cell source content. Notebooks typically have < 100 cells so the
-// O(n*m) approach is fine.
-//
-// Pure functions, no side effects, no RPC calls. The renderer uses
-// this to display structured notebook diffs with collapsible output
-// sections.
-
-// --- Types ---
-
-/** A single cell parsed from a Jupyter notebook. */
+/** Structured nbformat 4 comparisons. Only null represents an absent file. */
 export interface NotebookCell {
+  id?: string;
   cell_type: string;
-  source: string[];
+  source: string;
   outputs: unknown[];
-  metadata: Record<string, unknown>;
+  /** Preserve metadata, execution counts, attachments and extension fields. */
+  details: Record<string, unknown>;
 }
 
-/** The kind of change detected for a cell. */
 export type CellDiffOp = "added" | "removed" | "modified" | "unchanged";
 
-/** A single entry in the cell-level diff result. */
 export interface CellDiff {
   op: CellDiffOp;
-  /** Index in the new notebook for added/modified/unchanged cells,
-   *  or index in the old notebook for removed cells. */
   index: number;
-  /** The cell content (new side for added/modified/unchanged,
-   *  old side for removed). */
   cell: NotebookCell;
-  /** The old cell when op is "modified". */
   oldCell?: NotebookCell;
-  /** Whether the source text differs between old and new. */
   sourceChanged: boolean;
-  /** Whether the outputs differ between old and new. */
   outputsChanged: boolean;
+  detailsChanged: boolean;
 }
 
-/** Full diff result for a notebook comparison. */
 export interface NotebookDiff {
   cells: CellDiff[];
   metadataChanged: boolean;
+  beforeDetails: Record<string, unknown>;
+  afterDetails: Record<string, unknown>;
 }
 
-// --- Core function ---
+interface Notebook {
+  cells: NotebookCell[];
+  details: Record<string, unknown>;
+}
 
-/**
- * Diff two notebook JSON strings and produce a cell-level patch.
- *
- * Aligns cells using LCS on source content, then classifies each
- * cell as added, removed, modified, or unchanged.
- */
-export function diffNotebooks(oldJson: string, newJson: string): NotebookDiff {
-  const oldNb = parseNotebook(oldJson);
-  const newNb = parseNotebook(newJson);
-
-  const metadataChanged =
-    JSON.stringify(oldNb.metadata) !== JSON.stringify(newNb.metadata);
-
-  const oldTexts = oldNb.cells.map(cellSourceText);
-  const newTexts = newNb.cells.map(cellSourceText);
-
-  // Compute LCS alignment
-  const lcs = computeLCS(oldTexts, newTexts);
-
-  // Walk through the alignment to produce diff entries
+/** Compare complete documents; malformed content never means an empty side. */
+export function diffNotebooks(before: string | null, after: string | null): NotebookDiff {
+  const oldNb = readSide(before, "Before");
+  const newNb = readSide(after, "After");
+  if (oldNb.cells.length + newNb.cells.length > 100_000) {
+    throw new Error("Structured comparison exceeds 100,000 combined cells. Open the files to inspect their complete content.");
+  }
+  const useIds = [oldNb, newNb].every((nb) => nb.cells.every((cell) => cell.id !== undefined));
+  const key = (cell: NotebookCell) => useIds ? `id:${cell.id}` : `${cell.cell_type}:${cell.source}`;
+  const matches = align(oldNb.cells.map(key), newNb.cells.map(key));
   const cells: CellDiff[] = [];
-  let oldIdx = 0;
-  let newIdx = 0;
-
-  for (const [lcsOldIdx, lcsNewIdx] of lcs) {
-    // Emit removed cells before this match
-    while (oldIdx < lcsOldIdx) {
-      cells.push({
-        op: "removed",
-        index: oldIdx,
-        cell: oldNb.cells[oldIdx],
-        sourceChanged: true,
-        outputsChanged: true,
-      });
-      oldIdx++;
-    }
-
-    // Emit added cells before this match
-    while (newIdx < lcsNewIdx) {
-      cells.push({
-        op: "added",
-        index: newIdx,
-        cell: newNb.cells[newIdx],
-        sourceChanged: true,
-        outputsChanged: true,
-      });
-      newIdx++;
-    }
-
-    // Emit the matched pair
-    const oldCell = oldNb.cells[oldIdx];
-    const newCell = newNb.cells[newIdx];
-    const sourceChanged = !cellsEqual(oldCell, newCell);
-    const outputChanged = !outputsEqual(oldCell.outputs, newCell.outputs);
-
-    if (sourceChanged || outputChanged) {
-      cells.push({
-        op: "modified",
-        index: newIdx,
-        cell: newCell,
-        oldCell,
-        sourceChanged,
-        outputsChanged: outputChanged,
-      });
-    } else {
-      cells.push({
-        op: "unchanged",
-        index: newIdx,
-        cell: newCell,
-        sourceChanged: false,
-        outputsChanged: false,
-      });
-    }
-
-    oldIdx++;
-    newIdx++;
+  let oldIndex = 0;
+  let newIndex = 0;
+  const removed = () => {
+    const cell = oldNb.cells[oldIndex];
+    cells.push({ op: "removed", index: oldIndex++, cell, sourceChanged: true, outputsChanged: cell.outputs.length > 0, detailsChanged: true });
+  };
+  const added = () => {
+    const cell = newNb.cells[newIndex];
+    cells.push({ op: "added", index: newIndex++, cell, sourceChanged: true, outputsChanged: cell.outputs.length > 0, detailsChanged: true });
+  };
+  for (const [oldMatch, newMatch] of matches) {
+    while (oldIndex < oldMatch) removed();
+    while (newIndex < newMatch) added();
+    const oldCell = oldNb.cells[oldIndex++];
+    const cell = newNb.cells[newIndex];
+    const sourceChanged = oldCell.source !== cell.source;
+    const outputsChanged = !jsonEqual(oldCell.outputs, cell.outputs);
+    const detailsChanged = !jsonEqual(oldCell.details, cell.details);
+    const changed = sourceChanged || outputsChanged || detailsChanged;
+    cells.push({ op: changed ? "modified" : "unchanged", index: newIndex++, cell, oldCell: changed ? oldCell : undefined, sourceChanged, outputsChanged, detailsChanged });
   }
-
-  // Remaining removed cells after the last LCS match
-  while (oldIdx < oldNb.cells.length) {
-    cells.push({
-      op: "removed",
-      index: oldIdx,
-      cell: oldNb.cells[oldIdx],
-      sourceChanged: true,
-      outputsChanged: true,
-    });
-    oldIdx++;
-  }
-
-  // Remaining added cells after the last LCS match
-  while (newIdx < newNb.cells.length) {
-    cells.push({
-      op: "added",
-      index: newIdx,
-      cell: newNb.cells[newIdx],
-      sourceChanged: true,
-      outputsChanged: true,
-    });
-    newIdx++;
-  }
-
-  return { cells, metadataChanged };
+  while (oldIndex < oldNb.cells.length) removed();
+  while (newIndex < newNb.cells.length) added();
+  return {
+    cells,
+    metadataChanged: !jsonEqual(oldNb.details, newNb.details),
+    beforeDetails: oldNb.details,
+    afterDetails: newNb.details,
+  };
 }
 
-// --- Helper functions ---
-
-/**
- * Parse a JSON string as a Jupyter notebook and normalise cells.
- * Handles both nbformat 4 (cells at top level) and gracefully
- * falls back to an empty notebook on parse failure.
- */
-export function parseNotebook(json: string): { cells: NotebookCell[]; metadata: Record<string, unknown> } {
-  let raw: Record<string, unknown>;
+function readSide(text: string | null, label: string): Notebook {
+  if (text === null) return { cells: [], details: {} };
   try {
-    raw = JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return { cells: [], metadata: {} };
+    return parseNotebook(text);
+  } catch (error) {
+    throw new Error(`${label} notebook: ${error instanceof Error ? error.message : String(error)}`);
   }
-
-  const metadata = (raw.metadata ?? {}) as Record<string, unknown>;
-  const rawCells = Array.isArray(raw.cells) ? raw.cells : [];
-
-  const cells: NotebookCell[] = rawCells.map((c: unknown) => {
-    const cell = c as Record<string, unknown>;
-    const source = normaliseSource(cell.source);
-    const outputs = Array.isArray(cell.outputs) ? cell.outputs : [];
-    const cellMeta = (cell.metadata ?? {}) as Record<string, unknown>;
-    const cellType = typeof cell.cell_type === "string" ? cell.cell_type : "raw";
-
-    return {
-      cell_type: cellType,
-      source,
-      outputs: outputs as unknown[],
-      metadata: cellMeta,
-    };
-  });
-
-  return { cells, metadata };
 }
 
-/** Join a cell's source lines into a single string for comparison. */
-export function cellSourceText(cell: NotebookCell): string {
-  return cell.source.join("");
-}
-
-/** Deep equality check on cell source content. */
-export function cellsEqual(a: NotebookCell, b: NotebookCell): boolean {
-  return cellSourceText(a) === cellSourceText(b);
-}
-
-/** Compare outputs using JSON serialisation (sufficient for v1). */
-export function outputsEqual(a: unknown[], b: unknown[]): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-// --- LCS implementation ---
-
-/**
- * Compute the Longest Common Subsequence of two string arrays.
- * Returns an array of [oldIndex, newIndex] pairs representing
- * matched positions.
- *
- * Uses the standard O(n*m) dynamic programming approach. Fine for
- * notebooks which typically have < 100 cells.
- */
-function computeLCS(oldTexts: string[], newTexts: string[]): Array<[number, number]> {
-  const n = oldTexts.length;
-  const m = newTexts.length;
-
-  // Build the DP table
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    Array.from({ length: m + 1 }, () => 0),
-  );
-
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      if (oldTexts[i - 1] === newTexts[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+/** Read nbformat 4 without coercing malformed fields or discarding extensions. */
+export function parseNotebook(text: string): Notebook {
+  const raw: unknown = JSON.parse(text);
+  if (!isRecord(raw) || raw.nbformat !== 4 || !Number.isInteger(raw.nbformat_minor) || (raw.nbformat_minor as number) < 0) {
+    throw new Error("Expected an nbformat 4 notebook with a nonnegative minor version.");
+  }
+  if (!isRecord(raw.metadata) || !Array.isArray(raw.cells)) {
+    throw new Error("Notebook metadata must be an object and cells must be an array.");
+  }
+  if (raw.cells.length > 100_000) throw new Error("Notebook exceeds 100,000 cells.");
+  const ids = new Set<string>();
+  const cells = raw.cells.map((value: unknown, index: number): NotebookCell => {
+    if (!isRecord(value) || typeof value.cell_type !== "string" || !isRecord(value.metadata)) {
+      throw new Error(`Cell ${index + 1} requires a cell type and metadata object.`);
+    }
+    if ((raw.nbformat_minor as number) >= 5 || value.id !== undefined) {
+      if (typeof value.id !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(value.id) || ids.has(value.id)) {
+        throw new Error(`Cell ${index + 1} requires a unique valid cell ID.`);
       }
+      ids.add(value.id);
     }
-  }
-
-  // Backtrack to find the actual subsequence indices
-  const result: Array<[number, number]> = [];
-  let i = n;
-  let j = m;
-
-  while (i > 0 && j > 0) {
-    if (oldTexts[i - 1] === newTexts[j - 1]) {
-      result.push([i - 1, j - 1]);
-      i--;
-      j--;
-    } else if (dp[i - 1][j] > dp[i][j - 1]) {
-      i--;
-    } else {
-      j--;
+    const { source, outputs, ...details } = value;
+    const known = ["code", "markdown", "raw"].includes(value.cell_type);
+    let text = "";
+    if (typeof source === "string") text = source;
+    else if (Array.isArray(source) && source.every((line: unknown) => typeof line === "string")) text = source.join("");
+    else if (known || source !== undefined) throw new Error(`Cell ${index + 1} source must be a string or an array of strings.`);
+    if ((value.cell_type === "code" || outputs !== undefined) && !Array.isArray(outputs)) {
+      throw new Error(`Cell ${index + 1} outputs must be an array.`);
     }
-  }
-
-  result.reverse();
-  return result;
+    if (value.cell_type === "code" && value.execution_count !== null && (!Number.isInteger(value.execution_count) || (value.execution_count as number) < 0)) {
+      throw new Error(`Cell ${index + 1} execution count must be a nonnegative integer or null.`);
+    }
+    return { id: value.id as string | undefined, cell_type: value.cell_type, source: text, outputs: Array.isArray(outputs) ? outputs : [], details };
+  });
+  const { cells: _cells, ...details } = raw;
+  return { cells, details };
 }
 
-// --- Internal helpers ---
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
-/** Normalise the `source` field which can be a string or string[]. */
-function normaliseSource(raw: unknown): string[] {
-  if (Array.isArray(raw)) {
-    return raw.map((line) => (typeof line === "string" ? line : String(line)));
+// Object key order is not a notebook change. An iterative comparison also
+// avoids blowing the worker's call stack on deeply nested output/metadata.
+function jsonEqual(left: unknown, right: unknown): boolean {
+  const pending: Array<[unknown, unknown]> = [[left, right]];
+  while (pending.length) {
+    const [a, b] = pending.pop()!;
+    if (a === b) continue;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    for (const key of aKeys) {
+      if (!Object.hasOwn(b, key)) return false;
+      pending.push([(a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]]);
+    }
   }
-  if (typeof raw === "string") {
-    return raw.split("\n").map((line, i, arr) =>
-      i < arr.length - 1 ? line + "\n" : line,
-    );
-  }
-  return [];
+  return true;
+}
+
+// Match each key's occurrences in order, then choose an increasing subsequence.
+// This deterministic alignment preserves both complete sequences in O(n log n)
+// work/linear memory, including repeated legacy sources; it need not be a
+// minimal edit script. IDs keep edits aligned in nbformat 4.5 and newer.
+function align(before: string[], after: string[]): Array<[number, number]> {
+  const positions = new Map<string, { indices: number[]; next: number }>();
+  after.forEach((key, index) => {
+    let entry = positions.get(key);
+    if (!entry) { entry = { indices: [], next: 0 }; positions.set(key, entry); }
+    entry.indices.push(index);
+  });
+  const candidates: Array<[number, number]> = [];
+  before.forEach((key, index) => {
+    const entry = positions.get(key);
+    if (entry && entry.next < entry.indices.length) candidates.push([index, entry.indices[entry.next++]]);
+  });
+  const tails: number[] = [];
+  const previous = new Int32Array(candidates.length).fill(-1);
+  candidates.forEach((pair, index) => {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (candidates[tails[mid]][1] < pair[1]) low = mid + 1;
+      else high = mid;
+    }
+    if (low > 0) previous[index] = tails[low - 1];
+    tails[low] = index;
+  });
+  const result: Array<[number, number]> = [];
+  for (let index = tails.at(-1) ?? -1; index >= 0; index = previous[index]) result.push(candidates[index]);
+  return result.reverse();
 }

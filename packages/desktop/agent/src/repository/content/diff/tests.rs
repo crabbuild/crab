@@ -364,3 +364,131 @@ async fn native_crab_comparison_uses_real_recipes_for_index_and_streams_the_work
     assert_eq!(same["status"], "unchanged");
     repo.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn notebook_comparisons_capture_versions_and_only_proven_absence_is_null() {
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let path = "file[1].IPYNB";
+    tokio::fs::write(root.join(path), b"committed")
+        .await
+        .unwrap();
+    commit(root, "first").await;
+    tokio::fs::write(root.join(path), b"staged").await.unwrap();
+    super::super::super::git(root, &["add", "--", path])
+        .await
+        .unwrap();
+    tokio::fs::write(root.join(path), b"").await.unwrap();
+    for (before, after, old, new) in [
+        (
+            revision("HEAD"),
+            Version::Index,
+            json!("committed"),
+            json!("staged"),
+        ),
+        (Version::Index, Version::Working, json!("staged"), json!("")),
+        (
+            Version::Empty,
+            revision("HEAD"),
+            Value::Null,
+            json!("committed"),
+        ),
+    ] {
+        let result = diff(&repo, path, before, after).await.unwrap();
+        assert_eq!(
+            result,
+            json!({ "kind": "notebook", "path": path, "before": old, "after": new })
+        );
+    }
+    assert!(
+        diff(&repo, path, revision("missing-ref"), Version::Working)
+            .await
+            .is_err()
+    );
+    tokio::fs::remove_file(root.join(path)).await.unwrap();
+    let deleted = diff(&repo, path, revision("HEAD"), Version::Working)
+        .await
+        .unwrap();
+    assert!(deleted["after"].is_null());
+    repo.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_comparisons_read_retained_working_and_index_content() {
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let path = "retained.ipynb";
+    tokio::fs::write(root.join(path), b"original")
+        .await
+        .unwrap();
+    commit(root, "first").await;
+    let scope = repo.read_scope();
+    let before = capture(&repo, path, Version::Index, scope.clone())
+        .await
+        .unwrap();
+    let after = capture(&repo, path, Version::Working, scope.clone())
+        .await
+        .unwrap();
+    tokio::fs::rename(root.join(path), root.join("old.ipynb"))
+        .await
+        .unwrap();
+    tokio::fs::write(root.join(path), b"replacement")
+        .await
+        .unwrap();
+    super::super::super::git(root, &["add", "--", path])
+        .await
+        .unwrap();
+    let result = comparison(
+        &repo,
+        &Params {
+            repo_id: "test".into(),
+            path: path.into(),
+            old_path: None,
+            before: Version::Index,
+            after: Version::Working,
+            op_id: None,
+        },
+        &before,
+        &after,
+        &scope,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({ "kind": "notebook", "path": path, "before": "original", "after": "original" })
+    );
+    before.close().await.unwrap();
+    after.close().await.unwrap();
+    repo.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_comparisons_reject_oversize_and_unavailable_pointer_content() {
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let path = "missing.ipynb";
+    tokio::fs::write(root.join(path), lfs(b"unavailable content"))
+        .await
+        .unwrap();
+    assert!(
+        diff(&repo, path, Version::Empty, Version::Working)
+            .await
+            .is_err()
+    );
+    let file = std::fs::File::create(root.join(path)).unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
+    let error = diff(&repo, path, Version::Empty, Version::Working)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("16 MiB combined input limit"));
+    tokio::fs::write(root.join(path), [0xff, 0xfe])
+        .await
+        .unwrap();
+    assert!(
+        diff(&repo, path, Version::Empty, Version::Working)
+            .await
+            .is_err()
+    );
+    repo.close().await.unwrap();
+}

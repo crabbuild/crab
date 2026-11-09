@@ -31,49 +31,6 @@ interface Props {
   onAddComment?: (line: number, body: string) => void;
 }
 
-/** Returns true when the file path has a Jupyter notebook extension. */
-function isNotebook(filePath: string): boolean {
-  return filePath.toLowerCase().endsWith(".ipynb");
-}
-
-/**
- * Main-pane diff renderer backed by @pierre/diffs' `PatchDiff`.
- *
- * The agent runs `git diff [base..head] -- <path>` and returns the
- * raw unified patch; we feed that straight into `<PatchDiff patch=/>`
- * which handles parsing, syntax highlighting (via Shiki), and the
- * "expand unchanged" affordance.
- *
- * For `.ipynb` files, routes to `<NotebookDiffView />` which renders
- * a structured cell-level diff instead of raw JSON.
- */
-export function DiffView({ repo, path, base, head, commentsByLine, onAddComment }: Props) {
-  // Route notebook files to the cell-level diff view
-  if (isNotebook(path)) {
-    return (
-      <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
-        <DiffHeader path={path} badge="notebook" base={base} head={head} />
-        <div className="min-h-0 flex-1 overflow-auto">
-          <NotebookDiffView repo={repo} path={path} base={base} head={head} />
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <PatchDiffView
-      repo={repo}
-      path={path}
-      base={base}
-      head={head}
-      commentsByLine={commentsByLine}
-      onAddComment={onAddComment}
-    />
-  );
-}
-
-// --- Internal components ---
-
 function DiffHeader({
   path,
   badge,
@@ -113,16 +70,16 @@ function DiffHeader({
   );
 }
 
-/**
- * Standard patch-based diff view. Extracted so the notebook early-
- * return in `DiffView` doesn't violate React's rules of hooks.
- */
-function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }: Props) {
+/** Compare selected versions through one cancellable capture operation. */
+export function DiffView({ repo, path, base, head, commentsByLine, onAddComment }: Props) {
   const [result, setResult] = useState<FileComparison | null>(null);
   const patch = result?.kind === "git" ? result.patch : null;
   const largeFileDiff = result?.kind === "large_file" ? result : null;
+  const notebook = result?.kind === "notebook" ? result : null;
   const [err, setErr] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [stopped, setStopped] = useState(false);
+  const cancelRef = useRef<(() => void) | null>(null);
   const [comparison, setComparison] = useState<Comparison>("working");
   const minimap = useSetting("editorMinimap");
   const effective = useEffectiveTheme();
@@ -137,6 +94,8 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
     let cancelled = false;
     setResult(null);
     setErr(null);
+    setStopped(false);
+    cancelRef.current = () => { cancelled = true; cancelFn?.(); setStopped(true); };
 
     const attempt = async () => {
       const before: DiffVersion = base ? { kind: "revision", rev: base }
@@ -159,6 +118,7 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
     return () => {
       cancelled = true;
       cancelFn?.();
+      cancelRef.current = null;
     };
   }, [repo.repo_id, path, base, head, comparison, refreshKey]);
 
@@ -171,18 +131,21 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
       <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
           {err && (
-            <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
               {err}
+              <button className="btn ml-2" onClick={handleRefresh}>Retry comparison</button>
             </div>
           )}
-          {!err && patch == null && !largeFileDiff && (
+          {!err && result == null && (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-              <Loader2 size={14} className="animate-spin" /> Running diff…
+              {stopped ? <>Comparison cancelled. <button className="btn" onClick={handleRefresh}>Retry comparison</button></>
+                : <><Loader2 size={14} className="animate-spin" /> Running diff… <button className="btn" onClick={() => cancelRef.current?.()}>Cancel comparison</button></>}
             </div>
           )}
           {!err && largeFileDiff && (
             <LargeFileDiffView data={largeFileDiff} repoId={head ? undefined : repo.repo_id} onRefresh={handleRefresh} />
           )}
+          {!err && notebook && <NotebookDiffView data={notebook} onRefresh={handleRefresh} />}
           {!err && !largeFileDiff && patch != null && patch.trim().length === 0 && (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
               <FileMinus size={14} /> No changes for this file.
@@ -195,7 +158,7 @@ function PatchDiffView({ repo, path, base, head, commentsByLine, onAddComment }:
               options={diffOptions(effective)}
             />
           )}
-          {(hasComments || onAddComment) && (
+          {result?.kind === "git" && (hasComments || onAddComment) && (
             <CommentGutter
               commentsByLine={commentsByLine ?? {}}
               onAddComment={onAddComment}

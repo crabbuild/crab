@@ -2,6 +2,7 @@ import { useCallback, useEffect, forwardRef, useImperativeHandle, useMemo, useRe
 import clsx from "clsx";
 import { SafePatchDiff } from "../components/SafePatchDiff";
 import { LargeFileDiffView } from "../components/LargeFileDiffView";
+import { NotebookDiffView } from "../components/NotebookDiffView";
 import {
   FileTree as PierreFileTree,
   useFileTree,
@@ -721,6 +722,8 @@ const AllDiffsPane = forwardRef<
               </div>
             ) : state?.result?.kind === "large_file" ? (
               <LargeFileDiffView data={state.result} />
+            ) : state?.result?.kind === "notebook" ? (
+              <NotebookDiffView data={state.result} />
             ) : state?.result?.kind === "git" ? (
               state.result.patch.trim().length === 0 ? (
                 <p className="px-4 py-6 text-xs text-gx-muted">No changes for this file.</p>

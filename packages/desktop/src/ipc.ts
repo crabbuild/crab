@@ -1696,7 +1696,15 @@ export interface LargeFileDiff {
   metrics_note: string;
 }
 
-export type FileComparison = { kind: "git"; path: string; patch: string } | LargeFileDiff;
+export interface NotebookComparison {
+  kind: "notebook";
+  path: string;
+  /** Only a proven absent file is null. Empty or invalid content remains an error. */
+  before: string | null;
+  after: string | null;
+}
+
+export type FileComparison = { kind: "git"; path: string; patch: string } | LargeFileDiff | NotebookComparison;
 
 export function fileDiffCancellable(
   repo_id: string,
