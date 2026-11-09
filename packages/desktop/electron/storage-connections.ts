@@ -130,6 +130,13 @@ export class StorageConnections {
     return redacted;
   }
 
+  private redactValue(value: unknown): unknown {
+    if (typeof value === "string") return this.redactText(value);
+    if (Array.isArray(value)) return value.map(item => this.redactValue(item));
+    if (record(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [this.redactText(key), this.redactValue(item)]));
+    return value;
+  }
+
   async request(method: string, params: unknown, nativeSend: Send): Promise<unknown> {
     const send: Send = async (name, payload) => {
       const repoId = record(payload) ? text(payload.repo_id) : "";
@@ -146,7 +153,11 @@ export class StorageConnections {
         if (!(error instanceof Error)) throw error;
         // Provider failures can contain signed URLs. Strip credential material
         // at the public IPC boundary, including errors from already-open SDKs.
-        throw Object.assign(new Error(this.redactText(error.message)), { code: (error as Error & { code?: number }).code });
+        const detail = error as Error & { code?: number; data?: unknown };
+        throw Object.assign(new Error(this.redactText(error.message)), {
+          code: detail.code,
+          data: this.redactValue(detail.data),
+        });
       } finally { if (active) this.inFlight.delete(active); }
     };
     const payload = record(params) ? { ...params } : {};

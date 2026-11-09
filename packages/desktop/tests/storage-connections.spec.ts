@@ -165,8 +165,15 @@ describe("built-in storage connections", () => {
 
   it("redacts selected credentials and signed URLs from public IPC errors", async () => {
     const saved = await save();
-    send.mockRejectedValueOnce(new Error("rejected fixture-secret-Store at https://storage.invalid?sig=private-signature"));
-    await expect(call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: saved.id })).rejects.toThrow("rejected [redacted] at https://storage.invalid?sig=[redacted]");
+    send.mockRejectedValueOnce(Object.assign(new Error("rejected fixture-secret-Store at https://storage.invalid?sig=private-signature"), {
+      code: 1012,
+      data: { kind: "content_read", code: "integrity", sources: [{ message: "fixture-secret-Store", url: "https://storage.invalid?sig=private-signature&x=1" }], "fixture-access-Store": "detail" },
+    }));
+    await expect(call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: saved.id })).rejects.toMatchObject({
+      message: "rejected [redacted] at https://storage.invalid?sig=[redacted]",
+      code: 1012,
+      data: { kind: "content_read", code: "integrity", sources: [{ message: "[redacted]", url: "https://storage.invalid?sig=[redacted]&x=1" }], "[redacted]": "detail" },
+    });
   });
   it("redacts saved credentials from errors emitted by an already-open SDK session", async () => {
     const saved = await save();

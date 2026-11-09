@@ -222,6 +222,12 @@ failures and preserves integrity and cancellation data for UI policy.
   passed focused tests; 41 renderer/router tests and typechecks passed.
 - Renderer and Electron production builds passed. Packaged integrity and cache
   GUI verification is pending the matching native release build.
+- The first packaged error-detail check found another boundary: storage
+  connection redaction preserved the error code but discarded `data`. That
+  owner now recursively redacts structured details while retaining their shape
+  and classification. Its credential/signed-URL tests, renderer error tests and
+  typechecks passed (35 focused tests). The matching package is being rebuilt;
+  the failed smoke has not been counted as successful GUI qualification.
 - Documentation link validation requires a built Next.js site. Dependencies
   were installed and the check retried; it stops because this checkout has no
   production `.next` build. The PR documentation-quality CI job builds the site
