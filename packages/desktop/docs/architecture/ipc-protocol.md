@@ -120,10 +120,23 @@ reports and their issues. Cleanup failures are errors, with no filesystem
 deletion fallback; retained, unknown and busy state stays with its owner.
 
 ### File Operations
-- `list`, `stat`, `pointer_info`
+- `list`, `stat`, `file_open`, `file_chunks`, `file_close`
 - `read_text`, `read_bytes`, `read_range`
 - `preview_parquet`, `preview_safetensors`, `preview_npy`, `preview_npz`
 - `preview_zip`, `preview_notebook_meta`, `preview_torch_checkpoint`
+
+`file_open {repo_id, path, rev?, op_id?}` captures a file and returns an opaque
+`file_id`, logical `size`, `kind`, `representation`, and available identities.
+Working files never claim an uncomputed content hash. `file_chunks {repo_id,
+file_id, start, limit, op_id?}` returns at most 512 ordered occurrences and a
+next cursor; repeated hashes retain their positions. Local recipes do not claim
+published xorb placement. Git and LFS files have no Crab recipe.
+
+`file_close {repo_id, file_id}` cancels and drains active queries before releasing
+the native source. Repository close drains every retained file. Queries have
+independent cancellation; cancelling a page does not cancel its file. At most
+128 files are retained per repository. These stateful operations are rejected
+during SSH reconnection and are never served from stale cache or replayed.
 
 ### Git Operations
 - `git_status_porcelain`, `git_diff_file`, `git_grep`

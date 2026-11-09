@@ -178,7 +178,6 @@ export class ResilienceManager extends EventEmitter {
       "read_text",
       "list",
       "git_grep",
-      "pointer_info",
       "pointer_top",
       "crab_status",
     ]);

@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use crate::{AgentError, Result, shellout};
 
 mod content;
+mod files;
 mod native;
 pub(crate) use content::{FileSource, MAX_COMPLETE_BYTES, ReadScope};
 
@@ -23,6 +24,7 @@ pub struct BrowseSession {
     pub work_dir: Option<PathBuf>,
     remote: Option<Arc<RemoteSession>>,
     readers: native::NativeReads,
+    pub(crate) files: files::Files,
 }
 
 struct RemoteSession {
@@ -96,6 +98,7 @@ impl BrowseSession {
             work_dir: Some(root),
             remote: None,
             readers: native::NativeReads::default(),
+            files: files::Files::default(),
         })
     }
 
@@ -186,16 +189,18 @@ impl BrowseSession {
             work_dir: None,
             remote: Some(Arc::new(RemoteSession { client, repository })),
             readers: native::NativeReads::default(),
+            files: files::Files::default(),
         })
     }
 
     pub async fn close(&self) -> Result<()> {
+        let files = self.files.close().await;
         let native = self.readers.close().await;
         let remote = match &self.remote {
             Some(remote) => remote.client.close().await.map_err(AgentError::from),
             None => Ok(()),
         };
-        native.and(remote)
+        files.and(native).and(remote)
     }
 
     pub async fn refs(&self) -> Result<crab_sdk::remote::References> {
@@ -395,15 +400,6 @@ impl BrowseSession {
             },
         })
     }
-
-    pub async fn pointer_info(&self, path: &str, rev: Option<&str>) -> Result<Value> {
-        let metadata = self.stat(path, rev).await?;
-        Ok(
-            json!({ "size": metadata.size, "pointer_hash": metadata.pointer_hash,
-            "kind": format!("{:?}", metadata.kind).to_lowercase(),
-            "chunk_count": null, "xorb_count": null, "dedup_ratio": null }),
-        )
-    }
 }
 
 async fn remote_metadata(
@@ -569,6 +565,7 @@ mod tests {
                 url: "test".into(),
                 work_dir: None,
                 readers: native::NativeReads::default(),
+                files: files::Files::default(),
                 remote: Some(Arc::new(RemoteSession {
                     client: client.clone(),
                     repository,

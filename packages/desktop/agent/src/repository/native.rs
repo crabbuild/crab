@@ -22,7 +22,7 @@ use crate::{AgentError, Result, shellout, storage_auth::Connection};
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 // Match the SDK's five-minute read owner; an initial LFS range can
 // verify the whole payload before returning its selected bytes.
-const RANGE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(super) struct NativeReads(Arc<Runtime>);
@@ -142,42 +142,123 @@ enum Completion {
 }
 
 pub(super) struct NativeFile {
-    send: mpsc::Sender<Range>,
+    send: mpsc::Sender<Query>,
     completion: watch::Receiver<Completion>,
     stop: CancellationToken,
     id: String,
     pub size: u64,
 }
 
-struct Range {
-    offset: u64,
-    length: u32,
-    reply: oneshot::Sender<Result<Bytes>>,
+struct Query {
+    request: Request,
+    reply: oneshot::Sender<Result<Response>>,
+    cancel: CancellationToken,
 }
 
 impl NativeFile {
-    pub(super) async fn read(&self, offset: u64, length: u32) -> Result<Bytes> {
-        if self.stop.is_cancelled() {
+    pub(super) async fn read(
+        &self,
+        offset: u64,
+        length: u32,
+        cancel: &CancellationToken,
+    ) -> Result<Bytes> {
+        let response = self
+            .query(Request::Range { offset, length }, cancel)
+            .await?;
+        let result = range_response(response, self.size, offset, length);
+        self.checked(result).await
+    }
+
+    pub(super) async fn chunks(
+        &self,
+        start: u64,
+        limit: u32,
+        cancel: &CancellationToken,
+    ) -> Result<crab_types::file_layout::ChunkPage> {
+        let response = self.query(Request::Chunks { start, limit }, cancel).await?;
+        let result = chunk_response(response, start, limit);
+        self.checked(result).await
+    }
+
+    async fn checked<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            // Invalid framing makes subsequent replies untrustworthy. Drain the
+            // source before reporting it; a retained file must not reuse it.
+            self.close().await?;
+        }
+        result
+    }
+
+    async fn query(&self, request: Request, cancel: &CancellationToken) -> Result<Response> {
+        if self.stop.is_cancelled() || cancel.is_cancelled() {
             return Err(cancelled(&self.id));
         }
         let (reply, receive) = oneshot::channel();
-        self.send
-            .send(Range {
-                offset,
-                length,
-                reply,
-            })
-            .await
-            .map_err(|_| cancelled(&self.id))?;
+        let query = Query {
+            request,
+            reply,
+            cancel: cancel.clone(),
+        };
+        tokio::select! {
+            biased;
+            () = self.stop.cancelled() => return Err(cancelled(&self.id)),
+            () = cancel.cancelled() => return Err(cancelled(&self.id)),
+            sent = self.send.send(query) => sent.map_err(|_| cancelled(&self.id))?,
+        }
+        // Admission owns the query. Keep its reply even after cancellation so
+        // the actor can acknowledge drained native work before this call ends.
         receive
             .await
-            .map_err(|_| AgentError::Other("native reader stopped without a range result".into()))?
+            .map_err(|_| AgentError::Other("native reader stopped without a query result".into()))?
     }
 
     pub(super) async fn close(&self) -> Result<()> {
         self.stop.cancel();
         completed(self.completion.clone()).await
     }
+}
+
+fn range_response(response: Response, size: u64, offset: u64, length: u32) -> Result<Bytes> {
+    let Response::Data {
+        offset: actual,
+        bytes_b64,
+    } = response
+    else {
+        return Err(unexpected(response));
+    };
+    let start = offset.min(size);
+    let expected = u64::from(length).min(size - start);
+    let bytes = STANDARD.decode(bytes_b64).map_err(std::io::Error::other)?;
+    if actual != start || bytes.len() as u64 != expected {
+        return Err(AgentError::Other(
+            "native reader returned a mismatched range".into(),
+        ));
+    }
+    Ok(Bytes::from(bytes))
+}
+
+fn chunk_response(
+    response: Response,
+    start: u64,
+    limit: u32,
+) -> Result<crab_types::file_layout::ChunkPage> {
+    let Response::Chunks { page } = response else {
+        return Err(unexpected(response));
+    };
+    if start > page.chunk_count
+        || page.chunks.len() as u64 != (page.chunk_count - start).min(u64::from(limit))
+    {
+        return Err(AgentError::Other(
+            "native reader returned a mismatched chunk page".into(),
+        ));
+    }
+    let end = start + page.chunks.len() as u64;
+    if page.next != (end < page.chunk_count).then_some(end) {
+        return Err(AgentError::Other(
+            "native reader returned a mismatched chunk cursor".into(),
+        ));
+    }
+    Ok(page)
 }
 
 async fn completed(mut completion: watch::Receiver<Completion>) -> Result<()> {
@@ -197,7 +278,7 @@ async fn actor(
     pointer: Bytes,
     selected: Option<Connection>,
     options: Option<DirectStoreOptions>,
-    receive: mpsc::Receiver<Range>,
+    receive: mpsc::Receiver<Query>,
     ready: oneshot::Sender<Result<u64>>,
     stop: &CancellationToken,
     id: &str,
@@ -227,7 +308,7 @@ async fn actor(
         }
     };
     let result = if ready.send(Ok(size)).is_ok() {
-        process.serve(receive, size, stop, id).await
+        process.serve(receive, stop, id).await
     } else {
         Ok(())
     };
@@ -295,7 +376,7 @@ impl Process {
         .await?;
         let response = tokio::select! {
             () = stop.cancelled() => return Err(cancelled(id)),
-            result = tokio::time::timeout(RANGE_TIMEOUT, response(&mut self.stdout)) => result.map_err(|_| AgentError::Other("native reader open timed out".into()))??,
+            result = tokio::time::timeout(READ_TIMEOUT, response(&mut self.stdout)) => result.map_err(|_| AgentError::Other("native reader open timed out".into()))??,
         };
         let Response::Ready { size, remote_url } = response else {
             return Err(unexpected(response));
@@ -308,8 +389,7 @@ impl Process {
 
     async fn serve(
         &mut self,
-        mut receive: mpsc::Receiver<Range>,
-        size: u64,
+        mut receive: mpsc::Receiver<Query>,
         stop: &CancellationToken,
         id: &str,
     ) -> Result<()> {
@@ -318,18 +398,19 @@ impl Process {
                 () = stop.cancelled() => return Ok(()),
                 request = receive.recv() => request,
             };
-            let Some(Range {
-                offset,
-                length,
+            let Some(Query {
+                request,
                 mut reply,
+                cancel,
             }) = request
             else {
                 return Ok(());
             };
-            if reply.is_closed() {
+            if reply.is_closed() || cancel.is_cancelled() {
+                let _ = reply.send(Err(cancelled(id)));
                 continue;
             }
-            let result = self.range(offset, length, size, &mut reply, stop, id).await;
+            let result = self.query(request, &mut reply, stop, &cancel, id).await;
             match result {
                 Err(error)
                     if !matches!(
@@ -352,16 +433,15 @@ impl Process {
         }
     }
 
-    async fn range(
+    async fn query(
         &mut self,
-        offset: u64,
-        length: u32,
-        size: u64,
-        reply: &mut oneshot::Sender<Result<Bytes>>,
+        request: Request,
+        reply: &mut oneshot::Sender<Result<Response>>,
         stop: &CancellationToken,
+        cancel: &CancellationToken,
         id: &str,
-    ) -> Result<Bytes> {
-        self.send(Request::Range { offset, length }).await?;
+    ) -> Result<Response> {
+        self.send(request).await?;
         let mut timed_out = false;
         let next = response(&mut self.stdout);
         tokio::pin!(next);
@@ -372,31 +452,22 @@ impl Process {
                 self.stdin.take();
                 tokio::time::timeout(CLOSE_TIMEOUT, next).await.map_err(|_| AgentError::Other("native reader did not acknowledge close".into()))?
             },
+            () = cancel.cancelled() => {
+                send(&mut self.stdin, Request::Cancel).await?;
+                tokio::time::timeout(CLOSE_TIMEOUT, next).await.map_err(|_| AgentError::Other("native reader did not acknowledge cancellation".into()))?
+            },
             () = reply.closed() => {
                 send(&mut self.stdin, Request::Cancel).await?;
                 tokio::time::timeout(CLOSE_TIMEOUT, next).await.map_err(|_| AgentError::Other("native reader did not acknowledge cancellation".into()))?
             },
-            () = tokio::time::sleep(RANGE_TIMEOUT) => {
+            () = tokio::time::sleep(READ_TIMEOUT) => {
                 send(&mut self.stdin, Request::Cancel).await?;
                 timed_out = true;
                 tokio::time::timeout(CLOSE_TIMEOUT, next).await.map_err(|_| AgentError::Other("native reader did not acknowledge cancellation".into()))?
             },
         }?;
         let result = match result {
-            Response::Data {
-                offset: actual,
-                bytes_b64,
-            } => {
-                let start = offset.min(size);
-                let expected = u64::from(length).min(size - start);
-                let bytes = STANDARD.decode(bytes_b64).map_err(std::io::Error::other)?;
-                if actual != start || bytes.len() as u64 != expected {
-                    return Err(AgentError::Other(
-                        "native reader returned a mismatched range".into(),
-                    ));
-                }
-                Ok(Bytes::from(bytes))
-            }
+            reply @ (Response::Data { .. } | Response::Chunks { .. }) => Ok(reply),
             Response::Cancelled => Err(cancelled(id)),
             Response::Closed if stop.is_cancelled() => {
                 self.closed = true;
@@ -410,10 +481,10 @@ impl Process {
             }
             other => Err(unexpected(other)),
         };
-        if timed_out {
+        if timed_out && matches!(&result, Ok(_) | Err(AgentError::OpCancelled { .. })) {
             return Err(AgentError::Other(format!(
-                "native range read exceeded {} seconds",
-                RANGE_TIMEOUT.as_secs()
+                "native read exceeded {} seconds",
+                READ_TIMEOUT.as_secs()
             )));
         }
         result

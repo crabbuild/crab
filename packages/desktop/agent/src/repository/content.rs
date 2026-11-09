@@ -10,7 +10,7 @@ pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
 pub(crate) const MAX_COMPLETE_BYTES: usize = 200 * 1024 * 1024;
 
 pub(crate) struct FileSource {
-    source: Source,
+    source: Arc<Source>,
     scope: ReadScope,
     pub size: u64,
 }
@@ -47,6 +47,18 @@ impl ReadScope {
             }));
         }
         Ok(())
+    }
+
+    async fn run<T>(&self, work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        tokio::pin!(work);
+        tokio::select! {
+            biased;
+            result = &mut work => result,
+            () = self.stop.cancelled() => {
+                self.sdk.cancel();
+                work.await
+            }
+        }
     }
 
     fn options(&self) -> Options {
@@ -93,6 +105,8 @@ enum Source {
     Remote {
         snapshot: Snapshot,
         path: GitPath,
+        kind: ContentKind,
+        oid: String,
     },
 }
 
@@ -106,18 +120,24 @@ impl FileSource {
         scope.check()?;
         let validated = GitPath::new(path.as_bytes().to_vec())?;
         let Some(root) = &repo.work_dir else {
-            let snapshot = repo.snapshot(rev, scope.options()).await?;
-            let metadata = snapshot
-                .file_metadata(validated.clone())
-                .with_options(ReadOptions::default().with_operation(scope.options()))
+            let snapshot = scope.run(repo.snapshot(rev, scope.options())).await?;
+            let metadata = scope
+                .run(async {
+                    Ok(snapshot
+                        .file_metadata(validated.clone())
+                        .with_options(ReadOptions::default().with_operation(scope.options()))
+                        .await?)
+                })
                 .await?;
             return Ok(Self {
                 scope,
                 size: metadata.size,
-                source: Source::Remote {
+                source: Arc::new(Source::Remote {
                     snapshot,
                     path: validated,
-                },
+                    kind: metadata.kind,
+                    oid: metadata.id.to_string(),
+                }),
             });
         };
         if let Some(rev) = rev {
@@ -145,10 +165,10 @@ impl FileSource {
             return Ok(Self {
                 scope,
                 size,
-                source: Source::Git {
+                source: Arc::new(Source::Git {
                     root: root.clone(),
                     oid,
-                },
+                }),
             });
         }
         let absolute = tokio::fs::canonicalize(root.join(path))
@@ -189,10 +209,10 @@ impl FileSource {
         Ok(Self {
             scope,
             size,
-            source: Source::Local {
+            source: Arc::new(Source::Local {
                 file: Mutex::new(file),
                 modified: metadata.modified().ok(),
-            },
+            }),
         })
     }
 
@@ -218,16 +238,61 @@ impl FileSource {
         Ok(Self {
             scope,
             size,
-            source: Source::Pointer {
+            source: Arc::new(Source::Pointer {
                 reader: source,
                 identity,
-            },
+            }),
         })
+    }
+
+    pub(crate) fn describe(&self) -> Value {
+        let (kind, representation, hash, oid) = match self.source.as_ref() {
+            Source::Local { .. } => ("git", "working_file", None, None),
+            Source::Git { oid, .. } => ("git", "git_blob", None, Some(oid.as_str())),
+            Source::Pointer { identity, .. } => {
+                let (kind, hash) = match identity {
+                    Identity::Blake3(hash) => ("crab", hash),
+                    Identity::Sha256(hash) => ("lfs", hash),
+                };
+                (
+                    kind,
+                    "pointer",
+                    Some(crab_git::lfs_pointer::hex_encode(hash)),
+                    None,
+                )
+            }
+            Source::Remote { kind, oid, .. } => {
+                let kind = match kind {
+                    ContentKind::Crab => "crab",
+                    ContentKind::Lfs => "lfs",
+                    _ => "git",
+                };
+                (kind, "remote_content", None, Some(oid.as_str()))
+            }
+        };
+        json!({ "kind": kind, "representation": representation, "size": self.size,
+            "content_hash": hash, "git_oid": oid })
+    }
+
+    pub(super) fn query(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            scope: ReadScope::new(self.scope.stop.child_token()),
+            size: self.size,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> ReadScope {
+        self.scope.clone()
+    }
+
+    pub(super) fn cancel(&self) {
+        self.scope.cancel();
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
         self.scope.cancel();
-        if let Source::Pointer { reader, .. } = &self.source {
+        if let Source::Pointer { reader, .. } = self.source.as_ref() {
             reader.close().await?;
         }
         Ok(())
@@ -235,6 +300,35 @@ impl FileSource {
 
     pub(crate) fn check_cancelled(&self) -> Result<()> {
         self.scope.check()
+    }
+
+    pub(crate) async fn chunk_page(
+        &self,
+        start: u64,
+        limit: u32,
+    ) -> Result<crab_types::file_layout::ChunkPage> {
+        self.scope.check()?;
+        let page = match self.source.as_ref() {
+            Source::Pointer {
+                reader,
+                identity: Identity::Blake3(_),
+            } => reader.chunks(start, limit, &self.scope.stop).await?,
+            Source::Remote { snapshot, path, .. } => {
+                self.scope
+                    .run(async {
+                        Ok(snapshot
+                            .file_chunks(path.clone(), start, limit)
+                            .with_options(
+                                ReadOptions::default().with_operation(self.scope.options()),
+                            )
+                            .await?)
+                    })
+                    .await?
+            }
+            _ => return Err(AgentError::Other("file has no Crab chunk recipe".into())),
+        };
+        self.scope.check()?;
+        Ok(page)
     }
 
     pub(crate) async fn read_range(&self, offset: u64, length: u32) -> Result<Bytes> {
@@ -255,7 +349,7 @@ impl FileSource {
         let end = start.saturating_add(u64::from(length)).min(self.size);
         let length = (end - start) as usize;
         if length == 0 {
-            if let Source::Local { file, modified } = &self.source {
+            if let Source::Local { file, modified } = self.source.as_ref() {
                 let metadata = file.lock().await.metadata().await?;
                 if metadata.len() != self.size || metadata.modified().ok() != *modified {
                     return Err(changed());
@@ -263,7 +357,7 @@ impl FileSource {
             }
             return Ok(Bytes::new());
         }
-        let bytes = match &self.source {
+        let bytes = match self.source.as_ref() {
             Source::Local { file, modified } => {
                 let mut file = file.lock().await;
                 let before = file.metadata().await?;
@@ -284,12 +378,16 @@ impl FileSource {
                 bytes.into()
             }
             Source::Git { root, oid } => self.read_git(root, oid, start, length).await?,
-            Source::Pointer { reader, .. } => reader.read(start, length as u32).await?,
-            Source::Remote { snapshot, path } => {
+            Source::Pointer { reader, .. } => {
+                reader.read(start, length as u32, &self.scope.stop).await?
+            }
+            Source::Remote { snapshot, path, .. } => {
                 let options = ReadOptions::default()
                     .with_operation(self.scope.options())
                     .with_range(start..end)?;
-                remote_bytes(snapshot, path, options, length).await?
+                self.scope
+                    .run(remote_bytes(snapshot, path, options, length))
+                    .await?
             }
         };
         self.scope.check()?;
@@ -309,12 +407,15 @@ impl FileSource {
             )));
         }
         let length = self.size as usize;
-        match &self.source {
-            Source::Remote { snapshot, path } => {
+        match self.source.as_ref() {
+            Source::Remote { snapshot, path, .. } => {
                 // Let the SDK observe verified whole-file EOF instead of
                 // assembling this response from independently requested ranges.
                 let options = ReadOptions::default().with_operation(self.scope.options());
-                return remote_bytes(snapshot, path, options, length).await;
+                return self
+                    .scope
+                    .run(remote_bytes(snapshot, path, options, length))
+                    .await;
             }
             Source::Git { root, oid } => return self.read_git(root, oid, 0, length).await,
             _ => {}
@@ -330,7 +431,7 @@ impl FileSource {
             let count = (length - output.len()).min(MAX_RANGE_BYTES as usize) as u32;
             output.extend_from_slice(&self.read_range(output.len() as u64, count).await?);
         }
-        if let Source::Pointer { identity, .. } = &self.source {
+        if let Source::Pointer { identity, .. } = self.source.as_ref() {
             let identity = *identity;
             // Native ranges authenticate their selected chunks/blocks. Binding
             // the assembled response to its whole-file identity is a separate
@@ -415,14 +516,14 @@ async fn remote_bytes(
     options: ReadOptions,
     length: usize,
 ) -> Result<Bytes> {
-    let mut stream = snapshot
-        .open_file(path.clone())
-        .with_options(options)
-        .await?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
         .map_err(std::io::Error::other)?;
+    let mut stream = snapshot
+        .open_file(path.clone())
+        .with_options(options)
+        .await?;
     let result = async {
         while let Some(chunk) = stream.next().await? {
             if chunk.len() > length - bytes.len() {

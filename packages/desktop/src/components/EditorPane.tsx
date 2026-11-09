@@ -1,8 +1,8 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import clsx from "clsx";
-import { Binary, Code2, Download, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
-import { DirEntry, mainProcess, PointerInfo, rpc } from "../ipc";
+import { Binary, Code2, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
+import { DirEntry, mainProcess, rpc } from "../ipc";
 import { OpenRepo } from "../state";
 import { base64ToBytes, decodeText, hexDump } from "../lib/binary";
 import { previewKindFor, PreviewKind } from "../lib/preview-kind";
@@ -11,6 +11,7 @@ import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
 import { useRemoteAutoSave } from "../hooks/useRemoteAutoSave";
 import { useExternalFileChange } from "../hooks/useExternalFileChange";
 import { ExternalChangePrompt } from "./ExternalChangePrompt";
+import { FileInspector } from "./FileInspector";
 import { FileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
 import { formatBytes } from "../lib/format";
@@ -497,7 +498,23 @@ function ContextMenuItemPane({
   );
 }
 
-function Router({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
+function Router(props: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
+  const [details, setDetails] = useState(false);
+  const { repo, tab } = props;
+  const pointer = tab.entry.kind === "pointer" || tab.entry.kind === "lfs";
+  if (!pointer || previewKindFor(tab.path, tab.entry.kind) === "pointer") return <PreviewBody {...props} />;
+  return <div className="flex h-full min-h-0 flex-col">
+    <div className="flex shrink-0 justify-end border-b border-gx-border px-3 py-1">
+      <button type="button" className="btn text-xs" aria-pressed={details} onClick={() => setDetails(!details)}>
+        {details ? "Back to preview" : "File details"}
+      </button>
+    </div>
+    <div className={clsx("min-h-0 flex-1", details && "hidden")}><PreviewBody {...props} /></div>
+    {details && <div className="min-h-0 flex-1"><FileInspector repo={repo} path={tab.path} rev={tab.rev} /></div>}
+  </div>;
+}
+
+function PreviewBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
   const kind: PreviewKind = previewKindFor(tab.path, tab.entry.kind);
   const common = { repoId: repo.repo_id, path: tab.path, rev: tab.rev } as const;
   const capabilities = useRepoCapabilities();
@@ -506,7 +523,7 @@ function Router({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; 
   // edit capabilities, open markdown in the code editor so the user can edit it.
   const canEdit = capabilities.canEdit && tab.rev === null;
 
-  if (kind === "pointer") return <PointerBody repo={repo} tab={tab} />;
+  if (kind === "pointer") return <FileInspector repo={repo} path={tab.path} rev={tab.rev} />;
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
   if (kind === "image") return <ImageView {...common} entryKind={tab.entry.kind} />;
   if (kind === "video") return <VideoView {...common} />;
@@ -977,127 +994,6 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
           <MarkdownView repoId={repo.repo_id} path={tab.path} rev={tab.rev} />
         )}
       </div>
-    </div>
-  );
-}
-
-function PointerBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
-  const [info, setInfo] = useState<PointerInfo | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setInfo(null);
-    setErr(null);
-    setLoading(true);
-    rpc
-      .pointerInfo(repo.repo_id, tab.path, tab.rev ?? undefined)
-      .then((p) => {
-        if (!cancelled) setInfo(p);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setErr(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [repo.repo_id, tab.path, tab.rev]);
-
-  // Use entry-level data as fallback when the full pointerInfo RPC
-  // hasn't resolved or failed (e.g. no remote configured).
-  const entrySize = tab.entry.size;
-  const entryHash = tab.entry.pointer_hash;
-
-  const displaySize = info
-    ? formatBytes(info.size)
-    : entrySize != null
-      ? formatBytes(entrySize)
-      : loading ? "…" : "–";
-
-  const displayKind = info?.kind ?? tab.entry.kind ?? "–";
-
-  const displayHash = info?.pointer_hash ?? entryHash ?? null;
-
-  const displayChunks = info
-    ? info.chunk_count?.toLocaleString() ?? "–"
-    : loading ? "…" : "–";
-
-  const displayXorbs = info
-    ? info.xorb_count?.toLocaleString() ?? "–"
-    : loading ? "…" : "–";
-
-  const displayDedup = info
-    ? info.dedup_ratio?.toFixed(3) ?? "–"
-    : loading ? "…" : "–";
-
-  return (
-    <div className="h-full overflow-auto bg-gx-bg-sub p-6 text-sm">
-      <div className="mx-auto max-w-3xl rounded border border-gx-border bg-gx-surface p-5">
-        <div className="mb-4 flex items-center gap-2 text-base font-semibold">
-          <Binary size={16} className="text-gx-accent" />
-          {tab.entry.kind === "lfs" ? "Git LFS pointer" : "Crab pointer"}
-        </div>
-
-        {err && (
-          <div className="mb-3 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
-            {err}
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 gap-3">
-          <KV label="Path" value={tab.path} mono wide />
-          <KV label="Logical size" value={displaySize} />
-          <KV label="Pointer kind" value={displayKind} />
-          <KV label="Chunks" value={displayChunks} />
-          <KV label="Xorbs" value={displayXorbs} />
-          <KV label="Dedup ratio" value={displayDedup} />
-        </div>
-
-        {displayHash && (
-          <div className="mt-4">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-gx-muted">Content hash</div>
-            <div className="break-all rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-[11px]">
-              {displayHash}
-            </div>
-          </div>
-        )}
-
-        {repo.path && (
-          <div className="mt-5 flex gap-2">
-            <button
-              type="button"
-              className="btn btn-primary text-xs"
-              onClick={() => void rpc.hydrate(repo.path!, [tab.path])}
-              title="Materialize this file via `crab hydrate`"
-            >
-              <Download size={12} /> Hydrate to preview
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function KV({
-  label,
-  value,
-  mono,
-  wide,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  wide?: boolean;
-}) {
-  return (
-    <div className={wide ? "col-span-2" : undefined}>
-      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-gx-muted">{label}</div>
-      <div className={clsx("text-sm", mono && "break-all font-mono")}>{value}</div>
     </div>
   );
 }

@@ -9,7 +9,7 @@ completion. This record tracks implementation and qualification separately.
 
 | Capability | Required behavior | Current gap / qualification |
 | --- | --- | --- |
-| File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | `repository.rs::pointer_info` currently returns no chunk/xorb metadata. |
+| File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Cold multi-GiB remote LFS costs, packaged cancellation, media delivery and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Parser and desktop qualification are in progress; media and query paths still need audit. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
@@ -88,10 +88,11 @@ completion. This record tracks implementation and qualification separately.
 
 ## Open implementation details
 
-- Existing whole-file `read_text` / `read_bytes` still validate against index
-  metadata and use a separate read path. Move these onto the captured source;
-  a grown working file must not bypass its response limit, and complete reads
-  must preserve whole-file hash verification.
+- One-shot RPC previews capture and close their source per operation. The new
+  file inspector retains a source across metadata pages, with independent query
+  cancellation and close/repository-close drain. Media still needs to use this
+  owner for bounded byte delivery; retaining a snapshot alone does not avoid
+  repeated cold LFS verification.
 - Media still uses complete base64 responses (video up to 200 MiB). Introduce
   range-backed media delivery so large playback/seeking stays bounded.
 - Complete preview resource limits include decoded Parquet pages and rendered
@@ -268,3 +269,33 @@ Remaining integration details found during qualification:
   native reader now matches the SDK's five-minute default owner, but explicit
   verification cost/progress, read budgets and the transfer queue still need
   coherent behavior for objects larger/slower than a preview budget permits.
+
+## Captured chunk inspection checkpoint
+
+- Shared staged/remote readers expose ordered metadata pages of at most 512
+  occurrences. The SDK uses its pinned catalog; local inspection uses retained
+  recipe pages. Chunk hashes/offsets/lengths and published placement come from
+  real metadata. Unknown placement remains unknown; no dedup ratio is invented.
+- Desktop `file_open` / `file_chunks` / `file_close` retain the source across
+  pages. Each query has independent cancellation. Close waits for active queries
+  before releasing native ownership; repeated callers also wait for that drain.
+  Repository close
+  rejects admission and drains retained files. SSH reconnection rejects these
+  stateful calls instead of replaying or serving cached results.
+- Focused checks passed: staged metadata pagination, captured remote catalog and
+  term resolution, five native CLI integration cases, SDK files and metadata-only
+  profiles, four captured-source tests, the native Crab/LFS staging fixture and
+  RPC cancellation drain. Renderer/Electron type checks and 38 focused IPC/SSH
+  tests passed. Release native, renderer and Electron builds passed.
+- Unpacked macOS arm64 smoke passed in 17.2 seconds. Real filters staged a sparse
+  3 GiB Crab safetensors file and a Git LFS file. The inspector reported 24,577
+  chunk occurrences, navigated pages after replacing the working-tree pointer,
+  and retained the captured recipe. Header previews, visible LFS integrity
+  failure/repair and safe cache preview/cleanup still passed. Worktree pointers
+  remained unchanged after fixture restoration and cleanup preserved staging.
+- Evidence: `large-files-inspector-ui-proof/qualification.json` and screenshots
+  in the per-worktree external build directory. The local unpacked artifact is
+  `packages/desktop/release/large-files-inspector/mac-arm64/Crab.app` and is
+  unsigned. This does not qualify Windows/Linux, other storage profiles,
+  cold multi-GiB remote LFS, media delivery, durable transfers or the remaining
+  acceptance matrix.

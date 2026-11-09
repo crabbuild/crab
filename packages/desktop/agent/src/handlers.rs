@@ -161,7 +161,9 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "list" => list(state, decode(&method, params)?, out).await,
         "list_refs" => list_refs(state, decode(&method, params)?).await,
         "stat" => stat(state, decode(&method, params)?).await,
-        "pointer_info" => pointer_info(state, decode(&method, params)?).await,
+        "file_open" => file_open(state, decode(&method, params)?).await,
+        "file_chunks" => file_chunks(state, decode(&method, params)?).await,
+        "file_close" => file_close(state, decode(&method, params)?).await,
         "read_text" => read_text(state, decode(&method, params)?).await,
         "read_bytes" => read_bytes(state, decode(&method, params)?).await,
         "read_range" => read_range(state, decode(&method, params)?).await,
@@ -1194,11 +1196,6 @@ async fn stat(state: &State, p: StatParams) -> Result<Value> {
         }
         Err(e) => Err(e.into()),
     }
-}
-
-async fn pointer_info(state: &State, p: StatParams) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    repo.pointer_info(&p.path, p.rev.as_deref()).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2494,59 +2491,114 @@ where
 {
     let repo = state.get(&p.repo_id).await?;
     let scope = repo.read_scope();
-    let id = p.op_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut signal = state.cancel_registry.register(id.clone()).await;
-    let result = async {
-        let capture =
-            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone());
-        tokio::pin!(capture);
-        let mut cancelled = false;
-        let captured = tokio::select! {
-            biased;
-            result = &mut capture => result,
-            _ = &mut signal => { scope.cancel(); cancelled = true; capture.await },
+    let read = async {
+        let source =
+            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone())
+                .await?;
+        let source = Arc::new(source);
+        let result = match scope.check() {
+            Ok(()) => work(source.clone()).await,
+            Err(error) => Err(error),
         };
-        let source = match captured {
-            Ok(source) => Arc::new(source),
-            Err(error) if error.is_cancelled() => {
-                return Err(AgentError::OpCancelled { op_id: id.clone() });
-            }
-            Err(error) => return Err(error),
-        };
-        if cancelled {
-            source.close().await?;
-            return Err(AgentError::OpCancelled { op_id: id.clone() });
-        }
-        let work = work(source.clone());
-        tokio::pin!(work);
-        let result = tokio::select! {
-            biased;
-            result = &mut work => result,
-            _ = &mut signal => { scope.cancel(); cancelled = true; work.await },
-        };
-        // Cancellation never abandons blocking parsers, native children or SDK
-        // streams. Close errors take precedence over the cancellation result.
         source.close().await?;
-        if let Some(error) = scope.failure() {
+        result
+    };
+    cancellable_read(state, p.op_id, &scope, read).await
+}
+
+async fn cancellable_read<T>(
+    state: &State,
+    op_id: Option<String>,
+    scope: &crate::repository::ReadScope,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let id = op_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut signal = state.cancel_registry.register(id.clone()).await;
+    tokio::pin!(work);
+    let mut cancelled = false;
+    let result = tokio::select! {
+        biased;
+        result = &mut work => result,
+        _ = &mut signal => { scope.cancel(); cancelled = true; work.await },
+    };
+    state.cancel_registry.unregister(&id).await;
+    // Keep terminal failures after draining: an abort cannot hide integrity or
+    // cleanup errors, including parser dependencies that stringify I/O sources.
+    if let Some(error) = scope.failure() {
+        return Err(error);
+    }
+    match result {
+        Err(error) if error.is_cancelled() => Err(AgentError::OpCancelled { op_id: id }),
+        Err(AgentError::Preview { .. } | AgentError::Io(_)) if scope.cancelled_read() => {
+            Err(AgentError::OpCancelled { op_id: id })
+        }
+        Err(error) => Err(error),
+        Ok(_) if cancelled || scope.cancelled_read() => Err(AgentError::OpCancelled { op_id: id }),
+        Ok(value) => Ok(value),
+    }
+}
+
+async fn file_open(state: &State, p: PreviewParams) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let id = uuid::Uuid::new_v4().to_string();
+    let open = async {
+        let source =
+            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone())
+                .await?;
+        if let Err(error) = scope.check() {
+            source.close().await?;
             return Err(error);
         }
-        match result {
-            Err(error) if error.is_cancelled() => {
-                Err(AgentError::OpCancelled { op_id: id.clone() })
-            }
-            Err(AgentError::Preview { .. } | AgentError::Io(_)) if scope.cancelled_read() => {
-                Err(AgentError::OpCancelled { op_id: id.clone() })
-            }
-            Err(error) => Err(error),
-            Ok(_) if cancelled || scope.cancelled_read() => {
-                Err(AgentError::OpCancelled { op_id: id.clone() })
-            }
-            Ok(value) => Ok(value),
-        }
+        let file = repo.files.insert(id.clone(), source).await?;
+        let mut info = file.describe();
+        info["file_id"] = json!(id);
+        Ok(info)
+    };
+    let result = cancellable_read(state, p.op_id, &scope, open).await;
+    if result.is_err() {
+        repo.files.remove(&id).await?;
     }
-    .await;
-    state.cancel_registry.unregister(&id).await;
     result
+}
+
+#[derive(Deserialize)]
+struct FileIdParams {
+    repo_id: String,
+    file_id: String,
+}
+
+#[derive(Deserialize)]
+struct FileChunksParams {
+    #[serde(flatten)]
+    file: FileIdParams,
+    start: u64,
+    limit: u32,
+    op_id: Option<String>,
+}
+
+async fn file_chunks(state: &State, p: FileChunksParams) -> Result<Value> {
+    if !(1..=512).contains(&p.limit) {
+        return Err(AgentError::Other(
+            "chunk page limit must be between 1 and 512".into(),
+        ));
+    }
+    let repo = state.get(&p.file.repo_id).await?;
+    let file = repo.files.get(&p.file.file_id).await?;
+    let (_guard, source) = file.query().await?;
+    let scope = source.scope();
+    let read = async {
+        Ok(serde_json::to_value(
+            source.chunk_page(p.start, p.limit).await?,
+        )?)
+    };
+    cancellable_read(state, p.op_id, &scope, read).await
+}
+
+async fn file_close(state: &State, p: FileIdParams) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    repo.files.remove(&p.file_id).await?;
+    Ok(json!({ "closed": p.file_id }))
 }
 
 async fn preview_fmt(

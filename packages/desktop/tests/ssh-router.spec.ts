@@ -362,7 +362,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     const { router } = createRouter(sm);
 
-    for (const method of ["git_commit", "cache_clean"]) {
+    for (const method of ["git_commit", "cache_clean", "file_open", "file_chunks", "file_close"]) {
       await expect(
         router.route("ssh://server/repo", method, { repo_id: "ssh://server/repo" }),
       ).rejects.toThrow("Connection lost: write operations are unavailable during reconnection");

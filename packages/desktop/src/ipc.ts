@@ -175,13 +175,26 @@ export interface FileStat {
   kind: PointerKind;
 }
 
-export interface PointerInfo {
+export interface CapturedFile {
+  file_id: string;
   size: number;
-  pointer_hash: string | null;
-  chunk_count: number | null;
-  xorb_count: number | null;
-  dedup_ratio: number | null;
   kind: PointerKind;
+  representation: "working_file" | "git_blob" | "pointer" | "remote_content";
+  content_hash: string | null;
+  git_oid: string | null;
+}
+
+export interface FileChunkPage {
+  chunk_count: number;
+  xorb_count: number | null;
+  chunks: Array<{
+    hash: string;
+    offset: number;
+    length: number;
+    xorb_hash: string | null;
+    xorb_chunk_index: number | null;
+  }>;
+  next: number | null;
 }
 
 export interface AuthStatus {
@@ -1701,8 +1714,13 @@ export const rpc = {
   stat: (repo_id: string, path: string, rev?: string) =>
     call<FileStat>("stat", { repo_id, path, rev }),
 
-  pointerInfo: (repo_id: string, path: string, rev?: string) =>
-    call<PointerInfo>("pointer_info", { repo_id, path, rev }),
+  openFile: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<CapturedFile>("file_open", { repo_id, path, ...opts }, signal),
+
+  fileChunks: (repo_id: string, file_id: string, start: number, limit: number, signal?: AbortSignal) =>
+    call<FileChunkPage>("file_chunks", { repo_id, file_id, start, limit }, signal),
+
+  closeFile: (repo_id: string, file_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id }),
 
   readText: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
     call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),
@@ -2016,8 +2034,8 @@ export const rpc = {
   status: (cwd: string, jobId = nextJobId("status")) =>
     call<{ status: number }>("status", { job_id: jobId, cwd }),
 
-  hydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("hydrate")) =>
-    call<{ status: number }>("hydrate", { job_id: jobId, cwd, patterns }),
+  hydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("hydrate"), repo_id?: string) =>
+    call<{ status: number }>("hydrate", { job_id: jobId, cwd, patterns, repo_id }),
 
   dehydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("dehydrate")) =>
     call<{ status: number }>("dehydrate", { job_id: jobId, cwd, patterns }),

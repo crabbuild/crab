@@ -122,6 +122,50 @@ async fn index_and_committed_sources_remain_distinct_from_working_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_file_queries_cancel_independently_and_close_drains_readers() {
+    let (directory, repo) = repository().await;
+    let path = directory.path().join("file.txt");
+    tokio::fs::write(&path, b"captured").await.unwrap();
+    let source = FileSource::capture(&repo, "file.txt", None, repo.read_scope())
+        .await
+        .unwrap();
+    let file = repo.files.insert("capture".into(), source).await.unwrap();
+    let (guard, query) = file.query().await.unwrap();
+    query.scope().cancel();
+    assert!(query.read_range(0, 8).await.unwrap_err().is_cancelled());
+    drop(guard);
+    let replacement = directory.path().join("replacement");
+    tokio::fs::write(&replacement, b"replacement")
+        .await
+        .unwrap();
+    tokio::fs::rename(replacement, &path).await.unwrap();
+    let (guard, query) = file.query().await.unwrap();
+    assert_eq!(
+        query.read_range(0, 8).await.unwrap(),
+        b"captured".as_slice()
+    );
+    let closing = repo.clone();
+    let close = tokio::spawn(async move { closing.close().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while query.check_cancelled().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!close.is_finished());
+    let files = repo.files.clone();
+    let duplicate_close = tokio::spawn(async move { files.remove("capture").await });
+    tokio::task::yield_now().await;
+    assert!(!duplicate_close.is_finished());
+    drop(guard);
+    close.await.unwrap().unwrap();
+    duplicate_close.await.unwrap().unwrap();
+    assert!(file.query().await.is_err());
+    assert!(repo.files.get("capture").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
 async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
     let (directory, repo) = repository().await;
@@ -183,6 +227,27 @@ async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {
             bytes.as_slice()
         );
         assert!(source.read_complete(1024).await.is_err());
+        if path.starts_with("crab") {
+            let mut start = 0;
+            let mut offset = 0;
+            loop {
+                let page = source.chunk_page(start, 7).await.unwrap();
+                assert_eq!(page.xorb_count, None);
+                for chunk in &page.chunks {
+                    assert_eq!(chunk.offset, offset);
+                    offset += chunk.length;
+                }
+                let Some(next) = page.next else {
+                    assert_eq!(start + page.chunks.len() as u64, page.chunk_count);
+                    break;
+                };
+                assert!(next > start);
+                start = next;
+            }
+            assert_eq!(offset, bytes.len() as u64);
+        } else {
+            assert!(source.chunk_page(0, 7).await.is_err());
+        }
         source.close().await.unwrap();
         assert_eq!(std::fs::read(root.join(path)).unwrap(), pointer);
     }

@@ -61,9 +61,12 @@ interface JsonRpcNotification {
 
 type JsonRpcFrame = JsonRpcResponse | JsonRpcNotification;
 
-/** Methods that mutate state and must NOT be queued during reconnection. */
+/** Mutations and live resource operations must not be replayed after reconnect. */
 const WRITE_METHODS = new Set([
   "cache_clean",
+  "file_open",
+  "file_chunks",
+  "file_close",
   "add",
   "git_commit",
   "git_stage",
