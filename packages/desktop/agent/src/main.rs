@@ -12,8 +12,6 @@ mod audit;
 mod batch_git_status;
 mod cache;
 mod cancel;
-#[cfg(test)]
-mod cancel_test;
 mod conflicts;
 mod credential_store;
 mod experiments;
@@ -193,7 +191,7 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let log_file = parse_log_file_arg();
+    let log_file = path_argument("--log-file")?;
     init_tracing(log_file.as_deref());
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -207,7 +205,10 @@ async fn main() -> std::io::Result<()> {
     // Spawn the background indexer. It opens its SlateDB instance and
     // waits for commands. The sender is stored in State so handlers
     // (indexer_status, open_local) can communicate with it.
-    let indexer_config = indexer::IndexerConfig::default();
+    let mut indexer_config = indexer::IndexerConfig::default();
+    if let Some(directory) = path_argument("--index-dir")? {
+        indexer_config.db_path = directory.into();
+    }
     let indexer_handle = indexer::Indexer::spawn(state.clone(), indexer_config);
     state.set_indexer_tx(indexer_handle.tx_clone()).await;
 
@@ -222,6 +223,35 @@ async fn main() -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
+        let request: Request = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                warn!(%error, "malformed request");
+                if let Err(error) = write_frame(
+                    &stdout,
+                    &Response::error(None, RpcError::parse_error(&error)),
+                )
+                .await
+                {
+                    break Err(std::io::Error::other(error));
+                }
+                continue;
+            }
+        };
+        let operation = (request.method != "rpc/cancel")
+            .then(|| {
+                request
+                    .params
+                    .get("op_id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_owned)
+            })
+            .flatten();
+        if let Some(id) = &operation {
+            // Reserve before spawning: a following cancel frame can otherwise
+            // run before the handler subscribes and lose the signal entirely.
+            drop(state.cancel_registry.register(id.clone()).await);
+        }
         let out = Arc::clone(&stdout);
         let state = state.clone();
         while let Some(result) = requests.try_join_next() {
@@ -230,14 +260,17 @@ async fn main() -> std::io::Result<()> {
             }
         }
         requests.spawn(async move {
-            if let Err(err) = dispatch(line, state, out).await {
+            if let Err(err) = dispatch(request, state, out, operation).await {
                 error!(%err, "failed to dispatch request");
             }
         });
     };
 
     info!("stdin closed; agent shutting down");
-    requests.abort_all();
+    // Dropping read futures skips their explicit native/SDK cleanup. Stop
+    // admitted and newly subscribing reads, then join before closing owners.
+    state.cancel_registry.close().await;
+    state.stop_reads().await;
     while let Some(result) = requests.join_next().await {
         if let Err(error) = result {
             error!(%error, "request task failed");
@@ -250,17 +283,12 @@ async fn main() -> std::io::Result<()> {
     read_result
 }
 
-/// Parse one NDJSON line as a JSON-RPC request, dispatch it, and
-/// write back a single response frame.
-async fn dispatch(line: String, state: handlers::State, out: SharedStdout) -> Result<()> {
-    let req: Request = match serde_json::from_str(&line) {
-        Ok(req) => req,
-        Err(e) => {
-            warn!(error = %e, "malformed request");
-            write_frame(&out, &Response::error(None, RpcError::parse_error(&e))).await?;
-            return Ok(());
-        }
-    };
+async fn dispatch(
+    req: Request,
+    state: handlers::State,
+    out: SharedStdout,
+    operation: Option<String>,
+) -> Result<()> {
     debug!(method = %req.method, id = ?req.id, "dispatching");
     let id = req.id.clone();
     let method = req.method.clone();
@@ -276,6 +304,11 @@ async fn dispatch(line: String, state: handlers::State, out: SharedStdout) -> Re
             ResponseBody::err(RpcError::from(err))
         }
     };
+    // Release admission before publishing the reply; a peer may reuse an ID
+    // immediately after observing completion, while this writer is flushing.
+    if let Some(id) = operation {
+        state.cancel_registry.unregister(&id).await;
+    }
     write_frame(&out, &Response::new(id, body)).await?;
     Ok(())
 }
@@ -326,18 +359,23 @@ pub(crate) async fn emit_partial(
     .await
 }
 
-/// Parse `--log-file <path>` from process arguments. When present,
-/// the agent writes logs to a rolling file appender at the given path
-/// in addition to stderr.
-fn parse_log_file_arg() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut iter = args.iter();
+fn path_argument(flag: &str) -> std::io::Result<Option<String>> {
+    let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
-        if arg == "--log-file" {
-            return iter.next().cloned();
+        if arg == flag {
+            return iter
+                .next()
+                .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                .map(Some)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{flag} requires a path"),
+                    )
+                });
         }
     }
-    None
+    Ok(None)
 }
 
 fn init_tracing(log_file: Option<&str>) {

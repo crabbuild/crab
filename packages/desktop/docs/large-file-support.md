@@ -669,3 +669,60 @@ History uses the same notebook renderer and explicit initial-commit baseline.
   The peer app was restored to its saved workflow, Save disabled, Activity empty
   and port 17789 listening. Cross-platform/current-head CI and the remaining
   acceptance matrix remain open; this checkpoint does not close the feature.
+
+## Owned SSH source checkpoint
+
+SSH content operations now retain their native owner through completion. The
+30-second metadata deadline does not discard file captures, bounded reads,
+previews, comparisons or materializations. An explicitly configured operation
+deadline signals `rpc/cancel` and waits for the original terminal reply. A
+cancellation acknowledgement alone does not release the request; a raced success
+or integrity failure remains authoritative. Release operations wait for cleanup.
+If cancellation signalling fails, the channel sends EOF and waits for native
+shutdown instead of inventing completion.
+
+Pending calls and byte buffers belong to a specific channel. Closing or replacing
+one channel settles its calls without affecting sibling profiles. NDJSON framing
+precedes strict UTF-8 decoding, preserving multibyte text split across SSH packets.
+Batches use the same single-request protocol, with four calls in flight; the
+native agent does not accept JSON-RPC arrays. Reconnection only replays the five
+explicitly cacheable metadata methods. Captures, mutations, cancellation signals
+and unknown methods cannot cross agent sessions. Stale reconnect prefetch results
+do not refresh metadata TTLs.
+
+Native admission latches cancellation before a handler subscribes. On stdin EOF,
+the sidecar stops admitted and newly subscribing reads, joins their cleanup and
+then closes the indexer and repository owners. Each local application profile
+passes its own index database directory, avoiding a shared home-directory SlateDB
+writer. Standalone/SSH launchers retain their existing default; remote index
+namespacing and legacy uncancellable handlers remain open.
+
+- Seven router regressions and the early-cancellation latch failed before the
+  fixes. Thirteen focused source lifecycle cases now cover timeouts, terminal
+  integrity/success races, default long reads, channel ownership, fragmented
+  UTF-8, replay cancellation/disconnect, bounded batches and stale prefetch.
+  The five focused router/cache/timeout/operation files pass 167 cases; four
+  sibling provider/transport files pass 46. Four
+  native cancellation registry cases pass. Renderer/Electron type checks, the
+  new integration spec's strict type probe, formatting and native/renderer/
+  Electron builds pass.
+- A real authenticated loopback ssh2 server runs the packaged native sidecar and
+  CLI with isolated index/cache directories. The exact packaged router receives
+  actually split UTF-8 packets, reads bounded Crab/LFS ranges and materializes
+  both 4 MiB files byte-identically with real progress and unchanged Git index
+  pointers. A live exclusive staging writer proves explicit timeout cancellation
+  joins the CLI child before rejecting. Channel EOF also joins that child before
+  clean sidecar exit while the writer remains locked; a second profile stays
+  usable. The final smoke passed in 6.6 seconds. It uses POSIX flock and explicitly
+  skips Windows; it does not qualify GUI deployment, providers or credentials.
+- The same unsigned macOS arm64 package passes the existing desktop large-file
+  GUI smoke in 22.7 seconds: 3 GiB previews, captured chunk pages, integrity
+  failures, cache cleanup and Crab/LFS materialization. The peer build was
+  restored to its saved workflow, Save disabled, Activity empty, port 17789 live.
+- Evidence: `ssh-owned-final-proof/` and `ssh-owned-qualification.json` in the per-checkout external build directory.
+  Package: `desktop-ssh-owned/mac-arm64/Crab.app`. Production desktop SSH setup
+  remains unqualified: the application does not inject deployment dependencies
+  into its session manager, capability negotiation routes through a deploying
+  status, and the bundled sidecar lacks that capabilities method. These are
+  follow-up implementation gaps, not passing checks. Current-head CI and the
+  remaining acceptance matrix also remain open.

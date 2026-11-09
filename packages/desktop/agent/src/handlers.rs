@@ -108,6 +108,12 @@ impl State {
         result
     }
 
+    pub(crate) async fn stop_reads(&self) {
+        for repo in self.repos.read().await.values() {
+            repo.handle.stop_reads();
+        }
+    }
+
     /// Store a [`WatchSet`] for a repo so worktree handlers can
     /// dynamically add/remove watched paths.
     pub async fn set_watch_set(&self, repo_id: String, ws: crate::watcher::WatchSet) {
@@ -779,7 +785,8 @@ where
     match op_id {
         None => work.await,
         Some(ref id) => {
-            let mut cancel_rx = state.cancel_registry.register(id.clone()).await;
+            let cancel_rx = state.cancel_registry.register(id.clone()).await;
+            tokio::pin!(cancel_rx);
             tokio::pin!(work);
             let result = tokio::select! {
                 biased;
@@ -2513,7 +2520,8 @@ async fn cancellable_read<T>(
     work: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
     let id = op_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut signal = state.cancel_registry.register(id.clone()).await;
+    let signal = state.cancel_registry.register(id.clone()).await;
+    tokio::pin!(signal);
     tokio::pin!(work);
     let mut cancelled = false;
     let result = tokio::select! {
@@ -2628,7 +2636,8 @@ async fn file_materialize(
 ) -> Result<Value> {
     let repo = state.get(&p.file.repo_id).await?;
     let scope = repo.read_scope();
-    let mut signal = state.cancel_registry.register(p.op_id.clone()).await;
+    let signal = state.cancel_registry.register(p.op_id.clone()).await;
+    tokio::pin!(signal);
     let work = async {
         let file = repo.files.get(&p.file.file_id).await?;
         let (_guard, source) = file.materialization(scope.clone()).await?;

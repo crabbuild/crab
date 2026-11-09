@@ -1,3 +1,4 @@
+import type { SshSessionManager } from "../electron/ssh-manager";
 /**
  * Verification tests for remote Crab operations over the SSH router.
  *
@@ -241,7 +242,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // add is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "add", { repo_id: repoId, paths: ["model.bin"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toThrow(/live operations are unavailable during reconnection/);
     });
   });
 
@@ -600,7 +601,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // hydrate is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "hydrate", { repo_id: repoId, patterns: ["model.bin"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toThrow(/live operations are unavailable during reconnection/);
     });
 
     it("times out hydrate if remote agent does not respond", async () => {
@@ -985,7 +986,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // dehydrate is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "dehydrate", { repo_id: repoId, patterns: ["--all"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toThrow(/live operations are unavailable during reconnection/);
     });
 
     it("does not route dehydrate to local agent for remote repos", async () => {
@@ -1500,7 +1501,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // push is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "push", { repo_id: repoId, remote: "origin", ref: "main" }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toThrow(/live operations are unavailable during reconnection/);
     });
 
     it("does not route push to local agent for remote repos", async () => {
@@ -2024,45 +2025,17 @@ describe("Remote Crab Operations via RPC Router", () => {
       expect((result as any).stagingSize).toBe(24_000_000_000);
     });
 
-    it("queues crab_status during reconnection (read operation)", async () => {
-      const sessionManager = new MockSessionManager() as any;
-      const agent = new MockLocalAgent();
-      const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
-      const ch = new MockChannel();
-
-      sessionManager.setStatus("gpu-server", "reconnecting");
-      sessionManager.setConnection("gpu-server", ch);
-      r2.attachChannel("gpu-server", ch.asChannel());
-
+    it("rejects crab_status from a previous agent session during reconnection", async () => {
       const repoId = "ssh://gpu-server/home/user/ml-repo";
-
-      // crab_status is a READ operation — should be queued, not rejected
-      const promise = r2.route(repoId, "crab_status", { repo_id: repoId });
-
-      // Nothing written to channel yet (queued)
-      expect(ch.written).toHaveLength(0);
-
-      // Simulate reconnection completing — replay sends the queued call
-      sessionManager.setStatus("gpu-server", "connected");
-      const replayPromise = r2.replayQueue("gpu-server");
-
-      // Wait a tick for the replay to write to the channel
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Now the queued call should have been sent
-      expect(ch.written).toHaveLength(1);
-      const written = JSON.parse(ch.written[0]);
-      expect(written.method).toBe("crab_status");
-
-      simulateResponse(ch, written.id, {
-        stagedFiles: 3,
-        pendingUploads: 1,
-        stagingSize: 500_000_000,
-      });
-
-      await replayPromise;
-      const result = await promise;
-      expect((result as any).stagedFiles).toBe(3);
+      const manager = new MockSessionManager();
+      manager.setStatus("gpu-server", "reconnecting");
+      manager.setConnection("gpu-server", channel);
+      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+      remote.attachChannel("gpu-server", channel.asChannel());
+      await expect(remote.route(repoId, "crab_status", { repo_id: repoId })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+      manager.setStatus("gpu-server", "connected");
+      await remote.replayQueue("gpu-server");
+      expect(channel.written).toHaveLength(0);
     });
 
     it("does not route crab_status to local agent for remote repos", async () => {
@@ -2293,49 +2266,17 @@ describe("Remote Crab Operations via RPC Router", () => {
         expect(localAgent.calls).toHaveLength(0);
       });
 
-      it("queues pointer_top during reconnection (read operation)", async () => {
-        const sessionManager = new MockSessionManager() as any;
-        const agent = new MockLocalAgent();
-        const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
-        const ch = new MockChannel();
-
-        sessionManager.setStatus("gpu-server", "reconnecting");
-        sessionManager.setConnection("gpu-server", ch);
-        r2.attachChannel("gpu-server", ch.asChannel());
-
+      it("rejects pointer_top from a previous agent session during reconnection", async () => {
         const repoId = "ssh://gpu-server/home/user/ml-repo";
-
-        // pointer_top is a READ operation — should be queued, not rejected
-        const promise = r2.route(repoId, "pointer_top", {
-          repo_id: repoId,
-          limit: 5,
-        });
-
-        // Nothing written to channel yet (queued)
-        expect(ch.written).toHaveLength(0);
-
-        // Simulate reconnection completing — replay sends the queued call
-        sessionManager.setStatus("gpu-server", "connected");
-        const replayPromise = r2.replayQueue("gpu-server");
-
-        // Wait a tick for the replay to write to the channel
-        await new Promise((resolve) => setTimeout(resolve, 10));
-
-        // Now the queued call should have been sent
-        expect(ch.written).toHaveLength(1);
-        const written = JSON.parse(ch.written[0]);
-        expect(written.method).toBe("pointer_top");
-
-        simulateResponse(ch, written.id, {
-          files: [
-            { path: "model.safetensors", size: 4_500_000_000 },
-            { path: "data.parquet", size: 2_000_000_000 },
-          ],
-        });
-
-        await replayPromise;
-        const result = await promise;
-        expect((result as any).files).toHaveLength(2);
+        const manager = new MockSessionManager();
+        manager.setStatus("gpu-server", "reconnecting");
+        manager.setConnection("gpu-server", channel);
+        const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+        remote.attachChannel("gpu-server", channel.asChannel());
+        await expect(remote.route(repoId, "pointer_top", { repo_id: repoId, limit: 5 })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+        manager.setStatus("gpu-server", "connected");
+        await remote.replayQueue("gpu-server");
+        expect(channel.written).toHaveLength(0);
       });
 
       it("times out pointer_top if remote agent does not respond", async () => {
@@ -2625,51 +2566,17 @@ describe("Remote Crab Operations via RPC Router", () => {
       expect((result as any).reason).toContain("No operation");
     });
 
-    it("rejects cancel during reconnection (rpc/cancel is not in WRITE_METHODS but routes normally)", async () => {
-      // rpc/cancel is NOT in the WRITE_METHODS set, so during reconnection
-      // it would be queued as a read operation. However, cancelling a stale
-      // operation after reconnection is meaningless — the queued cancel will
-      // be replayed but the original operation is already dead.
-      const sessionManager = new MockSessionManager() as any;
-      const agent = new MockLocalAgent();
-      const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
-      const ch = new MockChannel();
-
-      sessionManager.setStatus("gpu-server", "reconnecting");
-      sessionManager.setConnection("gpu-server", ch);
-      r2.attachChannel("gpu-server", ch.asChannel());
-
+    it("rejects rpc/cancel from a previous agent session during reconnection", async () => {
       const repoId = "ssh://gpu-server/home/user/ml-repo";
-
-      // rpc/cancel is queued during reconnection (not rejected)
-      const cancelPromise = r2.route(repoId, "rpc/cancel", {
-        repo_id: repoId,
-        request_id: 42,
-      });
-
-      // Nothing written to channel yet (queued)
-      expect(ch.written).toHaveLength(0);
-
-      // Simulate reconnection completing — replay sends the queued cancel
-      sessionManager.setStatus("gpu-server", "connected");
-      const replayPromise = r2.replayQueue("gpu-server");
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Now the queued cancel should have been sent
-      expect(ch.written).toHaveLength(1);
-      const written = JSON.parse(ch.written[0]);
-      expect(written.method).toBe("rpc/cancel");
-
-      // Remote agent responds — operation no longer exists after reconnection
-      simulateResponse(ch, written.id, {
-        cancelled: false,
-        reason: "No operation with that ID is in flight",
-      });
-
-      await replayPromise;
-      const result = await cancelPromise;
-      expect((result as any).cancelled).toBe(false);
+      const manager = new MockSessionManager();
+      manager.setStatus("gpu-server", "reconnecting");
+      manager.setConnection("gpu-server", channel);
+      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+      remote.attachChannel("gpu-server", channel.asChannel());
+      await expect(remote.route(repoId, "rpc/cancel", { repo_id: repoId, op_id: "old-session" })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+      manager.setStatus("gpu-server", "connected");
+      await remote.replayQueue("gpu-server");
+      expect(channel.written).toHaveLength(0);
     });
 
     it("cancels one operation while another continues (multiple concurrent ops)", async () => {
@@ -2833,22 +2740,11 @@ describe("Remote Crab Operations via RPC Router", () => {
         { method: "crab_status", params: { repo_id: repoId } },
       ]);
 
-      // The batch is sent as a single JSON array
-      const written = JSON.parse(channel.written[0]);
-      expect(Array.isArray(written)).toBe(true);
-      expect(written).toHaveLength(3);
-
-      // Simulate batch response
-      const batchResponse = written.map((req: any, i: number) => ({
-        jsonrpc: "2.0",
-        id: req.id,
-        result: i === 0
-          ? { totalFiles: 50 }
-          : i === 1
-            ? { entries: [] }
-            : { stagedFiles: 0 },
-      }));
-      channel.emit("data", Buffer.from(JSON.stringify(batchResponse) + "\n"));
+      const written = channel.written.map(line => JSON.parse(line));
+      expect(written.map(request => request.method)).toEqual(["hydration_status", "git_status_porcelain", "crab_status"]);
+      for (const [index, request] of written.entries()) {
+        simulateResponse(channel, request.id, index === 0 ? { totalFiles: 50 } : index === 1 ? { entries: [] } : { stagedFiles: 0 });
+      }
 
       const results = await promise;
       expect(results).toHaveLength(3);

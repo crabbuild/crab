@@ -76,6 +76,10 @@ pub fn token_cache_directory() -> Result<PathBuf> {
 }
 
 impl BrowseSession {
+    pub(crate) fn stop_reads(&self) {
+        self.readers.cancel();
+    }
+
     pub(crate) fn read_scope(&self) -> ReadScope {
         ReadScope::new(self.readers.read_token())
     }
@@ -197,7 +201,7 @@ impl BrowseSession {
     pub async fn close(&self) -> Result<()> {
         // Materialization owns a repository scope even after its view closes.
         // Stop it before waiting for file guards, otherwise close can deadlock.
-        self.readers.cancel();
+        self.stop_reads();
         let files = self.files.close().await;
         let native = self.readers.close().await;
         let remote = match &self.remote {

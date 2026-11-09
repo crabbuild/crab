@@ -1,682 +1,329 @@
-/**
- * RPC Router — routes agent RPC calls to either the local agent or
- * the appropriate remote agent based on repo_id prefix.
- *
- * Remote repos use `ssh://<profileId>/<path>` as their repo_id. The
- * router parses this prefix to determine the target SSH connection
- * and forwards the JSON-RPC 2.0 request over the agent channel.
- */
-
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { TextDecoder } from "node:util";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "./ssh-manager";
 import type { RemoteCache } from "./ssh-cache";
 
-// ── Types ────────────────────────────────────────────────────────
-
-export interface RepoTransport {
-  type: "local" | "remote";
-  profileId?: string;
-}
-
+export interface RepoTransport { type: "local" | "remote"; profileId?: string }
 export interface RpcRouterOptions {
-  /** Per-request timeout in milliseconds (default: 30_000). */
+  /** Metadata/control timeout; explicit values also bound owned content operations. */
   requestTimeoutMs?: number;
-  /** Maximum queued calls during reconnection (default: 50). */
   maxQueuedCalls?: number;
 }
 
+interface ChannelOwner {
+  profileId: string;
+  channel: ClientChannel;
+  parts: Buffer[];
+  bytes: number;
+  closed: boolean;
+  draining?: Error;
+}
 interface PendingRequest {
+  owner: ChannelOwner;
+  method: string;
+  operation?: { op_id: string; repo_id?: string };
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
+  timeout?: Error;
+  cancelRequested?: boolean;
 }
-
 interface QueuedCall {
   method: string;
   params: unknown;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
 }
-
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params: unknown;
-}
-
 interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: number | null;
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
 }
+type BatchReply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
 
-interface JsonRpcNotification {
-  jsonrpc: "2.0";
-  method: string;
-  params: unknown;
-}
-
-type JsonRpcFrame = JsonRpcResponse | JsonRpcNotification;
-
-/** Mutations and live resource operations must not be replayed after reconnect. */
-const WRITE_METHODS = new Set([
-  "cache_clean",
-  "file_open",
-  "file_diff",
-  "file_chunks",
-  "file_close",
-  "file_materialize",
-  "read_range",
-  "add",
-  "git_commit",
-  "git_stage",
-  "git_checkout",
-  "git_push",
-  "git_pull",
-  "git_stash_save",
-  "git_branch_create",
-  "git_branch_delete",
-  "hydrate",
-  "dehydrate",
-  "op_start",
-  "op_continue",
-  "push",
-  "worktree_create",
-  "worktree_destroy",
+// These methods own bounded content work and acknowledge cancellation only
+// after their readers drain. The generic 30-second metadata timer must not
+// discard a multi-GiB verification or materialization halfway through it.
+const CONTENT_METHODS = new Set([
+  "file_open", "file_diff", "file_chunks", "file_materialize", "read_range", "read_text", "read_bytes",
+  "preview_parquet", "preview_safetensors", "preview_npy", "preview_npz", "preview_zip",
+  "preview_notebook_meta", "preview_torch_checkpoint",
 ]);
-
-/** Read-only methods eligible for stale cache fallback during reconnection. */
 const CACHEABLE_READ_METHODS = new Set([
-  "git_status_porcelain",
-  "git_log",
-  "list_refs",
-  "repo_summary",
-  "hydration_status",
+  "git_status_porcelain", "git_log", "list_refs", "repo_summary", "hydration_status",
 ]);
 
-// ── Helpers ──────────────────────────────────────────────────────
-
-/**
- * Parse a repo ID to determine if it targets a remote agent.
- * Remote repos use the format: `ssh://<profileId>/<path>`
- *
- * Returns `{ profileId, remotePath }` for remote repos, or `null`
- * for local repos.
- */
 export function parseRepoId(repoId: string): { profileId: string; remotePath: string } | null {
   if (!repoId.startsWith("ssh://")) return null;
-
-  const withoutScheme = repoId.slice("ssh://".length);
-  const slashIdx = withoutScheme.indexOf("/");
-  if (slashIdx < 0) {
-    // ssh://<profileId> with no path — treat the path as "/"
-    return { profileId: withoutScheme, remotePath: "/" };
-  }
-
-  const profileId = withoutScheme.slice(0, slashIdx);
-  const remotePath = withoutScheme.slice(slashIdx);
-  return { profileId, remotePath };
+  const value = repoId.slice(6);
+  const slash = value.indexOf("/");
+  return slash < 0 ? { profileId: value, remotePath: "/" } : { profileId: value.slice(0, slash), remotePath: value.slice(slash) };
 }
+export function isCacheableReadMethod(method: string): boolean { return CACHEABLE_READ_METHODS.has(method); }
 
-/**
- * Determine whether a method is a write operation that should be
- * rejected immediately during reconnection.
- */
-export function isWriteMethod(method: string): boolean {
-  for (const prefix of WRITE_METHODS) {
-    if (method === prefix || method.startsWith(prefix)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Determine whether a method is a read-only operation eligible for
- * stale cache fallback during reconnection.
- */
-export function isCacheableReadMethod(method: string): boolean {
-  return CACHEABLE_READ_METHODS.has(method);
-}
-
-function isNotification(frame: JsonRpcFrame): frame is JsonRpcNotification {
-  return "method" in frame && !("id" in frame && frame.id !== null && frame.id !== undefined);
-}
-
-// ── RpcRouter ────────────────────────────────────────────────────
-
-export interface BandwidthStats {
-  bytesIn: number;
-  bytesOut: number;
-}
+export interface BandwidthStats { bytesIn: number; bytesOut: number }
 
 export class RpcRouter extends EventEmitter {
   private transports = new Map<string, RepoTransport>();
+  private channels = new Map<string, ChannelOwner>();
   private pending = new Map<number, PendingRequest>();
   private queues = new Map<string, QueuedCall[]>();
+  private replays = new Map<string, Promise<void>>();
   private nextId = 1;
-  private lineBuffers = new Map<string, string>();
-  /** Cumulative bandwidth counters per profile (bytes in/out since connection). */
   private bandwidthCounters = new Map<string, BandwidthStats>();
-
-  private readonly requestTimeoutMs: number;
-  private readonly maxQueuedCalls: number;
-  private readonly sessionManager: SshSessionManager;
-  private readonly localAgent: { request(method: string, params: unknown): Promise<unknown> };
   private remoteCache: RemoteCache | null = null;
+  private readonly requestTimeoutMs: number;
+  private readonly contentTimeoutMs?: number;
+  private readonly maxQueuedCalls: number;
 
   constructor(
-    sessionManager: SshSessionManager,
-    localAgent: { request(method: string, params: unknown): Promise<unknown> },
+    private readonly sessionManager: SshSessionManager,
+    private readonly localAgent: { request(method: string, params: unknown): Promise<unknown> },
     options: RpcRouterOptions = {},
   ) {
     super();
-    this.sessionManager = sessionManager;
-    this.localAgent = localAgent;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.contentTimeoutMs = options.requestTimeoutMs;
     this.maxQueuedCalls = options.maxQueuedCalls ?? 50;
   }
 
-  /**
-   * Set the remote cache instance for stale data fallback during
-   * reconnection. When set, read-only operations return cached data
-   * with `stale: true` instead of being queued.
-   */
-  setCache(cache: RemoteCache): void {
-    this.remoteCache = cache;
-  }
+  setCache(cache: RemoteCache): void { this.remoteCache = cache; }
+  registerTransport(repoId: string, transport: RepoTransport): void { this.transports.set(repoId, transport); }
+  unregisterTransport(repoId: string): void { this.transports.delete(repoId); }
 
-  /**
-   * Register a repo ID with its transport type. For remote repos,
-   * this is called when the user opens a remote repository.
-   */
-  registerTransport(repoId: string, transport: RepoTransport): void {
-    this.transports.set(repoId, transport);
-  }
-
-  /**
-   * Remove a registered transport (e.g., when a repo is closed).
-   */
-  unregisterTransport(repoId: string): void {
-    this.transports.delete(repoId);
-  }
-
-  /**
-   * Route an RPC call to the appropriate agent (local or remote).
-   * Determines the target based on the repo_id prefix or registered
-   * transport.
-   */
   async route(repoId: string, method: string, params: unknown): Promise<unknown> {
-    // First, check if the repo_id has an ssh:// prefix
     const parsed = parseRepoId(repoId);
-    if (parsed) {
-      return this.routeToRemote(parsed.profileId, method, params);
-    }
-
-    // Check registered transports
+    if (parsed) return this.routeToRemote(parsed.profileId, method, params);
     const transport = this.transports.get(repoId);
-    if (transport && transport.type === "remote" && transport.profileId) {
-      return this.routeToRemote(transport.profileId, method, params);
-    }
-
-    // Default: local agent
+    if (transport?.type === "remote" && transport.profileId) return this.routeToRemote(transport.profileId, method, params);
     return this.localAgent.request(method, params);
   }
 
-  /**
-   * Send multiple independent RPC calls as a JSON-RPC batch array.
-   * Returns an array of responses in the same order as the input calls.
-   * Reduces round-trips for Dashboard/status views.
-   */
-  async batchRpc(
-    repoId: string,
-    calls: Array<{ method: string; params: unknown }>,
-  ): Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>> {
-    const parsed = parseRepoId(repoId);
-    if (!parsed) {
-      // Local agent: execute sequentially (local agent doesn't support batch)
-      const results: Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }> = [];
-      for (const call of calls) {
-        try {
-          const result = await this.localAgent.request(call.method, call.params);
-          results.push({ result });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          results.push({ error: { code: -32000, message } });
+  /** Independent calls share single-request framing, ownership and errors. */
+  async batchRpc(repoId: string, calls: Array<{ method: string; params: unknown }>): Promise<BatchReply[]> {
+    const results: BatchReply[] = new Array(calls.length);
+    let next = 0;
+    // Workspace polling must not spawn a Git child for every repository at once.
+    await Promise.all(Array.from({ length: Math.min(4, calls.length) }, async () => {
+      while (next < calls.length) {
+        const index = next++;
+        const call = calls[index];
+        try { results[index] = { result: await this.route(repoId, call.method, call.params) }; }
+        catch (error) {
+          const detail = error as { code?: unknown; message?: unknown; data?: unknown } | null;
+          const failure: NonNullable<BatchReply["error"]> = {
+            code: typeof detail?.code === "number" ? detail.code : -32000,
+            message: typeof detail?.message === "string" ? detail.message : String(error),
+          };
+          if (detail && "data" in detail) failure.data = detail.data;
+          results[index] = { error: failure };
         }
       }
-      return results;
-    }
-
-    return this.sendBatchToRemote(parsed.profileId, calls);
+    }));
+    return results;
   }
 
-  /**
-   * Attach to a remote agent channel to listen for notifications.
-   * Call this after the agent channel is established on a connection.
-   */
   attachChannel(profileId: string, channel: ClientChannel): void {
-    this.lineBuffers.set(profileId, "");
-    // Initialize bandwidth counter for this profile
-    if (!this.bandwidthCounters.has(profileId)) {
-      this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 });
-    }
-
-    channel.on("data", (data: Buffer) => {
-      // Track incoming bytes
-      const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesIn += data.length;
-      }
-      this.handleChannelData(profileId, data);
-    });
-
-    channel.on("close", () => {
-      this.lineBuffers.delete(profileId);
-      // Reject all pending requests for this profile
-      for (const [] of this.pending) {
-        // We can't easily filter by profileId here, so we leave them
-        // to time out. The timeout mechanism handles cleanup.
-      }
-    });
+    const previous = this.channels.get(profileId);
+    if (previous?.channel === channel) return;
+    if (previous) this.failChannel(previous, Object.assign(new Error("Remote agent channel replaced"), { code: "SSH_CHANNEL_REPLACED" }));
+    const owner: ChannelOwner = { profileId, channel, parts: [], bytes: 0, closed: false };
+    this.channels.set(profileId, owner);
+    if (!this.bandwidthCounters.has(profileId)) this.resetBandwidth(profileId);
+    const onData = (data: Buffer) => {
+      if (this.channels.get(profileId) !== owner || owner.closed) return;
+      this.bandwidthCounters.get(profileId)!.bytesIn += data.length;
+      this.handleChannelData(owner, data);
+    };
+    const onError = (error: Error) => this.failChannel(owner, error);
+    const onEnd = () => this.failChannel(owner, Object.assign(new Error(owner.bytes ? "Remote agent ended with an incomplete RPC frame" : "Remote agent channel closed"), { code: owner.bytes ? "SSH_PROTOCOL_ERROR" : "SSH_CHANNEL_CLOSED" }));
+    const onClose = () => {
+      onEnd();
+      channel.removeListener("data", onData);
+      channel.removeListener("error", onError);
+      channel.removeListener("end", onEnd);
+      channel.removeListener("close", onClose);
+    };
+    channel.on("data", onData);
+    channel.on("error", onError);
+    channel.on("end", onEnd);
+    channel.on("close", onClose);
   }
 
-  /**
-   * Replay queued calls after a successful reconnection.
-   * Called by the session manager when a connection is re-established.
-   */
-  async replayQueue(profileId: string): Promise<void> {
+  private failChannel(owner: ChannelOwner, error: Error): void {
+    if (owner.closed) return;
+    owner.closed = true;
+    owner.parts = []; owner.bytes = 0;
+    if (this.channels.get(owner.profileId) === owner) this.channels.delete(owner.profileId);
+    for (const [id, request] of this.pending) {
+      if (request.owner !== owner) continue;
+      clearTimeout(request.timer);
+      this.pending.delete(id);
+      request.reject(error);
+    }
+    // EOF lets the native agent cancel and join reads, then close its SDK/DBs.
+    owner.channel.end();
+  }
+
+  replayQueue(profileId: string): Promise<void> {
+    const active = this.replays.get(profileId);
+    if (active) return active;
     const queue = this.queues.get(profileId);
-    if (!queue || queue.length === 0) return;
-
-    // Take ownership of the queue and clear it
-    const calls = [...queue];
-    this.queues.delete(profileId);
-
-    for (const call of calls) {
-      try {
-        const result = await this.sendToRemoteAgent(profileId, call.method, call.params);
-        call.resolve(result);
-      } catch (err) {
-        call.reject(err instanceof Error ? err : new Error(String(err)));
+    if (!queue?.length) return Promise.resolve();
+    const work = (async () => {
+      // Unsent calls remain cancellable while another replay is in flight.
+      while (queue.length) {
+        const call = queue.shift()!;
+        try { call.resolve(await this.sendToRemoteAgent(profileId, call.method, call.params)); }
+        catch (error) { call.reject(error instanceof Error ? error : new Error(String(error))); }
       }
-    }
+    })().finally(() => {
+      if (this.queues.get(profileId) === queue) this.queues.delete(profileId);
+      this.replays.delete(profileId);
+    });
+    this.replays.set(profileId, work);
+    return work;
   }
-
-  /**
-   * Clear the queue for a profile (e.g., on permanent disconnect).
-   */
   clearQueue(profileId: string): void {
-    const queue = this.queues.get(profileId);
-    if (!queue) return;
-
-    for (const call of queue) {
-      call.reject(new Error("Connection lost permanently"));
-    }
+    for (const call of this.queues.get(profileId)?.splice(0) ?? []) call.reject(new Error("Connection lost permanently"));
     this.queues.delete(profileId);
   }
-
-  /**
-   * Get cumulative bandwidth stats for a profile since connection.
-   */
-  getBandwidth(profileId: string): BandwidthStats {
-    return this.bandwidthCounters.get(profileId) ?? { bytesIn: 0, bytesOut: 0 };
-  }
-
-  /**
-   * Reset bandwidth counters for a profile (e.g., on new connection).
-   */
-  resetBandwidth(profileId: string): void {
-    this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 });
-  }
-
-  // ── Private ────────────────────────────────────────────────────
+  getBandwidth(profileId: string): BandwidthStats { return this.bandwidthCounters.get(profileId) ?? { bytesIn: 0, bytesOut: 0 }; }
+  resetBandwidth(profileId: string): void { this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 }); }
 
   private async routeToRemote(profileId: string, method: string, params: unknown): Promise<unknown> {
     const status = this.sessionManager.getStatus(profileId);
-
+    if (method === "rpc/cancel" && params && typeof params === "object" && "op_id" in params) {
+      const queue = this.queues.get(profileId);
+      const index = queue?.findIndex(call => call.params && typeof call.params === "object" && "op_id" in call.params && call.params.op_id === params.op_id) ?? -1;
+      if (queue && index >= 0) {
+        const [call] = queue.splice(index, 1);
+        call.reject(Object.assign(new Error("Queued operation cancelled"), { code: 1010, data: { kind: "op_cancelled" } }));
+        return { ok: true };
+      }
+    }
     if (status === "reconnecting") {
-      // Write operations are rejected immediately during reconnection
-      if (isWriteMethod(method)) {
-        const err = new Error("Connection lost: write operations are unavailable during reconnection");
-        (err as Error & { code?: string }).code = "SSH_RECONNECTING";
-        throw err;
+      // Only explicitly cacheable metadata can be replayed. Captured sources,
+      // cancellation signals and unknown mutations belong to one agent session.
+      if (!isCacheableReadMethod(method)) throw Object.assign(new Error("Connection lost: live operations are unavailable during reconnection"), { code: "SSH_RECONNECTING" });
+      const repoId = extractRepoId(params);
+      const cached = repoId ? this.remoteCache?.getCached(`${repoId}:${method}`) : null;
+      if (cached) {
+        const data = cached.data;
+        return { ...(data !== null && typeof data === "object" && !Array.isArray(data) ? data : { data }), __stale: true };
       }
-
-      // For cacheable read-only operations, return stale cached data if available
-      if (isCacheableReadMethod(method) && this.remoteCache) {
-        const repoId = this.extractRepoIdFromParams(params);
-        if (repoId) {
-          const cacheKey = `${repoId}:${method}`;
-          const cached = this.remoteCache.getCached(cacheKey);
-          if (cached) {
-            return { ...this.wrapResult(cached.data), __stale: true };
-          }
-        }
-      }
-
-      // Queue non-cacheable read-only calls for replay
-      return this.enqueueCall(profileId, method, params);
+      let queue = this.queues.get(profileId);
+      if (!queue) { queue = []; this.queues.set(profileId, queue); }
+      if (queue.length >= this.maxQueuedCalls) queue.shift()?.reject(new Error("Call dropped: reconnection queue overflow"));
+      return new Promise((resolve, reject) => queue.push({ method, params, resolve, reject }));
     }
-
-    if (status !== "connected") {
-      throw new Error(`SSH connection not available (status: ${status})`);
-    }
-
+    if (status !== "connected") throw new Error(`SSH connection not available (status: ${status})`);
     return this.sendToRemoteAgent(profileId, method, params);
   }
 
-  /**
-   * Wrap a cached result for return. If the data is already an object,
-   * return it directly (the __stale flag is added by the caller). If
-   * it's a primitive, wrap it in an object.
-   */
-  private wrapResult(data: unknown): Record<string, unknown> {
-    if (data !== null && typeof data === "object" && !Array.isArray(data)) {
-      return data as Record<string, unknown>;
-    }
-    return { data };
-  }
-
-  /**
-   * Extract repo_id from RPC params for cache key construction.
-   */
-  private extractRepoIdFromParams(params: unknown): string | null {
-    if (params && typeof params === "object" && "repo_id" in params) {
-      const id = (params as Record<string, unknown>).repo_id;
-      return typeof id === "string" ? id : null;
-    }
-    return null;
-  }
-
-  /**
-   * Serialize a JSON-RPC 2.0 request, write to the remote agent's SSH
-   * channel stdin, and wait for the correlated response from stdout.
-   * Uses NDJSON framing (newline-delimited JSON).
-   *
-   * The per-request timeout is determined by the profile's
-   * `operationTimeoutMs` setting, falling back to the router-level
-   * `requestTimeoutMs` default.
-   */
   sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
-    const conn = this.sessionManager.getConnection(profileId);
-    if (!conn || !conn.channels.agent) {
-      return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
-    }
+    const connection = this.sessionManager.getConnection(profileId);
+    const owner = this.channels.get(profileId);
+    if (!owner || owner.closed || owner.channel !== connection?.channels.agent) return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
+    const content = CONTENT_METHODS.has(method);
+    // Release must finish even if the initiating view/profile deadline expires.
+    const timeout = method === "file_close" || method === "close" ? undefined
+      : connection.profile?.operationTimeoutMs ?? (content ? this.contentTimeoutMs : this.requestTimeoutMs);
+    const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+    const enriched = content && fields && typeof fields.op_id !== "string" ? { ...fields, op_id: randomUUID() } : params;
+    return this.send(owner, method, enriched, timeout);
+  }
 
-    const channel = conn.channels.agent;
+  private send(owner: ChannelOwner, method: string, params: unknown, timeoutMs: number | undefined): Promise<unknown> {
+    if (owner.closed || owner.draining) return Promise.reject(owner.draining ?? new Error("Remote agent channel closed"));
+    const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+    const operation = method !== "rpc/cancel" && typeof fields?.op_id === "string"
+      ? { op_id: fields.op_id, ...(typeof fields.repo_id === "string" ? { repo_id: fields.repo_id } : {}) } : undefined;
+    if (method === "rpc/cancel") {
+      for (const request of this.pending.values()) if (request.owner === owner && request.operation?.op_id === fields?.op_id) request.cancelRequested = true;
+    }
     const id = this.nextId++;
-    const timeoutMs = conn.profile?.operationTimeoutMs ?? this.requestTimeoutMs;
-
-    const request: JsonRpcRequest = {
-      jsonrpc: "2.0",
-      id,
-      method,
-      params,
-    };
-
-    return new Promise<unknown>((resolve, reject) => {
-      // Set up per-request timeout
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`RPC timeout: ${method} did not respond within ${timeoutMs}ms`));
-      }, timeoutMs);
-
-      this.pending.set(id, { resolve, reject, timer });
-
-      // Write NDJSON frame (JSON + newline)
-      const frame = JSON.stringify(request) + "\n";
-      // Track outgoing bytes
-      const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesOut += Buffer.byteLength(frame, "utf8");
-      }
-      channel.write(frame, (err?: Error | null) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
-    });
-  }
-
-  /**
-   * Send a batch of RPC calls as a JSON-RPC batch array to the remote agent.
-   */
-  private sendBatchToRemote(
-    profileId: string,
-    calls: Array<{ method: string; params: unknown }>,
-  ): Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>> {
-    const conn = this.sessionManager.getConnection(profileId);
-    if (!conn || !conn.channels.agent) {
-      return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
-    }
-
-    const channel = conn.channels.agent;
-
-    // Assign IDs to each call in the batch
-    const batchRequests: JsonRpcRequest[] = calls.map((call) => ({
-      jsonrpc: "2.0" as const,
-      id: this.nextId++,
-      method: call.method,
-      params: call.params,
-    }));
-
-    const ids = batchRequests.map((r) => r.id);
-
-    return new Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>>((resolve, reject) => {
-      const results = new Map<number, { result?: unknown; error?: { code: number; message: string; data?: unknown } }>();
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        // Clean up pending entries
-        for (const id of ids) {
-          this.pending.delete(id);
-        }
-        reject(new Error(`Batch RPC timeout: did not receive all responses within ${this.requestTimeoutMs}ms`));
-      }, this.requestTimeoutMs);
-
-      const checkComplete = () => {
-        if (results.size === ids.length && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          // Return results in the same order as input calls
-          const ordered = ids.map((id) => results.get(id) ?? { error: { code: -32000, message: "Missing response" } });
-          resolve(ordered);
-        }
-      };
-
-      // Register pending entries for each request in the batch
-      for (const req of batchRequests) {
-        const batchTimer = setTimeout(() => {
-          // Individual timeout — handled by the batch-level timer
-        }, this.requestTimeoutMs);
-
-        this.pending.set(req.id, {
-          resolve: (value: unknown) => {
-            clearTimeout(batchTimer);
-            results.set(req.id, { result: value });
-            checkComplete();
-          },
-          reject: (err: Error) => {
-            clearTimeout(batchTimer);
-            results.set(req.id, { error: { code: -32000, message: err.message } });
-            checkComplete();
-          },
-          timer: batchTimer,
+    const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+    return new Promise((resolve, reject) => {
+      const request: PendingRequest = { owner, method, operation, resolve, reject };
+      this.pending.set(id, request);
+      if (timeoutMs !== undefined) request.timer = setTimeout(() => {
+        const error = Object.assign(new Error(`RPC timeout: ${method} did not respond within ${timeoutMs}ms`), { code: "SSH_RPC_TIMEOUT" });
+        if (!operation) { this.pending.delete(id); reject(error); return; }
+        request.timeout = error;
+        // Signalling is not completion. Keep the original request until its
+        // native terminal reply, preserving integrity errors and raced success.
+        void this.send(owner, "rpc/cancel", operation, timeoutMs).catch(error => {
+          if (owner.closed || owner.draining) return;
+          owner.draining = error instanceof Error ? error : new Error(String(error));
+          for (const pending of this.pending.values()) if (pending.owner === owner) clearTimeout(pending.timer);
+          owner.channel.end();
         });
-      }
-
-      // Write the batch as a single NDJSON line (JSON array + newline)
-      const frame = JSON.stringify(batchRequests) + "\n";
-      // Track outgoing bytes for batch
-      const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesOut += Buffer.byteLength(frame, "utf8");
-      }
-      channel.write(frame, (err?: Error | null) => {
-        if (err && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          for (const id of ids) {
-            this.pending.delete(id);
-          }
-          reject(err);
-        }
+      }, timeoutMs);
+      const counter = this.bandwidthCounters.get(owner.profileId);
+      if (counter) counter.bytesOut += Buffer.byteLength(frame);
+      owner.channel.write(frame, error => {
+        if (!error) return;
+        this.failChannel(owner, error);
       });
     });
   }
 
-  /**
-   * Queue a read-only call during reconnection. Rejects if the queue
-   * is full (drops oldest to make room).
-   */
-  private enqueueCall(profileId: string, method: string, params: unknown): Promise<unknown> {
-    let queue = this.queues.get(profileId);
-    if (!queue) {
-      queue = [];
-      this.queues.set(profileId, queue);
-    }
-
-    // Drop oldest if at capacity
-    if (queue.length >= this.maxQueuedCalls) {
-      const dropped = queue.shift();
-      if (dropped) {
-        dropped.reject(new Error("Call dropped: reconnection queue overflow"));
+  private handleChannelData(owner: ChannelOwner, data: Buffer): void {
+    let start = 0;
+    while (start < data.length && !owner.closed) {
+      const end = data.indexOf(10, start);
+      const part = data.subarray(start, end < 0 ? data.length : end);
+      owner.parts.push(part); owner.bytes += part.length;
+      if (end < 0) return;
+      const bytes = Buffer.concat(owner.parts, owner.bytes);
+      owner.parts = []; owner.bytes = 0;
+      try {
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (text.trim()) this.processLine(owner, text);
+      } catch (error) {
+        this.failChannel(owner, Object.assign(new Error(`Invalid remote RPC frame: ${error instanceof Error ? error.message : String(error)}`), { code: "SSH_PROTOCOL_ERROR" }));
       }
-    }
-
-    return new Promise<unknown>((resolve, reject) => {
-      queue!.push({ method, params, resolve, reject });
-    });
-  }
-
-  /**
-   * Handle incoming data from a remote agent channel. Implements
-   * NDJSON parsing: buffer partial lines, process complete lines.
-   */
-  private handleChannelData(profileId: string, data: Buffer): void {
-    const text = data.toString("utf8");
-    const buffer = (this.lineBuffers.get(profileId) ?? "") + text;
-    const lines = buffer.split("\n");
-
-    // The last element is either empty (if data ended with \n) or a
-    // partial line that needs more data.
-    this.lineBuffers.set(profileId, lines.pop() ?? "");
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      this.processLine(profileId, line);
+      start = end + 1;
     }
   }
 
-  /**
-   * Process a single NDJSON line from the remote agent. Could be a
-   * response (has `id`) or a notification (has `method`, no `id`).
-   */
-  private processLine(profileId: string, line: string): void {
-    let frame: JsonRpcFrame;
-    try {
-      frame = JSON.parse(line) as JsonRpcFrame;
-    } catch {
-      // Malformed JSON — skip
+  private processLine(owner: ChannelOwner, line: string): void {
+    const frame: unknown = JSON.parse(line);
+    if (!frame || typeof frame !== "object" || Array.isArray(frame) || !("jsonrpc" in frame) || frame.jsonrpc !== "2.0") throw new Error("Expected one JSON-RPC 2.0 frame");
+    if ("method" in frame && typeof frame.method === "string" && !("id" in frame)) {
+      this.emit("notification", { profileId: owner.profileId, method: frame.method, params: "params" in frame ? frame.params : undefined });
       return;
     }
-
-    // Handle batch responses (array of responses)
-    if (Array.isArray(frame)) {
-      for (const item of frame as JsonRpcResponse[]) {
-        this.handleSingleResponse(item);
-      }
-      return;
-    }
-
-    // Notification: no `id` field, has `method`
-    if (isNotification(frame)) {
-      this.emit("notification", {
-        profileId,
-        method: (frame as JsonRpcNotification).method,
-        params: (frame as JsonRpcNotification).params,
-      });
-      return;
-    }
-
-    // Response: has `id`
-    this.handleSingleResponse(frame as JsonRpcResponse);
-  }
-
-  private handleSingleResponse(response: JsonRpcResponse): void {
-    if (response.id == null) return;
-
-    const id = typeof response.id === "number" ? response.id : Number(response.id);
-    const pending = this.pending.get(id);
-    if (!pending) return;
-
-    clearTimeout(pending.timer);
-    this.pending.delete(id);
-
+    if (!("id" in frame) || (typeof frame.id !== "number" && frame.id !== null)) throw new Error("Invalid response ID");
+    const response = frame as JsonRpcResponse;
+    if (response.id === null) throw new Error(response.error?.message ?? "Uncorrelated remote error");
+    const request = this.pending.get(response.id);
+    if (!request || request.owner !== owner) return;
+    clearTimeout(request.timer);
+    this.pending.delete(response.id);
     if (response.error) {
-      const err = new Error(response.error.message);
-      (err as Error & { code?: number; data?: unknown }).code = response.error.code;
-      (err as Error & { code?: number; data?: unknown }).data = response.error.data;
-      pending.reject(err);
-    } else {
-      pending.resolve(response.result);
-    }
+      const error = Object.assign(new Error(response.error.message), { code: response.error.code, data: response.error.data });
+      request.reject(response.error.code === 1010 ? request.timeout ?? (!request.cancelRequested && owner.draining ? owner.draining : error) : error);
+    } else request.resolve(response.result);
   }
 }
 
-// ── Integration helper for main.ts ──────────────────────────────
-
-/**
- * Intercept an RPC call and route it through the RPC router if the
- * repo_id indicates a remote repo. Returns the result from either
- * the local or remote agent.
- *
- * Usage in main.ts:
- * ```ts
- * ipcMain.handle("crab:rpc", async (_evt, method, params) => {
- *   return routeRpcCall(router, agent, method, params);
- * });
- * ```
- */
 export function routeRpcCall(
   router: RpcRouter,
   localAgent: { request(method: string, params: unknown): Promise<unknown> },
   method: string,
   params: unknown,
 ): Promise<unknown> {
-  // Extract repo_id from params if present
   const repoId = extractRepoId(params);
-
-  if (repoId && parseRepoId(repoId)) {
-    return router.route(repoId, method, params);
-  }
-
-  // No remote repo_id — send to local agent
-  return localAgent.request(method, params);
+  return repoId && parseRepoId(repoId) ? router.route(repoId, method, params) : localAgent.request(method, params);
 }
 
-/**
- * Extract the repo_id field from RPC params. Params can be an object
- * with a `repo_id` field, or the first element of an array.
- */
 function extractRepoId(params: unknown): string | null {
-  if (params && typeof params === "object") {
-    if ("repo_id" in params) {
-      const id = (params as Record<string, unknown>).repo_id;
-      return typeof id === "string" ? id : null;
-    }
-    // Array params: check first element
-    if (Array.isArray(params) && params.length > 0 && typeof params[0] === "string") {
-      return params[0].startsWith("ssh://") ? params[0] : null;
-    }
-  }
-  return null;
+  if (!params || typeof params !== "object") return null;
+  if ("repo_id" in params) return typeof params.repo_id === "string" ? params.repo_id : null;
+  return Array.isArray(params) && typeof params[0] === "string" && params[0].startsWith("ssh://") ? params[0] : null;
 }

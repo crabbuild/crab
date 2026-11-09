@@ -66,7 +66,7 @@ export interface SshProfile {
   pinned?: boolean;
   /** Timeout in ms for the initial SSH connection handshake (default: 10000). */
   connectionTimeoutMs?: number;
-  /** Timeout in ms for individual RPC operations (default: 30000). */
+  /** Explicit RPC deadline. Unset: metadata uses 30s; owned file work runs to completion/cancel. */
   operationTimeoutMs?: number;
 }
 

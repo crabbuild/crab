@@ -462,13 +462,13 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                     }
                   />
                 </FormField>
-                <FormField label="Operation timeout (ms)" hint="Per-RPC request timeout">
+                <FormField label="Operation timeout (ms)" hint="Leave blank to let large-file reads finish. Cancellation waits for cleanup.">
                   <input
                     type="number"
                     className="input-field w-28"
                     min={1000}
                     max={300000}
-                    placeholder="30000"
+                    placeholder="Automatic"
                     value={operationTimeoutMs}
                     onChange={(e) =>
                       setOperationTimeoutMs(e.target.value === "" ? "" : Number(e.target.value))
