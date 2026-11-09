@@ -1,150 +1,127 @@
-name: Temporary RELR component qualification
-
-on:
+---
+name: Temporary paired RELR push qualification
+'on':
   workflow_dispatch:
-
+    inputs:
+      component_run:
+        description: Successful matching normal and RELR component run
+        required: true
+        default: '42570788923'
+        type: string
 permissions:
   contents: read
-
 concurrency:
-  group: relr-component-${{ github.ref }}
+  group: relr-paired-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
-  release-build:
-    name: Build normal release (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
+  paired-existing-ref-performance:
+    name: Paired existing-ref throughput (${{ matrix.client }})
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        variant: [normal, relr]
+        client:
+        - native
+        - git
     env:
-      CARGO_INCREMENTAL: 0
-      VARIANT: ${{ matrix.variant }}
+      PAIR_CLIENT: "${{ matrix.client }}"
+      PAIR_COMPONENT_RUN: "${{ inputs.component_run }}"
+      PAIR_COMPONENT_SOURCE: 4a27de3de1757b716a1694c65a266c2afefc4412
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-        with:
-          toolchain: 1.99.1
-      - name: Install existing Linux build dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev binutils
-      - name: Build and record normal release provenance
-        shell: bash
-        run: |
-          set -euo pipefail
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-relr-$VARIANT"
-          test -z "${RUSTFLAGS:-}"
-          if [ "$VARIANT" = relr ]; then
-            # Same flag proposed for official GNU x64 archives. Keep all
-            # runtime code, CPU targets and release-profile settings equal.
-            export RUSTFLAGS="-C link-arg=-Wl,-z,pack-relative-relocs"
-          fi
-          GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
-          binary="$CARGO_TARGET_DIR/release/crab"
-          proof="$RUNNER_TEMP/proof"
-          mkdir -p "$proof"
-          "$binary" version | tee "$proof/version.txt"
-          "$binary" --help > "$proof/help.txt"
-          "$binary" push --help > "$proof/push-help.txt"
-          readelf -hW "$binary" > "$proof/elf-header.txt"
-          readelf -lW "$binary" > "$proof/elf-program.txt"
-          readelf -dW "$binary" > "$proof/elf-dynamic.txt"
-          readelf -SW "$binary" > "$proof/elf-sections.txt"
-          readelf -VW "$binary" > "$proof/elf-versions.txt"
-          readelf -rW "$binary" > "$proof/elf-relocations.txt"
-          python3 - <<'PYCODE'
-          import hashlib, json, os, platform, subprocess
-          from pathlib import Path
-          binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
-          record = {
-              'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-              'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
-              'features': 'default,gix-transport',
-              'variant': os.environ['VARIANT'],
-              'rustflags': os.environ.get('RUSTFLAGS', ''),
-              'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
-              'file_bytes': binary.stat().st_size,
-              'cc': subprocess.check_output(['cc', '--version'], text=True),
-              'ld': subprocess.check_output(['ld', '--version'], text=True),
-              'host': platform.platform(),
-          }
-          (Path(os.environ['RUNNER_TEMP']) / 'proof/candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
-          PYCODE
-          tar -czf "$RUNNER_TEMP/crab-relr-$VARIANT.tar.gz" \
-            -C "$CARGO_TARGET_DIR/release" crab -C "$proof" .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: crab-relr-${{ matrix.variant }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/crab-relr-${{ matrix.variant }}.tar.gz
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
-
-  compare:
-    name: Verify ELF and CLI contracts
-    needs: release-build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: crab-relr-*-${{ github.run_id }}
-          path: ${{ runner.temp }}/relr-components
-          merge-multiple: true
-      - name: Require matching runtime and unchanged security properties
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/relr-components"
-          mkdir normal relr
-          tar -xzf crab-relr-normal.tar.gz -C normal
-          tar -xzf crab-relr-relr.tar.gz -C relr
-          python3 - <<'PYCODE'
-          import hashlib, json, re
-          from pathlib import Path
-          records = {}
-          for name in ['normal', 'relr']:
-              root = Path(name)
-              manifest = json.loads((root / 'candidate-build.json').read_text())
-              assert manifest['sha256'] == hashlib.file_digest((root / 'crab').open('rb'), 'sha256').hexdigest()
-              header = (root / 'elf-header.txt').read_text()
-              program = (root / 'elf-program.txt').read_text()
-              dynamic = (root / 'elf-dynamic.txt').read_text()
-              versions = (root / 'elf-versions.txt').read_text()
-              relocs = (root / 'elf-relocations.txt').read_text()
-              assert re.search(r'Type:\s+DYN', header), header
-              assert 'GNU_RELRO' in program
-              stack = next(line for line in program.splitlines() if 'GNU_STACK' in line)
-              assert re.search(r'\sRW\s', stack) and not re.search(r'\sRWE\s', stack), stack
-              assert 'BIND_NOW' in dynamic and re.search(r'FLAGS_1.*PIE', dynamic)
-              glibc = sorted({tuple(map(int, v.split('.'))) for v in re.findall(r'GLIBC_(\d+\.\d+)', versions)})
-              needed = sorted(re.findall(r'\(NEEDED\).*\[(.*?)\]', dynamic))
-              records[name] = dict(manifest, glibc_versions=glibc, needed=needed,
-                  relative_rela=relocs.count('R_X86_64_RELATIVE'),
-                  relr_tags=all(re.search(r'\(' + tag + r'\)', dynamic) for tag in ['RELR', 'RELRSZ', 'RELRENT']),
-                  relr_abi='GLIBC_ABI_DT_RELR' in versions)
-              assert manifest['source'] in (root / 'version.txt').read_text()
-          a, b = records['normal'], records['relr']
-          for key in ['source', 'compiler', 'features', 'cc', 'ld', 'glibc_versions', 'needed']:
-              assert a[key] == b[key], (key, a[key], b[key])
-          assert a['rustflags'] == '' and b['rustflags'] == '-C link-arg=-Wl,-z,pack-relative-relocs'
-          assert not a['relr_tags'] and not a['relr_abi']
-          assert b['relr_tags'] and b['relr_abi']
-          assert b['relative_rela'] < a['relative_rela']
-          for command in ['help.txt', 'push-help.txt']:
-              assert (Path('normal') / command).read_bytes() == (Path('relr') / command).read_bytes(), command
-          records['verdict'] = 'Component contracts pass. No performance claim; RustFS correctness and uninstrumented paired measurements remain required.'
-          Path('component-proof.json').write_text(json.dumps(records, indent=2) + '\n')
-          print(json.dumps(records, indent=2))
-          PYCODE
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: crab-relr-component-proof-${{ github.run_id }}
-          path: ${{ runner.temp }}/relr-components/component-proof.json
-          if-no-files-found: error
-          retention-days: 3
+    - uses: actions/checkout@v4
+      with:
+        ref: 4a27de3de1757b716a1694c65a266c2afefc4412
+        fetch-depth: 0
+    - name: Install fixture dependencies
+      run: |
+        {
+          echo "PAIR_ROOT=$RUNNER_TEMP/crab-paired-$PAIR_CLIENT"
+          echo "PAIR_SOURCE=$RUNNER_TEMP/Github/curl/curl"
+          echo "PAIR_CONTROL=$RUNNER_TEMP/paired-control/crab"
+          echo "PAIR_CANDIDATE=$RUNNER_TEMP/paired-candidate/crab"
+        } >> "$GITHUB_ENV"
+        sudo apt-get update -y
+        sudo apt-get install -y curl libfuse3-dev pipx
+        pipx install awscli
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - uses: actions/download-artifact@v4
+      with:
+        name: crab-relr-relr-${{ inputs.component_run }}
+        run-id: "${{ inputs.component_run }}"
+        github-token: "${{ github.token }}"
+        path: "${{ runner.temp }}/candidate-archive"
+    - uses: actions/download-artifact@v4
+      with:
+        name: crab-relr-normal-${{ inputs.component_run }}
+        run-id: "${{ inputs.component_run }}"
+        github-token: "${{ github.token }}"
+        path: "${{ runner.temp }}/control-archive"
+    - uses: actions/download-artifact@v4
+      with:
+        name: crab-relr-component-proof-${{ inputs.component_run }}
+        run-id: "${{ inputs.component_run }}"
+        github-token: "${{ github.token }}"
+        path: "${{ runner.temp }}/component-proof"
+    - name: Verify artifact sources and prepare pinned Git history
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        [[ "$PAIR_COMPONENT_RUN" =~ ^[0-9]+$ ]]
+        mkdir -p "$(dirname "$PAIR_CONTROL")" "$(dirname "$PAIR_CANDIDATE")" "$(dirname "$PAIR_SOURCE")"
+        tar -xzf "$RUNNER_TEMP/candidate-archive/crab-relr-relr.tar.gz" -C "$(dirname "$PAIR_CANDIDATE")"
+        tar -xzf "$RUNNER_TEMP/control-archive/crab-relr-normal.tar.gz" -C "$(dirname "$PAIR_CONTROL")"
+        gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PAIR_COMPONENT_RUN" \
+          --jq '{head_sha: .head_sha, run_id: .id, path: .path, conclusion: .conclusion}' > "$RUNNER_TEMP/component-source.json"
+        python3 - <<'PYCODE'
+        import hashlib, json, os
+        from pathlib import Path
+        record = json.loads((Path(os.environ['RUNNER_TEMP']) / 'component-source.json').read_text())
+        assert record['head_sha'] == os.environ['PAIR_COMPONENT_SOURCE'] and record['conclusion'] == 'success'
+        proof = json.loads((Path(os.environ['RUNNER_TEMP']) / 'component-proof/component-proof.json').read_text())
+        for label, key, variable in [('control', 'normal', 'PAIR_CONTROL'), ('candidate', 'relr', 'PAIR_CANDIDATE')]:
+            binary = Path(os.environ[variable])
+            build = json.loads((binary.parent / 'candidate-build.json').read_text())
+            assert build['source'] == record['head_sha'] and build['variant'] == key
+            assert build['sha256'] == proof[key]['sha256'] == hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest()
+            assert build['compiler'] == proof[key]['compiler'] and build['features'] == proof[key]['features']
+        PYCODE
+        "$PAIR_CONTROL" version | grep -F "$PAIR_COMPONENT_SOURCE"
+        "$PAIR_CANDIDATE" version | grep -F "$PAIR_COMPONENT_SOURCE"
+        git clone --no-checkout https://github.com/curl/curl.git "$PAIR_SOURCE"
+        git -C "$PAIR_SOURCE" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+    - name: Compare identical 1, 10 and 50-client workloads in ABBA order
+      run: python3 -B crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py
+    - name: Enforce the original native median budget in both candidate trials
+      if: matrix.client == 'native'
+      run: |
+        python3 - <<'PY'
+        import json, os
+        from pathlib import Path
+        rows = json.loads((Path(os.environ['PAIR_ROOT']) / 'results.json').read_text())
+        candidates = [row for row in rows if row['variant'] == 'candidate']
+        assert len(candidates) == 6
+        assert all(row['p50_ms'] < 500 for row in candidates), candidates
+        PY
+    - name: Stop only this comparison's fixtures
+      if: always()
+      run: |
+        docker ps -aq --filter "label=crab-paired=$GITHUB_RUN_ID-$PAIR_CLIENT" \
+          | xargs -r docker rm -f
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: paired-push-${{ matrix.client }}-${{ github.run_id }}
+        path: |
+          ${{ env.PAIR_ROOT }}/*.json
+          ${{ env.PAIR_ROOT }}/*.log
+          ${{ env.PAIR_ROOT }}/*/paired-writers-*/artifacts/**
+          ${{ env.PAIR_ROOT }}/*/paired-writers-*/logs/**
+          ${{ runner.temp }}/component-source.json
+          ${{ runner.temp }}/component-proof/component-proof.json
+          ${{ runner.temp }}/paired-control/candidate-build.json
+          ${{ runner.temp }}/paired-candidate/candidate-build.json
+        if-no-files-found: error
