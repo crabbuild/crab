@@ -93,8 +93,11 @@ test("packaged updater handles CLI-only releases and genuine desktop updates", a
 });
 
 test("packaged desktop opens and reads a real repository through its v2 agent", async () => {
+  test.setTimeout(60_000);
   const executablePath = packagedExecutable();
   const root = mkdtempSync(path.join(tmpdir(), "crab-desktop-smoke-"));
+  const cache = path.join(root, "cache");
+  mkdirSync(cache);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root });
   git(["init", "--initial-branch=main"]);
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
@@ -102,7 +105,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
   const application = await electron.launch({
     executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
-    env: { ...process.env, CRAB_PTY_MODE: "auto" },
+    env: { ...process.env, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
   });
   try {
     expect(await application.evaluate(({ app }) => app.getVersion())).toBe(desktopVersion);
@@ -128,6 +131,48 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("button", { name: "Kanban Board", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => Object.hasOwn(window.crab, "kanban"))).toBe(false);
     await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Skills", exact: true })).toHaveCount(0);
+    const agentDetection = await page.evaluate(() => window.crab.orchestrator.detectAgents());
+    expect(agentDetection.success).toBe(true);
+    await page.getByRole("button", { name: "Chat", exact: true }).click();
+    if (!agentDetection.agents.some((agent: { available: boolean }) => agent.available)) {
+      await page.getByRole("button", { name: "Skip for now", exact: true }).click();
+    }
+    const composer = page.getByPlaceholder("Ask anything. / for commands, @ for context, # for files…");
+    const draft = "Keep this draft while managing skills @";
+    await composer.fill(draft);
+    const chatNavigation = page.getByRole("navigation", { name: "Agent chat", exact: true });
+    await chatNavigation.getByRole("button", { name: "Skills", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Skills", exact: true })).toBeVisible();
+    const skillSearch = page.getByPlaceholder("Search skills...");
+    await expect(skillSearch).toBeVisible();
+    await skillSearch.fill("Unmatched skill search");
+    await skillSearch.press("Enter");
+    await skillSearch.fill("");
+    await expect(composer).toBeHidden();
+    await page.getByRole("button", { name: "New Skill", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "New Skill", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("button", { name: "Install from URL", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Install Skill from URL", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.screenshot({ path: test.info().outputPath("skills-in-chat.png") });
+    await chatNavigation.getByRole("button", { name: "Chats", exact: true }).click();
+    await expect(composer).toHaveValue(draft);
+    await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Health & Diagnostics", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Diagnostics", exact: true }).click();
+    const healthReport = page.getByRole("region", { name: "Health & Diagnostics", exact: true });
+    await expect(healthReport.getByRole("heading", { name: "Health & Diagnostics", exact: true })).toBeVisible();
+    await expect(healthReport.getByText("Agent Version", { exact: true })).toBeVisible();
+    await expect(healthReport.getByText(desktopVersion, { exact: true }).first()).toBeVisible();
+    await expect(healthReport.getByText(cache, { exact: true })).toBeVisible();
+    const refreshHealth = healthReport.getByRole("button", { name: "Refresh health data", exact: true });
+    await refreshHealth.click();
+    await expect(refreshHealth).toBeEnabled();
+    await expect(healthReport.getByRole("button", { name: "Copy diagnostics to clipboard", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "PTY Daemon", exact: true, level: 3 })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("diagnostics-in-settings.png") });
     await page.getByRole("button", { name: "Explorer", exact: true }).click();
     await page.screenshot({ path: test.info().outputPath("repository-opened.png") });
     await page.locator('[role="treeitem"][data-item-path="desktop-smoke.txt"]').click();

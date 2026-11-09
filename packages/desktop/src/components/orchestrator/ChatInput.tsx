@@ -576,6 +576,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
   return (
     <div
       ref={containerRef}
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget)) return;
+        // These popovers listen on document; hidden chat must not consume Skills input.
+        setShowSlash(false);
+        setShowAt(false);
+        setFileMentionActive(false);
+      }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
       className="relative rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"

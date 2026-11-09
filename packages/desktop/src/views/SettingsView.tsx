@@ -32,6 +32,7 @@ import { useWorkspaceSettings } from "../hooks/useWorkspaceSettings";
 import { ScopeChip } from "../components/ScopeChip";
 import { AgentManagerView } from "./AgentManagerView";
 import { DiagnosticsView } from "./DiagnosticsView";
+import { HealthView } from "./HealthView";
 import { useSession } from "../lib/session-context";
 
 const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({ value: t.id, label: t.label }));
@@ -1647,6 +1648,7 @@ function DiagnosticsSection() {
 
   return (
     <Section title="Diagnostics" subtitle="Logging, notifications, telemetry, and system health.">
+      <HealthView />
       {/* Notifications */}
       <SubSection title="Notifications">
         <Row

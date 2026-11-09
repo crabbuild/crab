@@ -135,9 +135,9 @@ export function HealthView() {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-auto p-6">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gx-text">Health &amp; Diagnostics</h1>
+    <section aria-label="Health & Diagnostics" className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-gx-text">Health &amp; Diagnostics</h3>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -243,7 +243,7 @@ export function HealthView() {
           )}
 
           {/* Version & path cards */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
             <Card
               title="Agent Version"
               value={health.agent_version}
@@ -294,7 +294,7 @@ export function HealthView() {
           </div>
 
           {/* Storage metrics */}
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
             <Card
               title="Cache Used"
               value={formatBytes(health.cache_used_bytes)}
@@ -324,7 +324,7 @@ export function HealthView() {
           <RepoInfoSection />
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -431,7 +431,7 @@ function RepoInfoSection() {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-sm font-semibold text-gx-text">Repository Info</h2>
+      <h4 className="text-sm font-semibold text-gx-text">Repository Info</h4>
 
       {/* HEAD + working dir */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

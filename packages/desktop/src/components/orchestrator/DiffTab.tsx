@@ -119,7 +119,7 @@ interface Props {
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function DiffTab({ task, repo: _repo, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props) {
+export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
   const [files, setFiles] = useState<DiffFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -360,7 +360,7 @@ export function DiffTab({ task, repo: _repo, initialActiveFile, checkpointSha, c
 
   // Keyboard navigation (matches commit timeline page)
   useEffect(() => {
-    if (!files.length) return;
+    if (!active || !files.length) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const fi = Math.max(0, files.findIndex((f) => f.path === activeFile));
@@ -374,7 +374,7 @@ export function DiffTab({ task, repo: _repo, initialActiveFile, checkpointSha, c
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [files, activeFile, handleSelectFile]);
+  }, [active, files, activeFile, handleSelectFile]);
 
   if (loading) {
     return (

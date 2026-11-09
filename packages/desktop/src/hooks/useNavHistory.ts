@@ -58,7 +58,6 @@ const KNOWN_NAV_VIEWS = new Set([
   "workflows",
   "terminal",
   "dashboard",
-  "health",
   "orchestrator",
   "agents",
   "ssh",
