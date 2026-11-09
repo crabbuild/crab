@@ -97,9 +97,11 @@ permission to drop the enclosing future before removing its private destination.
 
 `Store::with_read_admission` adds caller-owned asynchronous GET/HEAD/listing admission
 after read-route configuration. The supplied policy is shared by clones and
-read routes, including access through `inner()`. It sees each facade retry,
-reserves the advertised body size before payload polling, and rejects body
-length mismatches.
+read routes, including access through `inner()`. Crab-built cloud providers
+charge HTTP attempts, listing pages and consumed response bytes. Their body
+polls retain the same admission scope, including provider range-resume requests
+after response headers have returned. Other stores reserve the advertised body
+size before payload polling. Both paths reject body length mismatches.
 
 `ReadRejected` preserves the caller source and is fatal
 through storage/cache/I/O wrappers. Admission and response-framing failures use
@@ -110,8 +112,9 @@ corruption once, while admission rejection is terminal.
 Each listing invocation charges one request; streaming listings defer admission
 and backend construction until first poll.
 
-Provider-internal pagination, listing response bytes and provider-internal HTTP
-retries are outside this hook; writes retain their existing behavior.
+Admission rejection remains latched through provider body retries, preventing
+a second request from escaping an exhausted owner. Writes retain their existing
+behavior.
 
 ### Provider identity
 

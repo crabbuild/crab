@@ -61,6 +61,87 @@ fn exhausted(error: StorageError) {
 }
 
 #[tokio::test]
+async fn provider_body_retries_retain_request_and_byte_admission() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for (truncate, requests, bytes, succeeds) in [
+        (false, 10, 1, false),
+        (true, 1, 4, false),
+        (true, 2, 4, true),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 16 * 1024);
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                let attempt = observed.fetch_add(1, Ordering::SeqCst);
+                let (status, range, body) = if attempt > 0 && truncate {
+                    assert!(String::from_utf8(request).unwrap().contains("bytes=2-3"));
+                    (
+                        "206 Partial Content",
+                        "Content-Range: bytes 2-3/4\r\n",
+                        "cd",
+                    )
+                } else {
+                    ("200 OK", "", "abcd")
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\n{range}Content-Length: {}\r\nETag: \"pinned\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                let body = if truncate && attempt == 0 {
+                    &body[..2]
+                } else {
+                    body
+                };
+                let _ = socket.write_all(body.as_bytes()).await;
+            }
+        });
+        let budget = Budget::new(requests, bytes);
+        let store = crate::build_explicit_store(
+            "bucket",
+            crate::ObjectStoreCredentials::Aws {
+                access_key_id: "test".into(),
+                secret_access_key: "test".into(),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            Some(&endpoint),
+            true,
+        )
+        .unwrap()
+        .with_read_admission(budget.clone());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (_, _, stream) = store.get_stream(&Path::from("object"), None).await?;
+            stream.try_collect::<Vec<_>>().await
+        })
+        .await;
+        server.abort();
+        let _ = server.await;
+        let result = result.unwrap();
+        if succeeds {
+            assert_eq!(result.unwrap().concat(), b"abcd");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(retry_class(&error), RetryClass::Fatal);
+            let mut cause: &(dyn std::error::Error + 'static) = &error;
+            while !cause.is::<Exhausted>() {
+                cause = cause.source().expect("typed admission rejection retained");
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), if succeeds { 2 } else { 1 });
+    }
+}
+
+#[tokio::test]
 async fn listing_shapes_cannot_bypass_request_admission() {
     let inner = Arc::new(object_store::memory::InMemory::new());
     let store = Store::new(inner).with_read_admission(Budget::new(0, 0));
