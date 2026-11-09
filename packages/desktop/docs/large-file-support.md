@@ -833,3 +833,23 @@ acceptance matrix above remains the completion boundary.
   still proves the human-review pause. All 108 cases across those seven files
   pass locally. This corrects the test contract; it does not widen replay or
   change production connection deadlines. Broad CI still needs a green rerun.
+
+## Paired SSH runtime producer checkpoint
+
+- Linux/macOS native builds now produce a compressed, checksummed CLI/sidecar
+  pair and target descriptor beneath `resources/native/ssh-runtimes/`. Both
+  inputs must match the native build manifest before archiving. Hard links keep
+  staging from duplicating the large binaries; hashing is streamed. Only the
+  native pair and its metadata enter the archive. The NFS helper remains local.
+- All 22 build-script cases pass, including actual archive extraction, exact
+  inventory/bytes/metadata, checksum validation and rejection of a modified
+  input without replacing the previous archive. An actual macOS arm64 archive
+  is 85,257,915 bytes: extracting it preserves both hashes, its CLI reports
+  `2.0.0-alpha.1`, and its agent reports all 194 methods and exits cleanly.
+  The final package repeats the real SSH transport smoke in 7.9 seconds and
+  verifies all 901 renderer/Electron files and native manifest checksums.
+  Evidence: `ssh-runtime-archive-proof.json`, `ssh-runtime-package-proof/` and
+  `ssh-runtime-packaged-assets.json` in the external build directory.
+- This is the deployment input producer. The application's deployer still uses
+  its old binary-only path; archive consumption, all-target assembly and actual
+  desktop bootstrap remain open. No remote-deployment completion is claimed.

@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundleSshRuntime } from "./bundle-ssh-runtime.mjs";
 
 const desktop = fileURLToPath(new URL("../", import.meta.url));
 const root = path.resolve(desktop, "../..");
@@ -59,4 +60,7 @@ for (const [name, prefix] of [["crab", "crab"], ["crab-desktop-agent", "crab-des
   if (actual !== `${prefix} ${version}`) throw new Error(`Desktop ${version} cannot bundle ${actual}`);
 }
 await writeFile(path.join(destination, "runtime.json"), JSON.stringify({ version, platform: process.platform, arch: process.arch, hashes }, null, 2) + "\n");
+if (process.platform !== "win32") {
+  await bundleSshRuntime(destination, path.join(desktop, "resources", "native", "ssh-runtimes"));
+}
 console.log(`Crab ${version} desktop runtime staged in ${destination}`);

@@ -90,6 +90,9 @@ scratch directory instead of the developer's Workspace volume.
 `build:agent` builds and stages the complete Rust runtime in
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
+On Linux and macOS, `build:agent` also creates the verified CLI/agent archive and
+checksum descriptor under `resources/native/ssh-runtimes/`. Remote installation
+and assembly of all target architectures remain under qualification.
 
 Run native integration tests after building the runtime, with `CRAB_BIN` set to
 `$CARGO_TARGET_DIR/release/crab` (`crab.exe` on Windows). Worktree tests invoke
