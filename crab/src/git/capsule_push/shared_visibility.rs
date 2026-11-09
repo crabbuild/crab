@@ -6,16 +6,14 @@ pub(super) fn prepare_replacements(
     git_dir: &Path,
     edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
     fast_forwards: &BTreeSet<String>,
-    available_old_tips: &BTreeSet<String>,
     cancel: &CancellationToken,
 ) -> Result<BTreeMap<String, GitVisibilityObjects>> {
     let replacements = edits
         .iter()
         .filter_map(|edit| {
             let new = edit.new_oid()?;
-            let incremental = edit.expected_old().is_some_and(|old| {
-                fast_forwards.contains(edit.ref_name()) || available_old_tips.contains(old)
-            });
+            let incremental =
+                edit.expected_old().is_some() && fast_forwards.contains(edit.ref_name());
             (!incremental).then_some((edit, new))
         })
         .collect::<Vec<_>>();
