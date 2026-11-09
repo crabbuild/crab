@@ -514,7 +514,7 @@ jobs:
           assert version['schema']=='version' and version['data']['git_sha']==source
           for command in ['push','fetch','fsck']:
               text=subprocess.check_output([str(binary),command,'--help'],text=True)
-              assert f'crab {command}' in text
+              assert f'{binary.name} {command}' in text
           with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as cwd:
               failure=subprocess.run([str(binary),'push','--json','unsupported://qualification'],cwd=cwd,text=True,capture_output=True)
               assert failure.returncode!=0
