@@ -630,7 +630,15 @@ fn generate_pack_files_via_git(
     );
     let base_name = output_dir.path().join("pack");
     let mut command = crab_git::raw_object_command(&output_root);
-    command.args(["pack-objects", "--quiet"]);
+    // This private directory supplies only the pack; the installer builds its own locators.
+    // Skip the unused reverse index while retaining Git's pack/index flushing
+    // and the installer's independent object validation.
+    command.args([
+        "-c",
+        "pack.writeReverseIndex=false",
+        "pack-objects",
+        "--quiet",
+    ]);
     if revisions {
         command.arg("--revs");
     }
@@ -2387,6 +2395,32 @@ mod tests {
             pack_generation_size_limit(hard_limit),
             hard_limit - hard_limit / 20
         );
+    }
+
+    #[test]
+    fn temporary_pack_generation_omits_unused_reverse_indexes() {
+        let (_repo, git_dir, head) = write_incompressible_git_commit(1, 4096);
+        assert!(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(["config", "pack.writeReverseIndex", "true"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        for revisions in [false, true] {
+            let packs =
+                generate_pack_files_via_git(Some(&git_dir), [head.clone()], revisions, 0).unwrap();
+            let directory = packs[0].pack_path.parent().unwrap();
+            assert!(
+                std::fs::read_dir(directory).unwrap().all(|entry| {
+                    entry.unwrap().path().extension() != Some(std::ffi::OsStr::new("rev"))
+                }),
+                "temporary pack generation does not consume reverse indexes (revisions={revisions})"
+            );
+        }
     }
 
     #[tokio::test]
