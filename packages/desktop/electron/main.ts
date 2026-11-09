@@ -2,6 +2,7 @@ import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage } from 
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
@@ -987,10 +988,19 @@ function registerIpc(skillManager: SkillManager) {
   });
 
   // ---- Terminal state persistence ----
-  const termStateDir = path.join(os.homedir(), ".crab-desktop");
-  const termStatePath = path.join(termStateDir, "terminal-state.json");
-  const termScrollbackDir = path.join(termStateDir, "terminal-scrollback");
+  const termStateDir = path.join(app.getPath("userData"), "terminal");
   const termLogsDir = path.join(termStateDir, "logs");
+
+  // A profile can host multiple repositories and task terminals. Each owner
+  // needs its own layout; sharing one file can restore another repo's deleted cwd.
+  function terminalStatePaths(persistenceKey: string) {
+    const key = createHash("sha256").update(persistenceKey).digest("hex");
+    const directory = path.join(termStateDir, "layouts", key);
+    return {
+      statePath: path.join(directory, "state.json"),
+      scrollbackDir: path.join(directory, "scrollback"),
+    };
+  }
 
   // ---- Terminal session logging ----
   // Per-session log writers (main-process side).
@@ -1130,9 +1140,10 @@ function registerIpc(skillManager: SkillManager) {
   // ---- Terminal scrollback/log cleanup IPC ----
   ipcMain.handle(
     "crab:term-clear-session",
-    async (_evt, sessionId: string) => {
-      // Delete scrollback persistence file
-      const scrollbackPath = path.join(termScrollbackDir, `${sessionId}.bin`);
+    async (_evt, sessionId: string, persistenceKey: string) => {
+      // Clearing a terminal must use the same owner as save and restore.
+      const { scrollbackDir } = terminalStatePaths(persistenceKey);
+      const scrollbackPath = path.join(scrollbackDir, `${sessionId}.bin`);
       try {
         if (fs.existsSync(scrollbackPath)) fs.unlinkSync(scrollbackPath);
       } catch { /* ignore */ }
@@ -1176,16 +1187,11 @@ function registerIpc(skillManager: SkillManager) {
     "crab:term-save-state",
     async (
       _evt,
-      req: { layout: unknown; scrollbackData: Record<string, string> },
+      req: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> },
     ) => {
       try {
-        // Ensure directories exist.
-        if (!fs.existsSync(termStateDir)) {
-          fs.mkdirSync(termStateDir, { recursive: true });
-        }
-        if (!fs.existsSync(termScrollbackDir)) {
-          fs.mkdirSync(termScrollbackDir, { recursive: true });
-        }
+        const { statePath, scrollbackDir } = terminalStatePaths(req.persistenceKey);
+        fs.mkdirSync(scrollbackDir, { recursive: true });
 
         // Write the layout state file.
         const stateFile = {
@@ -1193,11 +1199,11 @@ function registerIpc(skillManager: SkillManager) {
           savedAt: new Date().toISOString(),
           layout: req.layout,
         };
-        fs.writeFileSync(termStatePath, JSON.stringify(stateFile, null, 2), "utf8");
+        fs.writeFileSync(statePath, JSON.stringify(stateFile, null, 2), "utf8");
 
         // Write scrollback data for each session.
         for (const [sessionId, content] of Object.entries(req.scrollbackData)) {
-          const scrollbackPath = path.join(termScrollbackDir, `${sessionId}.bin`);
+          const scrollbackPath = path.join(scrollbackDir, `${sessionId}.bin`);
           fs.writeFileSync(scrollbackPath, content, "utf8");
         }
 
@@ -1221,13 +1227,14 @@ function registerIpc(skillManager: SkillManager) {
     },
   );
 
-  ipcMain.handle("crab:term-restore-state", async () => {
+  ipcMain.handle("crab:term-restore-state", async (_evt, persistenceKey: string) => {
     try {
-      if (!fs.existsSync(termStatePath)) {
+      const { statePath, scrollbackDir } = terminalStatePaths(persistenceKey);
+      if (!fs.existsSync(statePath)) {
         return { layout: null, scrollbackData: {} };
       }
 
-      const raw = fs.readFileSync(termStatePath, "utf8");
+      const raw = fs.readFileSync(statePath, "utf8");
       const parsed = JSON.parse(raw);
 
       if (!parsed || typeof parsed !== "object" || !parsed.layout) {
@@ -1240,7 +1247,7 @@ function registerIpc(skillManager: SkillManager) {
       if (layout && Array.isArray(layout.tabs)) {
         for (const tab of layout.tabs) {
           if (tab && typeof tab.id === "string") {
-            const scrollbackPath = path.join(termScrollbackDir, `${tab.id}.bin`);
+            const scrollbackPath = path.join(scrollbackDir, `${tab.id}.bin`);
             if (fs.existsSync(scrollbackPath)) {
               try {
                 scrollbackData[tab.id] = fs.readFileSync(scrollbackPath, "utf8");
@@ -1253,7 +1260,7 @@ function registerIpc(skillManager: SkillManager) {
         // Also check quick terminal scrollback.
         if (layout.quickTerminal && typeof layout.quickTerminal.id === "string") {
           const scrollbackPath = path.join(
-            termScrollbackDir,
+            scrollbackDir,
             `${layout.quickTerminal.id}.bin`,
           );
           if (fs.existsSync(scrollbackPath)) {

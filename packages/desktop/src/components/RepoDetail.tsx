@@ -12,7 +12,8 @@ import { ChangesAndStashesView } from "../views/ChangesAndStashesView";
 import { SearchView } from "../views/SearchView";
 import { SettingsView } from "../views/SettingsView";
 import { WorktreeDetailPanel } from "../views/WorktreeDetailPanel";
-import { WorktreesAndBranchesView } from "../views/WorktreesAndBranchesView";
+import { BranchesView } from "../views/BranchesView";
+import { WorktreeView } from "../views/WorktreeView";
 import { TimelineAndConflictsView } from "../views/TimelineAndConflictsView";
 import { DashboardView } from "../views/DashboardView";
 import { CommitDetailView } from "../views/CommitDetailView";
@@ -43,7 +44,6 @@ interface RepoDetailProps {
   repo: OpenRepo;
   navEntry?: NavEntry;
   onNavigate?: (entry: NavEntry) => void;
-  isRestoringRef?: React.MutableRefObject<boolean>;
   /** Whether the activity drawer is open. */
   activityDrawerOpen?: boolean;
   /** Toggle the activity drawer. */
@@ -59,7 +59,7 @@ interface RepoDetailProps {
  * render editor tabs (path+rev) and diff tabs (path+base/head) side
  * by side. That mirrors VS Code's mixed "editor group" behaviour.
  */
-export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
+export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
   const sessionManager = useSession();
 
   const [rev, setRev] = useState<string | null>(null);
@@ -74,9 +74,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         // there was no active file, the user was likely seeing the dashboard
         // fallback. Restore to "dashboard" so the indicator matches reality.
         const fullPaneViews: SidebarView[] = [
-          "settings", "dashboard", "crab",
+          "settings", "dashboard", "terminal", "crab",
           "workflows", "orchestrator", "changes", "timeline",
-          "pull-requests", "worktrees",
+          "pull-requests", "branches", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
           return "dashboard";
@@ -86,46 +86,16 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     }
     return "dashboard";
   });
-  const [worktreesBranchesTab, setWorktreesBranchesTabRaw] = useState<"worktrees" | "branches">(() => {
-    // Restore from per-repo session viewState first, fall back to global localStorage.
-    if (repo.path) {
-      const session = sessionManager.activate(repo.path);
-      const saved = session?.viewState?.worktreesBranchesTab;
-      if (saved === "branches" || saved === "worktrees") return saved;
-    }
-    const stored = localStorage.getItem("crab.worktreesBranches.tab");
-    return stored === "branches" ? "branches" : "worktrees";
-  });
   const [timelineConflictsTab, setTimelineConflictsTabRaw] = useState<"timeline" | "conflicts">(() => {
     const stored = localStorage.getItem("crab.timelineConflicts.tab");
     return stored === "conflicts" ? "conflicts" : "timeline";
   });
 
-  // Track which tab is active (for sidebar content only — does NOT
-  // affect the main pane). The main pane switches only when the user
-  // explicitly selects a branch or worktree item.
-  const handleTabChange = useCallback((tab: "worktrees" | "branches") => {
-    setWorktreesBranchesTabRaw(tab);
-  }, []);
-
   const handleTimelineConflictsTabChange = useCallback((tab: "timeline" | "conflicts") => {
     setTimelineConflictsTabRaw(tab);
   }, []);
 
-  // When a branch is selected, clear worktree selection so the main
-  // pane shows BranchDetailView. Vice versa for worktree selection.
-  const handleSelectBranch = useCallback((name: string | null) => {
-    setSelectedBranch(name);
-    if (name) setSelectedWorktree(null);
-  }, []);
-
-  const handleSelectWorktree = useCallback((wt: HydratedWorktreeEntry | null) => {
-    setSelectedWorktree(wt);
-    if (wt) setSelectedBranch(null);
-  }, []);
-
   const setActiveView = useCallback((view: SidebarView) => {
-    if (view !== "worktrees") setSelectedBranch(null);
     if (view !== "timeline") setConflictPath(null);
     setActiveViewRaw(view);
   }, []);
@@ -164,9 +134,8 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   const [timelineCommits, setTimelineCommits] = useState<CommitRow[]>([]);
   const [timelineRefreshKey, setTimelineRefreshKey] = useState(0);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(() => {
-    // Restore the branch selection owned by the worktrees view.
-    // so the user returns to the exact branch they were looking at.
-    if (activeView === "worktrees" && repo.path) {
+    // Branch selection belongs to its own route, independently of worktrees.
+    if (repo.path) {
       const session = sessionManager.activate(repo.path);
       const savedBranch = session?.viewState?.selectedBranch;
       if (typeof savedBranch === "string" && savedBranch.length > 0) {
@@ -208,20 +177,42 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     return () => window.removeEventListener("crab:active-view-changed", handler);
   }, [repo.path, sessionManager]);
 
+  const terminalReturnView = useRef<SidebarView>("dashboard");
+  useEffect(() => {
+    if (activeView !== "terminal") terminalReturnView.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    const openTerminal = () => setActiveView("terminal");
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key === "`") {
+        event.preventDefault();
+        setActiveView(activeView === "terminal" ? terminalReturnView.current : "terminal");
+      }
+    };
+    window.addEventListener("crab:open-terminal", openTerminal);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("crab:open-terminal", openTerminal);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [activeView, setActiveView]);
+
   useEffect(() => {
     const showOverview = () => setActiveView("dashboard");
     window.addEventListener("crab:show-repository-overview", showOverview);
     return () => window.removeEventListener("crab:show-repository-overview", showOverview);
   }, [setActiveView]);
 
-  // Restore view when navEntry changes (back/forward triggered).
+  // The initial view belongs to this repo's session. Only later history
+  // changes may replace it; the shell can still hold the departing repo's entry.
+  const previousNavEntryRef = useRef(navEntry);
   useEffect(() => {
-    if (!navEntry || !isRestoringRef) return;
-    isRestoringRef.current = true;
+    if (navEntry === previousNavEntryRef.current) return;
+    previousNavEntryRef.current = navEntry;
+    if (!navEntry) return;
     if (isSidebarView(navEntry.view)) setActiveView(navEntry.view);
     if (navEntry.commit !== undefined) setSelectedCommit(navEntry.commit ?? null);
-    // Allow the next render cycle to complete before re-enabling push.
-    requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [navEntry]);
 
   useEffect(() => {
@@ -289,7 +280,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   // context — not just the view, but the item within the view.
   useSessionSubView("selectedCommit", selectedCommit);
   useSessionSubView("selectedBranch", selectedBranch);
-  useSessionSubView("worktreesBranchesTab", worktreesBranchesTab);
 
   // Conflict resolution: selected file in ConflictsView opens MergeEditor.
   const [conflictPath, setConflictPath] = useState<string | null>(null);
@@ -721,17 +711,16 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
       />
     ),
     crab: <CrabFlowView repo={repo} onSelectCommit={(sha) => { setSelectedCommit(sha); setActiveView("timeline"); }} onOpenFile={openFile} />,
+    branches: (
+      <BranchesView repo={repo} selectedBranch={selectedBranch} onSelectBranch={setSelectedBranch} />
+    ),
     worktrees: (
-      <WorktreesAndBranchesView
+      <WorktreeView
         repo={repo}
-        onSelectWorktree={handleSelectWorktree}
+        onSelectWorktree={setSelectedWorktree}
         selectedWorktree={selectedWorktree}
         statusMap={worktreeStatusMap}
         onStatusMapChange={setWorktreeStatusMap}
-        selectedBranch={selectedBranch}
-        onSelectBranch={handleSelectBranch}
-        requestedTab={worktreesBranchesTab}
-        onTabChange={handleTabChange}
       />
     ),
     timeline: (
@@ -793,9 +782,9 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   // When the active view is NOT one of these and there are no open tabs,
   // we show the Dashboard as a landing page instead of a blank screen.
   const fullPaneActiveViews: SidebarView[] = [
-    "settings", "dashboard", "crab",
+    "settings", "dashboard", "terminal", "crab",
     "workflows", "orchestrator", "changes", "timeline",
-    "pull-requests", "worktrees",
+    "pull-requests", "branches", "worktrees",
   ];
   const showDashboardFallback =
     !hasOpenTabs &&
@@ -812,12 +801,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
           views={views}
           onViewChange={setActiveView}
           activeView={activeView}
-          fullPaneViews={["settings", "dashboard", "crab", "workflows", "orchestrator", "changes", "ssh"]}
+          fullPaneViews={["settings", "dashboard", "terminal", "crab", "workflows", "orchestrator", "changes", "ssh"]}
           hiddenViews={hiddenViews}
           badges={conflictCount > 0 ? { timeline: conflictCount } : undefined}
           main={
             <div className="relative flex h-full w-full min-w-0 flex-col">
-              {activeView === "settings" ? (
+              {activeView === "terminal" ? null : activeView === "settings" ? (
                 <SettingsView />
               ) : activeView === "ssh" ? (
                 <SshView />
@@ -851,8 +840,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                   }}
                   onSelectBranch={(name) => {
                     setSelectedBranch(name);
-                    setWorktreesBranchesTabRaw("branches");
-                    setActiveView("worktrees");
+                    setActiveView("branches");
                   }}
                 />
             ) : activeView === "timeline" && selectedCommit ? (
@@ -863,7 +851,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                   onSelectCommit={setSelectedCommit}
                   onOpenFileAtRev={openFileAtRev}
                 />
-            ) : selectedBranch && !selectedWorktree ? (
+            ) : activeView === "branches" && selectedBranch ? (
               <BranchDetailView
                   repo={repo}
                   branchName={selectedBranch}
@@ -949,8 +937,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                 }}
                 onSelectBranch={(name) => {
                   setSelectedBranch(name);
-                  setWorktreesBranchesTabRaw("branches");
-                    setActiveView("worktrees");
+                  setActiveView("branches");
                 }}
               />
             ) : splitTab ? (
@@ -1013,22 +1000,23 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         />
       </div>
 
-      <StatusBar
-        summary={hydration.summary}
-        loading={hydration.loading}
-        onRefresh={hydration.refresh}
-        syncToolbar={branchInfo ? {
-          repoId: repo.repo_id,
-          currentBranch: branchInfo.currentBranch,
-          ahead: branchInfo.ahead,
-          behind: branchInfo.behind,
-          upstream: branchInfo.upstream,
-        } : null}
-        onCommandExecuted={handleCommandExecuted}
-        activityDrawerOpen={activityDrawerOpen}
-        onToggleActivityDrawer={onToggleActivityDrawer}
-      />
-
+      <div className={activeView === "terminal" ? "hidden" : undefined}>
+        <StatusBar
+          summary={hydration.summary}
+          loading={hydration.loading}
+          onRefresh={hydration.refresh}
+          syncToolbar={branchInfo ? {
+            repoId: repo.repo_id,
+            currentBranch: branchInfo.currentBranch,
+            ahead: branchInfo.ahead,
+            behind: branchInfo.behind,
+            upstream: branchInfo.upstream,
+          } : null}
+          onCommandExecuted={handleCommandExecuted}
+          activityDrawerOpen={activityDrawerOpen}
+          onToggleActivityDrawer={onToggleActivityDrawer}
+        />
+      </div>
       <QuickOpen
         entries={entries}
         open={quickOpen}

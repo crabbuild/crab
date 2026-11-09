@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Maximize2, Minimize2, Terminal } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Terminal } from "lucide-react";
 import clsx from "clsx";
 import { OpenRepo, WorkspaceRepoEntry } from "../state";
 import { createPresetManager, type StartupCommand } from "../lib/terminal-presets";
@@ -18,11 +18,9 @@ interface Props {
   canForward: boolean;
   onBack: () => void;
   onForward: () => void;
-  /** Bottom terminal panel toggle. */
-  terminalOpen: boolean;
-  onToggleTerminal: () => void;
-  terminalMaximized: boolean;
-  onToggleTerminalMaximized: () => void;
+  /** Open the full-page terminal. */
+  terminalActive: boolean;
+  onOpenTerminal: () => void;
   onShowOverview: () => void;
   /** Called when user selects an agent preset from the dropdown. */
   onSpawnAgentTerminal?: (cmd: StartupCommand) => void;
@@ -62,10 +60,8 @@ export function TopBar({
   canForward,
   onBack,
   onForward,
-  terminalOpen,
-  onToggleTerminal,
-  terminalMaximized,
-  onToggleTerminalMaximized,
+  terminalActive,
+  onOpenTerminal,
   onShowOverview,
   onSpawnAgentTerminal,
   workspaceName,
@@ -288,10 +284,9 @@ export function TopBar({
         className="flex shrink-0 items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
-        {terminalOpen && <button type="button" aria-label={terminalMaximized ? "Restore terminal" : "Maximize terminal"} title={terminalMaximized ? "Restore terminal" : "Maximize terminal"} onClick={onToggleTerminalMaximized} className="rounded p-2 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text">{terminalMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>}
         <TerminalSplitButton
-          terminalOpen={terminalOpen}
-          onToggleTerminal={onToggleTerminal}
+          terminalActive={terminalActive}
+          onOpenTerminal={onOpenTerminal}
           onSpawnAgentTerminal={handleSpawnAgentTerminalWithMeta}
         />
       </div>
@@ -302,14 +297,14 @@ export function TopBar({
 // --- Terminal Split Button with Agent Dropdown ---
 
 interface TerminalSplitButtonProps {
-  terminalOpen: boolean;
-  onToggleTerminal: () => void;
+  terminalActive: boolean;
+  onOpenTerminal: () => void;
   onSpawnAgentTerminal?: (cmd: StartupCommand) => void;
 }
 
 function TerminalSplitButton({
-  terminalOpen,
-  onToggleTerminal,
+  terminalActive,
+  onOpenTerminal,
   onSpawnAgentTerminal,
 }: TerminalSplitButtonProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -424,16 +419,16 @@ function TerminalSplitButton({
 
   return (
     <div className="relative inline-flex" ref={dropdownRef}>
-      {/* Main button — toggles terminal panel */}
+      {/* Main button — opens the terminal page */}
       <button
         type="button"
         className={clsx(
           "btn text-xs rounded-r-none border-r-0 pr-1.5",
-          terminalOpen && "border-gx-accent text-gx-accent",
+          terminalActive && "border-gx-accent text-gx-accent",
         )}
-        onClick={onToggleTerminal}
-        title="Toggle Terminal (⌃`)"
-        aria-label="Toggle Terminal"
+        onClick={onOpenTerminal}
+        title="Open Terminal (⌃`)"
+        aria-label="Open Terminal"
       >
         <Terminal size={14} />
         Terminal
@@ -444,7 +439,7 @@ function TerminalSplitButton({
         type="button"
         className={clsx(
           "btn text-xs rounded-l-none border-l-0 pl-1 pr-1.5",
-          terminalOpen && "border-gx-accent text-gx-accent",
+          terminalActive && "border-gx-accent text-gx-accent",
           dropdownOpen && "bg-gx-surface-hover",
         )}
         onClick={() => setDropdownOpen((o) => !o)}
@@ -465,12 +460,12 @@ function TerminalSplitButton({
               type="button"
               onClick={() => {
                 setDropdownOpen(false);
-                onToggleTerminal();
+                onOpenTerminal();
               }}
               className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
             >
               <Terminal size={13} className="shrink-0 text-gx-muted" />
-              <span className="font-medium">New Terminal</span>
+              <span className="font-medium">Open Terminal</span>
               <span className="ml-auto text-gx-muted text-[10px]">⌃`</span>
             </button>
 

@@ -147,6 +147,11 @@ import { usePtyMode } from "../lib/pty-mode-context";
 
 // --- Types ---
 
+export type TerminalStartupRequest = Pick<
+  import("../lib/terminal-presets").StartupCommand,
+  "name" | "command" | "cwd" | "env" | "agentMeta"
+>;
+
 export interface SshTerminalRequest {
   profileId: string;
   hostname: string;
@@ -155,9 +160,11 @@ export interface SshTerminalRequest {
 }
 
 interface Props {
+  persistenceKey: string;
   sshRequest?: SshTerminalRequest | null;
   onSshRequestHandled?: () => void;
-  globalTerminal?: boolean;
+  startupRequest?: TerminalStartupRequest | null;
+  onStartupRequestHandled?: () => void;
   repo: OpenRepo;
   /**
    * Optional — when provided, non-zero exit codes surface a "Send error
@@ -366,8 +373,8 @@ const ptyIpc = {
     (window.crab as any).termColdRestoreDiscard(sessionId) as Promise<void>,
   saveState: (state: SaveStateRequest) =>
     (window.crab as any).termSaveState(state) as Promise<{ success: boolean; error?: string }>,
-  restoreState: () =>
-    (window.crab as any).termRestoreState() as Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>,
+  restoreState: (persistenceKey: string) =>
+    (window.crab as any).termRestoreState(persistenceKey) as Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>,
   openUrl: (url: string) =>
     (window.crab as any).openUrl(url) as Promise<void>,
 };
@@ -402,13 +409,13 @@ const LS_SCROLLBAR_MODE_KEY = "crab.termScrollbar";
 const LS_BREADCRUMB_KEY = "crab.termBreadcrumb";
 const LS_WORKSPACE_STATE_PREFIX = "crab.termWorkspaceState:";
 
-function workspaceStateKey(repoPath: string): string {
-  return `${LS_WORKSPACE_STATE_PREFIX}${repoPath || "default"}`;
+function workspaceStateKey(persistenceKey: string): string {
+  return `${LS_WORKSPACE_STATE_PREFIX}${persistenceKey}`;
 }
 
-function loadWorkspaceState(repoPath: string): TerminalWorkspaceStateV1 | null {
+function loadWorkspaceState(persistenceKey: string): TerminalWorkspaceStateV1 | null {
   try {
-    const raw = localStorage.getItem(workspaceStateKey(repoPath));
+    const raw = localStorage.getItem(workspaceStateKey(persistenceKey));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<TerminalWorkspaceStateV1>;
     if (parsed.version !== 1) return null;
@@ -427,9 +434,9 @@ function loadWorkspaceState(repoPath: string): TerminalWorkspaceStateV1 | null {
   }
 }
 
-function saveWorkspaceState(repoPath: string, state: TerminalWorkspaceStateV1): void {
+function saveWorkspaceState(persistenceKey: string, state: TerminalWorkspaceStateV1): void {
   try {
-    localStorage.setItem(workspaceStateKey(repoPath), JSON.stringify(state));
+    localStorage.setItem(workspaceStateKey(persistenceKey), JSON.stringify(state));
   } catch {
     // Best effort; terminal sessions remain daemon-backed even if layout state cannot persist.
   }
@@ -519,7 +526,7 @@ function savePasteGuardConfig(config: PasteGuardConfig) {
  * - Export output (text / HTML)
  * - Copy all output, rename tabs, search, context menu
  */
-export function TerminalView({ repo, onSendErrorToAgent, visible = true, defaultSessionType, sshRequest, onSshRequestHandled, globalTerminal = false }: Props) {
+export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible = true, defaultSessionType, sshRequest, onSshRequestHandled, startupRequest, onStartupRequestHandled }: Props) {
   const initialLeaf = createLeaf();
   const [splitTree, setSplitTree] = useState<SplitNode>(initialLeaf);
   const [activePaneId, setActivePaneId] = useState(initialLeaf.id);
@@ -591,7 +598,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
    * Cleared when the user activates the tab.
    */
   const [tabBadges, setTabBadges] = useState<Map<string, "success" | "error">>(new Map());
-  const restoredWorkspaceStateRef = useRef<TerminalWorkspaceStateV1 | null>(loadWorkspaceState(repo.path || ""));
+  const restoredWorkspaceStateRef = useRef<TerminalWorkspaceStateV1 | null>(loadWorkspaceState(persistenceKey));
   const [daemonSessions, setDaemonSessions] = useState<DaemonSessionSummary[]>([]);
   const [sessionsManagerOpen, setSessionsManagerOpen] = useState(false);
   const [sessionSidebarSide, setSessionSidebarSide] = useState<TerminalSessionSidebarSide>(
@@ -776,10 +783,10 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
         }
       }
 
-      void ptyIpc.saveState({ layout, scrollbackData });
+      void ptyIpc.saveState({ persistenceKey, layout, scrollbackData });
     });
     return off;
-  }, [repo.path]);
+  }, [repo.path, persistenceKey]);
 
   // ─── Session persistence: restore on app start ──────────────────
   //
@@ -865,21 +872,15 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
 
         // Step 2: Fall back to restoring from saved state (spawns fresh terminals).
         try {
-          const { layout: rawLayout } = await ptyIpc.restoreState();
+          const { layout: rawLayout } = await ptyIpc.restoreState(persistenceKey);
           const layout = deserializeLayout(rawLayout);
           if (!restoreMountedRef.current) return;
           if (!layout || layout.tabs.length === 0) return;
 
-          // Restore sessions by spawning new terminals with saved metadata.
-          // Old persisted layouts may contain every daemon session because the
-          // previous restore path materialized all of them. Without the new
-          // workspace state, cap fallback restore to one tab.
-          const savedWorkspaceState = restoredWorkspaceStateRef.current;
-          const layoutTabs = savedWorkspaceState
-            ? layout.tabs.filter((tab) => savedWorkspaceState.openSessionIds.includes(tab.id))
-            : layout.tabs.slice(0, 1);
+          // This layout belongs only to this terminal owner. Live daemon
+          // selection is separate; fresh shell IDs cannot match those old IDs.
           const restoredTabs: TermTab[] = [];
-          for (const session of layoutTabs) {
+          for (const session of layout.tabs) {
             try {
               const cwd = session.cwd || repo.path || "";
               const { id } = await ptyIpc.spawn(
@@ -911,9 +912,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
           }
 
           if (restoredTabs.length > 0) {
-            const activeIdx = savedWorkspaceState?.activeSessionId
-              ? Math.max(0, restoredTabs.findIndex((tab) => tab.id === savedWorkspaceState.activeSessionId))
-              : Math.min(layout.activeTabIndex, restoredTabs.length - 1);
+            const activeIdx = Math.min(layout.activeTabIndex, restoredTabs.length - 1);
             const restoredLeaf: LeafNode = {
               type: "leaf",
               id: "restored-pane",
@@ -962,8 +961,8 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
       titles,
       updatedAt: Date.now(),
     };
-    saveWorkspaceState(repo.path || "", state);
-  }, [splitTree, activePaneId, pinnedDaemonSessionIds, hiddenDaemonSessionIds, sessionSidebarSide, initialRestoreComplete, repo.path]);
+    saveWorkspaceState(persistenceKey, state);
+  }, [splitTree, activePaneId, pinnedDaemonSessionIds, hiddenDaemonSessionIds, sessionSidebarSide, initialRestoreComplete, persistenceKey]);
 
   useEffect(() => {
     if (!sessionsManagerOpen) return;
@@ -978,7 +977,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
   const spawningRef = useRef(false);
   const suppressNextAutoSpawnRef = useRef(false);
   useEffect(() => {
-    if (!initialRestoreComplete || !visible) return;
+    if (!initialRestoreComplete || !visible || startupRequest || sshRequest) return;
     const activeLeaf = findLeaf(splitTree, activePaneId);
     if (activeLeaf && activeLeaf.tabs.length === 0 && !spawningRef.current) {
       if (suppressNextAutoSpawnRef.current) {
@@ -991,43 +990,36 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId, initialRestoreComplete, visible]);
+  }, [splitTree, activePaneId, initialRestoreComplete, visible, startupRequest, sshRequest]);
 
-  // Listen for agent terminal spawn requests from the TopBar dropdown.
+  // Restore owns the initial layout; append requests only after it completes
+  // so a late restore cannot replace the new tab or race normal auto-spawn.
   useEffect(() => {
-    function handleAgentSpawn(e: Event) {
-      const cmd = (e as CustomEvent).detail as {
-        name: string;
-        command: string;
-        cwd?: string;
-        env?: Record<string, string>;
-        agentMeta?: AgentMeta;
-      } | undefined;
-      if (!cmd || !visible || !globalTerminal) return;
-      const leaf = findLeaf(splitTreeRef.current, activePaneId) ?? getAllLeaves(splitTreeRef.current)[0];
-      if (!leaf) return;
-      void spawnTab(leaf.id, undefined, {
-        name: cmd.name,
-        shell: "",
-        cwd: cmd.cwd,
-        env: cmd.env,
-        startupCommand: cmd.command,
-        agentMeta: cmd.agentMeta,
-      });
-    }
-    window.addEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
-    return () => window.removeEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
+    if (!startupRequest || !visible || !initialRestoreComplete) return;
+    const leaf = findLeaf(splitTreeRef.current, activePaneId) ?? getAllLeaves(splitTreeRef.current)[0];
+    if (!leaf) return;
+    spawningRef.current = true;
+    void spawnTab(leaf.id, undefined, {
+      name: startupRequest.name,
+      shell: "",
+      cwd: startupRequest.cwd,
+      env: startupRequest.env,
+      startupCommand: startupRequest.command,
+      agentMeta: startupRequest.agentMeta,
+    }).finally(() => { spawningRef.current = false; });
+    onStartupRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTree, activePaneId, visible, globalTerminal]);
+  }, [startupRequest, visible, initialRestoreComplete]);
 
   // App queues this request until the active global terminal has mounted.
   // Hidden repo and task terminals must never consume another terminal's request.
   useEffect(() => {
-    if (!sshRequest || !visible || !globalTerminal) return;
-    void spawnSshTab(sshRequest.profileId, sshRequest.hostname, sshRequest.cwd, sshRequest.colour);
+    if (!sshRequest || !visible || !initialRestoreComplete) return;
+    spawningRef.current = true;
+    void spawnSshTab(sshRequest.profileId, sshRequest.hostname, sshRequest.cwd, sshRequest.colour).finally(() => { spawningRef.current = false; });
     onSshRequestHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sshRequest, visible, globalTerminal]);
+  }, [sshRequest, visible, initialRestoreComplete]);
 
   // Cmd+Shift+T: open a remote terminal on the most recently used SSH connection.
   useEffect(() => {
@@ -1663,7 +1655,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
       if (meta && e.key === "w") { const pane = getActivePane(); if (pane?.activeTab) { e.preventDefault(); closeTabFromTabStrip(pane.id, pane.activeTab); } return; }
       // Cmd+Shift+W: close the entire pane (if more than one pane exists).
       if (meta && e.shiftKey && e.key === "W") { e.preventDefault(); if (getAllLeaves(splitTree).length > 1) removePane(activePaneId); return; }
-      if (meta && e.key === "k") { const pane = getActivePane(); if (pane?.activeTab) { const term = terminalsRef.current.get(pane.activeTab); if (term) { e.preventDefault(); term.xterm.clear(); void (window.crab as any).termClearSession(pane.activeTab); } } return; }
+      if (meta && e.key === "k") { const pane = getActivePane(); if (pane?.activeTab) { const term = terminalsRef.current.get(pane.activeTab); if (term) { e.preventDefault(); term.xterm.clear(); void (window.crab as any).termClearSession(pane.activeTab, persistenceKey); } } return; }
       if (meta && e.shiftKey && e.key === "C") { e.preventDefault(); copyAllOutput(); return; }
       if (meta && e.shiftKey && e.key === "[") { e.preventDefault(); switchTab(-1); return; }
       if (meta && e.shiftKey && e.key === "]") { e.preventDefault(); switchTab(1); return; }
@@ -1828,7 +1820,7 @@ export function TerminalView({ repo, onSendErrorToAgent, visible = true, default
       }
       case "paste": navigator.clipboard.readText().then((text) => { handlePasteWithGuard(contextMenu.termId, text); }); break;
       case "selectAll": if (term) term.xterm.selectAll(); break;
-      case "clear": if (term) { term.xterm.clear(); void (window.crab as any).termClearSession(contextMenu.termId); } break;
+      case "clear": if (term) { term.xterm.clear(); void (window.crab as any).termClearSession(contextMenu.termId, persistenceKey); } break;
       case "splitRight": splitPane("horizontal", contextMenu.paneId); break;
       case "splitDown": splitPane("vertical", contextMenu.paneId); break;
       case "addBookmark": {

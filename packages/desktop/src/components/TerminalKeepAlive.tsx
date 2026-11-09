@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { TerminalView, type SshTerminalRequest } from "../views/TerminalView";
+import { TerminalView, type SshTerminalRequest, type TerminalStartupRequest } from "../views/TerminalView";
 import type { OpenRepo } from "../state";
 
 // --- Memory API typing (Chrome/Electron only) ---
@@ -32,6 +32,8 @@ const MEMORY_PRESSURE_THRESHOLD = 0.8;
 // --- Types ---
 
 export interface TerminalKeepAliveProps {
+  startupRequest?: TerminalStartupRequest | null;
+  onStartupRequestHandled?: () => void;
   sshRequest?: SshTerminalRequest | null;
   onSshRequestHandled?: () => void;
   /** All open repos in the store. */
@@ -116,7 +118,7 @@ interface SuspendedWorkspaceState {
  * independently.
  */
 export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKeepAliveProps>(
-  function TerminalKeepAlive({ repos, activeRepoId, maxKeptAlive, onSendErrorToAgent, sshRequest, onSshRequestHandled }, ref) {
+  function TerminalKeepAlive({ repos, activeRepoId, maxKeptAlive, onSendErrorToAgent, sshRequest, onSshRequestHandled, startupRequest, onStartupRequestHandled }, ref) {
     // LRU order: index 0 = most recently used, last = least recently used.
     const [lruOrder, setLruOrder] = useState<string[]>([]);
 
@@ -296,17 +298,9 @@ export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKee
       }
     }, [activeRepoId, addToKeepAlive]);
 
-    // Auto-pin repos when they spawn daemon/agent sessions.
-    // Listen for the spawn event and pin the active repo.
     useEffect(() => {
-      function handleAgentSpawn() {
-        if (activeRepoId) {
-          pin(activeRepoId);
-        }
-      }
-      window.addEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
-      return () => window.removeEventListener("crab:spawn-agent-terminal", handleAgentSpawn);
-    }, [activeRepoId, pin]);
+      if (startupRequest && activeRepoId) pin(activeRepoId);
+    }, [startupRequest, activeRepoId, pin]);
 
     // Track the effective cap — starts at maxKeptAlive but may be reduced
     // by memory pressure.
@@ -400,8 +394,10 @@ export const TerminalKeepAlive = forwardRef<TerminalKeepAliveHandle, TerminalKee
             >
               <TerminalView
                 repo={repo}
+                persistenceKey={repo.path ?? repo.repo_id}
                 visible={isActive}
-                globalTerminal
+                startupRequest={isActive ? startupRequest : null}
+                onStartupRequestHandled={onStartupRequestHandled}
                 sshRequest={isActive ? sshRequest : null}
                 onSshRequestHandled={onSshRequestHandled}
                 onSendErrorToAgent={isActive ? onSendErrorToAgent : undefined}

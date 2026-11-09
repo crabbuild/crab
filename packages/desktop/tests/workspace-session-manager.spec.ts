@@ -54,7 +54,6 @@ describe("WorkspaceSessionManager", () => {
       const session: Partial<WorkspaceSession> = {
         activeRepoRelativePath: "packages/frontend",
         tabBarOrder: ["packages/frontend", "packages/backend", "packages/shared"],
-        terminalPanelOpen: true,
         sidebarWidth: 300,
       };
 
@@ -65,7 +64,6 @@ describe("WorkspaceSessionManager", () => {
       expect(restored!.workspaceRoot).toBe("/Users/dev/my-workspace");
       expect(restored!.activeRepoRelativePath).toBe("packages/frontend");
       expect(restored!.tabBarOrder).toEqual(["packages/frontend", "packages/backend", "packages/shared"]);
-      expect(restored!.terminalPanelOpen).toBe(true);
       expect(restored!.sidebarWidth).toBe(300);
       expect(restored!.savedAt).toBeTypeOf("number");
     });
@@ -75,7 +73,6 @@ describe("WorkspaceSessionManager", () => {
       const session: Partial<WorkspaceSession> = {
         activeRepoRelativePath: "apps/web",
         tabBarOrder: ["apps/web", "libs/core"],
-        terminalPanelOpen: false,
         sidebarWidth: 240,
       };
 
@@ -90,7 +87,6 @@ describe("WorkspaceSessionManager", () => {
       expect(restored!.workspaceRoot).toBe("/Users/dev/monorepo");
       expect(restored!.activeRepoRelativePath).toBe("apps/web");
       expect(restored!.tabBarOrder).toEqual(["apps/web", "libs/core"]);
-      expect(restored!.terminalPanelOpen).toBe(false);
       expect(restored!.sidebarWidth).toBe(240);
     });
 
@@ -106,7 +102,6 @@ describe("WorkspaceSessionManager", () => {
       mgr.save("/Users/dev/ws", {
         activeRepoRelativePath: "repo-a",
         tabBarOrder: ["repo-a", "repo-b"],
-        terminalPanelOpen: true,
         sidebarWidth: 280,
       });
 
@@ -117,7 +112,6 @@ describe("WorkspaceSessionManager", () => {
       expect(restored!.activeRepoRelativePath).toBe("repo-b");
       // Other fields should be preserved from the first save.
       expect(restored!.tabBarOrder).toEqual(["repo-a", "repo-b"]);
-      expect(restored!.terminalPanelOpen).toBe(true);
       expect(restored!.sidebarWidth).toBe(280);
     });
   });
@@ -307,7 +301,6 @@ describe("WorkspaceSessionManager", () => {
       expect(restored!.workspaceRoot).toBe("/Users/dev/my-workspace");
       expect(restored!.activeRepoRelativePath).toBe("packages/frontend");
       expect(restored!.tabBarOrder).toEqual(["packages/frontend", "packages/backend"]);
-      expect(restored!.terminalPanelOpen).toBe(false);
       expect(restored!.sidebarWidth).toBe(260);
 
       // Legacy keys should be removed after migration.

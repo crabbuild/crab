@@ -1,5 +1,5 @@
-// Persists sub-view state (selectedCommit, selectedBranch,
-// worktreesBranchesTab) to the SessionManager's viewState field.
+// Persists sub-view state (selectedCommit, selectedBranch)
+// to the SessionManager's viewState field.
 // This is the write side — saving values as the user interacts so
 // they can be restored on next activation.
 

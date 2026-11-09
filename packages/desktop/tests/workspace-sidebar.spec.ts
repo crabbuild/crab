@@ -6,7 +6,7 @@ import {
   workspaceIdentity,
   workspaceRepoIdentity,
 } from "../src/lib/workspace-sidebar";
-import { isSidebarView, navigationGroup } from "../src/lib/navigation";
+import { isSidebarView, navigationGroup, VIEW_GROUPS, VIEW_LABELS } from "../src/lib/navigation";
 
 const entry = (
   relativePath: string,
@@ -112,6 +112,12 @@ describe("workspace repository navigation", () => {
 });
 
 describe("canonical view ownership", () => {
+  it("orders Git work from changes and history through branch/worktree management to pull requests", () => {
+    expect(VIEW_GROUPS.git.map((view) => VIEW_LABELS[view])).toEqual(["Changes", "History", "Branches", "Worktrees", "Pull Requests"]);
+  });
+  it("keeps dedicated terminal, workflow and SSH destinations outside Files and Git", () => {
+    expect(["terminal", "workflows", "ssh"].map((view) => isSidebarView(view) && navigationGroup(view) === undefined)).toEqual([true, true, true]);
+  });
   it("groups every Files and Git destination while retiring duplicate routes", () => {
     expect(
       [
@@ -119,12 +125,13 @@ describe("canonical view ownership", () => {
         "search",
         "changes",
         "timeline",
+        "branches",
         "worktrees",
         "pull-requests",
       ].map((view) => (isSidebarView(view) ? navigationGroup(view) : null)),
-    ).toEqual(["files", "files", "git", "git", "git", "git"]);
+    ).toEqual(["files", "files", "git", "git", "git", "git", "git"]);
     expect(
-      ["terminal", "branches", "conflicts", "health", "skills"].some(
+      ["conflicts", "health", "skills"].some(
         isSidebarView,
       ),
     ).toBe(false);

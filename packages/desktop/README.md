@@ -9,17 +9,20 @@ CLI on the user's PATH cannot override the bundled runtime.
 
 ## Navigation
 
-The primary rail contains **Chat**, **Files**, **Git**, and **Large Files**.
+The primary rail contains **Chat**, **Files**, **Git**, **Large Files**,
+**Data Workflows**, **SSH Connections** (when enabled), and **Terminal**.
 Files switches between Explorer and Search; Git switches between Changes,
-History, Branches & Worktrees, and Pull Requests (when a forge is detected).
-**More tools** opens Data Workflows and, when enabled, SSH Connections.
+History, Branches, Worktrees, and Pull Requests (when a forge is detected),
+in that order. Branches and Worktrees each have their own sidebar and selection.
 Settings stays at the bottom. Click the repository name in the title bar for
 its Overview; the adjacent arrow switches workspace repositories.
 
 Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
-The title-bar Terminal control owns the global terminal, with maximize/restore
-and Ctrl+` to show/hide it. Hiding or maximizing preserves its sessions; agent
-chat terminals remain scoped to their tasks.
+Terminal opens as a full page from its rail entry or the title-bar control.
+Ctrl+` switches between Terminal and the previous view. Navigating away keeps
+its sessions alive; agent chat terminals remain scoped to their tasks.
+Terminal layouts, scrollback, and logs stay inside the app profile. Layouts
+are isolated by repository or task, including when using a separate test profile.
 
 The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
 then More actions. Filter repositories by name or path; Escape clears the filter.
@@ -89,9 +92,8 @@ build. The PTY daemon and its native dependencies ship together outside ASAR.
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
 unpacked application from the same build. The Crab release workflow calls it
-again for the tagged source. Alpha builds are unsigned downloads; later release
-channels require signed and notarized macOS builds and a signed Windows
-installer. `scripts/package.mjs` selects the matching update channel for all
+again for the tagged source. All release channels, including alpha, require
+signed and notarized macOS builds and a signed Windows installer. `scripts/package.mjs` selects the matching update channel for all
 packaging commands. Publication runs only through the release workflow.
 
 Configure these repository Actions secrets before creating a signed Crab release:
@@ -107,8 +109,9 @@ Configure these repository Actions secrets before creating a signed Crab release
 Signed releases must use the same macOS signing identity and Windows publisher
 identity as installed builds so their platform updaters accept the replacement.
 If a signing secret is missing, a signed release fails before publication.
-Alpha desktop installers do not require these secrets and must be updated
-manually on macOS.
+Previously published unsigned alpha builds require one manual installation of a
+signed release on macOS before automatic installation can work. Local unsigned
+builds can check the release feed but cannot verify macOS update installation.
 
 ## Desktop updates
 
@@ -119,7 +122,8 @@ archives are not desktop updates. A release without desktop metadata displays a
 short informational notice and a link to releases; network or malformed metadata
 errors display a concise failure. Detailed diagnostics stay in the updater log.
 
-Full installer builds generate `app-update.yml` inside the app and matching
+Every packaged build, including `package:dir`, includes `app-update.yml` and
+checks the same GitHub release feed. Installer builds also generate matching
 `latest*.yml` files beside the installers. The release workflow verifies their
 versions and hashes, combines both macOS architectures into `latest-mac.yml`,
 and publishes them with the desktop installers and `SHA256SUMS-desktop.txt` in

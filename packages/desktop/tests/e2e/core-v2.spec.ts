@@ -1,10 +1,11 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { parse } from "yaml";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -33,6 +34,11 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
   test.setTimeout(90_000);
+  const executablePath = packagedExecutable();
+  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
+  const updateConfig = parse(readFileSync(path.join(resources, "app-update.yml"), "utf8"));
+  expect(updateConfig).toMatchObject({ provider: "github", owner: "crabbuild", repo: "crab", channel: prerelease ? prerelease.split(".")[0] : "latest" });
+  expect(updateConfig.updaterCacheDirName).toBeTruthy();
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-updater-"));
   const requests: string[] = [];
   let metadata: "missing" | "published" | "invalid" = "missing";
@@ -103,6 +109,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
   git(["add", "desktop-smoke.txt"]);
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
+  git(["branch", "topic"]);
   const application = await electron.launch({
     executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
     env: { ...process.env, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
@@ -189,52 +196,98 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByText("Crab Desktop v2 real-sidecar smoke", { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("desktop-v2.png") });
     const primary = page.getByRole("navigation", { name: "Primary", exact: true });
-    await expect(primary.getByRole("button")).toHaveCount(6);
-    await expect(primary.getByRole("button", { name: "Terminal", exact: true })).toHaveCount(0);
+    await expect(primary.getByRole("button", { name: "Data Workflows", exact: true })).toBeVisible();
+    await expect(primary.getByRole("button", { name: "SSH Connections", exact: true })).toBeVisible();
+    await expect(primary.getByRole("button", { name: "Terminal", exact: true })).toBeVisible();
+    await expect(primary.getByRole("button", { name: "More tools", exact: true })).toHaveCount(0);
     await primary.getByRole("button", { name: "Git", exact: true }).click();
     const gitNavigation = page.getByRole("navigation", { name: "Git", exact: true });
     await gitNavigation.getByRole("button", { name: "History", exact: true }).click();
     await expect(gitNavigation.getByRole("button", { name: "History", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await gitNavigation.getByRole("button", { name: "Branches & Worktrees", exact: true }).click();
-    await expect(primary.getByRole("button", { name: "Git", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(gitNavigation.getByRole("button")).toHaveText(["Changes", "History", "Branches", "Worktrees"]);
+    await gitNavigation.getByRole("button", { name: "Branches", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Branches & Worktrees", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Branches", exact: true })).toHaveCount(0);
+    await page.getByRole("option").filter({ hasText: "topic" }).click();
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-branches.png") });
+    await gitNavigation.getByRole("button", { name: "Worktrees", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Worktrees", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: `View worktree ${path.basename(root)}`, exact: true }).click();
+    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-worktrees.png") });
+    await page.setViewportSize({ width: 880, height: 560 });
+    await expect(gitNavigation.getByRole("button", { name: "Branches", exact: true })).toBeVisible();
+    await expect(gitNavigation.getByRole("button", { name: "Worktrees", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("git-tabs-compact.png") });
+    await page.setViewportSize({ width: 1280, height: 820 });
     await page.getByRole("button", { name: "Go back", exact: true }).click();
-    await expect(gitNavigation.getByRole("button", { name: "History", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await primary.getByRole("button", { name: "More tools", exact: true }).click();
-    await expect(page.getByRole("menuitem", { name: "Data Workflows", exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(primary.getByRole("button", { name: "More tools", exact: true })).toBeFocused();
-    await page.getByRole("button", { name: "Repository overview", exact: true }).click();
-    await expect(gitNavigation).toHaveCount(0);
-    await page.getByRole("button", { name: "Toggle Terminal", exact: true }).click();
-    await expect(page.locator(".xterm-screen").first()).toBeVisible();
-    const terminal = page.locator(".xterm-helper-textarea").first();
+    await expect(gitNavigation.getByRole("button", { name: "Branches", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toBeVisible();
+    await page.getByRole("button", { name: "Go forward", exact: true }).click();
+    await expect(gitNavigation.getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await expect(primary.getByRole("button", { name: "Git", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.reload();
+    await expect(page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Create Workflow", exact: true })).toBeVisible();
+    await primary.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "SSH Remote Connections", exact: true })).toBeVisible();
+    const coldCommandProof = path.join(root, "terminal-cold-command-proof.txt");
+    const writeShellPid = (file: string) => `node -e "require('fs').writeFileSync(process.argv[1],String(process.ppid))" "${file}"`;
+    await page.evaluate(({ command, root }) => {
+      window.dispatchEvent(new CustomEvent("crab:spawn-agent-terminal", { detail: { name: "Cold smoke command", command, cwd: root } }));
+    }, { command: writeShellPid(coldCommandProof), root });
+    await expect.poll(() => existsSync(coldCommandProof)).toBe(true);
+    await primary.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "SSH Remote Connections", exact: true })).toBeVisible();
+    await primary.getByRole("button", { name: "Terminal", exact: true }).click();
+    const terminalPage = page.getByRole("region", { name: "Terminal page", exact: true });
+    await expect(terminalPage).toBeVisible();
+    await expect(primary.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
+    const mainBounds = await page.getByRole("main").boundingBox();
+    const terminalBounds = await terminalPage.boundingBox();
+    expect(Math.abs(terminalBounds!.height - mainBounds!.height)).toBeLessThan(2);
+    expect(Math.abs(terminalBounds!.y - mainBounds!.y)).toBeLessThan(2);
+    await expect(page.locator('[data-panel-group-direction="vertical"]')).toHaveCount(0);
+    await expect(terminalPage.locator(".xterm-screen:visible").first()).toBeVisible();
+    const terminal = terminalPage.locator(".xterm-helper-textarea:visible").first();
     await terminal.focus();
     const proof = path.join(root, "terminal-proof.txt");
-    const writeShellPid = (file: string) => `node -e "require('fs').writeFileSync(process.argv[1],String(process.ppid))" "${file}"`;
     await page.keyboard.type(writeShellPid(proof));
     await page.keyboard.press("Enter");
     await expect.poll(() => existsSync(proof) && readFileSync(proof, "utf8").trim().length > 0).toBe(true);
     const shellPid = readFileSync(proof, "utf8").trim();
-    const before = await page.getByRole("main").boundingBox();
-    await page.getByRole("button", { name: "Maximize terminal", exact: true }).click();
-    await expect(page.getByRole("main")).toBeHidden();
-    await page.getByRole("button", { name: "Restore terminal", exact: true }).click();
-    await expect(page.getByRole("main")).toBeVisible();
-    await page.getByRole("button", { name: "Toggle Terminal", exact: true }).click();
-    await expect(page.locator(".xterm-screen").first()).toBeHidden();
+    await primary.getByRole("button", { name: "Git", exact: true }).click();
+    await expect(terminalPage).toBeHidden();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+t" : "Control+t");
-    await page.getByRole("button", { name: "Repository overview", exact: true }).click();
-    await page.getByRole("button", { name: "Toggle Terminal", exact: true }).click();
+    await page.getByRole("button", { name: "Go back", exact: true }).click();
+    await expect(terminalPage).toBeVisible();
+    await page.keyboard.press("Control+Backquote");
+    await expect(terminalPage).toBeHidden();
+    await page.getByRole("button", { name: "Open Terminal", exact: true }).click();
+    await expect(terminalPage).toBeVisible();
     const reopenedProof = path.join(root, "terminal-reopened-proof.txt");
     await terminal.focus();
     await page.keyboard.type(writeShellPid(reopenedProof));
     await page.keyboard.press("Enter");
     await expect.poll(() => existsSync(reopenedProof) ? readFileSync(reopenedProof, "utf8").trim() : "").toBe(shellPid);
-    const after = await page.getByRole("main").boundingBox();
-    expect(Math.abs(after!.height - before!.height)).toBeLessThan(5);
-    await expect(page.locator(".xterm-screen").first()).toBeVisible();
+    await expect(terminalPage.locator(".xterm-screen:visible").first()).toBeVisible();
+    const commandProof = path.join(root, "terminal-command-proof.txt");
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    await page.evaluate(({ command, root }) => {
+      window.dispatchEvent(new CustomEvent("crab:spawn-agent-terminal", { detail: { name: "Smoke command", command, cwd: root } }));
+    }, { command: writeShellPid(commandProof), root });
+    await expect(terminalPage).toBeVisible();
+    await expect.poll(() => existsSync(commandProof)).toBe(true);
+    await expect(primary.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
     await page.setViewportSize({ width: 880, height: 560 });
     await page.screenshot({ path: test.info().outputPath("navigation-compact.png") });
+    await page.reload();
+    await expect(page.getByRole("region", { name: "Terminal page", exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
 
   } finally {
     await application.close();
@@ -242,6 +295,56 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   }
 });
 
+
+test("terminal restore is isolated by profile and repository", async () => {
+  test.setTimeout(60_000);
+  const root = mkdtempSync(path.join(tmpdir(), "crab-terminal-isolation-"));
+  const testHome = path.join(root, "home");
+  const repository = path.join(root, "repository");
+  mkdirSync(testHome);
+  mkdirSync(repository);
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
+  const profile = path.join(root, "profile-a");
+  const env = { ...process.env, HOME: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
+  let application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
+  const savedLayout = { version: 1, tabs: [{ id: "old-tab", title: "Other repository shell", shell: "", cwd: path.join(root, "removed-repository") }], splits: [], activeTabIndex: 0 };
+  try {
+    let page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    expect(await page.evaluate(layout => window.crab.termSaveState({ persistenceKey: "other-repository", layout, scrollbackData: { "old-tab": "saved scrollback" } }), savedLayout)).toEqual({ success: true });
+    expect(await page.evaluate(() => window.crab.termRestoreState("other-repository"))).toEqual({ layout: savedLayout, scrollbackData: { "old-tab": "saved scrollback" } });
+    await page.evaluate(() => window.crab.termClearSession("old-tab", "other-repository"));
+    expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).scrollbackData).toEqual({});
+    expect((await page.evaluate(repository => window.crab.termRestoreState(repository), repository)).layout).toBeNull();
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+    const handle = await call(page, "open_local", { repo_id: "terminal-isolation", path: repository });
+    await page.evaluate(({ handle, repository }) => {
+      window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repository } }));
+    }, { handle, repository });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true }).click();
+    const terminal = page.getByRole("region", { name: "Terminal page", exact: true });
+    await expect(terminal).toBeVisible();
+    await expect(terminal.getByText("Other repository shell", { exact: true })).toHaveCount(0);
+    await terminal.locator(".xterm-helper-textarea:visible").first().focus();
+    const proof = path.join(root, "working-directory.txt");
+    await page.keyboard.type(`node -e "require('fs').writeFileSync(process.argv[1],process.cwd())" "${proof}"`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => existsSync(proof) ? readFileSync(proof, "utf8") : "").toBe(realpathSync(repository));
+    await page.screenshot({ path: test.info().outputPath("terminal-isolation.png") });
+    await application.close();
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile-b")}`], env });
+    page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).layout).toBeNull();
+    expect(existsSync(path.join(testHome, ".crab-desktop", "terminal-state.json"))).toBe(false);
+  } finally {
+    await application.close();
+    // Agent version probes can finish writing their isolated HOME after Electron exits.
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
 
 test("workspace sidebar filters, pins, remembers recents and restores collapse and scroll", async () => {
   test.setTimeout(90_000);

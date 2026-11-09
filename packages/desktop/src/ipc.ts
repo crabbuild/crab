@@ -1121,13 +1121,13 @@ declare global {
       termKill: (id: string) => Promise<void>;
       termListShells: () => Promise<string[]>;
       termPoolHint: (cwd: string) => Promise<void>;
-      termSaveState: (state: { layout: unknown; scrollbackData: Record<string, string> }) => Promise<{ success: boolean; error?: string }>;
-      termRestoreState: () => Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>;
+      termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) => Promise<{ success: boolean; error?: string }>;
+      termRestoreState: (persistenceKey: string) => Promise<{ layout: unknown | null; scrollbackData: Record<string, string> }>;
       termNotify: (req: { title: string; body: string; icon: "success" | "error"; terminalId: string; tabIndex: number }) => Promise<void>;
       termLogPath: (sessionId: string) => Promise<{ path: string; exists: boolean; sizeBytes: number }>;
       termLogRead: (sessionId: string) => Promise<{ content: string | null; error: string | null }>;
       termLogList: () => Promise<Array<{ sessionId: string; path: string; sizeBytes: number; mtimeMs: number }>>;
-      termClearSession: (sessionId: string) => Promise<{ success: boolean }>;
+      termClearSession: (sessionId: string, persistenceKey: string) => Promise<{ success: boolean }>;
       termListDaemonSessions: (repoPath: string) => Promise<Array<{
         id: string;
         daemonSessionId: string;
