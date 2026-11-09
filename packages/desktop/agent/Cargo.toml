@@ -85,6 +85,7 @@ base64 = "0.22"
 bytes = { workspace = true }
 blake3 = { workspace = true }
 sha2 = "0.10"
+tempfile = { workspace = true }
 
 # Stream adapters for `walk()` consumers (used by `list_stream`).
 futures-util = { workspace = true }
@@ -132,11 +133,6 @@ libc = "0.2"
 
 [dev-dependencies]
 crab-sdk = { workspace = true, features = ["publish"] }
-# Real filesystem + git-repo fixtures for hunk-staging tests.
-# Using a temp dir + shelling out to `git init` keeps tests hermetic
-# without pulling a second git implementation into the agent.
-tempfile = { workspace = true }
-
 # Property testing for anchor staleness under simulated concurrent edits.
 # Pinned to the workspace-wide major.
 proptest = "1"

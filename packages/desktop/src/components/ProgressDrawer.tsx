@@ -12,8 +12,11 @@ import {
   Trash2,
   X,
   XCircle,
+  Ban,
 } from "lucide-react";
 import { useStore, JobState } from "../state";
+import { rpc } from "../ipc";
+import { formatBytes } from "../lib/format";
 
 interface Props {
   open: boolean;
@@ -107,6 +110,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
   const runningCount = Object.values(state.jobs).filter((j) => j.status === "running").length;
   const doneCount = Object.values(state.jobs).filter((j) => j.status === "done").length;
   const failedCount = Object.values(state.jobs).filter((j) => j.status === "failed").length;
+  const cancelledCount = Object.values(state.jobs).filter((j) => j.status === "cancelled").length;
 
   return (
     <div
@@ -142,6 +146,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
                   {failedCount} failed
                 </span>
               )}
+              {cancelledCount > 0 && <span className="text-gx-muted">{cancelledCount} cancelled</span>}
               <span className="text-gx-muted">
                 {filteredLogs.length} line{filteredLogs.length === 1 ? "" : "s"}
               </span>
@@ -309,6 +314,19 @@ interface JobCardProps {
 
 function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
   const elapsed = job.updatedAt - job.startedAt;
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const transfer = job.transfer;
+  async function cancel() {
+    if (!transfer) return;
+    setCancelRequested(true);
+    setCancelError(null);
+    try { await rpc.cancelOperation(transfer.repo_id, jobId); }
+    catch (error) {
+      setCancelRequested(false);
+      setCancelError(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   return (
     <div
@@ -330,6 +348,8 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
           <Loader2 size={10} className="shrink-0 animate-spin text-gx-warn" />
         ) : job.status === "failed" ? (
           <XCircle size={10} className="shrink-0 text-gx-error" />
+        ) : job.status === "cancelled" || job.status === "interrupted" ? (
+          <Ban size={10} className="shrink-0 text-gx-muted" />
         ) : (
           <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
         )}
@@ -338,6 +358,15 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
         </span>
         {expanded ? <ChevronDown size={9} className="text-gx-muted" /> : <ChevronRight size={9} className="text-gx-muted" />}
       </button>
+      {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
+        <p className="tabular-nums">{formatBytes(transfer.written_bytes)} / {formatBytes(transfer.total_bytes)} written</p>
+        {job.status === "running" ? <>
+          <progress aria-label="Materialization bytes written" className="h-1 w-full" value={transfer.written_bytes} max={Math.max(1, transfer.total_bytes)} />
+          <button type="button" className="btn text-[10px]" disabled={cancelRequested} onClick={() => void cancel()}>{cancelRequested ? "Cancellation requested…" : "Cancel materialization"}</button>
+        </> : <p>{job.status === "done" ? "Verified and materialized" : job.status === "cancelled" ? "Cancelled before publication" : job.status === "interrupted" ? "Outcome unknown. Reopen the file to inspect its working copy." : "Materialization failed"}</p>}
+        {cancelError && <p role="alert" className="break-words text-gx-error">{cancelError}</p>}
+      </div>}
+      {job.status === "interrupted" && <p className="break-words px-2 pb-2 text-[10px] text-gx-warn">{job.interruption}</p>}
       {expanded && (
         <div className="border-t border-gx-border/30 px-2 py-1 text-[9px] text-gx-muted">
           <div className="flex items-center gap-1">

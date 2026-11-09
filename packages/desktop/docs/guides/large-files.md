@@ -114,6 +114,16 @@ Container and codec support follows the bundled Electron media decoder.
 
 ### Hydrating Files
 
+For one working Crab or Git LFS pointer, open **File details → Hydrate to disk**.
+The captured content streams to disk, verifies its whole-file identity, then
+replaces the unchanged pointer. Activity shows bytes written and provides
+cancellation; browsing elsewhere keeps the operation alive. A cancelled write
+preserves the pointer, and detected external edits are not replaced. Reopen
+details to inspect the working copy after completion.
+
+The bulk controls below currently use the Crab-only CLI inventory. Git LFS bulk
+materialization and its complete lifecycle remain under implementation.
+
 1. Select files to hydrate (or use "Hydrate All")
 2. Click **Hydrate** — the agent runs `crab hydrate`
 3. Progress shows per-file download status

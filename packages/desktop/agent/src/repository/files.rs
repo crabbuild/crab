@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 
-use super::FileSource;
+use super::{FileSource, ReadScope};
 use crate::{AgentError, Result};
 
 const MAX_OPEN_FILES: usize = 128;
@@ -89,6 +89,15 @@ impl OpenedFile {
         let guard = self.active.read().await;
         self.source.check_cancelled()?;
         Ok((guard, Arc::new(self.source.query())))
+    }
+
+    pub(crate) async fn materialization(
+        &self,
+        scope: ReadScope,
+    ) -> Result<(RwLockReadGuard<'_, ()>, Arc<FileSource>)> {
+        let guard = self.active.read().await;
+        self.source.check_cancelled()?;
+        Ok((guard, Arc::new(self.source.materialization(scope)?)))
     }
 
     async fn close(&self) -> Result<()> {

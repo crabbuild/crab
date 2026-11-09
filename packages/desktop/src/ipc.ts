@@ -182,6 +182,7 @@ export interface CapturedFile {
   representation: "working_file" | "git_blob" | "pointer" | "remote_content";
   content_hash: string | null;
   git_oid: string | null;
+  can_materialize: boolean;
 }
 
 export interface MediaSource {
@@ -576,6 +577,15 @@ export interface ProgressComplete {
   op: string;
   job_id: string;
   status: number;
+  outcome?: "completed" | "failed" | "cancelled";
+}
+
+export interface ProgressTransfer {
+  op: string;
+  job_id: string;
+  repo_id: string;
+  written_bytes: number;
+  total_bytes: number;
 }
 
 /** Incremental chunk from a streaming read handler. */
@@ -631,6 +641,7 @@ export function isStaleHunkError(err: unknown): boolean {
 export type AgentEvent =
   | { method: "progress/line"; params: ProgressLine }
   | { method: "progress/complete"; params: ProgressComplete }
+  | { method: "progress/transfer"; params: ProgressTransfer }
   | { method: "progress/partial"; params: ProgressPartial }
   | { method: "crab/add_progress"; params: AddProgressEvent }
   | { method: "crab/push_step"; params: PushStepEvent }
@@ -1733,6 +1744,11 @@ export const rpc = {
     call<FileChunkPage>("file_chunks", { repo_id, file_id, start, limit }, signal),
 
   closeFile: (repo_id: string, file_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id }),
+
+  materializeFile: (repo_id: string, file_id: string, op_id: string) =>
+    call<{ written_bytes: number }>("file_materialize", { repo_id, file_id, op_id }),
+
+  cancelOperation: (repo_id: string, op_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id }),
 
   readText: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
     call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),

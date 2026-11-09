@@ -1,6 +1,6 @@
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, onAgentEvent, CapabilitySet, fullCapabilities, mainProcess } from "./ipc";
+import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, CapabilitySet, fullCapabilities, mainProcess, rpc, nextJobId, isCancelledError } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -206,7 +206,9 @@ export function getActiveWorkspace(state: AppState): Workspace | null {
 
 export interface JobState {
   op: string;
-  status: "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "cancelled" | "interrupted";
+  transfer?: ProgressTransfer;
+  interruption?: string;
   exitCode?: number;
   lines: number;
   startedAt: number;
@@ -322,7 +324,9 @@ export type Action =
   | { type: "job-start"; job_id: string; op: string }
   | { type: "job-line"; line: ProgressLine }
   | { type: "job-lines-batch"; lines: ProgressLine[] }
-  | { type: "job-complete"; job_id: string; status: number }
+  | { type: "job-complete"; job_id: string; status: number; outcome?: ProgressComplete["outcome"] }
+  | { type: "job-transfer"; transfer: ProgressTransfer }
+  | { type: "job-interrupted"; job_id: string; message: string }
   | { type: "set-max-log-lines"; value: number }
   | { type: "clear-logs" }
   | WorkspaceAction
@@ -458,6 +462,19 @@ function reducer(state: AppState, action: Action): AppState {
       }
       return { ...state, logs, jobs };
     }
+    case "job-transfer": {
+      const transfer = action.transfer;
+      const now = Date.now();
+      const existing = state.jobs[transfer.job_id];
+      if (existing && existing.status !== "running") return state;
+      const job: JobState = existing ?? { op: transfer.op, status: "running", lines: 0, startedAt: now, updatedAt: now };
+      return { ...state, jobs: { ...state.jobs, [transfer.job_id]: { ...job, transfer, updatedAt: now } } };
+    }
+    case "job-interrupted": {
+      const job = state.jobs[action.job_id];
+      if (!job || job.status !== "running") return state;
+      return { ...state, jobs: { ...state.jobs, [action.job_id]: { ...job, status: "interrupted", interruption: action.message, updatedAt: Date.now() } } };
+    }
     case "job-complete": {
       const existing = state.jobs[action.job_id];
       if (!existing) return state;
@@ -467,7 +484,7 @@ function reducer(state: AppState, action: Action): AppState {
           ...state.jobs,
           [action.job_id]: {
             ...existing,
-            status: action.status === 0 ? "done" : "failed",
+            status: action.outcome === "cancelled" ? "cancelled" : action.status === 0 ? "done" : "failed",
             exitCode: action.status,
             updatedAt: Date.now(),
           },
@@ -612,6 +629,7 @@ interface Ctx {
   unpinRepo: (path: string) => void;
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
+  materializeFile: (repoId: string, fileId: string) => Promise<{ written_bytes: number }>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -645,8 +663,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // Flush any pending lines before marking complete so the UI
         // sees the final lines before the job transitions to done.
         if (lineBuf.length > 0) flushLines();
-        const p = evt.params as { job_id: string; status: number };
-        dispatch({ type: "job-complete", job_id: p.job_id, status: p.status });
+        const p = evt.params as ProgressComplete;
+        dispatch({ type: "job-complete", job_id: p.job_id, status: p.status, outcome: p.outcome });
+      } else if (evt.method === "progress/transfer") {
+        dispatch({ type: "job-transfer", transfer: evt.params as ProgressTransfer });
       } else if (evt.method === "repo:capabilities-changed") {
         const p = evt.params as { repo_id: string; capabilities: CapabilitySet };
         dispatch({ type: "repo-capabilities-changed", repo_id: p.repo_id, capabilities: p.capabilities });
@@ -770,6 +790,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
+      materializeFile: async (repoId, fileId) => {
+        const job_id = nextJobId("hydrate");
+        dispatch({ type: "job-start", job_id, op: "hydrate" });
+        try {
+          const result = await rpc.materializeFile(repoId, fileId, job_id);
+          dispatch({ type: "job-complete", job_id, status: 0 });
+          return result;
+        }
+        catch (error) {
+          // A lost terminal reply proves neither rollback nor publication.
+          // Keep the job inspectable after its originating view has unmounted.
+          if (isCancelledError(error)) dispatch({ type: "job-complete", job_id, status: -1, outcome: "cancelled" });
+          else if (error && typeof error === "object" && "code" in error && typeof error.code === "number") dispatch({ type: "job-complete", job_id, status: 1 });
+          else dispatch({ type: "job-interrupted", job_id, message: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+      },
       setMaxLogLines: (value) => dispatch({ type: "set-max-log-lines", value }),
       clearLogs: () => dispatch({ type: "clear-logs" }),
     }),

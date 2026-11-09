@@ -24,6 +24,7 @@ const ALLOWED_METHODS = new Set([
   "file_open",
   "file_chunks",
   "file_close",
+  "file_materialize",
   "read_text",
   "read_bytes",
   "read_range",

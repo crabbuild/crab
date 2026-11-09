@@ -7,7 +7,7 @@ import { call, packagedExecutable } from "./packaged-app";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 
-test("packaged desktop previews large pointers and materializes staged Crab content", async () => {
+test("packaged desktop previews large pointers and materializes Crab and LFS content", async () => {
   test.setTimeout(240_000);
   const executablePath = packagedExecutable();
   const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
@@ -124,6 +124,12 @@ test("packaged desktop previews large pointers and materializes staged Crab cont
     });
     expect(failure).toMatchObject({ code: 1012, data: { kind: "content_read" } });
     await page.screenshot({ path: test.info().outputPath("lfs-integrity-error.png") });
+    await page.getByRole("button", { name: "File details", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate to disk", exact: true }).click();
+    await expect(inspector.getByRole("alert")).toContainText(/native content read failed/i);
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
+    await page.screenshot({ path: test.info().outputPath("lfs-materialization-integrity-error.png") });
+    await page.getByRole("button", { name: "Back to preview", exact: true }).click();
     writeFileSync(payload, original);
     await page.locator('[role="treeitem"][data-item-path="large.safetensors"]').click();
     await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
@@ -154,7 +160,7 @@ test("packaged desktop previews large pointers and materializes staged Crab cont
     await expect(page.getByRole("cell", { name: "weights", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "File details", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate to disk", exact: true }).click();
-    await expect(page.getByRole("status").filter({ hasText: "File materialized on disk" })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "materialized on disk" })).toBeVisible();
     expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
     expect(git(["show", ":staged.safetensors"])).toEqual(pointers.get("staged.safetensors"));
     await page.getByRole("button", { name: "Back to preview", exact: true }).click();
@@ -171,6 +177,19 @@ test("packaged desktop previews large pointers and materializes staged Crab cont
     await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
     await expect(page.getByText("1 hydrated", { exact: true })).toBeVisible();
     await expect(page.getByText("File status unavailable", { exact: true })).toHaveCount(0);
+    await page.locator('[role="treeitem"][data-item-path="lfs.safetensors"]').click();
+    await page.getByRole("button", { name: "File details", exact: true }).click();
+    await expect(inspector.getByText("Git LFS", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Hydrate to disk", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "materialized on disk" })).toBeVisible();
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
+    expect(git(["show", ":lfs.safetensors"])).toEqual(pointers.get("lfs.safetensors"));
+    git(["diff", "--exit-code", "--", "staged.safetensors", "lfs.safetensors"]);
+    await expect(page.getByText("2 hydrated", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(2);
+    await expect(page.getByText("Verified and materialized", { exact: true }).first()).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath("materialized-lfs-and-crab.png") });
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

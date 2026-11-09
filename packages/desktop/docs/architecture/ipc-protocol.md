@@ -120,13 +120,13 @@ reports and their issues. Cleanup failures are errors, with no filesystem
 deletion fallback; retained, unknown and busy state stays with its owner.
 
 ### File Operations
-- `list`, `stat`, `file_open`, `file_chunks`, `file_close`
+- `list`, `stat`, `file_open`, `file_chunks`, `file_close`, `file_materialize`
 - `read_text`, `read_bytes`, `read_range`
 - `preview_parquet`, `preview_safetensors`, `preview_npy`, `preview_npz`
 - `preview_zip`, `preview_notebook_meta`, `preview_torch_checkpoint`
 
 `file_open {repo_id, path, rev?, op_id?}` captures a file and returns an opaque
-`file_id`, logical `size`, `kind`, `representation`, and available identities.
+`file_id`, logical `size`, `kind`, `representation`, `can_materialize`, and available identities.
 Working files never claim an uncomputed content hash. `file_chunks {repo_id,
 file_id, start, limit, op_id?}` returns at most 512 ordered occurrences and a
 next cursor; repeated hashes retain their positions. Local recipes do not claim
@@ -141,6 +141,28 @@ the native source. Repository close drains every retained file. Queries have
 independent cancellation; cancelling a page does not cancel its file. At most
 128 files are retained per repository. These stateful operations are rejected
 during SSH reconnection and are never served from stale cache or replayed.
+
+`file_materialize {repo_id, file_id, op_id}` writes a captured working Crab or
+LFS pointer through 1 MiB ranges to a same-directory temporary file. It verifies
+the complete content identity and rechecks the working pointer before atomic
+replacement, preserving permissions and the Git index. Historical, remote and
+symlink captures cannot be materialized. The result contains `written_bytes`
+only after publication; complete-response preview limits do not apply.
+
+The operation has a repository-owned scope. Closing its view cancels ordinary
+queries and waits for materialization before releasing the native source;
+repository close cancels and drains the write. `rpc/cancel {repo_id, op_id}`
+signals cancellation, and the original reply establishes the terminal outcome.
+A cancellation that loses to publication returns success. Failed or cancelled
+writes explicitly remove their temporary output. Detected external edits survive.
+
+`progress/transfer {op, job_id, repo_id, written_bytes, total_bytes}` reports
+logical bytes actually written to the temporary file, not network traffic.
+`progress/complete` includes `outcome` for materialization: `completed`, `failed`
+or `cancelled`. Activity owns progress and cancellation across view changes.
+A transport error without a terminal result leaves the outcome unknown;
+reopening the working file establishes its representation. Resume/restart and
+long SSH request deadlines still require separate qualification.
 
 The main process owns `media_open {repo_id, path, rev?, op_id?}` and
 `media_close {media_id}`. It captures a native file and exposes an opaque

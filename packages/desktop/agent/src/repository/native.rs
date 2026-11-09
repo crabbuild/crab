@@ -57,7 +57,7 @@ impl NativeReads {
         &self,
         root: &Path,
         pointer: Bytes,
-        stop: CancellationToken,
+        capture_stop: CancellationToken,
         id: String,
     ) -> Result<NativeFile> {
         // Storage identity is task-local. Capture it before the actor leaves
@@ -68,7 +68,10 @@ impl NativeReads {
         let (ready, opened) = oneshot::channel();
         let (finished, completion) = watch::channel(Completion::Running);
         let actor_id = id.clone();
-        let source_stop = stop.clone();
+        // A retained reader outlives any one query or view. Opening still
+        // belongs to its request; cancellation must drain a late handshake.
+        let source_stop = self.read_token();
+        let stop = source_stop.clone();
         let root = root.to_owned();
         let mut workers = self.0.workers.lock().await;
         if workers.closed {
@@ -87,9 +90,15 @@ impl NativeReads {
             result.map_err(AgentError::Shared)
         });
         drop(workers);
-        let opened = opened
-            .await
-            .map_err(|_| AgentError::Other("native reader stopped before opening".into()));
+        let opened = tokio::select! {
+            biased;
+            result = opened => result.map_err(|_| AgentError::Other("native reader stopped before opening".into())),
+            () = capture_stop.cancelled() => {
+                source_stop.cancel();
+                completed(completion).await?;
+                return Err(cancelled(&id));
+            }
+        };
         let size = match opened.and_then(|result| result) {
             Ok(size) => size,
             Err(error) => {
@@ -119,6 +128,10 @@ impl NativeReads {
             Some(error) => Err(AgentError::Shared(error.clone())),
             None => Ok(()),
         }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.0.stop.cancel();
     }
 }
 

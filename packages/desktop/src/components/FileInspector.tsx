@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Binary, ChevronLeft, ChevronRight, Download, Loader2 } from "lucide-react";
-import { rpc, type CapturedFile, type FileChunkPage } from "../ipc";
-import type { OpenRepo } from "../state";
+import { rpc, isCancelledError, type CapturedFile, type FileChunkPage } from "../ipc";
+import { useStore, type OpenRepo } from "../state";
 import { formatBytes } from "../lib/format";
 import { publishToast } from "../lib/toasts";
 
@@ -51,7 +51,7 @@ export function FileInspector({ repo, path, rev }: { repo: OpenRepo; path: strin
           {file.content_hash && <><dt className="text-gx-muted">{file.kind === "lfs" ? "SHA-256" : "BLAKE3"}</dt><dd className="break-all font-mono">{file.content_hash}</dd></>}
           {file.git_oid && <><dt className="text-gx-muted">Git object</dt><dd className="break-all font-mono">{file.git_oid}</dd></>}
         </dl>
-        {repo.path && rev === null && file.representation === "pointer" && <MaterializeFile key={file.file_id} repo={repo} path={path} />}
+        {file.can_materialize && <MaterializeFile key={file.file_id} repoId={repo.repo_id} file={file} />}
         {file.kind === "crab" ? <ChunkDetails key={file.file_id} repoId={repo.repo_id} file={file} onReopen={() => setRetry(retry + 1)} /> : file.kind === "lfs" ? <p className="text-xs text-gx-muted">Git LFS stores this file as one SHA-256 object. It has no Crab chunk recipe.</p> : null}
       </>}
     </div>
@@ -102,26 +102,28 @@ function ChunkDetails({ repoId, file, onReopen }: { repoId: string; file: Captur
   </div>;
 }
 
-function MaterializeFile({ repo, path }: { repo: OpenRepo; path: string }) {
+function MaterializeFile({ repoId, file }: { repoId: string; file: CapturedFile }) {
+  const { materializeFile } = useStore();
   const [pending, setPending] = useState(false);
+  const [materialized, setMaterialized] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function hydrate() {
-    if (!repo.path) return;
     setPending(true);
     setMessage(null);
     setError(null);
     try {
-      // The CLI's canonical Git pathspec parser treats metacharacters literally.
-      const result = await rpc.hydrate(repo.path, [`:(top,literal)${path}`], undefined, repo.repo_id);
-      if (result.status !== 0) throw new Error(`Hydration failed (exit ${result.status}). See command output for details.`);
-      setMessage("File materialized on disk. Reopen details to inspect the working copy.");
+      const result = await materializeFile(repoId, file.file_id);
+      setMaterialized(true);
+      setMessage(`${formatBytes(result.written_bytes)} materialized on disk. Reopen details to inspect the working copy.`);
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      if (isCancelledError(error)) setMessage("Materialization cancelled. The working pointer was preserved.");
+      else setError(error instanceof Error ? error.message : String(error));
     } finally { setPending(false); }
   }
   return <div className="space-y-2 border-t border-gx-border pt-3 text-xs">
-    <button type="button" className="btn text-xs" disabled={pending || message !== null} onClick={() => void hydrate()}>{pending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}{pending ? "Materializing file…" : "Hydrate to disk"}</button>
+    <button type="button" className="btn text-xs" disabled={pending || materialized} onClick={() => void hydrate()}>{pending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}{pending ? "Materializing file…" : "Hydrate to disk"}</button>
+    {pending && <p className="text-gx-muted">Progress and cancellation are available in Activity. You can continue browsing.</p>}
     {message && <p role="status" className="text-gx-muted">{message}</p>}
     {error && <p role="alert" className="break-words text-gx-error">{error}</p>}
   </div>;

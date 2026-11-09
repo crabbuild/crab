@@ -13,8 +13,8 @@ completion. This record tracks implementation and qualification separately.
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold multi-GiB remote LFS costs, packaged interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
-| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Existing workflows need qualification together, including uncommitted staged content and failures. |
-| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Publish state is component-owned and cancellation is optimistic. |
+| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
+| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Verify provider routing and remote RPC parity; do not silently change credentials or claim unqualified profiles. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
@@ -434,3 +434,61 @@ refresh can recover. Per-view hydration completion callbacks are removed.
   `desktop-hydration-status/mac-arm64/Crab.app` in the external build directory.
   Shared request/lifecycle ownership accounts for the non-test source growth.
   LFS materialization, durable transfers and the remaining matrix are open.
+
+## Captured materialization checkpoint
+
+File details no longer routes single-file hydration through the Crab-only CLI
+inventory. `file_materialize` uses the captured working Crab or LFS source,
+streams 1 MiB ranges to a same-directory temporary file, and verifies its whole
+BLAKE3 or SHA-256 identity before atomic replacement. It preserves permissions
+and the Git pointer. Detected external edits survive; failed and cancelled writes
+explicitly close and remove their temporary output. Historical, remote and
+symlink captures do not advertise materialization.
+
+Native reader lifetime is separate from the opening request and ordinary query
+scopes. The materializer holds a file guard and repository scope, so closing its
+view waits for the write instead of cancelling it. Repository close first stops
+that scope, then drains guards and native actors. Capture cancellation still
+drains a late native handshake. The original terminal reply wins a cancellation
+that loses to atomic publication.
+
+Activity owns the operation across view changes. Progress reports actual logical
+bytes written to temporary output, without calling them network bytes. Its
+cancel button routes the operation ID through the same repository. Acknowledged
+cancellation is distinct from failure; a lost transport reply leaves outcome
+unknown instead of claiming rollback. Failures retain native classification and
+appear in the inspector and redacted Activity log.
+
+- Three real-native regression cases passed in 25.9 seconds: both formats above
+  the 200 MiB complete-response cap, byte identity and unchanged index, literal
+  comma/bracket filenames, executable permissions, non-materializable index and
+  symlink captures, cancellation and external-edit preservation with temporary
+  cleanup, view-independent completion and repository-close cancellation/drain.
+  The existing Crab/LFS native preview fixture also passed after the reader
+  lifetime change. CI runs the new native cases against its bundled CLI.
+- Forty-three focused renderer IPC/cancellation/SSH/shared-status checks, thirteen
+  media cases, four captured-source cases and renderer/Electron typechecks
+  passed. Production native, renderer and Electron
+  builds and unsigned arm64 packaging passed. Agent Clippy remains blocked by
+  three unchanged `unwrap()` violations already present on `origin/crab-v2`:
+  two in `forge/handlers.rs` and one filesystem fallback in `handlers.rs`.
+  No Clippy diagnostic remains on the new materialization/read-owner code.
+- The isolated RustFS fixture passed publication, lazy/direct-remote captured
+  reads and both lazy-clone materializations through selected read-only storage.
+  Exact bytes, unchanged Git pointers, actual progress and one successful native
+  completion per job were checked: **230 GET/HEAD requests, zero writes**.
+  Evidence: `large-files-materialize-proof.enxiyall/report.json` in the external
+  build directory.
+- The matching packaged GUI smoke passed in 19.0 seconds, including sparse
+  3 GiB preview/chunk inspection, actual Crab and LFS **Hydrate to disk** actions,
+  exact 4 MiB payloads, clean Git diffs and two updated hydrated-file counts.
+  Corrupt LFS materialization showed the native failure and preserved its
+  pointer. Activity visibly displayed both verified results and the failed
+  attempt. Screenshots were inspected, and the peer app was restored to its
+  saved workflow. Evidence: `large-files-materialize-ui-proof`; package:
+  `desktop-materialize/mac-arm64/Crab.app` in the external build directory.
+- Non-test growth owns actual streaming publication, integrity, temporary-file
+  cleanup, lifecycle and visible operation state. It replaces the inspector's
+  status-only CLI call; it adds no second preview or reconstruction engine.
+  Bulk LFS routing, decoded limits, diffs, durable transfers, cache budgets and
+  the remaining acceptance matrix are still open.

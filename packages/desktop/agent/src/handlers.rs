@@ -164,6 +164,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "file_open" => file_open(state, decode(&method, params)?).await,
         "file_chunks" => file_chunks(state, decode(&method, params)?).await,
         "file_close" => file_close(state, decode(&method, params)?).await,
+        "file_materialize" => file_materialize(state, decode(&method, params)?, out).await,
         "read_text" => read_text(state, decode(&method, params)?).await,
         "read_bytes" => read_bytes(state, decode(&method, params)?).await,
         "read_range" => read_range(state, decode(&method, params)?).await,
@@ -2613,6 +2614,93 @@ async fn file_close(state: &State, p: FileIdParams) -> Result<Value> {
     let repo = state.get(&p.repo_id).await?;
     repo.files.remove(&p.file_id).await?;
     Ok(json!({ "closed": p.file_id }))
+}
+
+#[derive(Deserialize)]
+struct FileMaterializeParams {
+    #[serde(flatten)]
+    file: FileIdParams,
+    op_id: String,
+}
+
+async fn file_materialize(
+    state: &State,
+    p: FileMaterializeParams,
+    out: SharedStdout,
+) -> Result<Value> {
+    let repo = state.get(&p.file.repo_id).await?;
+    let scope = repo.read_scope();
+    let mut signal = state.cancel_registry.register(p.op_id.clone()).await;
+    let work = async {
+        let file = repo.files.get(&p.file.file_id).await?;
+        let (_guard, source) = file.materialization(scope.clone()).await?;
+        let runtime = tokio::runtime::Handle::current();
+        let output = out.clone();
+        let job_id = p.op_id.clone();
+        let repo_id = p.file.repo_id.clone();
+        let total_bytes = source.size;
+        let written = source
+            .materialize(move |written_bytes| {
+                runtime.block_on(crate::notify(
+                    &output,
+                    "progress/transfer",
+                    json!({
+                        "op": "hydrate", "job_id": job_id, "repo_id": repo_id,
+                        "written_bytes": written_bytes, "total_bytes": total_bytes,
+                    }),
+                ))
+            })
+            .await?;
+        Ok::<_, AgentError>(json!({ "written_bytes": written }))
+    };
+    tokio::pin!(work);
+    let result = tokio::select! {
+        biased;
+        result = &mut work => result,
+        _ = &mut signal => { scope.cancel(); work.await },
+    };
+    state.cancel_registry.unregister(&p.op_id).await;
+    // The writer checks cancellation before atomic publication. Its terminal
+    // result wins a late cancel, so committed bytes cannot be called cancelled.
+    let result = match scope.failure() {
+        Some(error) => Err(error),
+        None if matches!(&result, Err(error) if error.is_cancelled()) => {
+            Err(AgentError::OpCancelled {
+                op_id: p.op_id.clone(),
+            })
+        }
+        None => result,
+    };
+    let (status, outcome) = match &result {
+        Ok(_) => (0, "completed"),
+        Err(error) if error.is_cancelled() => (-1, "cancelled"),
+        Err(_) => (1, "failed"),
+    };
+    if let Err(error) = &result {
+        if !error.is_cancelled() {
+            let event = shellout::ProgressEvent {
+                op: "hydrate",
+                job_id: &p.op_id,
+                stream: shellout::Stream::Stderr,
+                line: error.to_string(),
+            };
+            if let Err(delivery) = crate::notify(&out, "progress/line", event).await {
+                tracing::error!(%delivery, "materialization failure delivery failed");
+            }
+        }
+    }
+    if let Err(error) = crate::notify(
+        &out,
+        "progress/complete",
+        json!({
+            "op": "hydrate", "job_id": p.op_id, "status": status, "outcome": outcome,
+        }),
+    )
+    .await
+    {
+        tracing::error!(%error, "materialization completion delivery failed");
+    }
+    result
 }
 
 async fn preview_fmt(

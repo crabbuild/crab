@@ -38,7 +38,9 @@ export function setupJobCompletionPublisher(): () => void {
     const p = evt.params as ProgressComplete;
     const label = formatOpLabel(p.op);
 
-    if (p.status === 0) {
+    if (p.outcome === "cancelled") {
+      publishToast({ kind: "info", title: `${label} cancelled`, body: "The operation stopped before publication." });
+    } else if (p.status === 0) {
       publishToast({
         kind: "success",
         title: `${label} completed`,

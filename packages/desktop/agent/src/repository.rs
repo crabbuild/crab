@@ -194,6 +194,9 @@ impl BrowseSession {
     }
 
     pub async fn close(&self) -> Result<()> {
+        // Materialization owns a repository scope even after its view closes.
+        // Stop it before waiting for file guards, otherwise close can deadlock.
+        self.readers.cancel();
         let files = self.files.close().await;
         let native = self.readers.close().await;
         let remote = match &self.remote {

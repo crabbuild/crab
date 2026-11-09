@@ -165,6 +165,245 @@ async fn retained_file_queries_cancel_independently_and_close_drains_readers() {
     assert!(repo.files.get("capture").await.is_err());
 }
 
+async fn working_pointer(kind: &str, size: u64) -> (tempfile::TempDir, BrowseSession, Bytes) {
+    use std::io::Write as _;
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let binary = shellout::resolve_crab_bin();
+    let driver = format!(
+        "'{}' filter-process",
+        binary.to_string_lossy().replace('\'', "'\\''")
+    );
+    git(
+        root,
+        &["config", &format!("filter.{kind}.process"), &driver],
+    )
+    .await
+    .unwrap();
+    git(
+        root,
+        &["config", &format!("filter.{kind}.required"), "true"],
+    )
+    .await
+    .unwrap();
+    std::fs::write(
+        root.join(".gitattributes"),
+        format!("*.bin filter={kind} -text\n"),
+    )
+    .unwrap();
+    let mut file = std::fs::File::create(root.join("model[1],data.bin")).unwrap();
+    file.write_all(b"retained").unwrap();
+    file.set_len(size).unwrap();
+    drop(file);
+    git(root, &["add", "--", "model[1],data.bin"])
+        .await
+        .unwrap();
+    let pointer = Bytes::from(git(root, &["show", ":model[1],data.bin"]).await.unwrap());
+    std::fs::write(root.join("model[1],data.bin"), &pointer).unwrap();
+    (directory, repo, pointer)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
+async fn materialization_streams_both_pointer_formats_above_the_complete_response_cap() {
+    use std::io::Read as _;
+    let size = MAX_COMPLETE_BYTES as u64 + 1024 * 1024;
+    for kind in ["crab", "lfs"] {
+        let (directory, repo, pointer) = working_pointer(kind, size).await;
+        let index = FileSource::capture(&repo, "model[1],data.bin", Some(""), repo.read_scope())
+            .await
+            .unwrap();
+        assert_eq!(index.describe()["can_materialize"], false);
+        assert!(index.materialization(repo.read_scope()).is_err());
+        index.close().await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                directory.path().join("model[1],data.bin"),
+                std::fs::Permissions::from_mode(0o751),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("model[1],data.bin", directory.path().join("link.bin"))
+                .unwrap();
+            let link = FileSource::capture(&repo, "link.bin", None, repo.read_scope())
+                .await
+                .unwrap();
+            assert_eq!(link.describe()["can_materialize"], false);
+            link.close().await.unwrap();
+        }
+        let source = FileSource::capture(&repo, "model[1],data.bin", None, repo.read_scope())
+            .await
+            .unwrap();
+        let file = repo.files.insert("file".into(), source).await.unwrap();
+        let (guard, source) = file.materialization(repo.read_scope()).await.unwrap();
+        assert_eq!(source.materialize(|_| Ok(())).await.unwrap(), size);
+        drop(guard);
+        let mut bytes = std::fs::File::open(directory.path().join("model[1],data.bin")).unwrap();
+        let mut prefix = [0; 8];
+        bytes.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"retained");
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut remaining = size - 8;
+        loop {
+            let count = bytes.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            assert!(buffer[..count].iter().all(|byte| *byte == 0));
+            remaining -= count as u64;
+        }
+        assert_eq!(remaining, 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(directory.path().join("model[1],data.bin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o751
+            );
+        }
+        assert_eq!(
+            git(directory.path(), &["show", ":model[1],data.bin"])
+                .await
+                .unwrap(),
+            pointer
+        );
+        repo.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
+async fn materialization_preserves_pointers_on_cancel_and_edits_observed_before_publication() {
+    for kind in ["crab", "lfs"] {
+        for edit in [false, true] {
+            let size = 2 * 1024 * 1024;
+            let (directory, repo, pointer) = working_pointer(kind, size).await;
+            let path = directory.path().join("model[1],data.bin");
+            let source = FileSource::capture(&repo, "model[1],data.bin", None, repo.read_scope())
+                .await
+                .unwrap();
+            let file = repo.files.insert("file".into(), source).await.unwrap();
+            let scope = repo.read_scope();
+            let (guard, source) = file.materialization(scope.clone()).await.unwrap();
+            let mut before = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            before.sort();
+            let target = path.clone();
+            let result = source
+                .materialize(move |written| {
+                    if written == size {
+                        if edit {
+                            std::fs::write(&target, b"external edit")?;
+                        } else {
+                            scope.cancel();
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+            assert!(result.is_err());
+            if !edit {
+                assert!(result.unwrap_err().is_cancelled());
+            }
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                if edit {
+                    b"external edit".as_slice()
+                } else {
+                    pointer.as_ref()
+                }
+            );
+            let mut after = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            after.sort();
+            assert_eq!(after, before);
+            drop(guard);
+            repo.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
+async fn materialization_outlives_its_view_and_repository_close_cancels_and_drains_it() {
+    for close_repo in [false, true] {
+        let (directory, repo, pointer) = working_pointer("lfs", 2 * 1024 * 1024).await;
+        let source = FileSource::capture(&repo, "model[1],data.bin", None, repo.read_scope())
+            .await
+            .unwrap();
+        let view_scope = source.scope();
+        let file = repo.files.insert("file".into(), source).await.unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let scope = repo.read_scope();
+        let observer = scope.clone();
+        let job = tokio::spawn(async move {
+            let (_guard, source) = file.materialization(scope).await.unwrap();
+            let mut entered = Some(entered);
+            source
+                .materialize(move |_| {
+                    if let Some(entered) = entered.take() {
+                        entered.send(()).unwrap();
+                        released.recv().unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        let closing = repo.clone();
+        let close = tokio::spawn(async move {
+            if close_repo {
+                closing.close().await
+            } else {
+                closing.files.remove("file").await
+            }
+        });
+        if close_repo {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while observer.check().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while view_scope.check().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(observer.check().is_ok());
+        }
+        assert!(!close.is_finished());
+        release.send(()).unwrap();
+        let result = job.await.unwrap();
+        close.await.unwrap().unwrap();
+        assert!(repo.files.get("file").await.is_err());
+        if close_repo {
+            assert!(result.unwrap_err().is_cancelled());
+            assert_eq!(
+                std::fs::read(directory.path().join("model[1],data.bin")).unwrap(),
+                pointer
+            );
+        } else {
+            assert_eq!(result.unwrap(), 2 * 1024 * 1024);
+        }
+        repo.close().await.unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
 async fn native_crab_and_lfs_pointer_previews_use_staging_without_hydrating() {

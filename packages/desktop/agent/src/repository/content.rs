@@ -6,6 +6,9 @@ use tokio::sync::Mutex;
 
 use super::*;
 
+mod materialize;
+use materialize::WorkingPointer;
+
 pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
 pub(crate) const MAX_COMPLETE_BYTES: usize = 200 * 1024 * 1024;
 
@@ -101,6 +104,7 @@ enum Source {
     Pointer {
         reader: super::native::NativeFile,
         identity: Identity,
+        target: Option<WorkingPointer>,
     },
     Remote {
         snapshot: Snapshot,
@@ -159,7 +163,8 @@ impl FileSource {
             if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
                 let bytes = git(root, &["cat-file", "blob", &oid]).await?;
                 if let Some((size, identity)) = pointer_metadata(&bytes) {
-                    return Self::pointer(repo, root, bytes.into(), size, identity, scope).await;
+                    return Self::pointer(repo, root, bytes.into(), size, identity, None, scope)
+                        .await;
                 }
             }
             return Ok(Self {
@@ -188,7 +193,7 @@ impl FileSource {
                 "file resolves outside the repository".into(),
             ));
         }
-        let mut file = tokio::fs::File::open(absolute).await?;
+        let mut file = tokio::fs::File::open(&absolute).await?;
         let metadata = file.metadata().await?;
         if !metadata.is_file() {
             return Err(AgentError::Other("preview source is not a file".into()));
@@ -203,7 +208,19 @@ impl FileSource {
                 return Err(changed());
             }
             if let Some((size, identity)) = pointer_metadata(&bytes) {
-                return Self::pointer(repo, root, bytes.into(), size, identity, scope).await;
+                let bytes = Bytes::from(bytes);
+                let requested = root.join(path);
+                let target = if tokio::fs::symlink_metadata(&requested).await?.is_file() {
+                    Some(WorkingPointer::capture(
+                        requested,
+                        absolute,
+                        bytes.clone(),
+                        metadata,
+                    ))
+                } else {
+                    None
+                };
+                return Self::pointer(repo, root, bytes, size, identity, target, scope).await;
             }
         }
         Ok(Self {
@@ -222,6 +239,7 @@ impl FileSource {
         bytes: Bytes,
         size: u64,
         identity: Identity,
+        target: Option<WorkingPointer>,
         scope: ReadScope,
     ) -> Result<Self> {
         let source = repo
@@ -241,6 +259,7 @@ impl FileSource {
             source: Arc::new(Source::Pointer {
                 reader: source,
                 identity,
+                target,
             }),
         })
     }
@@ -270,7 +289,14 @@ impl FileSource {
                 (kind, "remote_content", None, Some(oid.as_str()))
             }
         };
-        json!({ "kind": kind, "representation": representation, "size": self.size,
+        let can_materialize = matches!(
+            self.source.as_ref(),
+            Source::Pointer {
+                target: Some(_),
+                ..
+            }
+        );
+        json!({ "kind": kind, "representation": representation, "size": self.size, "can_materialize": can_materialize,
             "content_hash": hash, "git_oid": oid })
     }
 
@@ -280,6 +306,25 @@ impl FileSource {
             scope: ReadScope::new(self.scope.stop.child_token()),
             size: self.size,
         }
+    }
+
+    pub(super) fn materialization(&self, scope: ReadScope) -> Result<Self> {
+        if !matches!(
+            self.source.as_ref(),
+            Source::Pointer {
+                target: Some(_),
+                ..
+            }
+        ) {
+            return Err(AgentError::Other(
+                "only a captured working pointer can be materialized".into(),
+            ));
+        }
+        Ok(Self {
+            source: self.source.clone(),
+            scope,
+            size: self.size,
+        })
     }
 
     pub(crate) fn scope(&self) -> ReadScope {
@@ -312,6 +357,7 @@ impl FileSource {
             Source::Pointer {
                 reader,
                 identity: Identity::Blake3(_),
+                ..
             } => reader.chunks(start, limit, &self.scope.stop).await?,
             Source::Remote { snapshot, path, .. } => {
                 self.scope
@@ -555,10 +601,23 @@ enum Identity {
 
 impl Identity {
     fn verify(self, bytes: &[u8]) -> Result<()> {
+        let mut hasher = self.hasher();
+        hasher.update(bytes);
+        self.verify_digest(hasher.finish())
+    }
+
+    fn hasher(self) -> ContentHasher {
         use sha2::Digest as _;
-        let (algorithm, expected, actual) = match self {
-            Self::Blake3(expected) => ("BLAKE3", expected, *blake3::hash(bytes).as_bytes()),
-            Self::Sha256(expected) => ("SHA-256", expected, sha2::Sha256::digest(bytes).into()),
+        match self {
+            Self::Blake3(_) => ContentHasher::Blake3(Box::new(blake3::Hasher::new())),
+            Self::Sha256(_) => ContentHasher::Sha256(sha2::Sha256::new()),
+        }
+    }
+
+    fn verify_digest(self, actual: [u8; 32]) -> Result<()> {
+        let (algorithm, expected) = match self {
+            Self::Blake3(expected) => ("BLAKE3", expected),
+            Self::Sha256(expected) => ("SHA-256", expected),
         };
         if expected != actual {
             return Err(AgentError::Integrity {
@@ -568,6 +627,31 @@ impl Identity {
             });
         }
         Ok(())
+    }
+}
+
+enum ContentHasher {
+    Blake3(Box<blake3::Hasher>),
+    Sha256(sha2::Sha256),
+}
+
+impl ContentHasher {
+    fn update(&mut self, bytes: &[u8]) {
+        use sha2::Digest as _;
+        match self {
+            Self::Blake3(hasher) => {
+                hasher.update(bytes);
+            }
+            Self::Sha256(hasher) => hasher.update(bytes),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        use sha2::Digest as _;
+        match self {
+            Self::Blake3(hasher) => *hasher.finalize().as_bytes(),
+            Self::Sha256(hasher) => hasher.finalize().into(),
+        }
     }
 }
 
