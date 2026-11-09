@@ -10,14 +10,14 @@ completion. This record tracks implementation and qualification separately.
 | Capability | Required behavior | Current gap / qualification |
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | `repository.rs::pointer_info` currently returns no chunk/xorb metadata. |
-| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Captured sources now retain native sessions and acknowledge cancellation/close. Selected-connection and read-only S3-compatible RPC proof passed. Packaged UI, cold/large content and other profiles remain open. |
+| Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Cold multi-GiB remote LFS costs, packaged cancellation, media delivery and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Parser and desktop qualification are in progress; media and query paths still need audit. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Desktop rejects the CLI JSON envelope, manufactures size-only chunk reports, and treats empty Git patches as large files. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Existing workflows need qualification together, including uncommitted staged content and failures. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Publish state is component-owned and cancellation is optimistic. |
-| Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Cache controls and active-reader ownership need end-to-end qualification. |
+| Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Verify provider routing and remote RPC parity; do not silently change credentials or claim unqualified profiles. |
-| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Not yet run for this change. Cross-platform/provider claims require their corresponding dedicated proof. |
+| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Ownership
 
@@ -233,6 +233,27 @@ failures and preserves integrity and cancellation data for UI policy.
   production `.next` build. The PR documentation-quality CI job builds the site
   before running that check. Installer-only lock metadata was restored; no web
   dependency versions changed.
+
+### Packaged consolidation proof
+
+The rebuilt unsigned macOS arm64 package passed the focused GUI smoke in
+15 seconds, including the latest connection-redaction fix. Real Explorer
+actions previewed a sparse 3 GiB Crab file and an LFS file without replacing
+their working pointers. Corrupt LFS content produced a visible failure with
+code `1012` and `content_read` data across the real Electron boundary, without
+the transport prefix; repairing the object restored the preview.
+
+Settings displayed actual cache usage. Preview cleanup kept the disposable
+payload; actual cleanup removed it while preserving retained workspace data.
+The subsequent 3 GiB staged preview still worked, with its working pointer
+unchanged. Screenshots were inspected for the cleanup and error states.
+
+Evidence: external build directory `large-files-verified-ui-proof` and
+`large-files-verified-ui-smoke.log`. Application:
+`packages/desktop/release/large-files-verified/mac-arm64/Crab.app`. The earlier
+ZIP predates the redaction fix; this proof uses the rebuilt unpacked package.
+The other chat's Crab application was reopened and its saved workflow view
+restored after each smoke. The complete feature acceptance matrix remains open.
   Evidence: `large-files-proof._xhbivbf/report.json` in the external build root;
   payload SHA-256 `4c22df11d3ecfef30df347707e9070fd9f96a0112170cb85b736818ef56001fd`.
   Renderer/Electron type checks passed; repeat packaged proof remains required.
