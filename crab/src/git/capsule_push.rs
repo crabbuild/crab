@@ -974,10 +974,15 @@ fn prepare_visibility_delta(
             edit.expected_old()
                 .map(|oid| (edit.ref_name().to_owned(), oid.to_owned()))
         })
-        .collect();
-    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeMap<_, _>>();
+    let available_old_tips = if rewritten_old_refs.is_empty() {
+        BTreeSet::new()
+    } else {
+        let objects = gix_odb::at(git_dir.join("objects"))?;
+        locally_available_remote_tips(&objects, &rewritten_old_refs)
+            .into_iter()
+            .collect()
+    };
     let mut shared = shared_visibility::prepare_replacements(
         git_dir,
         edits,
@@ -1119,6 +1124,17 @@ fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<Option<bo
     }
 }
 
+fn local_objects_at(git_dir: &Path) -> std::io::Result<gix_odb::Handle> {
+    gix_odb::at_opts(
+        git_dir.join("objects"),
+        [],
+        gix_odb::store::init::Options {
+            alloc_limit_bytes: Some(LOCAL_OBJECT_ALLOCATION_BYTES),
+            ..Default::default()
+        },
+    )
+}
+
 // A direct parent edge proves fast-forward without scanning prior history.
 // Both checks use the same physical history as packing and visibility; a local
 // replacement or graft must not turn a divergent update into a fast-forward.
@@ -1131,14 +1147,7 @@ fn has_direct_parent(git_dir: &Path, old_oid: &str, new_oid: &str) -> bool {
     };
     // Read physical objects directly: no replacement refs, grafts, shallow
     // boundary or lazy fetch may manufacture the edge used by admission.
-    let Ok(objects) = gix_odb::at_opts(
-        git_dir.join("objects"),
-        [],
-        gix_odb::store::init::Options {
-            alloc_limit_bytes: Some(LOCAL_OBJECT_ALLOCATION_BYTES),
-            ..Default::default()
-        },
-    ) else {
+    let Ok(objects) = local_objects_at(git_dir) else {
         return false;
     };
     let mut buffer = Vec::new();
@@ -1189,10 +1198,13 @@ async fn prepare_git_packs(
     if updates.is_empty() {
         return Ok(PreparedGitPush::default());
     }
+    // Exclusion and inventory reads share physical indexes. Retain normal miss
+    // refresh and the allocation bound while keeping this handle across packing.
+    let objects = local_objects_at(git_dir)?;
     let excluded_tips = if force_full_graph {
         None
     } else {
-        Some(locally_available_remote_tips(git_dir, remote_refs)?)
+        Some(locally_available_remote_tips(&objects, remote_refs))
     };
     let pack_is_exact_visibility_delta = if !force_full_graph
         && let [update] = updates
@@ -1219,6 +1231,7 @@ async fn prepare_git_packs(
     .await?;
     prepare_generated_git_packs(
         git_dir,
+        objects,
         generated,
         max_input_size,
         pack_is_exact_visibility_delta,
@@ -1238,6 +1251,7 @@ struct PreparedGitPush {
 
 async fn prepare_generated_git_packs(
     git_dir: &Path,
+    objects: gix_odb::Handle,
     generated: Vec<crate::git::pack::PackedFileData>,
     max_input_size: u64,
     exact_ref_delta: bool,
@@ -1290,7 +1304,7 @@ async fn prepare_generated_git_packs(
         if let Some(objects) = &mut visibility_objects {
             objects.extend(object_ids.iter().copied());
         }
-        let inventory = inspect_generated_objects(git_dir, &object_ids)?;
+        let inventory = inspect_generated_objects(git_dir, &objects, &object_ids)?;
         lfs_delta_empty &= !inventory.has_lfs_objects;
         pointers.extend(inventory.pointers);
         let checksum =
@@ -1321,18 +1335,15 @@ async fn prepare_generated_git_packs(
 }
 
 fn locally_available_remote_tips(
-    git_dir: &Path,
+    objects: &impl Exists,
     remote_refs: &BTreeMap<String, String>,
-) -> Result<Vec<String>> {
-    let objects = gix_odb::at(git_dir.join("objects")).map_err(|error| {
-        CrabError::Internal(format!("failed to open local Git object database: {error}"))
-    })?;
-    Ok(remote_refs
+) -> Vec<String> {
+    remote_refs
         .values()
         .filter_map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).ok())
         .filter(|oid| objects.exists(oid))
         .map(|oid| oid.to_string())
-        .collect())
+        .collect()
 }
 
 struct GeneratedObjectInventory {
@@ -1345,17 +1356,9 @@ struct GeneratedObjectInventory {
 // physical headers once for its ordered locator kinds and small pointer blobs.
 fn inspect_generated_objects(
     git_dir: &Path,
+    objects: &gix_odb::Handle,
     object_ids: &[gix_hash::ObjectId],
 ) -> Result<GeneratedObjectInventory> {
-    let objects = gix_odb::at_opts(
-        git_dir.join("objects"),
-        [],
-        gix_odb::store::init::Options {
-            alloc_limit_bytes: Some(LOCAL_OBJECT_ALLOCATION_BYTES),
-            ..Default::default()
-        },
-    )
-    .map_err(|error| CrabError::Internal(format!("failed to open local Git objects: {error}")))?;
     let mut buffer = Vec::new();
     let mut pointers = Vec::new();
     let mut has_lfs_objects = false;
