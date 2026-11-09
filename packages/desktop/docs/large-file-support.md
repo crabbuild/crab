@@ -12,7 +12,7 @@ completion. This record tracks implementation and qualification separately.
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
-| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured comparisons replace size-only reports and error fallbacks; actual ordered chunk metrics, explicit versions, same-size LFS identities and empty Git patches have focused proof. Packaged UI and remote/profile/format comparison qualification are being completed. |
+| Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS comparisons have packaged macOS and real RustFS proof: working/index/revision/empty pairs, actual ordered chunk metrics, same-size identities, initial commits and paged ranges. Ordinary Git capture validation, notebooks, inline reviews, modes, formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
@@ -565,9 +565,9 @@ incrementally and complete reads retain their separate 200 MiB ceiling.
 - Hydration outside a Git worktree again preserves the original remote failure;
   real local staging still restores an unpushed pointer. Both focused regression
   tests passed. Shared chunk-page Clippy and wire-contract admission checks pass.
-- Packaged comparison screenshots currently cover chunk metrics, more than fifty
-  changed ranges, same-size LFS and initial commits. The full GUI rerun and final
-  matching package are still pending. Ordinary Git patches still read the live
+- Packaged comparison screenshots cover chunk metrics, more than fifty changed
+  ranges, same-size LFS and initial commits. Final matching-package proof follows
+  below. Ordinary Git patches still read the live
   index/worktree through Git, so concurrent mutation needs capture validation.
   Notebook, inline staging/review, mode-only large-file changes, format comparisons
   and remaining provider/profile surfaces still require implementation or
@@ -597,6 +597,21 @@ current owned operations supply their existing cancellation token.
   optional pathspec syntax is separate from the exact-byte and unchanged-index
   lease assertions. Both minimal and desktop-pathspec CLI profiles passed all
   eight cases after that fixture fix.
-- The matching native rebuild and comparison GUI rerun remain pending. Earlier
-  final-package preview/materialization and real-storage/cold-LFS checks passed;
-  the failed comparison smoke is not counted as successful GUI qualification.
+- The matching optimized native build and unsigned macOS arm64 package passed.
+  Both packaged GUI tests passed in 36.7 seconds: real 64 MiB same-size Crab
+  changes, more than fifty changed ranges and pagination, index/working selection,
+  same-size LFS, ordinary documentation patches, unchanged Git patches and initial
+  commits. Exact fixture bytes and index pointers remained unchanged. The sibling
+  sparse 3 GiB preview, cache cleanup, corruption/repair, Crab/LFS materialization,
+  hydrated counts and visible Activity outcomes also passed.
+- Matching-runtime RustFS proof repeated the local lazy-clone/direct-remote
+  comparisons and exact materializations: 290 GET/HEAD requests and zero writes.
+  Evidence: `large-files-diff-proof.rps7thf2/report.json` in the external build
+  directory. The cold SDK LFS data path is unchanged from the preceding 2 GiB
+  proof; packaged cold progress/interruption remains open.
+- Evidence: `large-files-staging-admission-ui-proof/qualification.json` records
+  tested commit `112356576500d48c6310186902f3c0b41c65c8b0`, source/native/package
+  hashes and fourteen screenshots. Selected screenshots were inspected. The peer
+  Crab app was restored to its saved workflow, Save disabled, Activity empty and
+  port 17789 listening. Package: `desktop-staging-admission/mac-arm64/Crab.app`.
+  The failed prior smoke remains negative evidence, not a passing qualification.
