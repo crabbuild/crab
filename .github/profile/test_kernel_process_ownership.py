@@ -15,7 +15,10 @@ from diagnose_push_kernel import KernelPush, parse_args
 
 def owner(root, name):
     args = parse_args(["--root", str(root), "--run-id", name, "--crab-bin", sys.executable])
-    return KernelPush(args, Path("/unused/perf"), root)
+    workload = KernelPush(args, Path("/unused/perf"), root)
+    # Command fixtures must not appear as independent workload qualification reports.
+    workload.artifacts = workload.run_root / "receipts"
+    return workload
 
 
 def gone(pids):
@@ -49,7 +52,7 @@ def main(root):
         raise AssertionError("timeout did not fire")
     gone(json.loads(pids.read_text()))
     assert not workload.processes and not workload.children()
-    ledger = [json.loads(line) for line in (root / "timeout/artifacts/commands.jsonl").read_text().splitlines()]
+    ledger = [json.loads(line) for line in (root / "timeout/receipts/commands.jsonl").read_text().splitlines()]
     assert ledger[-1]["exit_code"] < 0
     assert "escaped-ready" in Path(ledger[-1]["stdout_log"]).read_text()
     proof["timeout_reaps_escaped_child_and_grandchild"] = True
