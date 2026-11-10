@@ -47,7 +47,7 @@ class RemoteNativeProcess extends EventEmitter {
   private ended = false;
   private stopping?: Promise<void>;
 
-  constructor(private readonly router: RpcRouter, private readonly profileId: string, binary: string, args: string[], cwd: string) {
+  constructor(private readonly router: RpcRouter, private readonly profileId: string, binary: string, args: string[], cwd: string, taskId?: string) {
     super();
     const owner = router.remoteChannelOwner(profileId);
     if (!owner) throw new Error("Native process requires an attached SSH agent");
@@ -70,7 +70,7 @@ class RemoteNativeProcess extends EventEmitter {
     router.on("remote-channel-retired", this.retired);
     // Only command arguments cross the wire. Native credentials and PATH come
     // from the server login; local process.env and per-agent secrets stay local.
-    this.ready = this.request("native_process_open", { executable: binary, args, cwd }).then(result => {
+    this.ready = this.request("native_process_open", { executable: binary, args, cwd, ...(taskId === undefined ? {} : { task_id: taskId }) }).then(result => {
       if (!result || typeof result !== "object" || !("opened" in result) || result.opened !== true) throw new Error("Native process open was not acknowledged");
     });
     void this.ready.catch((error: unknown) => this.fail(error));
@@ -169,9 +169,10 @@ class RemoteNativeProcess extends EventEmitter {
   }
 }
 
-export function remoteAgentProcessFactory(router: RpcRouter, profileId: string): AgentProcessFactory {
+/** Uses the workspace owner's task UUID for disposable tasks, including shared conversations. */
+export function remoteAgentProcessFactory(router: RpcRouter, profileId: string, taskId?: string): AgentProcessFactory {
   return (binary, args, options): OwnedAgentProcess => {
-    const process = new RemoteNativeProcess(router, profileId, binary, args, options.cwd);
+    const process = new RemoteNativeProcess(router, profileId, binary, args, options.cwd, taskId);
     return { process, closed: process.closed };
   };
 }

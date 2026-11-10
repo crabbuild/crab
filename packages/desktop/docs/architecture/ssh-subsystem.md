@@ -128,9 +128,43 @@ original branch selection remains the Apply target; a moving branch or HEAD
 cannot change the saved comparison baseline. Existing saved paths stay opaque
 and are not relocated or read through a compatibility path.
 
-This creation boundary does not qualify the legacy `worktree_destroy`,
-`task_discard`, Apply cleanup or process-name orphan checks. Those paths still
-need explicit workspace/process ownership before production release.
+## Disposable task workspace ownership
+
+Creation records the task UUID, branch, canonical root, shared Git directory and
+private Git directory in `crab-desktop-task-owner.json` inside the worktree's
+private Git administration directory. Apply, Discard and `worktree_destroy`
+validate this record against the opened repository and live Git identity before
+mutation. Recreated directories, primary checkouts, changed branches and foreign
+task/repository identities cannot authorize cleanup. Old or damaged records
+require explicit ownership recovery; no path-based adoption is performed.
+
+Native process factories can carry the task UUID. Such opens require the saved
+owner even when the directory's `.git` pointer disappeared; they cannot become
+unowned commands during removal. Native writers take shared file leases, while
+task mutations take exclusive leases. Independent sidecars therefore reject
+cleanup while a native writer remains owned. Confirmed physical closure releases
+its lease before publishing the receipt; uncertain closure retains it while
+the sidecar lives. The
+contract uses [Rust file locks](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
+which map to nonblocking flock on supported Unix targets. It coordinates Crab's
+owners, not external editors or arbitrary user commands.
+
+Cleanup delegates to the existing core `crab worktree remove` contract. Git
+refusal preserves files and branches; the sidecar does not recursively delete
+directories or prune other worktrees. Apply propagates status, staging and commit
+errors before merging. A successful merge remains confirmed if later cleanup
+fails: `cleanup_error` and removal flags describe the retained resources. Both
+Electron callers report that warning, and only acknowledged mutations change
+task status. Discard failures and missing remote ownership reach the caller.
+
+Real SSH proof covers unrelated directories, wrong task/branch/root identities,
+two sidecars competing with a native writer, a recreated directory's rejected
+native open, successful Discard/Destroy, and a confirmed merge whose locked
+worktree remains intact. Full remote startup/snapshot/cancellation integration,
+captured Apply-target ownership, durable mutation recovery, recovery for older
+records, process-name orphan checks and crash/detached-child ownership remain
+release gates. Leases live with Rust owners; canceled mutation RPCs and orphaned
+Git subprocesses still need ownership integration before release.
 
 ## Limits and qualification
 

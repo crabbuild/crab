@@ -37,6 +37,7 @@ import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migr
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
 import { parseRepoId } from "./ssh-router";
 import type { RpcRouter } from "./ssh-router";
+import { confirmRemoteTaskOperation } from "./ssh-task-outcome";
 import {
   RemoteScriptRunner,
   loadRemoteScripts,
@@ -1749,16 +1750,18 @@ export class Orchestrator extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     this.workspaceTransitions.set(task, "applied");
+    let cleanupWarning: string | undefined;
     try {
       if (task.isRemote) {
         if (files) throw new Error("Selective apply requires a local workspace");
         if (!task.remoteProfileId || !this.rpcRouter) throw new Error("Remote apply requires a connected remote agent");
         if (this.ownsTaskWorktree(task)) {
           try {
-            await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_apply", {
+            const result = await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_apply", {
               repo_id: task.repoPath, task_id: taskId, branch: task.branch,
               base_ref: task.baseRef, base_branch: task.baseBranch, worktree_path: task.worktreePath,
             });
+            cleanupWarning = confirmRemoteTaskOperation(result, "apply");
           } catch (error: unknown) {
             throw new Error(`Remote apply failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
@@ -1778,6 +1781,7 @@ export class Orchestrator extends EventEmitter {
       task.completedAt = Date.now();
       await this.persistTasks();
       this.emit("orchestrator:task-status", { taskId, status: task.status });
+      if (cleanupWarning) this.emit("orchestrator:error", { taskId, message: cleanupWarning });
       return { success: true };
     } finally {
       this.workspaceTransitions.delete(task);
@@ -1920,22 +1924,21 @@ export class Orchestrator extends EventEmitter {
     // Borrowed conversations also need an admission barrier while their owners
     // retire, or a late follow-up can dispatch before discarded status is saved.
     this.workspaceTransitions.set(task, ownsWorktree ? "removed" : "closed");
+    let cleanupWarning: string | undefined;
     try {
       await this.closeWorkspaceConversations(task);
 
       // Remote tasks: route discard to the remote agent when Crab created
       // the disposable worktree. Primary/existing workspaces are user-owned.
-      if (task.isRemote && task.remoteProfileId && this.rpcRouter && ownsWorktree) {
-        try {
-          await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_discard", {
-            repo_id: task.repoPath,
-            task_id: taskId,
-            branch: task.branch,
-            worktree_path: task.worktreePath,
-          });
-        } catch {
-          // Best-effort — the remote may already be cleaned up or disconnected.
-        }
+      if (task.isRemote && ownsWorktree) {
+        if (!task.remoteProfileId || !this.rpcRouter) throw new Error("Remote discard requires a connected remote agent");
+        const result = await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_discard", {
+          repo_id: task.repoPath,
+          task_id: taskId,
+          branch: task.branch,
+          worktree_path: task.worktreePath,
+        });
+        cleanupWarning = confirmRemoteTaskOperation(result, "discard");
       } else if (!task.isRemote) {
         if (ownsWorktree) await this.workspaceScripts.archive(task, options);
         // Local tasks: clean up locally.
@@ -1965,6 +1968,7 @@ export class Orchestrator extends EventEmitter {
       task.lastActivityAt = task.completedAt;
       await this.persistTasks();
       this.emit("orchestrator:task-status", { taskId, status: task.status });
+      if (cleanupWarning) this.emit("orchestrator:error", { taskId, message: cleanupWarning });
     } finally {
       this.workspaceTransitions.delete(task);
     }

@@ -490,6 +490,7 @@ describe("SSH Connection Recovery", () => {
   describe("discardTask", () => {
     it("removes the worktree on the remote and marks task discarded", async () => {
       const task = injectRemoteTask(orchestrator, { status: "interrupted" });
+      mockRouter.nextResult = { discarded: true, worktree_removed: true, branch_deleted: true };
 
       await recovery.discardTask(task.id);
 

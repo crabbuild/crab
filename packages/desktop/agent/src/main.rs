@@ -37,6 +37,7 @@ mod shellout;
 mod storage_auth;
 mod system_health;
 mod task_diff;
+mod task_workspace;
 mod watcher;
 mod workflow;
 mod workspace_discovery;

@@ -203,7 +203,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       expect({ status: manager.getStatus("runtime"), version: negotiator.getCached("runtime")?.version, downloads: requests.length, uploads, completedWithCapabilities }).toEqual({ status: "connected", version, downloads: 3, uploads: 2, completedWithCapabilities: true });
       const repo = path.join(remote, "repo"); const worktree = path.join(remote, "task-worktree"); await mkdir(repo);
       const env = { HOME: remote, PATH: process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-      await run("git", ["init", "--template="], { cwd: repo, env }); await writeFile(path.join(repo, "tracked.txt"), "before\n");
+      await run("git", ["init", "--template=", "--initial-branch=main"], { cwd: repo, env }); await writeFile(path.join(repo, "tracked.txt"), "before\n");
       await run("git", ["add", "tracked.txt"], { cwd: repo, env });
       await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo, env });
       const browser = new RemoteFileBrowser(router, manager);
@@ -234,6 +234,18 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
         taskWorktrees.push(result);
       }
       const firstTask = taskWorktrees[0];
+      const bystander = path.join(repo, "unregistered-directory");
+      await mkdir(bystander);
+      await writeFile(path.join(bystander, "keep.txt"), "unrelated directory bytes");
+      for (const method of ["task_discard", "task_apply", "worktree_destroy"]) {
+        await expect(router.route(repoId, method, { repo_id: repoId, task_id: taskIds[0], branch: firstTask.branch, worktree_path: bystander, path: bystander, base_ref: firstTask.base_ref })).rejects.toThrow();
+      }
+      expect(await readFile(path.join(bystander, "keep.txt"), "utf8")).toBe("unrelated directory bytes");
+      for (const method of ["task_discard", "task_apply"]) {
+        for (const wrong of [{ task_id: taskIds[1] }, { branch: "main" }, { worktree_path: repo }]) {
+          await expect(router.route(repoId, method, { repo_id: repoId, task_id: taskIds[0], branch: firstTask.branch, worktree_path: firstTask.path, base_ref: firstTask.base_ref, ...wrong })).rejects.toThrow();
+        }
+      }
       await writeFile(path.join(firstTask.path, "unsaved.txt"), "task user bytes");
       await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: taskIds[0], branch: firstTask.branch, base_ref: "HEAD" })).rejects.toThrow();
       expect(await readFile(path.join(firstTask.path, "unsaved.txt"), "utf8")).toBe("task user bytes");
@@ -271,6 +283,41 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
         const second = await router.sendToRemoteAgent("concurrent", "indexer_status", {}) as { db_path: string; running: boolean };
         cachePaths = [first.db_path, second.db_path];
         expect({ distinct: first.db_path !== second.db_path, running: [first.running, second.running] }).toEqual({ distinct: true, running: [true, true] });
+        const otherRepo = await browser.openAsRepo("concurrent", repo) as { repo_id: string };
+        const busyPath = path.join(remote, ".crab", "worktrees", concurrentId);
+        const ownedFactory = remoteAgentProcessFactory(router, "runtime", concurrentId);
+        const writer = ownedFactory("/bin/sh", ["-c", "exec sleep 120"], { cwd: busyPath });
+        writer.process.on("error", () => {}); writer.process.stdout?.resume(); writer.process.stderr?.resume();
+        await new Promise<void>((resolve, reject) => writer.process.stdin!.write(Buffer.alloc(0), error => error ? reject(error) : resolve()));
+        const discard = { repo_id: otherRepo.repo_id, task_id: concurrentId, branch: `agent/${concurrentId}`, worktree_path: busyPath };
+        try { await expect(router.route(otherRepo.repo_id, "task_discard", discard)).rejects.toThrow("active writer"); }
+        finally { writer.process.kill(); await writer.closed; }
+        const removed = await router.route(otherRepo.repo_id, "task_discard", discard);
+        expect({ removed, exists: fs.existsSync(busyPath) }).toEqual({ removed: { discarded: true, worktree_removed: true, branch_deleted: true, cleanup_error: null }, exists: false });
+        // A recreated directory is not the old task. Required identity cannot
+        // fall through to an unowned native spawn after its .git pointer goes.
+        await mkdir(busyPath);
+        await writeFile(path.join(busyPath, "keep.txt"), "recreated directory bytes");
+        const stale = ownedFactory("/bin/sh", ["-c", "printf unexpected > unexpected.txt"], { cwd: busyPath });
+        stale.process.on("error", () => {});
+        await expect(stale.closed).rejects.toThrow();
+        expect(await readdir(busyPath)).toEqual(["keep.txt"]);
+
+        const applyId = "12345678-6666-4666-8666-666666666666";
+        const apply = await router.route(repoId, "worktree_create", { repo_id: repoId, task_id: applyId, branch: `agent/${applyId}`, base_ref: "HEAD" }) as { path: string; branch: string; base_ref: string };
+        await writeFile(path.join(apply.path, "applied.txt"), "confirmed merge\n");
+        await run("git", ["add", "applied.txt"], { cwd: apply.path, env });
+        await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "Owned task change"], { cwd: apply.path, env });
+        await run("git", ["config", "user.name", "Fixture"], { cwd: repo, env });
+        await run("git", ["config", "user.email", "fixture@example.invalid"], { cwd: repo, env });
+        await run("git", ["worktree", "lock", "--reason", "owned cleanup rejection", apply.path], { cwd: repo, env });
+        const applied = await router.route(repoId, "task_apply", { repo_id: repoId, task_id: applyId, branch: apply.branch, base_ref: apply.base_ref, base_branch: "main", worktree_path: apply.path }) as { applied: boolean; worktree_removed: boolean; cleanup_error: string };
+        expect({ applied: applied.applied, removed: applied.worktree_removed, error: applied.cleanup_error, bytes: await readFile(path.join(repo, "applied.txt"), "utf8"), retained: fs.existsSync(apply.path) }).toEqual({ applied: true, removed: false, error: expect.stringContaining("locked"), bytes: "confirmed merge\n", retained: true });
+        await run("git", ["worktree", "unlock", apply.path], { cwd: repo, env });
+        await router.route(repoId, "task_discard", { repo_id: repoId, task_id: applyId, branch: apply.branch, worktree_path: apply.path });
+        const destroyed = await router.route(repoId, "worktree_destroy", { repo_id: repoId, path: taskWorktrees[1].path, branch: taskWorktrees[1].branch, force: true });
+        expect(destroyed).toEqual({ removed: true, path: taskWorktrees[1].path, branch_deleted: true, cleanup_error: null });
+        await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "remote-cleanup-native.json"), JSON.stringify({ preserved: await readFile(path.join(bystander, "keep.txt"), "utf8"), removed, applied, destroyed }));
       } finally { await manager.disconnect("concurrent"); }
       const surviving = await router.sendToRemoteAgent("runtime", "indexer_status", {}) as { running: boolean };
       expect(surviving.running).toBe(true);

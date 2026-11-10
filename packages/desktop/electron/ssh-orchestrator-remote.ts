@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import type { RpcRouter } from "./ssh-router";
 import type { SshSessionManager } from "./ssh-manager";
 import { parseRepoId } from "./ssh-router";
+import { confirmRemoteTaskOperation } from "./ssh-task-outcome";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ export interface RemoteOrchestratorEvents {
   "remote-task:activity": (payload: { taskId: string; event: unknown }) => void;
   "remote-task:diff-ready": (payload: { taskId: string; diff: string }) => void;
 }
+
 
 function branchNameFromBaseRef(baseRef: string): string | undefined {
   if (baseRef === "HEAD" || /^[0-9a-f]{7,40}$/i.test(baseRef)) {
@@ -227,17 +229,20 @@ export class RemoteOrchestrator extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
-    await this.router.route(task.repoId, "task_apply", {
+    const result = await this.router.route(task.repoId, "task_apply", {
       repo_id: task.repoId,
       task_id: taskId,
       branch: task.branch,
       base_ref: task.baseRef,
       base_branch: task.baseBranch,
+      worktree_path: task.worktreePath,
     });
+    const warning = confirmRemoteTaskOperation(result, "apply");
 
     task.status = "applied";
     task.completedAt = Date.now();
     this.emitStatusChange(task);
+    if (warning) this.emit("remote-task:activity", { taskId, event: { type: "error", timestamp: Date.now(), error: warning } });
   }
 
   /**
@@ -247,16 +252,18 @@ export class RemoteOrchestrator extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
-    await this.router.route(task.repoId, "task_discard", {
+    const result = await this.router.route(task.repoId, "task_discard", {
       repo_id: task.repoId,
       task_id: taskId,
       branch: task.branch,
       worktree_path: task.worktreePath,
     });
+    const warning = confirmRemoteTaskOperation(result, "discard");
 
     task.status = "discarded";
     task.completedAt = Date.now();
     this.emitStatusChange(task);
+    if (warning) this.emit("remote-task:activity", { taskId, event: { type: "error", timestamp: Date.now(), error: warning } });
   }
 
   /**

@@ -28,6 +28,7 @@ use group::{GRACE, group_exists};
 #[derive(Deserialize)]
 pub(crate) struct Open {
     process_id: String,
+    task_id: Option<uuid::Uuid>,
     executable: String,
     args: Vec<String>,
     cwd: PathBuf,
@@ -102,6 +103,7 @@ impl Credit {
 }
 
 struct Process {
+    workspace_lease: Mutex<Option<std::fs::File>>,
     stdin: Mutex<Option<ChildStdin>>,
     stop: CancellationToken,
     force: CancellationToken,
@@ -134,6 +136,7 @@ impl NativeProcesses {
                 "Native process requires an absolute working directory".into(),
             ));
         }
+        let workspace_lease = crate::task_workspace::writer_lease(&p.cwd, p.task_id).await?;
         let mut registry = self.registry.lock().await;
         while let Some(result) = registry.tasks.try_join_next() {
             result.map_err(io::Error::other)?;
@@ -174,6 +177,7 @@ impl NativeProcesses {
             .ok_or_else(|| io::Error::other("Native stderr unavailable"))?;
         let (closed, receipt) = watch::channel(None);
         let process = Arc::new(Process {
+            workspace_lease: Mutex::new(workspace_lease),
             stdin: Mutex::new(Some(stdin)),
             stop: CancellationToken::new(),
             force: CancellationToken::new(),
@@ -222,6 +226,12 @@ impl NativeProcesses {
                 }
                 Err(error) => json!({ "process_id": p.process_id, "error": error.to_string() }),
             };
+            // Cleanup may start as soon as another profile sees the receipt.
+            // Release only confirmed writers before publication; uncertainty
+            // retains the lease so a failed stream cannot authorize removal.
+            if result.is_ok() {
+                process.workspace_lease.lock().await.take();
+            }
             closed.send_replace(Some(result));
             if let Err(error) = crate::write_frame(
                 &out,
@@ -398,6 +408,7 @@ mod tests {
         let value = service
             .open(
                 Open {
+                    task_id: None,
                     process_id: id.clone(),
                     executable: "/bin/sh".into(),
                     args: vec!["-c".into(), command.into()],
@@ -552,6 +563,7 @@ mod tests {
             service
                 .open(
                     Open {
+                        task_id: None,
                         process_id: uuid::Uuid::new_v4().to_string(),
                         executable: "/bin/sh".into(),
                         args: vec![],

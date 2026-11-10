@@ -250,6 +250,22 @@ describe("Remote Apply/Discard", () => {
   });
 
   describe("discardTask (remote)", () => {
+    it.each(["router", "profile"] as const)("cannot discard a remote workspace with missing %s ownership", async missing => {
+      const task = injectRemoteTask(orchestrator);
+      if (missing === "profile") delete task.remoteProfileId;
+      else (orchestrator as unknown as { rpcRouter: undefined }).rpcRouter = undefined;
+      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("Remote discard requires a connected remote agent");
+      expect(task.status).not.toBe("discarded");
+    });
+
+    it.each(["apply", "discard"] as const)("does not record %s without a confirmed remote receipt", async operation => {
+      const task = injectRemoteTask(orchestrator);
+      mockRouter.nextResult = {};
+      const action = operation === "apply" ? orchestrator.applyTask(task.id) : orchestrator.discardTask(task.id);
+      await expect(action).rejects.toThrow(`Remote ${operation} was not confirmed`);
+      expect(["applied", "discarded"]).not.toContain(task.status);
+    });
+
     it("sends task_discard RPC to the remote agent", async () => {
       const task = injectRemoteTask(orchestrator);
 
@@ -297,15 +313,22 @@ describe("Remote Apply/Discard", () => {
       expect(events[0]).toEqual({ taskId: task.id, status: "discarded" });
     });
 
-    it("succeeds even if the remote RPC fails (best-effort)", async () => {
+    it("retains task state and reports a failed remote discard", async () => {
       const task = injectRemoteTask(orchestrator);
       mockRouter.shouldFail = true;
       mockRouter.failError = "SSH connection lost";
 
-      // Discard should NOT throw — it's best-effort for cleanup.
-      await orchestrator.discardTask(task.id);
+      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("SSH connection lost");
+      expect(task.status).not.toBe("discarded");
+    });
 
-      expect(task.status).toBe("discarded");
+    it("preserves confirmed discard and reports incomplete branch cleanup", async () => {
+      const task = injectRemoteTask(orchestrator);
+      mockRouter.nextResult = { discarded: true, worktree_removed: true, branch_deleted: false, cleanup_error: "branch ref is locked" };
+      const errors: string[] = [];
+      orchestrator.on("orchestrator:error", value => errors.push(value.message));
+      await orchestrator.discardTask(task.id);
+      expect({ status: task.status, errors }).toEqual({ status: "discarded", errors: ["Task discarded; remote cleanup needs attention: branch ref is locked"] });
     });
 
     it("throws if task is not found", async () => {

@@ -1277,6 +1277,46 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   imports Electron SQLite: the actual persisted-task probe remains on Electron,
   while every remote runtime/workspace check runs on both runners.
 
+- The remote cleanup follow-up replaces path guessing and filesystem deletion
+  after Git failure with one disposable-workspace owner. Creation writes a
+  private Git-administration record containing the task UUID, branch and
+  canonical root/common/private Git directories. Apply, Discard and Destroy
+  verify that identity against the opened repository. Native processes acquire
+  shared file leases; cleanup takes an exclusive lease. A factory carrying a
+  task UUID requires its owner even after `.git` disappears, preventing an
+  unowned spawn in a recreated directory. Confirmed group closure releases the
+  lease before its receipt; uncertain closure retains it while the sidecar lives.
+  The implementation uses [Rust's standard file locks](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
+  available before the workspace's Rust 1.97 minimum. No dependency changes.
+  The core CLI's existing worktree removal contract remains authoritative;
+  [Git's locked-worktree refusal](https://git-scm.com/docs/git-worktree#Documentation/git-worktree.txt---force)
+  cannot trigger recursive deletion or account-wide pruning. Apply now propagates
+  status/staging/commit failure before merging. Confirmed merges and removals
+  retain their result when later cleanup fails, with explicit flags and a
+  `cleanup_error` consumed by both Electron callers. Failed, missing-owner or
+  unacknowledged Discard does not become a discarded task. The existing IPC,
+  task-operation handler and agent error subscription display those failures.
+  The secondary remote Apply caller now supplies the required worktree path.
+  The first real SSH regression resolved Discard successfully for an unrelated,
+  unregistered directory. The rebuilt runtime rejects that request and preserves
+  its bytes. All ten real SSH/SFTP cases pass, including wrong task/branch/root,
+  cross-sidecar native writer exclusion, confirmed closure then cleanup,
+  recreated-directory spawn rejection, successful Discard/Destroy and a real
+  merge whose locked worktree remains intact. All 307 scoped checks and eight
+  focused Rust checks pass, including retained bytes and unchanged target HEAD
+  after a pre-commit rejection. Production/fixture types, native/Electron builds,
+  formatting and diff checks pass. Evidence: `remote-cleanup-before.json`,
+  `remote-cleanup-native-final.json`, `remote-cleanup-native.json`,
+  `remote-cleanup-tests-commit.json`, `remote-cleanup-rust-final.log`, and
+  `remote-cleanup-native-process-tests.log` in the owned output.
+  Full remote task startup/snapshots/cancellation remain open. Before release,
+  capture the Apply target durably, persist mutation recovery receipts, provide
+  explicit recovery for older/moved ownership records, and own mutating Git
+  subprocesses through canceled RPCs and backend exit. Cooperative leases do
+  not establish ownership of external editors or detached/crashed descendants.
+  The local Discard sibling still swallows removal/checkpoint cleanup failures;
+  its truthful terminal-state and recovery ordering need a separate fix.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1330,7 +1370,8 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   still open. Test Connection now has bounded remote-command ownership and
   live form failure/retry proof. Do not claim production SSH readiness from the
   owned loopback fixture. Remote file editing/status consumers and their sidecar
-  parameter/result contracts, remote Apply/Discard safety, native task dispatch,
+  parameter/result contracts, remaining remote Apply/Discard recovery/target
+  safety, native task dispatch,
   and Git-filter descendant cleanup remain open.
 - Finish live watch/command-control checks and the lifecycle/owner contract for
   extended controls that can execute or write outside ordinary chat submission.

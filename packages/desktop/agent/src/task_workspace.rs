@@ -1,0 +1,251 @@
+//! Identity and writer leases for disposable remote task workspaces.
+
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::handlers::run_git_worktree_cmd as git;
+use crate::{AgentError, Result};
+
+const OWNER_FILE: &str = "crab-desktop-task-owner.json";
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+struct Identity {
+    root: PathBuf,
+    common: PathBuf,
+    git_dir: PathBuf,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Record {
+    task_id: uuid::Uuid,
+    branch: String,
+    identity: Identity,
+}
+
+pub(crate) struct TaskWorkspace {
+    record: Record,
+    _lease: File,
+}
+
+pub(crate) struct Cleanup {
+    pub branch_deleted: bool,
+    pub error: Option<String>,
+}
+
+impl TaskWorkspace {
+    pub(crate) async fn record(
+        repo: &Path,
+        root: &Path,
+        task_id: uuid::Uuid,
+        branch: &str,
+    ) -> Result<()> {
+        let identity = identity(repo, root).await?;
+        verify_branch(root, branch).await?;
+        let record = Record {
+            task_id,
+            branch: branch.into(),
+            identity,
+        };
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(record.identity.git_dir.join(OWNER_FILE))?;
+        file.write_all(&serde_json::to_vec(&record)?)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub(crate) async fn open(
+        repo: &Path,
+        root: &Path,
+        task_id: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<Self> {
+        let identity = identity(repo, root).await?;
+        let mut lease = owner_file(&identity.git_dir)?;
+        lease.try_lock().map_err(lease_error)?;
+        let record = read_record(&mut lease)?;
+        let expected_id = task_id
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|source| AgentError::Managed {
+                kind: "task_identity".into(),
+                message: "Remote workspace cleanup requires a task UUID".into(),
+                remediation: "Recover the saved task identity before retrying".into(),
+                source: Some(Box::new(source)),
+            })?;
+        if record.identity != identity
+            || expected_id.is_some_and(|id| id != record.task_id)
+            || branch.is_some_and(|branch| branch != record.branch)
+        {
+            return Err(AgentError::Other(
+                "Remote workspace does not belong to this task, repository or branch".into(),
+            ));
+        }
+        verify_branch(root, &record.branch).await?;
+        Ok(Self {
+            record,
+            _lease: lease,
+        })
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.record.identity.root
+    }
+
+    pub(crate) async fn remove(
+        self,
+        repo: &Path,
+        force: bool,
+        delete_branch: bool,
+    ) -> Result<Cleanup> {
+        // Git remains the removal authority. A locked, replaced or unregistered
+        // checkout must fail without recursive filesystem cleanup or pruning.
+        let manager = crate::worktree::WorktreeManager::new(repo.to_path_buf());
+        manager.worktree_remove(self.root(), force).await?;
+        if !delete_branch {
+            return Ok(Cleanup {
+                branch_deleted: false,
+                error: None,
+            });
+        }
+        let branch = &self.record.branch;
+        match git(repo, &["branch", "-D", "--", branch]).await {
+            Ok(_) => Ok(Cleanup {
+                branch_deleted: true,
+                error: None,
+            }),
+            Err(error) => {
+                // Removal already happened. Preserve that outcome so callers
+                // never misreport a completed merge/discard as unperformed.
+                tracing::warn!(%error, %branch, "task workspace removed; branch retained");
+                Ok(Cleanup {
+                    branch_deleted: false,
+                    error: Some(error.to_string()),
+                })
+            }
+        }
+    }
+}
+
+async fn identity(repo: &Path, root: &Path) -> Result<Identity> {
+    if !root.is_absolute() {
+        return Err(AgentError::Other(
+            "Remote workspace path must be absolute".into(),
+        ));
+    }
+    let canonical = tokio::fs::canonicalize(root).await?;
+    let identity = Identity {
+        root: directory(root, "--show-toplevel").await?,
+        common: directory(root, "--git-common-dir").await?,
+        git_dir: directory(root, "--absolute-git-dir").await?,
+    };
+    let repository = directory(repo, "--git-common-dir").await?;
+    if identity.root != canonical
+        || identity.common != repository
+        || identity.git_dir == identity.common
+    {
+        return Err(AgentError::Other(
+            "Remote task requires its registered linked worktree in the opened repository".into(),
+        ));
+    }
+    Ok(identity)
+}
+
+async fn directory(root: &Path, option: &str) -> Result<PathBuf> {
+    let output = git(root, &["rev-parse", option]).await?;
+    Ok(tokio::fs::canonicalize(root.join(output)).await?)
+}
+
+async fn verify_branch(root: &Path, branch: &str) -> Result<()> {
+    let current = git(root, &["symbolic-ref", "HEAD"]).await?;
+    if current != format!("refs/heads/{branch}") {
+        return Err(AgentError::Other(
+            "Remote workspace branch changed; recover its ownership before cleanup".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn owner_file(git_dir: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(git_dir.join(OWNER_FILE))
+        .map_err(|source| AgentError::Managed {
+            kind: "task_workspace_owner".into(),
+            message: "Remote workspace ownership is unavailable".into(),
+            remediation: "Preserve the checkout and recover its task ownership before cleanup"
+                .into(),
+            source: Some(Box::new(source)),
+        })
+}
+
+fn read_record(file: &mut File) -> Result<Record> {
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 {
+        return Err(AgentError::Other(
+            "Remote workspace ownership record exceeds its limit".into(),
+        ));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn lease_error(source: std::fs::TryLockError) -> AgentError {
+    if let std::fs::TryLockError::Error(error) = source {
+        return error.into();
+    }
+    AgentError::Managed {
+        kind: "task_workspace_busy".into(),
+        message: "Remote workspace still has an active writer or lifecycle operation".into(),
+        remediation: "Stop its native processes and wait for workspace operations before retrying"
+            .into(),
+        source: Some(Box::new(source)),
+    }
+}
+
+pub(crate) async fn writer_lease(root: &Path, task_id: Option<uuid::Uuid>) -> Result<Option<File>> {
+    let pointer = match tokio::fs::read_to_string(root.join(".git")).await {
+        Ok(pointer) => pointer,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.kind() == std::io::ErrorKind::IsADirectory =>
+        {
+            if task_id.is_none() {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let git_dir = pointer
+        .trim()
+        .strip_prefix("gitdir:")
+        .ok_or_else(|| AgentError::Other("Invalid workspace Git directory pointer".into()))?;
+    let git_dir = tokio::fs::canonicalize(root.join(git_dir.trim())).await?;
+    if task_id.is_none() && !tokio::fs::try_exists(git_dir.join(OWNER_FILE)).await? {
+        return Ok(None);
+    }
+    let mut lease = owner_file(&git_dir)?;
+    lease.try_lock_shared().map_err(lease_error)?;
+    let record = read_record(&mut lease)?;
+    if record.identity.git_dir != git_dir
+        || record.identity.root != tokio::fs::canonicalize(root).await?
+        || task_id.is_some_and(|id| id != record.task_id)
+    {
+        return Err(AgentError::Other(
+            "Native process workspace ownership changed".into(),
+        ));
+    }
+    verify_branch(root, &record.branch).await?;
+    Ok(Some(lease))
+}
