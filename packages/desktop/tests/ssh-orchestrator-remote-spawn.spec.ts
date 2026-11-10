@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
-import { Orchestrator, Task } from "../electron/orchestrator";
+import { Orchestrator, Task, type OrchestratorOptions } from "../electron/orchestrator";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -238,23 +238,21 @@ describe("Remote Task Spawning", () => {
       );
     });
 
-    it("respects max concurrent limit for remote tasks", async () => {
-      const orch = new Orchestrator({
-        persistPath: createTempPersistPath(),
-        timeoutMs: 60_000,
-        maxConcurrent: 1,
-        rpcRouter: mockRouter as any,
-      });
-
-      // First task starts running.
-      const task1 = injectRemoteTask(orch, { id: "task-1" });
-      await orch.startTask(task1.id);
-      expect(task1.status).toBe("running");
-
-      // Second task gets queued.
-      const task2 = injectRemoteTask(orch, { id: "task-2" });
-      await orch.startTask(task2.id);
-      expect(task2.status).toBe("queued");
+    it("keeps a queued start pending until remote capacity is released", async () => {
+      const capacityPath = createTempPersistPath();
+      const orch = new Orchestrator({ persistPath: capacityPath, timeoutMs: 60_000, maxConcurrent: 1,
+        rpcRouter: mockRouter as unknown as NonNullable<OrchestratorOptions["rpcRouter"]> });
+      let starting: Promise<void> | undefined;
+      try {
+        const first = injectRemoteTask(orch, { id: "task-1" }); await orch.startTask(first.id);
+        const second = injectRemoteTask(orch, { id: "task-2" }); let acknowledged = false;
+        starting = orch.startTask(second.id).then(() => { acknowledged = true; }); void starting.catch(() => {});
+        await vi.waitFor(() => expect(second.status).toBe("queued"));
+        expect({ acknowledged, spawns: mockRouter.calls.filter(call => call.method === "task_spawn").length }).toEqual({ acknowledged: false, spawns: 1 });
+        await orch.handleRemoteTaskNotification({ profileId: "gpu-server", method: "task_completed", params: { task_id: first.id, exit_code: 0 } });
+        await starting;
+        expect({ acknowledged, status: second.status, spawns: mockRouter.calls.filter(call => call.method === "task_spawn").length }).toEqual({ acknowledged: true, status: "running", spawns: 2 });
+      } finally { await orch.shutdown(); await starting?.catch(() => {}); cleanupPath(capacityPath); }
     });
   });
 

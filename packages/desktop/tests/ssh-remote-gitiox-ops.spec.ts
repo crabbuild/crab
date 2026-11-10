@@ -2,7 +2,7 @@
  * Verification tests for remote Crab operations over the SSH router.
  *
  * These tests verify that crab-specific verbs (add, hydrate, dehydrate,
- * push, status, pointer_info, pointer_top) route correctly through the
+ * push, pointer_info, pointer_top) route correctly through the
  * RPC router to the remote agent, including progress streaming and
  * cancellation support.
  */
@@ -241,7 +241,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // add is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "add", { repo_id: repoId, paths: ["model.bin"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
     });
   });
 
@@ -600,7 +600,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // hydrate is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "hydrate", { repo_id: repoId, patterns: ["model.bin"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
     });
 
     it("times out hydrate if remote agent does not respond", async () => {
@@ -985,7 +985,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // dehydrate is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "dehydrate", { repo_id: repoId, patterns: ["--all"] }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
     });
 
     it("does not route dehydrate to local agent for remote repos", async () => {
@@ -1500,7 +1500,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // push is a write operation — should be rejected immediately during reconnection
       await expect(
         r2.route(repoId, "push", { repo_id: repoId, remote: "origin", ref: "main" }),
-      ).rejects.toThrow(/write operations are unavailable during reconnection/);
+      ).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
     });
 
     it("does not route push to local agent for remote repos", async () => {
@@ -1944,205 +1944,12 @@ describe("Remote Crab Operations via RPC Router", () => {
     });
   });
 
-  describe("status verb", () => {
-    it("routes crab_status to remote agent and returns structured data", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-      expect(written.method).toBe("crab_status");
-      expect(written.params.repo_id).toBe(repoId);
-
-      simulateResponse(channel, written.id, {
-        stagedFiles: 3,
-        pendingUploads: 1,
-        stagingSize: 500_000_000,
-      });
-
-      const result = await promise;
-      expect(result).toEqual({
-        stagedFiles: 3,
-        pendingUploads: 1,
-        stagingSize: 500_000_000,
-      });
-    });
-
-    it("handles no staged files (clean staging area)", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-      expect(written.method).toBe("crab_status");
-
-      simulateResponse(channel, written.id, {
-        stagedFiles: 0,
-        pendingUploads: 0,
-        stagingSize: 0,
-      });
-
-      const result = await promise;
-      expect((result as any).stagedFiles).toBe(0);
-      expect((result as any).pendingUploads).toBe(0);
-      expect((result as any).stagingSize).toBe(0);
-    });
-
-    it("handles many staged files with large staging size", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-      expect(written.method).toBe("crab_status");
-
-      simulateResponse(channel, written.id, {
-        stagedFiles: 150,
-        pendingUploads: 0,
-        stagingSize: 450_000_000_000,
-      });
-
-      const result = await promise;
-      expect((result as any).stagedFiles).toBe(150);
-      expect((result as any).pendingUploads).toBe(0);
-      expect((result as any).stagingSize).toBe(450_000_000_000);
-    });
-
-    it("handles pending uploads present", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-      expect(written.method).toBe("crab_status");
-
-      simulateResponse(channel, written.id, {
-        stagedFiles: 12,
-        pendingUploads: 5,
-        stagingSize: 24_000_000_000,
-      });
-
-      const result = await promise;
-      expect((result as any).stagedFiles).toBe(12);
-      expect((result as any).pendingUploads).toBe(5);
-      expect((result as any).stagingSize).toBe(24_000_000_000);
-    });
-
-    it("queues crab_status during reconnection (read operation)", async () => {
-      const sessionManager = new MockSessionManager() as any;
-      const agent = new MockLocalAgent();
-      const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
-      const ch = new MockChannel();
-
-      sessionManager.setStatus("gpu-server", "reconnecting");
-      sessionManager.setConnection("gpu-server", ch);
-      r2.attachChannel("gpu-server", ch.asChannel());
-
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-
-      // crab_status is a READ operation — should be queued, not rejected
-      const promise = r2.route(repoId, "crab_status", { repo_id: repoId });
-
-      // Nothing written to channel yet (queued)
-      expect(ch.written).toHaveLength(0);
-
-      // Simulate reconnection completing — replay sends the queued call
-      sessionManager.setStatus("gpu-server", "connected");
-      const replayPromise = r2.replayQueue("gpu-server");
-
-      // Wait a tick for the replay to write to the channel
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Now the queued call should have been sent
-      expect(ch.written).toHaveLength(1);
-      const written = JSON.parse(ch.written[0]);
-      expect(written.method).toBe("crab_status");
-
-      simulateResponse(ch, written.id, {
-        stagedFiles: 3,
-        pendingUploads: 1,
-        stagingSize: 500_000_000,
-      });
-
-      await replayPromise;
-      const result = await promise;
-      expect((result as any).stagedFiles).toBe(3);
-    });
-
-    it("does not route crab_status to local agent for remote repos", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      // Verify the call went to the remote channel, not the local agent
-      expect(channel.written).toHaveLength(1);
-      expect(localAgent.calls).toHaveLength(0);
-
-      const written = JSON.parse(channel.written[0]);
-      simulateResponse(channel, written.id, {
-        stagedFiles: 7,
-        pendingUploads: 2,
-        stagingSize: 14_000_000_000,
-      });
-
-      await promise;
-
-      // After completion, local agent still never called
-      expect(localAgent.calls).toHaveLength(0);
-    });
-
-    it("handles error when remote is not a crab repo", async () => {
-      const repoId = "ssh://gpu-server/home/user/plain-git-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-
-      const errorResponse = JSON.stringify({
-        jsonrpc: "2.0",
-        id: written.id,
-        error: {
-          code: -32001,
-          message: "Not a crab repository: no .crab directory found",
-        },
-      }) + "\n";
-      channel.emit("data", Buffer.from(errorResponse));
-
-      await expect(promise).rejects.toThrow(/Not a crab repository/);
-    });
-
-    it("handles error when staging database is corrupted", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.route(repoId, "crab_status", { repo_id: repoId });
-
-      const written = JSON.parse(channel.written[0]);
-
-      const errorResponse = JSON.stringify({
-        jsonrpc: "2.0",
-        id: written.id,
-        error: {
-          code: -32003,
-          message: "Staging database corrupted: failed to open .crab/staging/index.db",
-          data: { path: ".crab/staging/index.db", sqliteError: "database disk image is malformed" },
-        },
-      }) + "\n";
-      channel.emit("data", Buffer.from(errorResponse));
-
-      await expect(promise).rejects.toThrow(/Staging database corrupted/);
-    });
-
-    it("times out crab_status if remote agent does not respond", async () => {
-      const sessionManager = new MockSessionManager() as any;
-      const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
-      const ch = new MockChannel();
-
-      sessionManager.setStatus("gpu-server", "connected");
-      sessionManager.setConnection("gpu-server", ch);
-      shortTimeoutRouter.attachChannel("gpu-server", ch.asChannel());
-
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = shortTimeoutRouter.route(repoId, "crab_status", {
-        repo_id: repoId,
-      });
-
-      // Don't send a response — let it time out
-      await expect(promise).rejects.toThrow(/RPC timeout.*crab_status/);
-    });
+  it("does not defer an unsupported method just because its name suggests a read", async () => {
+    const { router, sessionManager, channel, localAgent } = createRouter();
+    sessionManager.setStatus("gpu-server", "reconnecting");
+    await expect(router.route("ssh://gpu-server/repo", "crab_status", {})).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+    sessionManager.setStatus("gpu-server", "connected"); await router.replayQueue("gpu-server");
+    expect({ writes: channel.written, local: localAgent.calls }).toEqual({ writes: [], local: [] });
   });
 
   describe("pointer_info and pointer_top verbs", () => {
@@ -2838,51 +2645,12 @@ describe("Remote Crab Operations via RPC Router", () => {
       expect((result as any).reason).toContain("No operation");
     });
 
-    it("rejects cancel during reconnection (rpc/cancel is not in WRITE_METHODS but routes normally)", async () => {
-      // rpc/cancel is NOT in the WRITE_METHODS set, so during reconnection
-      // it would be queued as a read operation. However, cancelling a stale
-      // operation after reconnection is meaningless — the queued cancel will
-      // be replayed but the original operation is already dead.
-      const sessionManager = new MockSessionManager() as any;
-      const agent = new MockLocalAgent();
-      const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
-      const ch = new MockChannel();
-
+    it("rejects a stale cancellation during reconnection without replaying it", async () => {
+      const { router, sessionManager, channel } = createRouter();
       sessionManager.setStatus("gpu-server", "reconnecting");
-      sessionManager.setConnection("gpu-server", ch);
-      r2.attachChannel("gpu-server", ch.asChannel());
-
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-
-      // rpc/cancel is queued during reconnection (not rejected)
-      const cancelPromise = r2.route(repoId, "rpc/cancel", {
-        repo_id: repoId,
-        request_id: 42,
-      });
-
-      // Nothing written to channel yet (queued)
-      expect(ch.written).toHaveLength(0);
-
-      // Simulate reconnection completing — replay sends the queued cancel
-      sessionManager.setStatus("gpu-server", "connected");
-      const replayPromise = r2.replayQueue("gpu-server");
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Now the queued cancel should have been sent
-      expect(ch.written).toHaveLength(1);
-      const written = JSON.parse(ch.written[0]);
-      expect(written.method).toBe("rpc/cancel");
-
-      // Remote agent responds — operation no longer exists after reconnection
-      simulateResponse(ch, written.id, {
-        cancelled: false,
-        reason: "No operation with that ID is in flight",
-      });
-
-      await replayPromise;
-      const result = await cancelPromise;
-      expect((result as any).cancelled).toBe(false);
+      await expect(router.route("ssh://gpu-server/repo", "rpc/cancel", { op_id: "retired" })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+      sessionManager.setStatus("gpu-server", "connected"); await router.replayQueue("gpu-server");
+      expect(channel.written).toEqual([]);
     });
 
     it("cancels one operation while another continues (multiple concurrent ops)", async () => {
@@ -3037,38 +2805,15 @@ describe("Remote Crab Operations via RPC Router", () => {
     });
   });
 
-  describe("batch RPC for crab operations", () => {
-    it("batches hydration_status with git_status_porcelain", async () => {
-      const repoId = "ssh://gpu-server/home/user/ml-repo";
-      const promise = router.batchRpc(repoId, [
-        { method: "hydration_status", params: { repo_id: repoId } },
-        { method: "git_status_porcelain", params: { repo_id: repoId } },
-        { method: "crab_status", params: { repo_id: repoId } },
-      ]);
-
-      // The batch is sent as a single JSON array
-      const written = JSON.parse(channel.written[0]);
-      expect(Array.isArray(written)).toBe(true);
-      expect(written).toHaveLength(3);
-
-      // Simulate batch response
-      const batchResponse = written.map((req: any, i: number) => ({
-        jsonrpc: "2.0",
-        id: req.id,
-        result: i === 0
-          ? { totalFiles: 50 }
-          : i === 1
-            ? { entries: [] }
-            : { stagedFiles: 0 },
-      }));
-      channel.emit("data", Buffer.from(JSON.stringify(batchResponse) + "\n"));
-
-      const results = await promise;
-      expect(results).toHaveLength(3);
-      expect(results[0].result).toEqual({ totalFiles: 50 });
-      expect(results[1].result).toEqual({ entries: [] });
-      expect(results[2].result).toEqual({ stagedFiles: 0 });
-    });
+  it("sends batched repository reads as independent NDJSON requests", async () => {
+    const repoId = "ssh://gpu-server/repo";
+    const results = [{ totalFiles: 50 }, { entries: [] }, { stats: { files: 0 } }];
+    const methods = ["hydration_status", "git_status_porcelain", "staging_stats"];
+    const pending = router.batchRpc(repoId, methods.map(method => ({ method, params: { repo_id: repoId } })));
+    const requests = channel.written.map(frame => JSON.parse(frame) as { id: number; method: string });
+    expect({ methods: requests.map(request => request.method), ids: new Set(requests.map(request => request.id)).size }).toEqual({ methods, ids: 3 });
+    for (const [index, request] of requests.entries()) simulateResponse(channel, request.id, results[index]);
+    expect(await pending).toEqual(results.map(result => ({ result })));
   });
 
   describe("progress streaming for long-running operations", () => {

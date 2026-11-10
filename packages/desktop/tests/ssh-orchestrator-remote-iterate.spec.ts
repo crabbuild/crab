@@ -217,36 +217,15 @@ describe("Remote Task Iteration", () => {
       expect(task.turnNumber).toBe(2);
     });
 
-    it("emits checkpoint-created event before iteration", async () => {
+    it("never snapshots a remote workspace with the local Git checkpoint owner", async () => {
       const task = injectRemoteTask(orchestrator, { status: "reviewing" });
-      const checkpointEvents: any[] = [];
-      orchestrator.on("orchestrator:checkpoint-created", (e) => checkpointEvents.push(e));
-
-      await orchestrator.iterate(task.id, "Add logging");
-
-      expect(checkpointEvents).toHaveLength(1);
-      expect(checkpointEvents[0].taskId).toBe(task.id);
-      expect(checkpointEvents[0].turnNumber).toBe(1);
-    });
-
-    it("waits for the checkpoint before sending remote iteration work", async () => {
-      const task = injectRemoteTask(orchestrator, { status: "reviewing" });
-      let release!: (checkpoint: { ref: string; sha: string }) => void;
-      const snapshot = { ref: `refs/crab/checkpoints/${task.id}/1`, sha: "a".repeat(40) };
-      const checkpoint = vi.spyOn(CheckpointManager.prototype, "createCheckpoint")
-        .mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
-      const iteration = orchestrator.iterate(task.id, "Next turn");
+      const snapshot = vi.spyOn(CheckpointManager.prototype, "snapshotHead");
+      const checkpoint = vi.spyOn(CheckpointManager.prototype, "createCheckpoint");
+      const hold = vi.spyOn(CheckpointManager.prototype, "holdCheckpoint");
       try {
-        await vi.advanceTimersByTimeAsync(0);
-        expect(mockRouter.calls.filter(call => call.method === "task_iterate")).toEqual([]);
-        release(snapshot);
-        await iteration;
-        expect(mockRouter.calls.filter(call => call.method === "task_iterate")).toHaveLength(1);
-      } finally {
-        release(snapshot);
-        await iteration;
-        checkpoint.mockRestore();
-      }
+        await orchestrator.iterate(task.id, "Next turn");
+        expect({ snapshot: snapshot.mock.calls, checkpoint: checkpoint.mock.calls, hold: hold.mock.calls }).toEqual({ snapshot: [], checkpoint: [], hold: [] });
+      } finally { snapshot.mockRestore(); checkpoint.mockRestore(); hold.mockRestore(); }
     });
 
     it("sets task to failed if task_iterate RPC fails", async () => {

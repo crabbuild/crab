@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, isWriteMethod, isCacheableReadMethod } from "../electron/ssh-router";
+import { RpcRouter, parseRepoId, isCacheableReadMethod } from "../electron/ssh-router";
 import { RemoteCache } from "../electron/ssh-cache";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -168,7 +168,6 @@ describe("RpcRouter — graceful degradation during reconnection", () => {
       expect.fail("Should have thrown");
     } catch (err: any) {
       expect(err.message).toContain("Connection lost");
-      expect(err.message).toContain("write operations are unavailable");
       expect(err.code).toBe("SSH_RECONNECTING");
     }
   });

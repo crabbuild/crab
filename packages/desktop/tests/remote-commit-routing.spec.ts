@@ -140,7 +140,7 @@ describe("remote commit routing — gitCommit via RpcRouter", () => {
 
     await expect(
       routeRpcCall(router, localAgent, "git_commit", commitParams),
-    ).rejects.toThrow("Connection lost: write operations are unavailable during reconnection");
+    ).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
   });
 
   it("rejects git_commit when SSH connection is disconnected", async () => {
