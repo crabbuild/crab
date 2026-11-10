@@ -29,11 +29,11 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Remaining: repository-switch repeatability under suite load, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening and real multi-hop cancellation. |
-| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local repository-switch watcher stalls now have a measured fix and packaged proof below. Remaining: caller-session ownership across physical read/save IPC, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader repeatability/profile qualification. |
+| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit during an admitted local publication, full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
-| P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
+| P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Background workspace/batch dirty counts still need the publication-ownership rule. Very large file-count/network-filesystem monitor costs, other format comparisons and parser/query budgets remain open. |
 
 Use the existing provider/native-session owner for recovery, the encrypted vault
 for credentials and identity changes, captured native readers for previews, and
@@ -48,7 +48,13 @@ alongside each slice.
 
 ### Next bounded slices
 
-1. Finish recovery parity before extending transfer features. The shared working
+1. Qualify caller ownership across physical read/save IPC before extending
+   transfer features: the remote provider currently selects the admitted native
+   session at dispatch; renderer binding-change checks do not alone prove the
+   read-to-write handoff on the real wire. Keep one provider writer and retain
+   local filesystem independence. Qualify discard-quit while a local publication
+   is admitted, alongside the existing keep-editing proof. Finish recovery parity:
+   the shared working
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
@@ -84,13 +90,74 @@ alongside each slice.
    measurements unknown and give oversized or malformed content a visible error.
    Dataset mtime filtering still has no timestamp input and currently does not
    filter; implement its native data contract and qualify recursive catalog
-   coverage rather than treating those controls as complete.
+   coverage rather than treating those controls as complete. Consolidate local
+   workspace polling and native batch-status counts with the exact publication
+   ownership rule used by selected-repository status; avoid a second blacklist.
 
 These slices consolidate functionality into File details, Activity and Settings.
 They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Local monitor and repository-switch checkpoint
+
+The prior local watcher paths duplicated `fs.watch` and synchronously closed its
+handles on Electron's main thread. A grouped packaged run reproduced the
+Markdown repository-switch timeout: the click selected the repository, then
+failed to acknowledge within 30 seconds. DOM events, main/renderer heartbeats
+and CPU profiles placed the pause after the click and before new native metadata
+requests. The previous package also paused for 13.4 seconds while its renderer
+was idle. An OS stack sample captured the main thread in
+`uv_fs_event_stop → uv_sem_wait`; the window was visible and focused.
+The bundled runtime is Electron 33.4.11 / Node 20.18.3 / libuv 1.46.0, whose
+[close implementation waits for FSEvents deinitialization](https://github.com/libuv/libuv/blob/v1.46.0/src/unix/fsevents.c#L811).
+
+Offloading the same native watcher was insufficient: real event-delivery checks
+failed, and a separate Node 22.20 probe received no directory changes
+through 25 seconds of writes on the Workspace volume. The canonical local path
+is now a metadata monitor in a worker. It folds eligible path, inode, mode, size,
+mtime and ctime records into a fixed-size fingerprint, with no file payload reads
+or per-file retained cache. One inventory runs at a time, followed by a one-second
+idle interval. The initial inventory invalidates any concurrently loaded view.
+Later metadata loss and repair also invalidate views, including repair to an
+identical fingerprint; consumers reread and display their source's actual error.
+
+IPC and `LocalProvider` share one owner per physical directory and one artifact/
+Git-path policy. Subscribers release callbacks immediately. The final release
+stops and joins the worker after its current directory traversal drains. New
+subscriptions cannot join a draining owner; app shutdown joins both active and
+draining workers and rejects late acquisition. Local monitoring is independent
+of native readiness. Immutable SDK snapshots have no physical watch target.
+SSH keeps its existing admitted provider/native polling ownership. No native
+watcher fallback, backend setting or dependency change is added.
+
+Six real-filesystem cases cover shared subscriptions, stop/restart, shutdown
+admission, invalid targets, a two-GiB sparse file and temporary root loss/repair.
+The existing build/runtime checks pass 28 cases together; eight focused desktop
+suites pass 136 cases. A red packaged check observes a main-thread native watch
+acquisition in the prior package. The new packaged check sees zero, and proves
+external create/delete visibility, restart, unchanged index bytes and normal
+Quit joining the owner. Three instrumented Markdown repository-switch runs
+pass with click acknowledgement at 60–65 ms, without forced clicks or added
+UI delays. Diagnostic probes are removed from source after recording evidence.
+The final unsigned macOS arm64 package passes all 23 grouped UI cases in
+1.8 minutes, including local/SSH saves and document edits, external-file
+monitoring, selected-source/media recovery, device settings before construction,
+real two-store identity replacement and both cold-restoration scenarios. All
+913 renderer/Electron assets match their producers. The bundled CLI/agent/NFS,
+remote helper and paired Darwin SSH archive match the qualified native producer;
+all 1,682 Rust/Cargo inputs remain unchanged after that native build.
+
+A read-only checkout measurement records a 295 ms first inventory, about 23 MB
+process RSS growth including worker startup, and a maximum 12.2 ms main-thread
+heartbeat gap during the observation. These are bounded local measurements;
+very large file counts, network filesystems and other provider/platform costs
+remain qualification work. Linked worktrees whose Git control directory is
+outside the watched root still need dedicated metadata-invalidation proof.
+The original cold-shutdown timeout had no stack capture; its exact cause is
+not inferred solely from the repository-switch diagnosis. Other recovery and
+full Crab/LFS workflow requirements remain in the matrix above.
 
 ## Publication visibility checkpoint
 
@@ -121,6 +188,11 @@ temporary on disk, and confirms the real status response omits only that owned
 name while retaining the similarly named user file. Publication failure remains
 visible, and native-offline retry still persists the latest buffer. No forced
 click, filename blacklist or extra tree delay is used to obtain this proof.
+Selected-repository file-tree/Changes status uses these RPC/provider boundaries.
+Local workspace polling (`electron/workspace-poller.ts`) and native background
+batches (`agent/src/batch_git_status.rs`) still derive dirty counts through
+separate Git subprocesses. Their publication-aware count consolidation remains
+explicit follow-up; no background-count parity is claimed by this checkpoint.
 The broader workflow, recovery and provider/platform requirements above remain
 separate gates.
 
@@ -141,8 +213,8 @@ Node reads/saves remain independent of native readiness. Remote reads use the
 required repository ID, relative path, byte limit and admitted native session.
 Only the typed missing-path response is absence; unavailable repositories,
 transport errors and truncated replies propagate. Mutable reads have no stale
-reconnect cache. A connection replacement before publication rejects the old
-read. Separate repositories have independent queues. Tracking configuration now
+reconnect cache. A binding replacement observed by the document owner before publication
+rejects its old read. Separate repositories have independent queues. Tracking configuration now
 uses this provider-correct physical read path too; SDK snapshot read failures
 stay visible, with missing optional SDK paths still requiring precise native
 classification in the broader workflow qualification.

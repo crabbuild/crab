@@ -2390,9 +2390,9 @@ app.on("will-quit", (e) => {
   if (isShuttingDown) return;
   isShuttingDown = true;
   e.preventDefault();
-  stopAllWatchers();
   stopAutoUpdater();
   Promise.allSettled([
+    stopAllWatchers(),
     (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
     sidecarManager.stopAll(),
     lspManager.stopAll(),

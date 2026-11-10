@@ -127,7 +127,7 @@ App Launch
 App Shutdown
     │
     ├─ Renderer persists state to localStorage
-    ├─ Main process stops file watchers
+    ├─ Main process joins local metadata-monitor workers
     ├─ Orchestrator persists task metadata
     ├─ Agent receives stdin EOF → graceful shutdown
     └─ Terminal pool kills all PTY processes
