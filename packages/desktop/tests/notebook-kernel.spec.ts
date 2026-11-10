@@ -4,13 +4,14 @@ import type { KernelOutput, KernelExecution } from "../electron/jupyter-types";
 
 const outputListeners = new Set<(event: KernelOutput & { id: string }) => void>();
 const statusListeners = new Set<(event: { id: string; status: string }) => void>();
+let kernelId = "";
 const bridge = {
-  jupyterStart: vi.fn(async () => ({ id: "kernel" })), jupyterExecute: vi.fn<[string, string, string], Promise<KernelExecution>>(),
+  jupyterStart: vi.fn(async (id: string) => { kernelId = id; }), jupyterExecute: vi.fn<[string, string, string, number], Promise<KernelExecution>>(),
   jupyterInterrupt: vi.fn(async () => {}), jupyterRestart: vi.fn(async () => {}), jupyterShutdown: vi.fn(async () => {}),
   onJupyterOutput: (listener: (event: KernelOutput & { id: string }) => void) => { outputListeners.add(listener); return () => { outputListeners.delete(listener); }; },
   onJupyterStatus: (listener: (event: { id: string; status: string }) => void) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; },
 };
-const emit = (requestId: string, msgType: string, content: Record<string, unknown>) => { for (const listener of outputListeners) listener({ id: "kernel", requestId, msgType, content }); };
+const emit = (requestId: string, msgType: string, content: Record<string, unknown>) => { for (const listener of outputListeners) listener({ id: kernelId, requestId, msgType, content }); };
 beforeEach(() => { vi.clearAllMocks(); bridge.jupyterExecute.mockReset(); vi.stubGlobal("window", { crab: bridge }); });
 afterEach(() => { retainNotebookRepositories(new Set()); vi.unstubAllGlobals(); });
 
@@ -65,6 +66,21 @@ it("reports terminal execution failure without leaving a cell running", async ()
   expect(kernel.snapshot().running.size).toBe(0);
 });
 
+it("keeps post-idle output routing until the cell is replaced", async () => {
+  const kernel = notebookKernel("repo", "analysis.ipynb", null);
+  await kernel.connect("python3", "native", "/python");
+  let request = "";
+  bridge.jupyterExecute.mockImplementation(async (_id, _code, requestId) => { request = requestId; return { status: "ok" }; });
+  await kernel.run(0, "background_work()");
+  const previous = request;
+  emit(previous, "stream", { name: "stdout", text: "AFTER_IDLE" });
+  expect(kernel.snapshot().outputs.get(0)?.[0]?.text).toBe("AFTER_IDLE");
+  await kernel.run(0, "replacement()");
+  emit(previous, "stream", { name: "stdout", text: "OBSOLETE" });
+  emit(request, "stream", { name: "stdout", text: "CURRENT" });
+  expect(kernel.snapshot().outputs.get(0)?.[0].text).toBe("CURRENT");
+});
+
 it("an old execution completion cannot clear a replacement kernel's running cell", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
   await kernel.connect("python3", "native", "/python");
@@ -79,4 +95,26 @@ it("an old execution completion cannot clear a replacement kernel's running cell
   expect(kernel.snapshot().running.has(0)).toBe(true);
   finishNew({ status: "ok" }); await current;
   expect(kernel.snapshot().running.size).toBe(0);
+});
+
+it("disconnect retires an unfinished connection before its reply", async () => {
+  const kernel = notebookKernel("repo", "analysis.ipynb", null);
+  let finish!: () => void;
+  bridge.jupyterStart.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = kernel.connect("python3", "native", "/python");
+  await kernel.control("disconnect");
+  finish(); await pending;
+  expect(kernel.snapshot().status).toBe("disconnected");
+  expect(kernel.snapshot().id).toBeNull();
+});
+
+it("a retired restart reply cannot reconnect a disconnected kernel", async () => {
+  const kernel = notebookKernel("repo", "analysis.ipynb", null);
+  await kernel.connect("python3", "native", "/python");
+  let finish!: () => void;
+  bridge.jupyterRestart.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = kernel.control("restart");
+  await kernel.control("disconnect");
+  finish(); await pending;
+  expect(kernel.snapshot().status).toBe("disconnected");
 });

@@ -73,15 +73,31 @@ export class JupyterKernel {
   private onOutput: ((output: KernelOutput) => void) | null = null;
   private onStatus: ((status: string) => void) | null = null;
   private alive = false;
+  private started = false;
+  private admission = new AbortController();
 
-  constructor(private kernelName: string, private cwd: string, private pythonPath: string, private env: NodeJS.ProcessEnv) {}
+  constructor(private kernelName: string, private pythonPath: string, private prepare: (signal: AbortSignal) => Promise<() => { cwd: string; env: NodeJS.ProcessEnv }>) {}
 
   setOutputHandler(handler: (output: KernelOutput) => void) { this.onOutput = handler; }
   setStatusHandler(handler: (status: string) => void) { this.onStatus = handler; }
 
   async start(): Promise<void> {
-    if (this.process || this.stopping) throw new Error("Kernel already started or disconnected");
-    const proc = spawn(this.pythonPath, ["-u", runtimeScript], { env: this.env, stdio: ["pipe", "pipe", "pipe"] });
+    if (this.started || this.stopping) throw new Error("Kernel already started or disconnected");
+    this.started = true;
+    const signal = this.admission.signal;
+    let cancel!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      cancel = () => reject(signal.reason);
+      signal.addEventListener("abort", cancel, { once: true });
+    });
+    let admit: () => { cwd: string; env: NodeJS.ProcessEnv };
+    try { admit = await Promise.race([this.prepare(signal), cancelled]); }
+    finally { signal.removeEventListener("abort", cancel); }
+    signal.throwIfAborted();
+    // Final native admission and worker creation share one synchronous turn;
+    // a preparation promise cannot authorize a replacement repository session.
+    const prepared = admit();
+    const proc = spawn(this.pythonPath, ["-u", runtimeScript], { env: prepared.env, stdio: ["pipe", "pipe", "pipe"] });
     this.process = proc;
     proc.stdin.on("error", error => this.fail(error));
     let stderr = "", text = "";
@@ -108,7 +124,7 @@ export class JupyterKernel {
       });
     });
     try {
-      await this.request("start", { kernelName: this.kernelName, cwd: this.cwd });
+      await this.request("start", { kernelName: this.kernelName, cwd: prepared.cwd });
       if (this.stopping) throw new Error("Kernel disconnected during startup");
       this.alive = true;
     } catch (error) {
@@ -118,9 +134,9 @@ export class JupyterKernel {
     }
   }
 
-  async execute(code: string, requestId: string): Promise<KernelExecution> {
+  async execute(code: string, requestId: string, cell: number): Promise<KernelExecution> {
     if (!this.alive) throw new Error("Kernel not connected");
-    return await this.request("execute", { code }, requestId) as KernelExecution;
+    return await this.request("execute", { code, cell }, requestId) as KernelExecution;
   }
 
   async interrupt(): Promise<void> { await this.request("interrupt"); }
@@ -129,6 +145,7 @@ export class JupyterKernel {
   shutdown(): Promise<void> {
     if (!this.stopping) this.stopping = (async () => {
       this.alive = false;
+      this.admission.abort(new Error("Kernel disconnected during startup"));
       // EOF is the worker's shutdown admission, even if startup is pending.
       // Await its exit so KernelManager still owns child/connection cleanup.
       this.process?.stdin.end();

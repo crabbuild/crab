@@ -11,13 +11,13 @@ const python = process.env.CRAB_TEST_JUPYTER_PYTHON;
 
 describe.runIf(python)("reference Jupyter runtime ownership", () => {
   let root: string, kernel: JupyterKernel, outputs: KernelOutput[];
-  const execute = (code: string) => kernel.execute(code, randomUUID());
+  const execute = (code: string) => kernel.execute(code, randomUUID(), 0);
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; } };
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "jupyter-owner-"));
     for (const name of ["TMPDIR", "TEMP", "TMP", "JUPYTER_RUNTIME_DIR", "JUPYTER_CONFIG_DIR"]) vi.stubEnv(name, root);
     outputs = [];
-    kernel = new JupyterKernel("python3", root, python!, { ...process.env });
+    kernel = new JupyterKernel("python3", python!, async () => () => ({ cwd: root, env: { ...process.env } }));
     kernel.setOutputHandler(output => outputs.push(output));
   });
   afterEach(async () => { await kernel.shutdown(); vi.unstubAllEnvs(); await fs.rm(root, { recursive: true, force: true }); });
@@ -25,7 +25,7 @@ describe.runIf(python)("reference Jupyter runtime ownership", () => {
   it("becomes ready in an explicit runtime directory and finishes after all immediate output", async () => {
     await kernel.start();
     const requestId = randomUUID();
-    expect(await kernel.execute("import os\nos.write(1, b'native stdout is not the worker protocol\\n')\nfor i in range(50): print('CRAB_READY_' + str(i), flush=True)", requestId)).toEqual({ status: "ok" });
+    expect(await kernel.execute("import os\nos.write(1, b'native stdout is not the worker protocol\\n')\nfor i in range(50): print('CRAB_READY_' + str(i), flush=True)", requestId, 0)).toEqual({ status: "ok" });
     const stream = outputs.filter(output => output.msgType === "stream");
     expect(stream.every(output => output.requestId === requestId)).toBe(true);
     expect(stream.map(output => output.content.text).join("")).toContain("CRAB_READY_49");
@@ -71,9 +71,65 @@ describe.runIf(python)("reference Jupyter runtime ownership", () => {
   }, 45_000);
 
   it("retires a failed startup and remains safely disconnectable", async () => {
-    kernel = new JupyterKernel("missing-crab-test-kernel", root, python!, { ...process.env });
+    kernel = new JupyterKernel("missing-crab-test-kernel", python!, async () => () => ({ cwd: root, env: { ...process.env } }));
     await expect(kernel.start()).rejects.toThrow(/No such kernel/);
     await kernel.shutdown();
     expect((await fs.readdir(root)).filter(name => name.startsWith("crab-kernel-"))).toEqual([]);
   }, 45_000);
+
+  it("routes background output after execution is idle to its original request", async () => {
+    await kernel.start();
+    const release = path.join(root, "release"), done = path.join(root, "background-done");
+    const request = randomUUID();
+    const code = `import threading,time,pathlib,contextvars\ndef background_output():\n    while not pathlib.Path(${JSON.stringify(release)}).exists(): time.sleep(0.01)\n    print('CRAB_AFTER_IDLE', flush=True)\n    pathlib.Path(${JSON.stringify(done)}).write_text('done')\nthreading.Thread(target=contextvars.copy_context().run, args=(background_output,), daemon=True).start()\nprint('CRAB_BEFORE_IDLE', flush=True)`;
+    expect(await kernel.execute(code, request, 0)).toEqual({ status: "ok" });
+    await fs.writeFile(release, "release");
+    await vi.waitFor(async () => expect(await fs.readFile(done, "utf8")).toBe("done"), { timeout: 10_000 });
+    await kernel.execute("print('CRAB_OUTPUT_BARRIER', flush=True)", randomUUID(), 1);
+    await vi.waitFor(() => expect(outputs.some(output => output.requestId === request && String(output.content.text).includes("CRAB_AFTER_IDLE"))).toBe(true), { timeout: 3000 });
+  }, 45_000);
+
+  it("a cell rerun retires its old background output route", async () => {
+    await kernel.start();
+    const release = path.join(root, "release"), done = path.join(root, "background-done");
+    const request = randomUUID();
+    await kernel.execute(`import threading,time,pathlib,contextvars\ndef retired_output():\n    while not pathlib.Path(${JSON.stringify(release)}).exists(): time.sleep(0.01)\n    print('CRAB_RETIRED_OUTPUT', flush=True)\n    pathlib.Path(${JSON.stringify(done)}).write_text('done')\nthreading.Thread(target=contextvars.copy_context().run, args=(retired_output,), daemon=True).start()`, request, 0);
+    await kernel.execute("print('CRAB_REPLACEMENT_OUTPUT', flush=True)", randomUUID(), 0);
+    await fs.writeFile(release, "release");
+    await vi.waitFor(async () => expect(await fs.readFile(done, "utf8")).toBe("done"), { timeout: 10_000 });
+    await kernel.execute("print('CRAB_OUTPUT_BARRIER', flush=True)", randomUUID(), 1);
+    expect(outputs.some(output => String(output.content.text).includes("CRAB_RETIRED_OUTPUT"))).toBe(false);
+  }, 45_000);
+
+  it.each(["startup", "restart"])("joins cancellation during blocked %s readiness", async phase => {
+    const spec = path.join(root, "data", "kernels", "delayed");
+    await fs.mkdir(spec, { recursive: true });
+    const script = path.join(root, "delayed.py"), identity = path.join(root, "launch-pid"), block = path.join(root, "block-ready");
+    await fs.writeFile(script, `import os,pathlib,time\npathlib.Path(${JSON.stringify(identity)}).write_text(str(os.getpid()))\nwhile pathlib.Path(${JSON.stringify(block)}).exists(): time.sleep(0.01)\nfrom ipykernel.kernelapp import IPKernelApp\nIPKernelApp.launch_instance()`);
+    await fs.writeFile(path.join(spec, "kernel.json"), JSON.stringify({ argv: [python, "-u", script, "-f", "{connection_file}"], display_name: "Delayed readiness", language: "python" }));
+    vi.stubEnv("JUPYTER_PATH", path.join(root, "data"));
+    kernel = new JupyterKernel("delayed", python!, async () => () => ({ cwd: root, env: { ...process.env } }));
+    if (phase === "restart") { await kernel.start(); await fs.rm(identity); }
+    await fs.writeFile(block, "blocked");
+    const pending = (phase === "startup" ? kernel.start() : kernel.restart()).catch(error => error as Error);
+    await vi.waitFor(async () => expect(await fs.readFile(identity, "utf8")).toMatch(/^\d+$/), { timeout: 10_000 });
+    const pid = Number(await fs.readFile(identity, "utf8")), began = performance.now();
+    await kernel.shutdown();
+    expect(await pending).toBeInstanceOf(Error);
+    expect(performance.now() - began).toBeLessThan(8000);
+    expect(alive(pid)).toBe(false);
+    expect((await fs.readdir(root)).filter(name => name.startsWith("crab-kernel-"))).toEqual([]);
+  }, 45_000);
+
+  it("cancels held preparation without admitting a late worker", async () => {
+    let release!: (admit: () => { cwd: string; env: NodeJS.ProcessEnv }) => void;
+    let admitted = false;
+    kernel = new JupyterKernel("python3", python!, () => new Promise(resolve => { release = resolve; }));
+    const pending = kernel.start().catch(error => error as Error);
+    await kernel.shutdown();
+    expect(await pending).toBeInstanceOf(Error);
+    release(() => { admitted = true; return { cwd: root, env: { ...process.env } }; });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+  });
 });

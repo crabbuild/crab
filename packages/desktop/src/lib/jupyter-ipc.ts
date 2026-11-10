@@ -25,7 +25,10 @@ class NotebookKernel {
       if (event.id === this.state.id) this.output(event);
     }), window.crab.onJupyterStatus(event => {
       if (event.id !== this.state.id) return;
-      if (event.status === "dead" || event.status === "disconnected") this.publish({ id: null, status: event.status, running: new Set(), error: event.status === "dead" ? "The kernel process exited. Connect again to continue." : null });
+      // Pending invokes own their terminal error/acknowledgement. A worker's
+      // exit event must not erase the startup failure or revive cancellation.
+      if (this.state.status === "starting" || this.state.status === "stopping") return;
+      if (event.status === "dead" || event.status === "disconnected") { this.retireRequests(); this.publish({ id: null, status: event.status, running: new Set(), error: event.status === "dead" ? "The kernel process exited. Connect again to continue." : null }); }
       else this.publish({ status: event.status });
     })];
   }
@@ -42,31 +45,33 @@ class NotebookKernel {
   async connect(name: string, nativeSessionId: string, pythonPath: string): Promise<void> {
     if (this.state.id || this.state.status === "starting") return;
     this.retireRequests();
-    this.publish({ status: "starting", error: null, outputs: new Map(), counts: new Map(), running: new Set() });
+    const id = crypto.randomUUID(), generation = this.generation;
+    this.publish({ id, status: "starting", error: null, outputs: new Map(), counts: new Map(), running: new Set() });
     try {
-      const { id } = await window.crab.jupyterStart(name, this.repoId, nativeSessionId, pythonPath);
-      if (this.disposed) { await window.crab.jupyterShutdown(id); return; }
-      this.publish({ id, status: "idle" });
-    } catch (error) { this.publish({ id: null, status: "disconnected", error: String(error) }); }
+      await window.crab.jupyterStart(id, name, this.repoId, nativeSessionId, pythonPath);
+      if (!this.disposed && this.state.id === id && generation === this.generation) this.publish({ status: "idle" });
+    } catch (error) { if (this.state.id === id && generation === this.generation) this.publish({ id: null, status: "disconnected", error: String(error) }); }
   }
 
   async run(cell: number, code: string): Promise<boolean> {
     const id = this.state.id, generation = this.generation;
-    if (!id) return false;
+    if (!id || this.state.running.has(cell)) return false;
     const requestId = crypto.randomUUID();
     // Correlate before IPC admission: fast outputs may arrive before the
     // invoke reply, and tab disposal must not discard this association.
+    for (const [previous, index] of this.requests) if (index === cell) { this.requests.delete(previous); this.clearOnOutput.delete(previous); }
     this.requests.set(requestId, cell);
     const outputs = new Map(this.state.outputs); outputs.set(cell, []);
     this.publish({ outputs, running: new Set([...this.state.running, cell]), error: null });
     try {
-      const result = await window.crab.jupyterExecute(id, code, requestId);
+      const result = await window.crab.jupyterExecute(id, code, requestId, cell);
       return result.status === "ok" && generation === this.generation;
     } catch (error) {
       if (this.state.id === id && this.state.status !== "stopping" && this.state.status !== "starting" && generation === this.generation) this.publish({ error: String(error) });
       return false;
     } finally {
-      this.requests.delete(requestId); this.clearOnOutput.delete(requestId);
+      // Completion releases the running state. The current output area still
+      // accepts asynchronous messages until rerun or document/kernel replacement.
       if (generation === this.generation) { const running = new Set(this.state.running); running.delete(cell); this.publish({ running }); }
     }
   }
@@ -74,13 +79,21 @@ class NotebookKernel {
   async control(action: "interrupt" | "restart" | "disconnect"): Promise<void> {
     const id = this.state.id;
     if (!id) return;
-    if (action === "restart") this.retireRequests();
+    if (action !== "interrupt") this.retireRequests();
+    const generation = this.generation;
     if (action !== "interrupt") this.publish({ status: action === "restart" ? "starting" : "stopping", error: null });
     try {
       if (action === "interrupt") await window.crab.jupyterInterrupt(id);
-      else if (action === "restart") { await window.crab.jupyterRestart(id); this.publish({ outputs: new Map(), counts: new Map(), running: new Set(), status: "idle" }); }
-      else { await window.crab.jupyterShutdown(id); this.publish({ id: null, status: "disconnected", running: new Set() }); }
-    } catch (error) { this.publish({ error: String(error) }); }
+      else if (action === "restart") {
+        await window.crab.jupyterRestart(id);
+        if (this.state.id === id && generation === this.generation) this.publish({ outputs: new Map(), counts: new Map(), running: new Set(), status: "idle" });
+      } else {
+        await window.crab.jupyterShutdown(id);
+        if (this.state.id === id && generation === this.generation) this.publish({ id: null, status: "disconnected", running: new Set() });
+      }
+    } catch (error) {
+      if (this.state.id === id && generation === this.generation) this.publish(action === "interrupt" ? { error: String(error) } : { id: null, status: "dead", running: new Set(), error: String(error) });
+    }
   }
 
   dispose(): void { this.disposed = true; for (const off of this.unsubscribe) off(); this.listeners.clear(); this.requests.clear(); }

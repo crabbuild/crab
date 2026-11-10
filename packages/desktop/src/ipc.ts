@@ -1076,8 +1076,8 @@ declare global {
       jupyterCheck: (pythonPath?: string) => Promise<JupyterRuntime>;
       jupyterListKernels: (pythonPath: string) => Promise<KernelSpec[]>;
       jupyterInstall: (pythonPath: string) => Promise<string>;
-      jupyterStart: (name: string, repoId: string, nativeSessionId: string, pythonPath: string) => Promise<{ id: string }>;
-      jupyterExecute: (id: string, code: string, requestId: string) => Promise<KernelExecution>;
+      jupyterStart: (id: string, name: string, repoId: string, nativeSessionId: string, pythonPath: string) => Promise<void>;
+      jupyterExecute: (id: string, code: string, requestId: string, cell: number) => Promise<KernelExecution>;
       jupyterInterrupt: (id: string) => Promise<void>;
       jupyterRestart: (id: string) => Promise<void>;
       jupyterShutdown: (id: string) => Promise<void>;

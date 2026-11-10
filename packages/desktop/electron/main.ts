@@ -2,7 +2,6 @@ import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protoco
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
@@ -1247,31 +1246,34 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
   ipcMain.handle("crab:jupyter-list-kernels", async (_evt, pythonPath: string) => listKernelSpecs(pythonPath));
   ipcMain.handle("crab:jupyter-install", async (_evt, pythonPath: string) => installJupyter(pythonPath));
 
-  ipcMain.handle("crab:jupyter-start", async (evt, kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => {
+  ipcMain.handle("crab:jupyter-start", async (evt, id: string, kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => {
     if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
     if (parseRepoId(repoId)) throw new Error("A local kernel requires a local working tree.");
-    const env = await getUserShellBaseEnv();
-    const local = await localAgent();
-    if (isShuttingDown || evt.sender.isDestroyed()) throw new Error("Notebook closed during kernel startup");
-    if (!nativeSessionId || local.repositorySession(repoId) !== nativeSessionId) throw nativeSessionLost();
-    const cwd = local.worktreePath(repoId);
-    if (!cwd) throw new Error("The repository has no local working tree for this kernel.");
-    const id = crypto.randomUUID();
-    // Environment preparation yields; validate the caller above immediately
-    // before worker creation so a replacement cannot inherit old admission.
-    const kernel = new JupyterKernel(kernelName, cwd, pythonPath, env);
+    if (!id || notebookKernels.has(id)) throw new Error("Duplicate kernel connection");
     const owner = evt.sender;
+    const kernel = new JupyterKernel(kernelName, pythonPath, async signal => {
+      const env = await getUserShellBaseEnv();
+      signal.throwIfAborted();
+      const local = await localAgent();
+      return () => {
+        signal.throwIfAborted();
+        if (isShuttingDown || owner.isDestroyed()) throw new Error("Notebook closed during kernel startup");
+        if (!nativeSessionId || local.repositorySession(repoId) !== nativeSessionId) throw nativeSessionLost();
+        const cwd = local.worktreePath(repoId);
+        if (!cwd) throw new Error("The repository has no local working tree for this kernel.");
+        return { cwd, env };
+      };
+    });
     const destroyed = () => { void closeNotebookKernel(id).catch(error => console.error("Notebook cleanup failed", error)); };
     owner.once("destroyed", destroyed);
-    // Admit before startup: window/repository/app shutdown must also join
-    // workers waiting for readiness, not only successfully connected kernels.
+    // The renderer preassigns the ID. The same owner can cancel environment
+    // preparation and readiness before the connection invoke has returned.
     notebookKernels.set(id, { repoId, owner, kernel, release: () => owner.removeListener("destroyed", destroyed) });
     kernel.setOutputHandler(output => { if (!owner.isDestroyed()) owner.send("crab:jupyter-output", { id, ...output }); });
     kernel.setStatusHandler(status => { if (!owner.isDestroyed()) owner.send("crab:jupyter-status", { id, status }); });
     try {
       await kernel.start();
       if (isShuttingDown || owner.isDestroyed() || !notebookKernels.has(id)) throw new Error("Notebook closed during kernel startup");
-      return { id };
     } catch (error) {
       await closeNotebookKernel(id);
       throw error;
@@ -1283,7 +1285,7 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     if (!entry || entry.owner !== sender) throw new Error("Kernel not connected");
     return entry.kernel;
   }
-  ipcMain.handle("crab:jupyter-execute", (evt, id: string, code: string, requestId: string) => ownedKernel(id, evt.sender).execute(code, requestId));
+  ipcMain.handle("crab:jupyter-execute", (evt, id: string, code: string, requestId: string, cell: number) => ownedKernel(id, evt.sender).execute(code, requestId, cell));
   ipcMain.handle("crab:jupyter-interrupt", (evt, id: string) => ownedKernel(id, evt.sender).interrupt());
   ipcMain.handle("crab:jupyter-restart", (evt, id: string) => ownedKernel(id, evt.sender).restart());
   ipcMain.handle("crab:jupyter-shutdown", async (evt, id: string) => { ownedKernel(id, evt.sender); await closeNotebookKernel(id); });

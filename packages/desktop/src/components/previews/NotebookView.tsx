@@ -138,13 +138,13 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
               <button type="button" className="btn text-[10px]" onClick={() => void runAllCells()} disabled={running.size > 0 || kernelStatus === "starting" || kernelStatus === "stopping"}>
                 <Play size={10} /> Run All
               </button>
-              <button type="button" className="btn text-[10px]" onClick={() => void kernelOwner.control("interrupt")} title="Interrupt" aria-label="Interrupt kernel">
+              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("interrupt")} title="Interrupt" aria-label="Interrupt kernel">
                 <Pause size={10} />
               </button>
               <button type="button" className="btn text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("restart")} title="Restart kernel" aria-label="Restart kernel">
                 <RefreshCw size={10} />
               </button>
-              <button type="button" className="btn text-[10px]" onClick={() => void kernelOwner.control("disconnect")} title="Disconnect" aria-label="Disconnect kernel">
+              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "stopping"} onClick={() => void kernelOwner.control("disconnect")} title={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect"} aria-label={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect kernel"}>
                 <Power size={10} />
               </button>
             </>

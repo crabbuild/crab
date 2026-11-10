@@ -66,9 +66,12 @@ Run All waits for each cell to finish and stops on failure. Live outputs and
 kernel variables survive tab changes and native-reader repair; interrupt,
 restart and busy disconnect/Quit join the existing kernel owner. Runtime
 discovery and optional installation use that Python environment asynchronously.
-Remote-server connection, cancellation during readiness, post-idle output
-routing, output budgets and SQL-query recovery remain tracked in the acceptance
-matrix below.
+Background outputs remain attached to the current cell after it becomes idle;
+rerunning that cell retires the old route. Cancel stops pending environment
+preparation or kernel readiness/restart and joins process cleanup before retry.
+Fresh-environment installation has packaged macOS proof. Remote-server connection,
+installer failure/retry, abrupt kernel recovery, output budgets
+and captured SQL-query recovery remain tracked in the acceptance matrix below.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

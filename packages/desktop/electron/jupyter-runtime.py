@@ -1,5 +1,6 @@
 """Own a local Jupyter kernel through the installed reference client."""
 
+import asyncio
 import json
 import queue
 import subprocess
@@ -7,7 +8,7 @@ import sys
 import tempfile
 import threading
 
-from jupyter_client import KernelManager
+from jupyter_client import AsyncKernelManager
 from jupyter_client.kernelspec import KernelSpecManager
 
 
@@ -20,30 +21,55 @@ def reply(request_id, result=None, error=None):
     emit({"kind": "reply", "id": request_id, "result": result, "error": error})
 
 
-def run():
-    commands = queue.Queue()
+async def run():
+    commands = asyncio.Queue()
+    loop = asyncio.get_running_loop()
 
     def read_commands():
         try:
             for line in sys.stdin:
-                commands.put(json.loads(line))
+                loop.call_soon_threadsafe(commands.put_nowait, json.loads(line))
         finally:
             # A closed Electron pipe still owns kernel shutdown, including
             # when the application exits without an explicit shutdown request.
-            commands.put(None)
+            loop.call_soon_threadsafe(commands.put_nowait, None)
 
     threading.Thread(target=read_commands, daemon=True).start()
     manager = None
     client = None
     jobs = {}
+    routes = {}
+    cells = {}
     request = None
+    launch = None
+    readiness = None
+    ready_request = None
+
+    async def wait_ready():
+        nonlocal client
+        # A provisioner launch/restart must reach its terminal state before
+        # shutdown. Cancelling it can leave KernelManager.ready unresolved.
+        await asyncio.shield(launch)
+        client = manager.client()
+        client.start_channels()
+        await client.wait_for_ready(timeout=30)
 
     with tempfile.TemporaryDirectory(prefix="crab-kernel-") as directory:
         try:
             while True:
+                if readiness is not None and readiness.done():
+                    try:
+                        readiness.result()
+                    except Exception as error:
+                        reply(ready_request, error=str(error))
+                        readiness = None
+                        break
+                    reply(ready_request)
+                    emit({"kind": "status", "status": "idle"})
+                    readiness = None
                 try:
-                    request = commands.get(timeout=0 if client else None)
-                except queue.Empty:
+                    request = await asyncio.wait_for(commands.get(), timeout=0.01)
+                except asyncio.TimeoutError:
                     request = False
                 if request is None:
                     break
@@ -53,32 +79,34 @@ def run():
                     request_id = request["id"]
                     try:
                         if method == "start":
-                            manager = KernelManager(kernel_name=params["kernelName"], connection_file=directory + "/connection.json")
+                            manager = AsyncKernelManager(kernel_name=params["kernelName"], connection_file=directory + "/connection.json")
                             # The worker's stdout is the control protocol;
                             # native kernel writes must not enter that pipe.
-                            manager.start_kernel(cwd=params["cwd"], stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr)
-                            client = manager.client()
-                            client.start_channels()
-                            client.wait_for_ready(timeout=30)
-                            reply(request_id)
-                            emit({"kind": "status", "status": "idle"})
+                            launch = asyncio.create_task(manager.start_kernel(cwd=params["cwd"], stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr))
+                            readiness = asyncio.create_task(wait_ready())
+                            ready_request = request_id
+                        elif readiness is not None:
+                            raise RuntimeError("Kernel readiness is still pending")
                         elif method == "execute":
                             msg_id = client.execute(params["code"], allow_stdin=False, stop_on_error=True)
+                            previous = cells.get(params["cell"])
+                            routes.pop(previous, None)
+                            cells[params["cell"]] = msg_id
+                            routes[msg_id] = request_id
                             jobs[msg_id] = {"id": request_id, "reply": None, "idle": False}
                         elif method == "interrupt":
-                            manager.interrupt_kernel()
+                            await manager.interrupt_kernel()
                             reply(request_id)
                         elif method == "restart":
                             for job in jobs.values():
                                 reply(job["id"], error="Kernel restarted before execution completed")
                             jobs.clear()
+                            routes.clear()
+                            cells.clear()
                             client.stop_channels()
-                            manager.restart_kernel(now=False)
-                            client = manager.client()
-                            client.start_channels()
-                            client.wait_for_ready(timeout=30)
-                            reply(request_id)
-                            emit({"kind": "status", "status": "idle"})
+                            launch = asyncio.create_task(manager.restart_kernel(now=False))
+                            readiness = asyncio.create_task(wait_ready())
+                            ready_request = request_id
                         else:
                             raise ValueError("Unknown kernel operation")
                     except Exception as error:
@@ -86,16 +114,16 @@ def run():
                         if method in ("start", "restart"):
                             break
 
-                if client is None:
+                if client is None or readiness is not None:
                     continue
-                if not manager.is_alive():
+                if not await manager.is_alive():
                     raise RuntimeError("The kernel process exited")
                 # Drain both channels without starving interrupt/shutdown
                 # admission. Execution completes only after its reply AND idle.
                 for channel in (client.iopub_channel, client.shell_channel):
                     for _ in range(100):
                         try:
-                            message = channel.get_msg(timeout=0.005)
+                            message = await channel.get_msg(timeout=0.005)
                         except queue.Empty:
                             break
                         parent = message["parent_header"].get("msg_id")
@@ -108,22 +136,30 @@ def run():
                                 job["idle"] = True
                         elif job and kind == "execute_reply":
                             job["reply"] = content["status"]
-                        elif job:
-                            emit({"kind": "output", "requestId": job["id"], "msgType": kind, "content": content})
+                        elif parent in routes:
+                            emit({"kind": "output", "requestId": routes[parent], "msgType": kind, "content": content})
                         if job and job["idle"] and job["reply"] is not None:
                             reply(job["id"], {"status": job["reply"]})
+                            # Idle completes the request, not its output area.
+                            # Keep only each cell's latest route for late output.
                             del jobs[parent]
         finally:
             # KernelManager joins its provisioner and removes connection data;
             # the worker must remain alive until this cleanup acknowledges.
             try:
+                if launch is not None:
+                    await asyncio.gather(launch, return_exceptions=True)
+                if readiness is not None:
+                    readiness.cancel()
+                    await asyncio.gather(readiness, return_exceptions=True)
+                    reply(ready_request, error="Kernel disconnected during readiness")
                 if manager is not None:
                     if manager.has_kernel:
-                        manager.shutdown_kernel(now=False)
+                        await manager.shutdown_kernel(now=False)
                     else:
                         # Failed kernelspec admission creates no process;
                         # release its resources without a shutdown request.
-                        manager.cleanup_resources()
+                        await manager.cleanup_resources()
             finally:
                 if client is not None:
                     client.stop_channels()
@@ -137,7 +173,7 @@ if __name__ == "__main__":
         emit([{"name": name, "displayName": value["spec"]["display_name"], "language": value["spec"]["language"]} for name, value in specs.items()])
     else:
         try:
-            run()
+            asyncio.run(run())
         except Exception as error:
             emit({"kind": "failed", "error": str(error)})
             sys.exit(1)

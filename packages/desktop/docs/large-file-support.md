@@ -13,7 +13,7 @@ record historical evidence rather than separate work queues.
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Remote kernels, readiness cancellation, post-idle outputs, decoded/output budgets and query paths remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Local post-idle output routing and readiness/restart cancellation are qualified below. Remote kernels, decoded/output budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
@@ -23,86 +23,28 @@ record historical evidence rather than separate work queues.
 
 ## Remaining priorities
 
-Work proceeds in this order. A gap closes only after the corresponding user
-action produces the real side effect and an accurate visible result. CI and
-provider qualification run alongside each slice, rather than after all features.
+This is the single execution queue. The acceptance matrix defines completion;
+checkpoint sections below preserve evidence, not additional queues. Within each
+row, fix the canonical owner and qualify the actual UI entry point before
+broadening profiles. Keep provider/platform qualification alongside the work.
 
-| Priority | Deliverable | Consolidation boundary | Closure proof |
+| Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local watcher stalls, physical caller-session handoff, notebook document recapture and audio/video playback state now have bounded packaged proof. Remaining: remote Jupyter connection, readiness/restart cancellation, post-idle outputs, abrupt kernel recovery and query state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader media/profile/platform qualification. |
-| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit now drains admitted local publication and failure cleanup, with packaged proof below. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
-| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
-| P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
-| P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Background workspace/batch dirty counts still need the publication-ownership rule. Very large file-count/network-filesystem monitor costs, other format comparisons and parser/query budgets remain open. |
+| P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Implement the advertised remote-server Connect action; qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, and output budgets. Local post-idle routing, cancellation during preparation/readiness/restart and fresh-environment installation now have the bounded packaged proof below. Broader runtime/platform profiles remain open. |
+| P0 | Correct and bound SQL queries | The existing [captured reader](../agent/src/preview/reader.rs), native query handler and [query panel](../src/components/previews/DuckDbQueryPanel.tsx). | Parquet/SQLite queries must retain the selected revision and source, work with Crab/LFS and SDK snapshots, cancel real work, and enforce decoded, result-byte/row and execution budgets. Preserve SQL drafts, results and history across tab disposal/native repair; reject stale replies. Current query RPC opens physical working-tree paths, has no revision parameter and collects all rows before truncating. A UI row limit does not close this gap. |
+| P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree/cross-repository comparisons and read-only model isolation through their UI entry points. Qualify Dashboard/Datasets/cached metrics/shared hydration state under storage rebind and SSH reconnect; removal during admitted SDK opening; real jump-host cancellation; broader media profiles and repeated shutdown. Native/local publication has bounded mode/symlink/cleanup proof; other filesystem metadata and platforms remain open. |
+| P1 | Complete one Crab and LFS repository lifecycle per supported profile | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Create/edit/rename/delete, track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate; compare exact bytes, identities, executable modes and unrelated index entries. Finish remote physical mutations, standalone editor RPC parity and admitted task-worktree ownership. Optional SDK configuration needs typed path absence distinct from missing content objects. Qualify migrations/extensions/supported locks, ordinary Git captures, review/mode diffs, plain Git patch cancellation and crash drafts. |
+| P1 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect/restart and retry from supported state. Prove acknowledged cancellation, cleanup and publication outcomes; durable terminal/journal ownership; logical versus network counters; active-reader pins, budget enforcement, SDK namespace eviction and offline retention. Remove component-owned publishing rather than add another retry queue. |
+| P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Complete remaining format comparisons. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
 
-Use the existing provider/native-session owner for recovery, the encrypted vault
-for credentials and identity changes, captured native readers for previews, and
-repository operations for transfers. Files, Activity and Settings expose those
-capabilities without adding primary navigation destinations. A working read or
-materialization smoke does not imply mutation parity or durable recovery.
-
-Repository-owned workspace state now has the bounded local/SSH and read-only
-snapshot proof below. The next implementation work is recovery parity and the
-complete physical-file workflow; broader provider/platform qualification stays
-alongside each slice.
-
-### Next bounded slices
-
-1. Finish recovery parity on the existing owners. Physical read/save IPC now
-   retains the caller's session through wire admission, with packaged SSH proof
-   across an unobserved owner replacement. Discard-quit joins admitted local
-   saves. Broaden provider/platform and shutdown qualification alongside the
-   keep-editing proof. The shared working
-   buffer now preserves pending text/Markdown through tab disposal/reopening,
-   repository switching and SSH reconnect. It replaces both local save loops
-   and the remote save hook, and writes through the existing provider. Next,
-   complete remote kernel and query ownership/state. Notebook documents
-   recapture, and audio/video restore playback through reader replacement.
-   Local kernel readiness, execution completion, interrupt/restart and busy
-   teardown now have bounded proof below. Finish the advertised remote-server
-   action, installer E2E, cancellation while readiness/restart is pending, abrupt worker/kernel
-   recovery, post-idle output routing and kernel output budgets. Query drafts
-   and captured-source/budget
-   semantics also remain open. Qualify auxiliary worktree/cross-repository comparison recovery and
-   snapshot model isolation through their actual UI entry points. Dashboard, Datasets,
-   cached metrics and shared hydration inventories have local same-ID native
-   repair proof; qualify storage rebind and SSH reconnect. Device metadata before
-   construction is now qualified below. Storage replacement/cold bindings, SDK
-   GUI restore and blocked SDK cancellation have bounded two-store macOS proof;
-   broaden provider/profile coverage. Prove removal during an admitted opening
-   against held real storage, and cancellation through actual jump hosts. Keep
-   refreshes at their existing owner; add no component retry queue.
-2. Local and native publication/mode integrity have bounded proof below. Qualify
-   other platforms/providers and complete one real repository round trip for each
-   Crab/LFS profile: physical file create/edit/rename/delete, attribute setup,
-   track, stage, commit, push, lazy clone, bulk hydrate and dehydrate. Remote
-   physical mutations and task file viewing need one
-   admitted worktree/provider owner; a remote task path must never become a local
-   filesystem read. Optional SDK configuration files need typed absence rather
-   than broad NotFound suppression. Complete these boundaries before claiming
-   editing parity; unsupported native filesystem RPCs must not masquerade
-   as complete remote editing. Preserve content identities, unrelated index
-   entries, executable modes and review/history source semantics.
-3. Deepen existing operation and cache owners: durable terminal state, supported
-   retry/resume after cold-transfer interruption, acknowledged cancellation,
-   logical versus network counters, active-reader pins, budget enforcement and
-   offline retention. Closing a view must not discard ownership or report a
-   cancelled transfer before native cleanup finishes.
-4. Finish metadata and format bounds on the existing captured-reader path:
-   physical/cache/available/pending bytes, decoded Parquet/query limits,
-   bounded plain-text pointers and remaining format comparisons. Keep unknown
-   measurements unknown and give oversized or malformed content a visible error.
-   Dataset mtime filtering still has no timestamp input and currently does not
-   filter; implement its native data contract and qualify recursive catalog
-   coverage rather than treating those controls as complete. Consolidate local
-   workspace polling and native batch-status counts with the exact publication
-   ownership rule used by selected-repository status; avoid a second blacklist.
-
-These slices consolidate functionality into File details, Activity and Settings.
-They do not require additional primary navigation destinations or a second
-reconstruction, credential, retry or cache implementation. Every slice retains
-its own byte-identity, failure and packaged-action evidence; provider/profile
-and cross-platform CI qualification remains a release gate for the whole matrix.
+File details, Activity and Settings remain the consolidation points. Reuse one
+captured read/reconstruction path, one vault, one repository operation owner and
+the existing cache. Fewer navigation destinations must not remove capabilities
+or hide unsupported actions. Each row closes with user action → real side effect
+→ visible result, including failure and cleanup. Full Crab/LFS round trips,
+multi-GiB bounds, small-edit dedup, cold interruption/restart, corrupt/missing
+objects and the cross-OS/provider matrix remain release gates for the whole
+feature; a successful preview smoke does not substitute for them.
 
 ## Local notebook execution checkpoint
 
@@ -113,8 +55,8 @@ interrupt signals the Jupyter launcher, whose signal handler shuts down the
 kernel. It also has no shell-reply consumer or authenticated receive path.
 
 The selected Python environment now owns a packaged worker using Jupyter
-Client's `KernelManager` and client channels. Runtime/spec discovery and optional
-installation use the shared asynchronous login environment; guessed executable
+Client's `AsyncKernelManager` and async client channels. Runtime/spec discovery
+and optional installation use the shared asynchronous login environment; guessed executable
 lists, synchronous shell commands and the Node protocol implementation are
 removed. Jupyter owns connection files, authentication, readiness, the kernel
 provisioner and platform-specific interrupt/shutdown behavior. The worker is
@@ -128,12 +70,31 @@ associates a request before IPC admission, preserves live outputs/running cells
 in one notebook owner across tab and Settings navigation, and stops Run All on
 failure. Same-document native repair keeps kernel variables and live outputs;
 replacement documents or kernels retire old request associations. Clear-output
-and display-update messages use that same output owner. There is no second
-kernel client or component retry queue.
+and display-update messages use that same output owner. Shell reply plus idle
+releases the running state, not the output area: each cell retains its latest
+parent/request route until rerun or document/kernel replacement. Post-idle
+background output reaches its original cell; retired runs cannot overwrite a
+replacement output area. There is no second kernel client or component retry queue.
 
-Main admits each worker before waiting for readiness, binds initial local
-startup to the caller's native session and the agent-owned physical working
-tree, and restricts controls/events to the initiating window. A remote or SDK
+Routing follows the transmitted parent header. A standalone reference-client
+control with ipykernel 7.4.0 reproduces bare-thread output carrying the following
+cell's parent; explicitly copying the originating Python context retains the
+original parent. The fixtures carry that context on both qualified runtimes;
+they keep the original-cell and retired-route assertions. The prior package
+still fails the original-cell assertion with that fixture. No parent guessing
+or runtime-specific routing is added. This follows the kernel's
+[ContextVar-based stream parent](https://github.com/ipython/ipykernel/blob/v7.4.0/ipykernel/iostream.py#L551)
+and Python's [explicit context management](https://docs.python.org/3.12/library/contextvars.html#manual-context-management).
+
+Main admits a renderer-assigned connection ID before environment preparation.
+The existing owner exposes Cancel while preparation/readiness/restart is pending;
+cancellation retires the renderer generation and joins cleanup before retry.
+The worker keeps command admission active while the reference client waits for
+readiness. It joins provisioner launch/restart before cancelling the client wait,
+so cancellation cannot leave the manager's readiness future unresolved or abandon
+an owned process. Final native admission and worker creation share one synchronous
+turn after preparation. Main binds initial local startup to the caller's native
+session and the agent-owned physical working tree, and restricts controls/events to the initiating window. A remote or SDK
 path cannot become a local kernel directory. Repository close, window teardown
 and normal Quit join worker shutdown. EOF makes the worker close its kernel,
 channels and temporary connection data before exiting. Failed admission without
@@ -156,29 +117,42 @@ the budget after old streams close. No app-wide Restart/Quit dialog or second
 restart owner remains. Local/SDK unit checks also cover a manual reopen already
 waiting for the old process to drain.
 
-Five real-kernel cases cover immediate output/completion, native stdout pipe
+Ten real-kernel cases cover immediate output/completion, native stdout pipe
 isolation, variable-preserving interrupt, process-replacing restart, busy
-shutdown and failed startup cleanup. Five notebook-owner cases cover early
-outputs, detached views, replacement documents/kernels, display clearing/update
-and visible execution failure. A blocked shared-environment case proves zero
-late runtime processes after shutdown. Together with the existing format/read
-regressions and 41 native lifecycle cases, seven focused suites pass 96 cases.
+shutdown, failed startup cleanup, late output/rerun retirement, held preparation
+and blocked startup/restart cancellation. Eight notebook-owner cases cover early
+and post-idle outputs, detached views, replacement documents/kernels, display
+clearing/update, visible execution failure and retired connection/restart replies.
+A blocked shared-environment case proves zero late runtime processes after
+shutdown. Together with the existing format/read regressions and 41 native lifecycle cases, seven focused suites pass 104 cases.
 
 Two packaged notebook cases drive Python selection, a real failed kernelspec
 and retry, stale startup admission with zero workers, sequential Run All,
 physical side effects, tab/Settings disposal, repeated native
 repair, interrupt, restart, stop-on-error and busy disconnect/normal Quit. They
+also cancel held environment preparation and blocked startup/restart readiness,
+connect again, and deliver post-idle output to its original cell. The prior
+package drops that output; the prior worker takes about 31 seconds to disconnect
+from each blocked readiness phase. The fixed cancellation cases finish within
+the eight-second cleanup assertion without waiting for readiness timeout. They
 verify retired worker/kernel PIDs, actual working directory, unchanged notebook
 and index bytes, and compact controls. Twenty packaged recovery/media/output
 cases pass together. macOS arm64 is the qualified local target; CI adds the same
 pinned runtime and notebook proof on the desktop platform matrix.
 
+The final notebook rerun creates a fresh isolated Python environment and drives
+Check runtime → Install Jupyter Client + ipykernel → kernel selection → execution.
+It records Jupyter Client 8.10.0/ipykernel 7.4.0, verifies the running kernel's
+actual environment prefix, then passes the full cancellation/recovery/output
+case. The other case retains 8.6.3/6.29.5. All ten real-kernel ownership cases also
+pass independently on 8.10.0/7.4.0. The installer changes only the owned test
+virtual environment; no repository or global Python dependency is changed.
+
 This checkpoint does not close remote-server connection (the existing Connect
-action is still a no-op), installer E2E, cancellation during blocked readiness/restart,
-abrupt worker/kernel recovery, post-idle output routing, output/decoded budgets,
-SQL queries or broader
-runtime/provider/platform qualification. Those remain release gates above.
-Protocol and packaging contracts follow the [Jupyter messaging specification](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
+action is still a no-op), installer failure/retry, independent controls during native-reader
+outage, abrupt worker/kernel recovery, output/decoded budgets, SQL queries or
+broader runtime/provider/platform qualification. Those remain release gates above.
+Protocol and packaging contracts follow the [Jupyter messaging specification, including asynchronous output after idle](https://jupyter-client.readthedocs.io/en/stable/messaging.html#kernel-status)
 and [Electron ASAR limitations](https://www.electronjs.org/docs/latest/tutorial/asar-archives).
 
 ## Notebook and media recovery checkpoint
