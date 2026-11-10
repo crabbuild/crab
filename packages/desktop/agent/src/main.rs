@@ -204,6 +204,9 @@ async fn main() -> std::io::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "crab-desktop-agent starting"
     );
+    if let Err(error) = preview::query::reclaim_abandoned_snapshot() {
+        warn!(%error, "could not reclaim the database query snapshot");
+    }
 
     let stdin = tokio::io::stdin();
     let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::stdout()));

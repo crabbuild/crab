@@ -21,6 +21,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[3]
+PARQUET_FIXTURES = ROOT / "packages/desktop/tests/fixtures"
 spec = importlib.util.spec_from_file_location("sdk_fixture", ROOT / "crab/scripts/qualify_sdk_native_rustfs.py")
 sdk_fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sdk_fixture)
@@ -41,6 +42,7 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
     counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0}
     gate = threading.Event()
     gate.set()
+    paused_path = None
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -55,8 +57,10 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
         do_PUT = do_POST = do_DELETE = do_PATCH = reject
 
         def forward(self):
-            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_release"):
-                if self.path == "/__fixture_pause":
+            nonlocal paused_path
+            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_pause_lfs", "/__fixture_release"):
+                if self.path in ("/__fixture_pause", "/__fixture_pause_lfs"):
+                    paused_path = "/lfs/objects/" if self.path.endswith("_lfs") else None
                     gate.clear()
                 elif self.path == "/__fixture_release":
                     gate.set()
@@ -67,7 +71,7 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
                 self.wfile.write(body)
                 return
             counts["get" if self.command == "GET" else "head"] += 1
-            if not gate.is_set():
+            if not gate.is_set() and (paused_path is None or paused_path in self.path):
                 counts["blocked"] += 1
                 try:
                     deadline = time.monotonic() + 30
@@ -181,7 +185,9 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             url = f"crab://{bucket}/proof"
             run([crab, "init", url], source)
             run([crab, "lfs", "install", "--local", "--skip-repo"], source)
-            (source / ".gitattributes").write_text("weights.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\ncold.safetensors filter=lfs -text\n")
+            (source / ".gitattributes").write_text("weights.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\ncold.safetensors filter=lfs -text\nquery.parquet filter=lfs -text\n")
+            parquet = "before" if index == 0 else "after"
+            shutil.copyfile(PARQUET_FIXTURES / f"metadata-{parquet}.parquet", source / "query.parquet")
             size = 4 * 1024 * 1024
             marker = name.upper() + "_STORAGE_IDENTITY_CONTENT"
             header = json.dumps({marker: {"dtype": "U8", "shape": [size], "data_offsets": [0, size]}}).encode()
@@ -194,7 +200,7 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             (source / "cold.safetensors").write_bytes(cold)
             samples = bytes([0x10 + index]) * 2048
             (source / "sample.wav").write_bytes(struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(samples), b"WAVE", b"fmt ", 16, 1, 1, 8000, 16000, 2, 16, b"data", len(samples)) + samples)
-            run([git, "add", ".gitattributes", "crab.toml", "weights.safetensors", "lfs.safetensors", "cold.safetensors", "sample.wav"], source)
+            run([git, "add", ".gitattributes", "crab.toml", "weights.safetensors", "lfs.safetensors", "cold.safetensors", "sample.wav", "query.parquet"], source)
             run([git, "commit", "-m", "Storage identity fixture"], source)
             run([crab, "push", url, "main", "--json"], source)
             payloads.append({"marker": marker, "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)})

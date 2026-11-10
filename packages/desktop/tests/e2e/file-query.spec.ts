@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { call, packagedExecutable } from "./packaged-app";
@@ -79,6 +79,12 @@ test("SQL uses the selected SQLite, LFS and Crab revisions and joins cancellatio
     const run = page.getByRole("button", { name: "Run", exact: true });
     const sql = page.getByRole("button", { name: "SQL", exact: true });
     const cell = (value: string) => page.getByRole("cell", { name: value, exact: true });
+    const nativePid = () => {
+      const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
+        .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+        .find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+      return native ? Number(native[1]) : undefined;
+    };
     await open("data.sqlite");
     await expect(cell("before")).toBeVisible();
     await sql.click();
@@ -101,24 +107,40 @@ test("SQL uses the selected SQLite, LFS and Crab revisions and joins cancellatio
     await expect(cell("3")).toBeVisible();
     if (process.platform !== "win32") {
       renameSync(gitDir, offline);
-      const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
-        .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
-        .find(row => row && Number(row[2]) === application!.process().pid && row[3].includes("/agent/crab-desktop-agent "));
+      const native = nativePid();
       if (!native) throw new Error("Test application's native child was not found");
-      process.kill(Number(native[1]), "SIGKILL");
+      process.kill(native, "SIGKILL");
       await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true })).toBeVisible();
       renameSync(offline, gitDir);
       await page.getByRole("button", { name: "Retry reopening repository", exact: true }).click();
       await expect(editor).toHaveValue(historical);
       await expect(cell("3")).toBeVisible();
     }
-    await editor.fill("SELECT sum(sin(i::DOUBLE)) FROM range(1000000000) t(i)");
+    const longQuery = "SELECT sum(sin(i::DOUBLE)) FROM range(1000000000) t(i)";
+    await editor.fill(longQuery);
     await run.click();
-    const snapshots = () => readdirSync(path.join(cache, "desktop-content")).filter(name => name.startsWith("crab-query-"));
-    await expect.poll(() => snapshots().length).toBe(1);
+    const snapshot = path.join(cache, "desktop-content", "database-query", "crab-query-snapshot");
+    await expect.poll(() => existsSync(snapshot)).toBe(true);
     await page.getByRole("button", { name: "Cancel query", exact: true }).click();
     await expect(page.getByRole("status").filter({ hasText: "Query cancelled" })).toBeVisible();
-    expect(snapshots()).toEqual([]);
+    expect(existsSync(snapshot)).toBe(false);
+    if (process.platform !== "win32") {
+      await run.click();
+      await expect.poll(() => existsSync(snapshot)).toBe(true);
+      execFileSync(path.join(resources, "agent", "crab-desktop-agent"), ["--index-dir", path.join(root, "other-index")], { env, input: "", timeout: 10_000 });
+      expect(existsSync(snapshot)).toBe(true);
+      const native = nativePid();
+      if (!native) throw new Error("Test application's native child was not found");
+      process.kill(native, "SIGKILL");
+      const retry = page.getByRole("button", { name: "Retry reopening repository", exact: true });
+      await expect.poll(async () => {
+        const current = nativePid();
+        return (current !== undefined && current !== native) || await retry.isVisible();
+      }).toBe(true);
+      if (await retry.isVisible()) await retry.click();
+      await expect.poll(() => existsSync(snapshot)).toBe(false);
+      await expect(editor).toHaveValue(longQuery);
+    }
     await editor.fill("SELECT range AS n FROM range(1001)");
     await run.click();
     await expect(page.getByText("(result truncated)", { exact: true })).toBeVisible();

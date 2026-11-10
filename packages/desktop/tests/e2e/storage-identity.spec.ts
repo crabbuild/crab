@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, mkdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
@@ -27,6 +27,34 @@ function isolatedEnvironment(root: string): NodeJS.ProcessEnv {
   return env;
 }
 
+async function queryColdParquet(page: Page, connection: S3Profile, cache: string, expectedRows: number) {
+  const snapshot = path.join(cache, "desktop-content", "database-query", "crab-query-snapshot");
+  const transport = async (action: "pause_lfs" | "release" | "stats") => {
+    const response = await fetch(`${connection.endpoint}/__fixture_${action}`);
+    expect(response.ok).toBe(true);
+    return await response.json() as { get: number; blocked: number; paused: boolean; writes: number };
+  };
+  const before = await transport("pause_lfs");
+  try {
+    await page.locator('[role="treeitem"][data-item-path="query.parquet"]').click();
+    await page.getByRole("button", { name: "SQL", exact: true }).click();
+    await expect.poll(async () => (await transport("stats")).blocked > 0 && existsSync(snapshot)).toBe(true);
+    await page.getByRole("button", { name: "Cancel query", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Query cancelled" })).toBeVisible();
+    expect(existsSync(snapshot)).toBe(false);
+    expect((await transport("stats")).paused).toBe(true);
+  } finally {
+    await transport("release");
+  }
+  await page.getByRole("textbox", { name: "SQL query", exact: true }).fill("SELECT count(*) AS selected_rows FROM data");
+  await page.getByRole("button", { name: "Run", exact: true }).click();
+  await expect(page.getByRole("cell", { name: String(expectedRows), exact: true })).toBeVisible();
+  expect(existsSync(snapshot)).toBe(false);
+  const after = await transport("stats");
+  expect(after.get).toBeGreaterThan(before.get);
+  expect(after.writes).toBe(0);
+}
+
 test("device storage identities reach SSH cold reads, replacement and saved restart", async () => {
   const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
   test.skip(!descriptor || process.platform === "win32", "Requires owned storage services and a POSIX SSH fixture");
@@ -41,7 +69,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     cpSync(source.repositories[index], directory, { recursive: true });
     mkdirSync(path.join(directory, ".crab"), { recursive: true });
     writeFileSync(path.join(directory, ".crab/config.toml"), `[cache]\nchunk_cache_dir = ${JSON.stringify(path.join(root, `remote-chunks-${index}`))}\n`);
-    for (const file of ["weights.safetensors", "lfs.safetensors", "cold.safetensors"]) writeFileSync(path.join(directory, file), git(directory, ["show", `:${file}`]));
+    for (const file of ["weights.safetensors", "lfs.safetensors", "cold.safetensors", "query.parquet"]) writeFileSync(path.join(directory, file), git(directory, ["show", `:${file}`]));
   }
   const profile = path.join(root, "profile");
   const events: Runtime[] = [];
@@ -116,6 +144,11 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     const selected = await call(page, "storage_connections_list", { repo_id: alphaId });
     const alphaConnection = String(selected.selected_id);
     const beforeAlpha = await stats(0);
+    await showFile(page, "lfs.safetensors", source.payloads[0].marker);
+    await queryColdParquet(page, source.profiles[0], path.join(root, "remote-cache"), 3);
+    expect(readFileSync(path.join(directories[0], "query.parquet"))).toEqual(git(directories[0], ["show", ":query.parquet"]));
+    expect(remote.requests.some(request => request.method === "file_query" && request.repo_id === alphaId)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("ssh-cold-parquet-sql.png") });
     await showFile(page, "lfs.safetensors", source.payloads[0].marker);
     const alphaEpoch = epoch(alphaId);
     expect(typeof alphaEpoch).toBe("string");
@@ -285,6 +318,8 @@ test("storage settings replace local and SDK reader identities across distinct r
     await show(page, remote, fixture.url);
     await files(page, "weights.safetensors");
     await expect(page.getByText(fixture.payloads[0].marker, { exact: false }).first()).toBeVisible();
+    await queryColdParquet(page, fixture.profiles[0], path.join(root, "cache"), 3);
+    await page.screenshot({ path: test.info().outputPath("sdk-cold-parquet-sql.png") });
     const remoteSession = String(remote.native_session_id);
     const retained = await call(page, "file_open", { repo_id: "snapshot", path: "weights.safetensors", native_session_id: remoteSession });
     const media = await call(page, "media_open", { repo_id: "snapshot", path: "sample.wav", native_session_id: remoteSession });

@@ -51,6 +51,10 @@ impl ReadScope {
         self.stop.cancel();
     }
 
+    pub(crate) fn cancellation_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.stop
+    }
+
     pub(crate) async fn cancelled(&self) -> AgentError {
         self.stop.cancelled().await;
         self.record(AgentError::OpCancelled {

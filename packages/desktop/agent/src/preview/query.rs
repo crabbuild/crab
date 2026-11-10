@@ -1,10 +1,12 @@
 use std::{
     collections::HashSet,
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
 
+use crab_cache::{CacheError, lifecycle::CacheUseGuard};
 use duckdb::arrow::{datatypes::DataType, util::display::array_value_to_string};
 use rusqlite::{
     Connection, OpenFlags,
@@ -28,7 +30,35 @@ const MAX_SQL_BYTES: usize = 64 * 1024;
 const MAX_COLUMNS: usize = 256;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
-static SNAPSHOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+const SNAPSHOT: &str = "crab-query-snapshot";
+
+fn snapshot_directory() -> PathBuf {
+    crab_cache::default_cache_root().join("desktop-content/database-query")
+}
+
+fn cache_busy(error: &CacheError) -> bool {
+    matches!(error, CacheError::Io(error) if error.kind() == ErrorKind::WouldBlock)
+}
+
+fn remove_snapshot(lease: &CacheUseGuard) -> Result<()> {
+    match std::fs::remove_file(lease.path().join(SNAPSHOT)) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        result => Ok(result?),
+    }
+}
+
+pub(crate) fn reclaim_abandoned_snapshot() -> Result<()> {
+    let directory = snapshot_directory();
+    if !directory.try_exists()? {
+        return Ok(());
+    }
+    crab_cache::ensure_private_cache_directory(&directory)?;
+    match CacheUseGuard::acquire(&directory, &tokio_util::sync::CancellationToken::new()) {
+        Ok(lease) => remove_snapshot(&lease),
+        Err(error) if cache_busy(&error) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 
 pub(crate) enum Job {
     SqlitePreview,
@@ -100,15 +130,28 @@ async fn execute(
         ));
     }
     let scope = source.scope();
-    let _slot = tokio::select! {
-        permit = SNAPSHOTS.acquire() => permit.map_err(std::io::Error::other)?,
-        error = scope.cancelled() => return Err(error),
-    };
-    let directory = crab_cache::default_cache_root().join("desktop-content");
+    let directory = snapshot_directory();
     crab_cache::ensure_private_cache_directory(&directory)?;
+    let lease = loop {
+        scope.check()?;
+        match CacheUseGuard::acquire(&directory, scope.cancellation_token()) {
+            Ok(lease) => break lease,
+            Err(CacheError::Cancelled) => return Err(scope.cancelled().await),
+            Err(error) if cache_busy(&error) => tokio::select! {
+                error = scope.cancelled() => return Err(error),
+                () = tokio::time::sleep(Duration::from_millis(40)) => {},
+            },
+            Err(error) => return Err(error.into()),
+        }
+    };
+    // The cache lease outlives both the engine and removal. Once acquired,
+    // this fixed name can only belong to an interrupted previous operation.
+    crab_cache::ensure_private_cache_directory(lease.path())?;
+    remove_snapshot(&lease)?;
     let file = tempfile::Builder::new()
-        .prefix("crab-query-")
-        .tempfile_in(directory)?;
+        .prefix(SNAPSHOT)
+        .rand_bytes(0)
+        .tempfile_in(lease.path())?;
     let input = async {
         source
             .copy_complete_to_file(file.as_file().try_clone()?)
