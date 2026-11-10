@@ -2248,3 +2248,42 @@ The Claude Agent SDK exposes `rewindFiles` for tracked file edits. It needs a
 replayed user message UUID and file checkpointing enabled. Conversation rewind
 uses a separate bounded resume. The tracked-file scope and shell edits require
 different recovery evidence. [Claude file checkpointing documentation](https://code.claude.com/docs/en/agent-sdk/file-checkpointing).
+
+## Exact inactive Apply destination (2026-11-10)
+
+Local full and selected Apply and SSH Apply now reject a symbolic destination
+before source staging. Local full Apply and the sidecar's shared inactive merge
+path prepare an exact ref transaction with dereferencing disabled. After Git
+locks the ref, they confirm it is direct and check worktree occupancy again.
+An already merged source still requires Git to verify the saved target OID.
+[Git update-ref documentation](https://git-scm.com/docs/git-update-ref).
+
+Two local regressions and the live SSH regression failed before this change and
+pass with it. A separate real Git probe replaced the destination after building
+the merge commit. Apply rejected the alias, left the referent unchanged and
+retained the source worktree. Another probe killed the sidecar during the
+prepared reference hook. The worker stopped the hook, released the ref lock
+and preserved the source commit and interrupted Apply record. Evidence is
+recorded in `apply-symbolic-local-before.json`, `apply-symbolic-ssh-before.json`,
+`apply-late-symbolic-native-after.json` and
+`apply-explicit-ref-prepared-shutdown.json`.
+
+All 303 touched local desktop cases, 12 live SSH cases and 11 scoped Rust
+tests passed, including the shared Git operation path. The package built and
+passed four smoke cases. The uninstrumented sidebar Recent assertion failed
+again. A copy of the same scenario with main-process and renderer timing
+passed, recording the second open completing in 29 ms and Recent updating
+26 ms later. This leaves the intermittent packaged activation open. Evidence
+is recorded in `apply-explicit-ref-packaged.json` and
+`apply-explicit-ref-sidebar-timing.json`.
+
+Active checkout publication still redirects under the reproduced concurrent
+checkout. A tag with the same short name as the task branch can also make the
+sidecar report that the source is already merged and remove the task worktree.
+The next publication change must use the exact source ref and keep the target
+ref, worktree and index consistent through interruption. The rollback prototype
+restored the original checkout before aborting. When an editor changed the
+affected file during the transaction, rollback refused to overwrite it.
+Evidence is recorded in `apply-branch-race-exact-ref.json`,
+`apply-ambiguous-source-probe.json` and
+`apply-publication-intervening-edit-probe.json`.

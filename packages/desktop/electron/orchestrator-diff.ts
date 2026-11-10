@@ -5,10 +5,11 @@
  * applies changes via merge or cherry-pick, and handles conflict detection.
  */
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import type { BrowserWindow, IpcMain } from "electron";
 
@@ -92,7 +93,18 @@ async function applyTarget(task: Task): Promise<string> {
   const target = localBranchRef(task.baseBranch);
   try { await execFile("git", ["show-ref", "--verify", "--", target], { cwd: task.repoPath }); }
   catch (cause: unknown) { throw new Error("Saved Apply target is unavailable. Restore its branch before applying changes.", { cause }); }
+  await requireDirectBranch(task.repoPath, target);
   return shortBranch(target);
+}
+
+async function requireDirectBranch(repoPath: string, branchRef: string): Promise<void> {
+  try {
+    await execFile("git", ["symbolic-ref", "-q", "--no-recurse", branchRef], { cwd: repoPath });
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return;
+    throw error;
+  }
+  throw new Error(`Apply target "${branchRef}" is a symbolic branch ref. Restore its original direct branch before applying changes.`);
 }
 
 async function branchIsCheckedOut(repoPath: string, branchRef: string): Promise<boolean> {
@@ -104,16 +116,6 @@ async function branchIsCheckedOut(repoPath: string, branchRef: string): Promise<
   return stdout
     .split("\n")
     .some((line) => line.startsWith("branch ") && line.slice("branch ".length) === branchRef);
-}
-
-async function gitExitCode(repoPath: string, args: string[]): Promise<number> {
-  try {
-    await execFile("git", args, { cwd: repoPath });
-    return 0;
-  } catch (err) {
-    const code = (err as { code?: number | string }).code;
-    return typeof code === "number" ? code : 1;
-  }
 }
 
 async function mergeTreeConflictPaths(
@@ -152,6 +154,7 @@ async function mergeWithoutCheckout(
 ): Promise<RefMergeResult> {
   const targetRef = localBranchRef(targetBranchInput);
   const targetBranch = shortBranch(targetRef);
+  await execFile("git", ["check-ref-format", targetRef], { cwd: repoPath });
 
   if (await branchIsCheckedOut(repoPath, targetRef)) {
     return { kind: "target-checked-out", targetBranch };
@@ -171,11 +174,15 @@ async function mergeWithoutCheckout(
   );
   const sourceSha = sourceOut.trim();
 
-  const sourceAlreadyMerged = await gitExitCode(
-    repoPath,
-    ["merge-base", "--is-ancestor", sourceSha, targetSha],
-  );
-  if (sourceAlreadyMerged === 0) {
+  const sourceAlreadyMerged = await execFile("git", ["merge-base", "--is-ancestor", sourceSha, targetSha], { cwd: repoPath })
+    .then(() => true, (error: unknown) => {
+      if ((error as { code?: number | string }).code === 1) return false;
+      throw error;
+    });
+  if (sourceAlreadyMerged) {
+    if (!await publishInactiveRef(repoPath, targetRef, targetSha, undefined, message)) {
+      return { kind: "target-checked-out", targetBranch };
+    }
     return { kind: "merged", commit: targetSha, targetBranch };
   }
 
@@ -201,13 +208,58 @@ async function mergeWithoutCheckout(
   );
   const mergeCommit = commitOut.trim();
 
-  await execFile(
-    "git",
-    ["update-ref", "-m", message, targetRef, mergeCommit, targetSha],
-    { cwd: repoPath },
-  );
+  if (!await publishInactiveRef(repoPath, targetRef, targetSha, mergeCommit, message)) {
+    return { kind: "target-checked-out", targetBranch };
+  }
 
   return { kind: "merged", commit: mergeCommit, targetBranch };
+}
+
+async function publishInactiveRef(
+  repoPath: string,
+  targetRef: string,
+  old: string,
+  next: string | undefined,
+  message: string,
+): Promise<boolean> {
+  const child = spawn("git", ["update-ref", "--stdin", "-m", message], { cwd: repoPath, stdio: "pipe" });
+  let failure: Error | undefined;
+  let stderr = "";
+  child.on("error", error => { failure = error; });
+  child.stdin.on("error", error => { failure = error; });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  const closed = new Promise<number | null>(resolve => child.once("close", resolve));
+  const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const lines = reader[Symbol.asyncIterator]();
+  const step = async (command: string, reply: string) => {
+    await new Promise<void>((resolve, reject) => child.stdin.write(`${command}\n`, error => error ? reject(error) : resolve()));
+    if ((await lines.next()).value !== reply) throw new Error(`Git reference transaction did not acknowledge ${reply}`);
+  };
+  const run = async () => {
+    await step("start", "start: ok");
+    const edit = next ? `update ${targetRef} ${next} ${old}` : `verify ${targetRef} ${old}`;
+    await step(`option no-deref\n${edit}\nprepare`, "prepare: ok");
+    let available: boolean;
+    try {
+      // Git checks the old OID of a symbolic ref through its referent.
+      // Prepare owns the exact ref while we check whether it is direct.
+      await requireDirectBranch(repoPath, targetRef);
+      available = !await branchIsCheckedOut(repoPath, targetRef);
+    } catch (error: unknown) {
+      await step("abort", "abort: ok");
+      throw error;
+    }
+    const action = available ? "commit" : "abort";
+    await step(action, `${action}: ok`);
+    return available;
+  };
+  const result = await run().then(value => ({ value }), (error: unknown) => ({ error }));
+  child.stdin.end();
+  const code = await closed;
+  reader.close();
+  if (code !== 0 || failure) throw new Error(stderr.trim() || "Git reference transaction failed", { cause: failure ?? ("error" in result ? result.error : undefined) });
+  if ("error" in result) throw result.error;
+  return result.value;
 }
 
 // ─── Diff Computation ────────────────────────────────────────────────────────

@@ -26,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-deleted", "apply-target-detached", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -103,6 +103,10 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
         await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
         if (mode !== "apply-target-active") await run("git", ["checkout", "-b", "other"], { cwd: repo });
         if (mode === "apply-target-deleted") await run("git", ["branch", "-D", "main"], { cwd: repo });
+        if (mode === "apply-target-symbolic") {
+          await run("git", ["branch", "alias-target"], { cwd: repo });
+          await run("git", ["symbolic-ref", "refs/heads/main", "refs/heads/alias-target"], { cwd: repo });
+        }
         if (mode === "apply-target" || mode === "apply-target-active") {
           await orchestrator.applyTask(task.id);
           const active = mode === "apply-target-active";
@@ -119,7 +123,10 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
             source: (await run("git", ["rev-parse", "HEAD"], { cwd: task.worktreePath })).stdout,
             bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), index: await readFile(path.resolve(task.worktreePath, index)),
             captured: task.baseBranch, status: task.status }).toEqual({ head, source: head, bytes: "captured target bytes\n", index: originalIndex,
-            captured: mode === "apply-target-deleted" ? "main" : undefined, status: "stopped" });
+            captured: mode === "apply-target-detached" ? undefined : "main", status: "stopped" });
+          if (mode === "apply-target-symbolic") {
+            expect((await run("git", ["rev-parse", "refs/heads/alias-target"], { cwd: repo })).stdout).toBe(head);
+          }
           await orchestrator.discardTask(task.id);
         }
       } else if (mode === "apply-eof" || mode === "apply-sidecar-kill") {

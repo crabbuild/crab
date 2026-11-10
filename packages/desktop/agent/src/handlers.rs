@@ -1873,6 +1873,7 @@ pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Va
             remediation: "Restore its branch before applying changes".into(),
             source: Some(Box::new(source)),
         })?;
+    crate::git_ref_merge::require_direct_branch(repo_dir, &target_ref).await?;
     workspace.begin_apply()?;
     let result =
         apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await;

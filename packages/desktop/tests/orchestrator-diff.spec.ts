@@ -586,7 +586,7 @@ rename to new-name.ts
   });
 
   describe("captured Apply contract", () => {
-    it.each(["all", "selected"].flatMap(operation => ["missing", "deleted"].map(target => ({ operation, target }))))(
+    it.each(["all", "selected"].flatMap(operation => ["missing", "deleted", "symbolic"].map(target => ({ operation, target }))))(
       "refuses $operation Apply with a $target destination before changing either checkout", async ({ operation, target }) => {
         const baseRef = await getHead(repoDir);
         const taskId = `captured-target-${operation}-${target}`;
@@ -597,14 +597,53 @@ rename to new-name.ts
           const sourceHead = await getHead(worktreePath);
           await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
           if (target === "deleted") await execFile("git", ["branch", "-D", "main"], { cwd: repoDir });
-          const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: target === "deleted" ? "main" : undefined };
+          if (target === "symbolic") {
+            await execFile("git", ["branch", "referent"], { cwd: repoDir });
+            await execFile("git", ["symbolic-ref", "refs/heads/main", "refs/heads/referent"], { cwd: repoDir });
+          }
+          const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: target === "missing" ? undefined : "main" };
           const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"]);
           await expect(apply).rejects.toThrow();
           expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8"),
             applied: fs.existsSync(path.join(repoDir, "src/new-feature.ts")) }).toEqual({ target: baseRef, source: sourceHead, pending: "retained pending work\n", applied: false });
+          if (target === "symbolic") {
+            expect((await execFile("git", ["rev-parse", "refs/heads/referent"], { cwd: repoDir })).stdout.trim()).toBe(baseRef);
+          }
         } finally { cleanup(worktreePath); }
       },
     );
+
+    it.skipIf(process.platform === "win32")("refuses an alias introduced after building the inactive merge candidate", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = "late-symbolic-target";
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), "crab-apply-ref-fixture-"));
+      const originalPath = process.env.PATH;
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      try {
+        await makeAgentChanges(worktreePath);
+        const source = await getHead(worktreePath);
+        await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        await execFile("git", ["branch", "referent"], { cwd: repoDir });
+        const git = (await execFile("which", ["git"])).stdout.trim();
+        fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh
+if [ "$1" = commit-tree ]; then
+  ${quote(git)} symbolic-ref refs/heads/main refs/heads/referent || exit 1
+fi
+exec ${quote(git)} "$@"
+`, { mode: 0o755 });
+        vi.stubEnv("PATH", `${bin}${path.delimiter}${originalPath ?? ""}`);
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        await expect(applyAll(task)).rejects.toThrow(/symbolic branch ref/i);
+        expect({ alias: (await execFile("git", ["symbolic-ref", "refs/heads/main"], { cwd: repoDir })).stdout.trim(),
+          referent: (await execFile("git", ["rev-parse", "refs/heads/referent"], { cwd: repoDir })).stdout.trim(),
+          source: await getHead(worktreePath) }).toEqual({ alias: "refs/heads/referent", referent: baseRef, source });
+      } finally {
+        vi.unstubAllEnvs();
+        cleanup(worktreePath);
+        cleanup(bin);
+      }
+    });
 
     it.each(["all", "selected"])("refuses %s Apply after the source checkout changes branch", async operation => {
       const baseRef = await getHead(repoDir);

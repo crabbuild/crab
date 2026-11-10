@@ -126,9 +126,10 @@ available for recovery. Missing HOME or invalid refs fail without a fallback.
 `worktree_create` returns the task branch, the resolved `base_ref` commit and
 the repository's `base_branch` at creation (`null` for detached HEAD). Electron
 persists the branch as the Apply destination and the commit as the comparison
-baseline. Apply rejects an absent or deleted destination before staging source
-changes. Existing saved paths stay opaque and are not relocated or read through
-a compatibility path.
+baseline. Apply rejects an absent, deleted or symbolic destination before
+staging source changes. For an inactive destination, it prepares a Git ref
+transaction with dereferencing disabled, verifies the locked branch and checks
+worktree occupancy again before committing. Existing saved paths stay opaque.
 
 ## Disposable task workspace ownership
 

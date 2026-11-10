@@ -11,12 +11,13 @@
 //! regex. Keeping the agent dumb here avoids coupling desktop to the
 //! exact progress format.
 
-use std::process::{Output, Stdio};
+use std::io;
+use std::process::{ExitStatus, Output, Stdio};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{ChildStdin, ChildStdout, Command};
 use tracing::{debug, warn};
 
 use crate::{AgentError, Result, SharedStdout, notify};
@@ -29,11 +30,73 @@ pub(crate) fn git_command() -> Command {
     command
 }
 
-pub(crate) async fn output(command: &mut Command) -> std::io::Result<Output> {
+pub(crate) async fn output(command: &mut Command) -> Result<Output> {
     #[cfg(unix)]
-    return crate::native_process::mutation::output(command).await;
+    if crate::native_process::mutation::active() {
+        let (status, stdout, stderr) = piped(command, async |_, mut stdout| {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await?;
+            Ok(bytes)
+        })
+        .await?;
+        return Ok(Output {
+            status,
+            stdout: stdout?,
+            stderr,
+        });
+    }
+    Ok(command.output().await?)
+}
+
+pub(crate) async fn piped<T>(
+    command: &mut Command,
+    exchange: impl AsyncFnOnce(Option<ChildStdin>, ChildStdout) -> Result<T>,
+) -> Result<(ExitStatus, Result<T>, Vec<u8>)> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    let (mut child, mut owner) = crate::native_process::mutation::CommandScope::spawn(command)?;
     #[cfg(not(unix))]
-    command.output().await
+    let mut child = command.spawn()?;
+    let input = child.stdin.take();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Command stdout unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Command stderr unavailable"))?;
+    let (status, (result, bytes)) = {
+        let wait = async {
+            #[cfg(unix)]
+            if let Some(owner) = &owner {
+                return owner.wait(&mut child).await;
+            }
+            child.wait().await
+        };
+        let drain = async {
+            let errors = async {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await?;
+                Ok::<_, io::Error>(bytes)
+            };
+            let (result, bytes) = tokio::join!(exchange(input, stdout), errors);
+            Ok::<_, io::Error>((result, bytes?))
+        };
+        tokio::pin!(wait, drain);
+        tokio::select! {
+            result = &mut drain => (wait.await?, result?),
+            status = &mut wait => (status?, tokio::time::timeout(std::time::Duration::from_secs(5), drain).await.map_err(io::Error::other)??),
+        }
+    };
+    #[cfg(unix)]
+    if let Some(owner) = &mut owner {
+        owner.confirm_closed();
+    }
+    Ok((status, result, bytes))
 }
 
 pub fn command() -> Result<Command> {

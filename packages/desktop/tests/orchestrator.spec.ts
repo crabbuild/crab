@@ -159,6 +159,9 @@ async function mockCommand(command: string, cmdArgs: string[], options?: { cwd?:
     const branch = directory.startsWith("crab-agent-") ? `agent/${directory.slice("crab-agent-".length)}` : mockCurrentBranch;
     return { stdout: `${branch}\n`, stderr: "" };
   }
+  if (cmdArgs[0] === "symbolic-ref" && cmdArgs.includes("--no-recurse") && cmdArgs.at(-1) === "refs/heads/main") {
+    throw Object.assign(new Error("main is a direct ref"), { code: 1 });
+  }
   if (cmdArgs[0] === "checkout" && cmdArgs[1]) {
     mockCurrentBranch = cmdArgs[1];
     return { stdout: "", stderr: "" };
