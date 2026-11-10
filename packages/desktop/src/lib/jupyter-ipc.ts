@@ -1,4 +1,4 @@
-import type { KernelOutput } from "../../electron/jupyter-types";
+import type { KernelOutput, KernelTarget } from "../../electron/jupyter-types";
 
 export interface NotebookOutput {
   output_type: string; name?: string; text?: string | string[];
@@ -28,8 +28,11 @@ class NotebookKernel {
       // Pending invokes own their terminal error/acknowledgement. A worker's
       // exit event must not erase the startup failure or revive cancellation.
       if (this.state.status === "starting" || this.state.status === "stopping") return;
-      if (event.status === "dead" || event.status === "disconnected") { this.retireRequests(); this.publish({ id: null, status: event.status, running: new Set(), error: event.status === "dead" ? "The kernel process exited. Connect again to continue." : null }); }
-      else this.publish({ status: event.status });
+      if (event.status === "dead" || event.status === "disconnected") {
+        this.retireRequests();
+        const error = event.status === "dead" ? event.error ?? "The kernel exited. Connect again to continue." : null;
+        this.publish({ id: null, status: event.status, running: new Set(), error });
+      } else this.publish({ status: event.status });
     })];
   }
 
@@ -42,13 +45,13 @@ class NotebookKernel {
     this.publish({ outputs: new Map(), counts: new Map(), running: new Set() });
   }
 
-  async connect(name: string, nativeSessionId: string, pythonPath: string): Promise<void> {
+  async connect(target: KernelTarget, pythonPath: string): Promise<void> {
     if (this.state.id || this.state.status === "starting") return;
     this.retireRequests();
     const id = crypto.randomUUID(), generation = this.generation;
     this.publish({ id, status: "starting", error: null, outputs: new Map(), counts: new Map(), running: new Set() });
     try {
-      await window.crab.jupyterStart(id, name, this.repoId, nativeSessionId, pythonPath);
+      await window.crab.jupyterStart(id, this.repoId, pythonPath, target);
       if (!this.disposed && this.state.id === id && generation === this.generation) this.publish({ status: "idle" });
     } catch (error) { if (this.state.id === id && generation === this.generation) this.publish({ id: null, status: "disconnected", error: String(error) }); }
   }

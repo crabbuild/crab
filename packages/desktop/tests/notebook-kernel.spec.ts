@@ -17,7 +17,7 @@ afterEach(() => { retainNotebookRepositories(new Set()); vi.unstubAllGlobals(); 
 
 it("retains immediate outputs and completion after all view subscriptions detach", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  kernel.document("original"); await kernel.connect("python3", "native", "/python");
+  kernel.document("original"); await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   const unsubscribe = kernel.subscribe(() => {}); unsubscribe();
   bridge.jupyterExecute.mockImplementation(async (_id, _code, requestId) => { emit(requestId, "stream", { name: "stdout", text: "EARLY_OUTPUT" }); return { status: "ok" }; });
   expect(await kernel.run(0, "print('EARLY_OUTPUT')")).toBe(true);
@@ -28,7 +28,7 @@ it("retains immediate outputs and completion after all view subscriptions detach
 
 it("keeps a repaired document's active association but retires it for replacement cells", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  kernel.document("original"); await kernel.connect("python3", "native", "/python");
+  kernel.document("original"); await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   let complete!: (result: KernelExecution) => void;
   let request = "";
   bridge.jupyterExecute.mockImplementation((_id, _code, requestId) => { request = requestId; return new Promise(resolve => { complete = resolve; }); });
@@ -43,7 +43,7 @@ it("keeps a repaired document's active association but retires it for replacemen
 
 it("applies deferred clearing and display updates across cell outputs", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   bridge.jupyterExecute.mockImplementation(async (_id, _code, requestId) => {
     emit(requestId, "stream", { name: "stdout", text: "OLD" });
     emit(requestId, "clear_output", { wait: true });
@@ -59,7 +59,7 @@ it("applies deferred clearing and display updates across cell outputs", async ()
 
 it("reports terminal execution failure without leaving a cell running", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   bridge.jupyterExecute.mockRejectedValue(new Error("worker disconnected"));
   expect(await kernel.run(0, "work()")).toBe(false);
   expect(kernel.snapshot().error).toContain("worker disconnected");
@@ -68,7 +68,7 @@ it("reports terminal execution failure without leaving a cell running", async ()
 
 it("keeps post-idle output routing until the cell is replaced", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   let request = "";
   bridge.jupyterExecute.mockImplementation(async (_id, _code, requestId) => { request = requestId; return { status: "ok" }; });
   await kernel.run(0, "background_work()");
@@ -83,12 +83,12 @@ it("keeps post-idle output routing until the cell is replaced", async () => {
 
 it("an old execution completion cannot clear a replacement kernel's running cell", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   let finishOld!: (result: KernelExecution) => void, finishNew!: (result: KernelExecution) => void;
   bridge.jupyterExecute.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
   const old = kernel.run(0, "old_work()");
   await kernel.control("disconnect");
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   bridge.jupyterExecute.mockImplementationOnce(() => new Promise(resolve => { finishNew = resolve; }));
   const current = kernel.run(0, "new_work()");
   finishOld({ status: "ok" }); await old;
@@ -101,7 +101,7 @@ it("disconnect retires an unfinished connection before its reply", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
   let finish!: () => void;
   bridge.jupyterStart.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-  const pending = kernel.connect("python3", "native", "/python");
+  const pending = kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   await kernel.control("disconnect");
   finish(); await pending;
   expect(kernel.snapshot().status).toBe("disconnected");
@@ -110,7 +110,7 @@ it("disconnect retires an unfinished connection before its reply", async () => {
 
 it("a retired restart reply cannot reconnect a disconnected kernel", async () => {
   const kernel = notebookKernel("repo", "analysis.ipynb", null);
-  await kernel.connect("python3", "native", "/python");
+  await kernel.connect({ kind: "local", name: "python3", nativeSessionId: "native" }, "/python");
   let finish!: () => void;
   bridge.jupyterRestart.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   const pending = kernel.control("restart");

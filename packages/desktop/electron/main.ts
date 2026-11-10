@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
 import { JupyterKernel, checkJupyterRuntime, installJupyter, listKernelSpecs, stopJupyterRuntimeCommands } from "./jupyter-kernel";
+import type { KernelTarget } from "./jupyter-types";
 import type { WebContents } from "electron";
 import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
 import type { CapabilitiesChangedEvent } from "./repo-provider";
@@ -1246,19 +1247,20 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
   ipcMain.handle("crab:jupyter-list-kernels", async (_evt, pythonPath: string) => listKernelSpecs(pythonPath));
   ipcMain.handle("crab:jupyter-install", async (_evt, pythonPath: string) => installJupyter(pythonPath));
 
-  ipcMain.handle("crab:jupyter-start", async (evt, id: string, kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => {
+  ipcMain.handle("crab:jupyter-start", async (evt, id: string, repoId: string, pythonPath: string, target: KernelTarget) => {
     if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
-    if (parseRepoId(repoId)) throw new Error("A local kernel requires a local working tree.");
+    if (target.kind === "local" && parseRepoId(repoId)) throw new Error("A local kernel requires a local working tree.");
     if (!id || notebookKernels.has(id)) throw new Error("Duplicate kernel connection");
     const owner = evt.sender;
-    const kernel = new JupyterKernel(kernelName, pythonPath, async signal => {
+    const kernel = new JupyterKernel(target.name, pythonPath, async signal => {
       const env = await getUserShellBaseEnv();
       signal.throwIfAborted();
-      const local = await localAgent();
+      const local = target.kind === "local" ? await localAgent() : null;
       return () => {
         signal.throwIfAborted();
         if (isShuttingDown || owner.isDestroyed()) throw new Error("Notebook closed during kernel startup");
-        if (!nativeSessionId || local.repositorySession(repoId) !== nativeSessionId) throw nativeSessionLost();
+        if (target.kind === "remote") return { env, serverUrl: target.url };
+        if (!local || !target.nativeSessionId || local.repositorySession(repoId) !== target.nativeSessionId) throw nativeSessionLost();
         const cwd = local.worktreePath(repoId);
         if (!cwd) throw new Error("The repository has no local working tree for this kernel.");
         return { cwd, env };
@@ -1270,7 +1272,13 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     // preparation and readiness before the connection invoke has returned.
     notebookKernels.set(id, { repoId, owner, kernel, release: () => owner.removeListener("destroyed", destroyed) });
     kernel.setOutputHandler(output => { if (!owner.isDestroyed()) owner.send("crab:jupyter-output", { id, ...output }); });
-    kernel.setStatusHandler(status => { if (!owner.isDestroyed()) owner.send("crab:jupyter-status", { id, status }); });
+    kernel.setStatusHandler((status, error) => {
+      if (status === "dead" && notebookKernels.get(id)?.kernel === kernel) {
+        notebookKernels.delete(id);
+        owner.removeListener("destroyed", destroyed);
+      }
+      if (!owner.isDestroyed()) owner.send("crab:jupyter-status", { id, status, error });
+    });
     try {
       await kernel.start();
       if (isShuttingDown || owner.isDestroyed() || !notebookKernels.has(id)) throw new Error("Notebook closed during kernel startup");

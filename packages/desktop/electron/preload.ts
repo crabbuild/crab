@@ -545,7 +545,7 @@ contextBridge.exposeInMainWorld("crab", {
   jupyterListKernels: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-list-kernels", pythonPath),
   jupyterCheck: (pythonPath?: string) => ipcRenderer.invoke("crab:jupyter-check", pythonPath),
   jupyterInstall: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-install", pythonPath),
-  jupyterStart: (id: string, kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => ipcRenderer.invoke("crab:jupyter-start", id, kernelName, repoId, nativeSessionId, pythonPath),
+  jupyterStart: (id: string, repoId: string, pythonPath: string, target: import("./jupyter-types").KernelTarget) => ipcRenderer.invoke("crab:jupyter-start", id, repoId, pythonPath, target),
   jupyterExecute: (id: string, code: string, requestId: string, cell: number) => ipcRenderer.invoke("crab:jupyter-execute", id, code, requestId, cell),
   jupyterInterrupt: (id: string) => ipcRenderer.invoke("crab:jupyter-interrupt", id),
   jupyterRestart: (id: string) => ipcRenderer.invoke("crab:jupyter-restart", id),
@@ -555,8 +555,8 @@ contextBridge.exposeInMainWorld("crab", {
     ipcRenderer.on("crab:jupyter-output", handler);
     return () => { ipcRenderer.removeListener("crab:jupyter-output", handler); };
   },
-  onJupyterStatus: (listener: (evt: { id: string; status: string }) => void) => {
-    const handler = (_e: unknown, payload: any) => listener(payload);
+  onJupyterStatus: (listener: (evt: import("./jupyter-types").KernelStatus) => void) => {
+    const handler = (_e: unknown, payload: import("./jupyter-types").KernelStatus) => listener(payload);
     ipcRenderer.on("crab:jupyter-status", handler);
     return () => { ipcRenderer.removeListener("crab:jupyter-status", handler); };
   },

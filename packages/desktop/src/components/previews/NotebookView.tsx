@@ -131,7 +131,8 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
             <KernelConnectButton
               status={kernelStatus}
               language={lang}
-              onConnect={(name, pythonPath) => { void kernelOwner.connect(name, nativeSessionId, pythonPath); }}
+              onConnect={(name, pythonPath) => { void kernelOwner.connect({ kind: "local", name, nativeSessionId }, pythonPath); }}
+              onRemoteConnect={(url, name, pythonPath) => { void kernelOwner.connect({ kind: "remote", name, url }, pythonPath); }}
             />
           ) : (
             <>
@@ -367,7 +368,12 @@ function joinData(d: string | string[] | undefined): string | null {
   return Array.isArray(d) ? d.join("") : d;
 }
 
-function KernelConnectButton({ status, language, onConnect }: { status: string; language: string; onConnect: (name: string, pythonPath: string) => void }) {
+function KernelConnectButton({ status, language, onConnect, onRemoteConnect }: {
+  status: string;
+  language: string;
+  onConnect: (name: string, pythonPath: string) => void;
+  onRemoteConnect: (url: string, name: string, pythonPath: string) => void;
+}) {
   const [showPanel, setShowPanel] = useState(false);
   const [checking, setChecking] = useState(false);
   const [runtime, setRuntime] = useState<JupyterRuntime | null>(null);
@@ -377,6 +383,7 @@ function KernelConnectButton({ status, language, onConnect }: { status: string; 
   const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteName, setRemoteName] = useState("");
 
   const check = async (value?: string) => {
     setChecking(true); setError(null); setSpecs([]);
@@ -425,28 +432,28 @@ function KernelConnectButton({ status, language, onConnect }: { status: string; 
       </div>}
       {runtime?.available && !checking && !specs.length && !error && <p className="text-[11px] text-gx-warn">No kernels are installed in this environment.</p>}
 
-      {/* Remote server connection */}
-      <div className="mt-3 border-t border-gx-border pt-3">
-        <div className="mb-1 text-[10px] uppercase tracking-wider text-gx-muted">Remote Server</div>
-        <div className="flex gap-1">
+      <div className="space-y-2 border-t border-gx-border pt-3 text-[11px]">
+        <label className="block space-y-1">Jupyter server URL
           <input
-            className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-[10px] focus-visible:outline-none focus:border-gx-accent"
-            placeholder="http://localhost:8888/?token=..."
+            className="input w-full"
+            type="password"
+            autoComplete="off"
+            placeholder="https://server.example/?token=…"
             value={remoteUrl}
-            onChange={(e) => setRemoteUrl(e.target.value)}
+            onChange={event => setRemoteUrl(event.target.value)}
           />
-          <button
-            type="button"
-            className="btn text-[10px]"
-            disabled={!remoteUrl.trim()}
-            onClick={() => { setShowPanel(false); /* TODO: connect to remote */ }}
-          >
-            Connect
-          </button>
-        </div>
-        <div className="mt-1 text-[9px] text-gx-muted">
-          Paste a Jupyter server URL to connect to a remote kernel.
-        </div>
+        </label>
+        <label className="block space-y-1">Remote kernel name
+          <input className="input w-full" placeholder="Server default" value={remoteName} onChange={event => setRemoteName(event.target.value)} />
+        </label>
+        <p className="text-gx-muted">Code runs on the server. Place any required files there before running cells.</p>
+        <button type="button" className="btn" disabled={!remoteUrl.trim() || !runtime?.available || checking || installing} onClick={() => {
+          if (!runtime?.pythonPath) return;
+          const url = remoteUrl.trim();
+          setRemoteUrl("");
+          setShowPanel(false);
+          onRemoteConnect(url, remoteName.trim(), runtime.pythonPath);
+        }}>Connect to server</button>
       </div>
     </div>
   );

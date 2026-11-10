@@ -69,9 +69,15 @@ discovery and optional installation use that Python environment asynchronously.
 Background outputs remain attached to the current cell after it becomes idle;
 rerunning that cell retires the old route. Cancel stops pending environment
 preparation or kernel readiness/restart and joins process cleanup before retry.
-Fresh-environment installation has packaged macOS proof. Remote-server connection,
-installer failure/retry, abrupt kernel recovery, output budgets
-and captured SQL-query recovery remain tracked in the acceptance matrix below.
+Fresh-environment installation has packaged macOS proof. To run a notebook on
+Jupyter Server, check the local Python runtime, enter the server base URL with
+its token, and select **Connect to server**. Enter a kernel name or use the
+server default. Cells run in the server environment, where their input files
+must be accessible. Use HTTPS for a network server or HTTP for a loopback server.
+
+Installer failure/retry, abrupt kernel recovery, remote network loss, output
+budgets and captured SQL-query recovery remain tracked in the acceptance matrix
+below.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

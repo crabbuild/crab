@@ -6,7 +6,7 @@ import { parseRepoId } from "../electron/ssh-types";
 // self-documenting.
 
 import type { CapabilitySet } from "../electron/repo-capabilities";
-import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec } from "../electron/jupyter-types";
+import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec, KernelStatus, KernelTarget } from "../electron/jupyter-types";
 
 export interface RepoHandle {
   repo_id: string;
@@ -1076,13 +1076,13 @@ declare global {
       jupyterCheck: (pythonPath?: string) => Promise<JupyterRuntime>;
       jupyterListKernels: (pythonPath: string) => Promise<KernelSpec[]>;
       jupyterInstall: (pythonPath: string) => Promise<string>;
-      jupyterStart: (id: string, name: string, repoId: string, nativeSessionId: string, pythonPath: string) => Promise<void>;
+      jupyterStart: (id: string, repoId: string, pythonPath: string, target: KernelTarget) => Promise<void>;
       jupyterExecute: (id: string, code: string, requestId: string, cell: number) => Promise<KernelExecution>;
       jupyterInterrupt: (id: string) => Promise<void>;
       jupyterRestart: (id: string) => Promise<void>;
       jupyterShutdown: (id: string) => Promise<void>;
       onJupyterOutput: (listener: (event: KernelOutput & { id: string }) => void) => () => void;
-      onJupyterStatus: (listener: (event: { id: string; status: string }) => void) => () => void;
+      onJupyterStatus: (listener: (event: KernelStatus) => void) => () => void;
       pickRepoDirectory: () => Promise<string | null>;
       pickCloneDestination: () => Promise<string | null>;
       pickWorktreePath: () => Promise<string | null>;

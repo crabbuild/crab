@@ -13,7 +13,7 @@ record historical evidence rather than separate work queues.
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Local post-idle output routing and readiness/restart cancellation are qualified below. Remote kernels, decoded/output budgets and query paths remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Local post-idle output routing and readiness/restart cancellation are qualified below. Token-authenticated Jupyter Server execution and cleanup have bounded macOS proof. Decoded/output budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
@@ -30,7 +30,7 @@ broadening profiles. Keep provider/platform qualification alongside the work.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Implement the advertised remote-server Connect action; qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, and output budgets. Local post-idle routing, cancellation during preparation/readiness/restart and fresh-environment installation now have the bounded packaged proof below. Broader runtime/platform profiles remain open. |
+| P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, output budgets, and remote network loss. Local execution and token-authenticated Jupyter Server execution now have bounded packaged proof. Broader runtime, TLS, SSH and platform profiles remain open. |
 | P0 | Correct and bound SQL queries | The existing [captured reader](../agent/src/preview/reader.rs), native query handler and [query panel](../src/components/previews/DuckDbQueryPanel.tsx). | Parquet/SQLite queries must retain the selected revision and source, work with Crab/LFS and SDK snapshots, cancel real work, and enforce decoded, result-byte/row and execution budgets. Preserve SQL drafts, results and history across tab disposal/native repair; reject stale replies. Current query RPC opens physical working-tree paths, has no revision parameter and collects all rows before truncating. A UI row limit does not close this gap. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree/cross-repository comparisons and read-only model isolation through their UI entry points. Qualify Dashboard/Datasets/cached metrics/shared hydration state under storage rebind and SSH reconnect; removal during admitted SDK opening; real jump-host cancellation; broader media profiles and repeated shutdown. Native/local publication has bounded mode/symlink/cleanup proof; other filesystem metadata and platforms remain open. |
 | P1 | Complete one Crab and LFS repository lifecycle per supported profile | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Create/edit/rename/delete, track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate; compare exact bytes, identities, executable modes and unrelated index entries. Finish remote physical mutations, standalone editor RPC parity and admitted task-worktree ownership. Optional SDK configuration needs typed path absence distinct from missing content objects. Qualify migrations/extensions/supported locks, ordinary Git captures, review/mode diffs, plain Git patch cancellation and crash drafts. |
@@ -148,12 +148,37 @@ case. The other case retains 8.6.3/6.29.5. All ten real-kernel ownership cases a
 pass independently on 8.10.0/7.4.0. The installer changes only the owned test
 virtual environment; no repository or global Python dependency is changed.
 
-This checkpoint does not close remote-server connection (the existing Connect
-action is still a no-op), installer failure/retry, independent controls during native-reader
-outage, abrupt worker/kernel recovery, output/decoded budgets, SQL queries or
-broader runtime/provider/platform qualification. Those remain release gates above.
+Installer failure/retry, controls during native-reader outage, abrupt worker/kernel
+recovery, output/decoded budgets, SQL queries and broader platform qualification
+remain release gates.
 Protocol and packaging contracts follow the [Jupyter messaging specification, including asynchronous output after idle](https://jupyter-client.readthedocs.io/en/stable/messaging.html#kernel-status)
 and [Electron ASAR limitations](https://www.electronjs.org/docs/latest/tutorial/asar-archives).
+
+## Remote notebook execution checkpoint
+
+Notebook Connect accepts a Jupyter Server base URL and optional kernel name. It
+uses the selected Python environment's Jupyter Client and Tornado, which Jupyter
+Client already requires. The server starts a named or default kernel and runs
+cells in its configured environment. Required files must be accessible there.
+Tokens travel in authorization headers over HTTPS or loopback HTTP. The same
+notebook owner handles request routing, cancellation and window/repository/app
+cleanup for both local and remote execution. The server transport waits for the
+matching kernel-info reply and idle event before exposing run controls.
+[Jupyter Server REST API](https://jupyter-server.readthedocs.io/en/stable/developers/rest-api.html#post-api-kernels) ·
+[Jupyter kernel WebSocket protocol](https://jupyter-server.readthedocs.io/en/stable/developers/websocket-protocols.html)
+
+The packaged macOS arm64 test uses Jupyter Server 2.17.0 with a token and base
+path prefix. It proves rejected authentication and retry, cancellation while
+creation is admitted but its response is held, remote file side effects and
+visible output, interrupt, restart, busy disconnect and normal Quit. Cancellation
+joins the create response and deletes the acknowledged kernel before allowing
+retry. An unrelated running kernel survives all controls. Notebook and index
+bytes stay identical. Both packaged local notebook cases and 104 focused cases
+also pass. The desktop CI matrix now exercises the same server fixture.
+
+A connection lost before the server acknowledges creation can leave a kernel
+requiring cleanup on the server. Network-loss recovery, abrupt worker death,
+TLS deployment and broader provider/platform qualification remain open.
 
 ## Notebook and media recovery checkpoint
 

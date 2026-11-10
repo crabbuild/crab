@@ -15,6 +15,7 @@ const runtimeScript = app?.isPackaged
   : path.join(__dirname, "jupyter-runtime.py");
 const runtimeCommands = new Set<{ cancel: () => void; done: Promise<unknown> }>();
 let commandsClosed = false;
+type KernelAdmission = { env: NodeJS.ProcessEnv } & ({ cwd: string } | { serverUrl: string });
 
 function runPython(pythonPath: string, args: string[], timeout: number, installs = false): Promise<{ stdout: string; stderr: string }> {
   const abort = new AbortController();
@@ -71,15 +72,16 @@ export class JupyterKernel {
   private exitError: Error | null = null;
   private pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
   private onOutput: ((output: KernelOutput) => void) | null = null;
-  private onStatus: ((status: string) => void) | null = null;
+  private onStatus: ((status: string, error?: string) => void) | null = null;
+  private workerFailure: Error | null = null;
   private alive = false;
   private started = false;
   private admission = new AbortController();
 
-  constructor(private kernelName: string, private pythonPath: string, private prepare: (signal: AbortSignal) => Promise<() => { cwd: string; env: NodeJS.ProcessEnv }>) {}
+  constructor(private kernelName: string, private pythonPath: string, private prepare: (signal: AbortSignal) => Promise<() => KernelAdmission>) {}
 
   setOutputHandler(handler: (output: KernelOutput) => void) { this.onOutput = handler; }
-  setStatusHandler(handler: (status: string) => void) { this.onStatus = handler; }
+  setStatusHandler(handler: (status: string, error?: string) => void) { this.onStatus = handler; }
 
   async start(): Promise<void> {
     if (this.started || this.stopping) throw new Error("Kernel already started or disconnected");
@@ -90,14 +92,14 @@ export class JupyterKernel {
       cancel = () => reject(signal.reason);
       signal.addEventListener("abort", cancel, { once: true });
     });
-    let admit: () => { cwd: string; env: NodeJS.ProcessEnv };
+    let admit: () => KernelAdmission;
     try { admit = await Promise.race([this.prepare(signal), cancelled]); }
     finally { signal.removeEventListener("abort", cancel); }
     signal.throwIfAborted();
     // Final native admission and worker creation share one synchronous turn;
     // a preparation promise cannot authorize a replacement repository session.
-    const prepared = admit();
-    const proc = spawn(this.pythonPath, ["-u", runtimeScript], { env: prepared.env, stdio: ["pipe", "pipe", "pipe"] });
+    const { env, ...location } = admit();
+    const proc = spawn(this.pythonPath, ["-u", runtimeScript], { env, stdio: ["pipe", "pipe", "pipe"] });
     this.process = proc;
     proc.stdin.on("error", error => this.fail(error));
     let stderr = "", text = "";
@@ -116,15 +118,15 @@ export class JupyterKernel {
       proc.once("error", error => this.fail(error));
       proc.once("close", (code, signal) => {
         this.process = null; this.alive = false;
-        const failure = new Error(`Kernel worker exited (${signal ?? code})${stderr ? `: ${stderr.trim()}` : ""}`);
+        const failure = this.workerFailure ?? new Error(`Kernel worker exited (${signal ?? code})${stderr ? `: ${stderr.trim()}` : ""}`);
         if (code !== 0) this.exitError = failure;
         this.fail(failure);
-        this.onStatus?.(this.stopping ? "disconnected" : "dead");
+        this.onStatus?.(this.stopping ? "disconnected" : "dead", failure.message);
         resolve();
       });
     });
     try {
-      await this.request("start", { kernelName: this.kernelName, cwd: prepared.cwd });
+      await this.request("start", { kernelName: this.kernelName, ...location });
       if (this.stopping) throw new Error("Kernel disconnected during startup");
       this.alive = true;
     } catch (error) {
@@ -140,7 +142,14 @@ export class JupyterKernel {
   }
 
   async interrupt(): Promise<void> { await this.request("interrupt"); }
-  async restart(): Promise<void> { await this.request("restart"); }
+  async restart(): Promise<void> {
+    try {
+      await this.request("restart");
+    } catch (error) {
+      await this.shutdown();
+      throw error;
+    }
+  }
 
   shutdown(): Promise<void> {
     if (!this.stopping) this.stopping = (async () => {
@@ -176,7 +185,10 @@ export class JupyterKernel {
       if (typeof message.requestId !== "string" || typeof message.msgType !== "string" || !message.content || typeof message.content !== "object") throw new Error("Invalid kernel output");
       this.onOutput?.({ requestId: message.requestId, msgType: message.msgType, content: message.content as Record<string, unknown> });
     } else if (message.kind === "status" && typeof message.status === "string") this.onStatus?.(message.status);
-    else if (message.kind === "failed") this.fail(new Error(String(message.error)));
+    else if (message.kind === "failed") {
+      this.workerFailure = new Error(String(message.error));
+      this.fail(this.workerFailure);
+    }
     else throw new Error("Invalid kernel worker message");
   }
 
