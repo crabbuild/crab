@@ -1728,12 +1728,32 @@ They use the existing Vite test server and an isolated installed-Chrome profile.
   packaged restart stability still need proof. A separate evaluator inspection
   failed before module inspection and was discarded; its isolated process tree
   was stopped and confirmed absent.
-- Windows job `129924483362` passes its native tests and packaged smoke, then
-  still fails packaged-storage fixture cleanup with `WinError 32` after four
-  passing cases. The held directory belongs to the terminal-isolation fixture.
+- Windows job `129924483362` passes native tests and four packaged cases, but
+  two terminal cases fail when killing a daemon session with
+  `Signals not supported on windows.` Cleanup then fails with `WinError 32`.
+  The held directory belongs to the terminal-isolation fixture.
   Daemon transport is home-scoped while saved layouts are profile-scoped; the
   profile switch alone does not establish which process retains the directory.
   Source inspection and Linux success do not replace Windows owner proof.
+
+### Windows terminal termination correction
+
+The terminal Kill IPC reaches `Session.kill()`, which supplies `SIGTERM` to
+`NodePtySubprocessHandle`. Installed node-pty 1.1.0's
+`lib/windowsTerminal.js` rejects any signal argument before invoking its
+ConPTY termination path. The wrapper now omits the signal on Windows;
+POSIX termination retains the supplied signal. Explicit signal requests
+remain a separate operation. Adopted descriptor handles use POSIX process
+signals directly and do not call node-pty's Windows API.
+
+The three-platform contract regression fails on the former Windows branch
+and passes with the correction. All 70 scoped terminal checks pass, including
+an authenticated real-daemon command followed by Kill and confirmed shell
+PID disappearance. Production and touched-fixture types and the Electron
+build pass. Evidence: `pty-kill-contract-before.json`,
+`pty-kill-contract-after.json`, `pty-kill-types.log`, and
+`pty-kill-fixture-types.log`. Native Windows packaged cleanup and descendant
+ownership still require CI; this local result does not establish either.
 
 ## Electron runtime release gate (2026-11-10)
 

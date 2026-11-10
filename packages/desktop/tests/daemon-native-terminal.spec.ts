@@ -5,8 +5,23 @@ import * as path from "node:path";
 import { DaemonClient } from "../electron/daemon/daemon-client";
 import { DaemonServer } from "../electron/daemon/daemon-server";
 import { PROTOCOL_VERSION } from "../electron/daemon/protocol";
-import { createNodePtySpawner } from "../electron/daemon/subprocess-handle";
+import { createNodePtySpawner, NodePtySubprocessHandle } from "../electron/daemon/subprocess-handle";
 import { TerminalHost } from "../electron/daemon/terminal-host";
+import type { IPty } from "node-pty";
+import type { SessionInfo } from "../electron/daemon/types";
+
+it.each(["win32", "darwin", "linux"])("terminates a %s PTY using its supported kill contract", platform => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const kill = vi.fn((signal?: string) => {
+    if (platform === "win32" && signal) throw new Error("Signals not supported on windows.");
+  });
+  const pty = { pid: 1, onData: vi.fn(), onExit: vi.fn(), kill } as unknown as IPty;
+  try {
+    Object.defineProperty(process, "platform", { value: platform });
+    new NodePtySubprocessHandle(pty).kill("SIGTERM");
+    expect(kill).toHaveBeenCalledWith(platform === "win32" ? undefined : "SIGTERM");
+  } finally { Object.defineProperty(process, "platform", descriptor); }
+});
 
 it("executes a real shell command through authenticated daemon connections", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-pty-"));
@@ -34,6 +49,14 @@ it("executes a real shell command through authenticated daemon connections", asy
     const expected = process.platform === "win32" ? `crab-pty-${process.env.COMPUTERNAME}` : "crab-pty-ready";
     await client.request("write", { sessionId: "native-test", data: command });
     await vi.waitFor(() => expect(output).toContain(expected), { timeout: 10_000 });
+    const sessions = await client.request<SessionInfo[]>("listSessions");
+    const session = sessions.find(session => session.sessionId === "native-test");
+    if (!session?.pid) throw new Error("Native terminal has no process identity");
+    const pid = session.pid;
+    await client.request("kill", { sessionId: "native-test" });
+    await vi.waitFor(() => {
+      expect(() => process.kill(pid, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" }));
+    }, { timeout: 10_000 });
   } finally {
     if (previousShell === undefined) delete process.env.SHELL;
     else process.env.SHELL = previousShell;
