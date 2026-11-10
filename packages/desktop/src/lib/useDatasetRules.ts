@@ -10,10 +10,12 @@ import { DatasetRule, DatasetRulesFile, defaultRules, mergeRules } from "./datas
  * parses correctly, the rules are merged with (or replace) the
  * shipped defaults. Falls back to defaults silently on any error.
  */
-export function useDatasetRules(repoId: string): DatasetRule[] {
+export function useDatasetRules(repoId: string, nativeSessionId: string | null | undefined): DatasetRule[] {
   const [rules, setRules] = useState<DatasetRule[]>(defaultRules.rules);
 
   useEffect(() => {
+    setRules(defaultRules.rules);
+    if (nativeSessionId === null) return;
     let cancelled = false;
 
     readWorkspaceDatasetRules(repoId)
@@ -33,7 +35,7 @@ export function useDatasetRules(repoId: string): DatasetRule[] {
     return () => {
       cancelled = true;
     };
-  }, [repoId]);
+  }, [repoId, nativeSessionId]);
 
   return rules;
 }

@@ -267,6 +267,10 @@ tests and packaged storage qualification.
   events, and displays execution errors even when the CLI fails before a stage
   starts. Structured CLI stdout and live command logs on stderr stay separate.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
+- Dashboard and dataset metadata refresh after native repository recovery while
+  retaining view controls and selection. The Datasets tab under Large Files
+  supports read-only inspection before Crab storage setup; tracking and storage
+  operations retain their setup requirement.
 - Native capability discovery returns `protocol: 1`, the runtime version, and
   registered RPC method names from the dispatcher itself. SSH negotiation uses
   the attached channel during deployment; feature gates require the methods

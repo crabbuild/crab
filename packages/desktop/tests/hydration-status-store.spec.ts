@@ -34,6 +34,51 @@ function subscribe(repoId = "repo") {
 }
 
 describe("shared hydration status", () => {
+  it("shares one inventory read for repeated notifications of the same admitted native owner", async () => {
+    native.read.mockResolvedValue(snapshot(1));
+    subscribe();
+    await vi.waitFor(() => expect(native.read).toHaveBeenCalledTimes(1));
+    const event = { method: "repo:capabilities-changed", params: { repo_id: "repo", native_session_id: "admitted" } };
+    native.listener!(event);
+    await vi.waitFor(() => expect(native.read).toHaveBeenCalledTimes(2));
+    native.listener!(event);
+    await Promise.resolve();
+    expect(native.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears an unavailable native owner's inventory and refreshes only after repository repair", async () => {
+    native.read.mockResolvedValueOnce(snapshot(1)).mockResolvedValueOnce(snapshot(0));
+    subscribe();
+    await vi.waitFor(() => expect(store.snapshot("repo").summary?.hydrated).toBe(1));
+    native.listener!({ method: "repo:capabilities-changed", params: { repo_id: "repo", native_session_id: null } });
+    expect(store.snapshot("repo").summary).toBeNull();
+    native.listener!({ method: "progress/complete", params: { op: "hydrate", job_id: "old-job", status: 1 } });
+    expect(native.read).toHaveBeenCalledTimes(1);
+    native.listener!({ method: "repo:capabilities-changed", params: { repo_id: "repo", native_session_id: "repaired" } });
+    await vi.waitFor(() => expect(store.snapshot("repo").summary?.pointer).toBe(1));
+  });
+
+  it("discards a replaced native owner's late inventory before reading the repaired repository", async () => {
+    const earlier = deferred<HydrationStatusResult>();
+    native.read.mockReturnValueOnce(earlier.promise).mockResolvedValueOnce(snapshot(0));
+    subscribe();
+    native.listener!({ method: "repo:capabilities-changed", params: { repo_id: "repo", native_session_id: null } });
+    native.listener!({ method: "repo:capabilities-changed", params: { repo_id: "repo", native_session_id: "repaired" } });
+    expect(native.read).toHaveBeenCalledTimes(1);
+    earlier.resolve(snapshot(1));
+    await vi.waitFor(() => expect(native.read).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(store.snapshot("repo").summary?.pointer).toBe(1));
+  });
+
+  it("does not clear a healthy sibling's hydration inventory when another repository loses its owner", async () => {
+    native.read.mockResolvedValue(snapshot(1));
+    subscribe("healthy");
+    await vi.waitFor(() => expect(store.snapshot("healthy").summary?.hydrated).toBe(1));
+    native.listener!({ method: "repo:capabilities-changed", params: { repo_id: "other", native_session_id: null } });
+    expect(store.snapshot("healthy").summary?.hydrated).toBe(1);
+    expect(native.read).toHaveBeenCalledTimes(1);
+  });
+
   it("shares one native read and refreshes every consumer after partial mutation completion", async () => {
     native.read.mockResolvedValueOnce(snapshot(0)).mockResolvedValueOnce(snapshot(1));
     subscribe(); subscribe();

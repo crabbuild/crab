@@ -37,3 +37,20 @@ it("recovery retires a visible outage even after notifications are muted", () =>
   fixture.receive({ method: "agent/ready", params: {} });
   expect(fixture.dismiss.mock.calls).toEqual([["outage"]]);
 });
+
+it("recovery clears a crash notice while preserving unrelated operation errors", () => {
+  fixture.publish.mockReturnValueOnce("crash").mockReturnValueOnce("operation");
+  fixture.receive({ method: "agent/exit", params: { code: null, signal: "SIGKILL" } });
+  fixture.receive({ method: "agent/error", params: { message: "Operation failed" } });
+  fixture.receive({ method: "agent/ready", params: {} });
+  expect(fixture.dismiss.mock.calls).toEqual([["crash"]]);
+});
+
+it("a failed restart replaces its crash notice and recovery clears it while muted", () => {
+  fixture.publish.mockReturnValueOnce("crash").mockReturnValueOnce("restart");
+  fixture.receive({ method: "agent/exit", params: { code: 1, signal: null } });
+  fixture.receive({ method: "agent/failed", params: { message: "Restart failed" } });
+  fixture.notifications.muteAgentErrors = true;
+  fixture.receive({ method: "agent/ready", params: {} });
+  expect(fixture.dismiss.mock.calls).toEqual([["crash"], ["restart"]]);
+});

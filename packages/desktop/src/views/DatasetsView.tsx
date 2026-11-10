@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -100,7 +100,8 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [selectedEntry, setSelectedEntry] = useState<ClassifiedEntry | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const listingRequest = useRef(0);
   const [collapsedKinds, setCollapsedKinds] = useState<Set<DatasetKind>>(new Set());
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState<FilterState>({
@@ -109,31 +110,37 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
     mtimeMaxAgeMs: 0,
   });
 
-  const rules = useDatasetRules(repo.repo_id);
+  const rules = useDatasetRules(repo.repo_id, repo.native_session_id);
 
   const hasActiveFilters =
     filters.minSize !== null ||
     filters.visibleKinds.size > 0 ||
     filters.mtimeMaxAgeMs > 0;
 
-  const fetchEntries = () => {
+  const fetchEntries = useCallback(() => {
+    if (repo.deferred || repo.native_session_id === null) return;
+    const request = ++listingRequest.current;
     setLoading(true);
     setError(null);
     rpc
       .list(repo.repo_id)
       .then((res) => {
+        if (request !== listingRequest.current) return;
         setEntries(res.entries);
         setLoading(false);
       })
       .catch((e) => {
+        if (request !== listingRequest.current) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoading(false);
       });
-  };
+  }, [repo.repo_id, repo.native_session_id, repo.deferred]);
 
   useEffect(() => {
+    setEntries(null); setLoading(false); setError(null);
     fetchEntries();
-  }, [repo.repo_id]);
+    return () => { listingRequest.current++; };
+  }, [fetchEntries]);
 
   const classified = useMemo<ClassifiedEntry[]>(() => {
     if (!entries) return [];
@@ -151,6 +158,8 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
         ),
       }));
   }, [entries, rules]);
+
+  const selectedEntry = classified.find(entry => entry.path === selectedPath);
 
   const filtered = useMemo(() => {
     let result = classified;
@@ -206,7 +215,7 @@ export function DatasetsView({ repo, onOpenFile }: Props) {
   };
 
   const handleFileClick = (entry: ClassifiedEntry) => {
-    setSelectedEntry(entry);
+    setSelectedPath(entry.path);
     onOpenFile(entry.path, entry);
   };
 
@@ -536,7 +545,7 @@ function ParquetMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
         setLoading(false);
       });
     return () => controller.abort();
-  }, [repo.repo_id, path]);
+  }, [repo.repo_id, repo.native_session_id, path]);
 
   if (loading) return <MetadataLoading />;
   if (error) return <MetadataError message={error} />;
@@ -594,7 +603,7 @@ function SafetensorsMetadata({ repo, path }: { repo: OpenRepo; path: string }) {
         setLoading(false);
       });
     return () => controller.abort();
-  }, [repo.repo_id, path]);
+  }, [repo.repo_id, repo.native_session_id, path]);
 
   if (loading) return <MetadataLoading />;
   if (error) return <MetadataError message={error} />;

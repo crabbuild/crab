@@ -283,29 +283,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     setShowWizard(false); setWizardFiles([]);
   };
 
-  // Show loading spinner while checking crab status.
-  if (crabStatus.status === "loading") {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Checking repository status…
-      </div>
-    );
-  }
-
-  // Show the setup wizard when the repo is not initialized with crab.
-  if (crabStatus.status === "uninitialized" || crabStatus.status === "no-storage") {
-    return (
-      <div className="flex h-full flex-col">
-        <ViewToolbar
-          title="Large Files"
-          icon={Package}
-          actions={[]}
-          onAction={() => {}}
-        />
-        <CrabSetupWizard repoId={repo.repo_id} onComplete={crabStatus.refresh} />
-      </div>
-    );
-  }
+  const needsSetup = crabStatus.status === "uninitialized" || crabStatus.status === "no-storage";
+  const actions = needsSetup || crabStatus.status === "loading" ? [] : toolbarActions;
 
   if (showWizard) {
     return (
@@ -348,7 +327,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       <ViewToolbar
         title="Large Files"
         icon={Package}
-        actions={toolbarActions}
+        actions={actions}
         onAction={handleToolbarAction}
       />
 
@@ -404,12 +383,19 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
         </button>
       </div>
 
-      {tab === "storage-map" ? (
+      {/* Dataset inspection uses captured reads and does not require Crab storage. */}
+      {tab === "datasets" ? (
+        <DatasetsView repo={repo} onOpenFile={onOpenFile ?? (() => {})} />
+      ) : crabStatus.status === "loading" ? (
+        <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <Loader2 size={14} className="animate-spin" /> Checking repository status…
+        </div>
+      ) : needsSetup ? (
+        <CrabSetupWizard repoId={repo.repo_id} onComplete={crabStatus.refresh} />
+      ) : tab === "storage-map" ? (
         <PointerMapPanel repo={repo} onSelectCommit={onSelectCommit} />
       ) : tab === "hydrate" ? (
         <HydratePage repo={repo} />
-      ) : tab === "datasets" ? (
-        <DatasetsView repo={repo} onOpenFile={onOpenFile ?? (() => {})} />
       ) : (
         <FilesPanel
           loading={loading}

@@ -53,14 +53,13 @@ implied by a working read/materialization smoke.
    repository replacement ownership. Two-store cloud reads, cold restart,
    failed selection, removal/reselection and stale captures have packaged
    S3-compatible macOS proof. Broaden provider/profile and platform qualification.
-   Use the existing session identity to refresh Dashboard, Datasets, cached metrics,
-   selected Changes diffs and notebook reads; preserve pending editor saves and
-   restore media playback deliberately. Dashboard effects and metric caches
-   currently depend on logical repository identity, so a same-ID retry can retain
-   a previous loading error or stale data. Datasets has the same epoch gap and
-   its listing lacks late-result suppression. Changes status and staging patches
-   now suppress obsolete replies without remounting the commit composer. Keep
-   these refreshes at their existing read owner; add no component retry queue.
+   Dashboard, Datasets, cached metrics and shared hydration inventories now refresh
+   through native ownership, with local same-ID repair proof below. Broaden that
+   UI proof to storage rebind and SSH reconnect. Finish selected Changes diffs and
+   notebook reads; preserve pending editor saves and restore media playback
+   deliberately. Changes status and staging patches suppress obsolete replies
+   without remounting the commit composer. Keep these refreshes at their existing
+   read owner; add no component retry queue.
    Direct SDK opening
    cancellation has real blocked-storage proof; qualify other providers and
    cancellation through actual jump hosts.
@@ -82,6 +81,9 @@ implied by a working read/materialization smoke.
    physical/cache/available/pending bytes, decoded Parquet/query limits,
    bounded plain-text pointers and remaining format comparisons. Keep unknown
    measurements unknown and give oversized or malformed content a visible error.
+   Dataset mtime filtering still has no timestamp input and currently does not
+   filter; implement its native data contract and qualify recursive catalog
+   coverage rather than treating those controls as complete.
 
 These slices consolidate functionality into File details, Activity and Settings.
 They do not require additional primary navigation destinations or a second
@@ -90,6 +92,49 @@ its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
 
 ## Storage identity checkpoint
+
+### Dashboard and dataset metadata recovery
+
+Dashboard data belongs to a native epoch. Replacement clears its old data and
+error state, cancels publication from previous effects and admits cached code
+frequency only after the replacement's own summary arrives. The metric hook
+clears disabled data and revalidates its existing logical cache when re-enabled;
+no second session/cache owner is introduced. UI controls retain their state.
+The existing availability-toast owner now also retains crash notices, so native
+negotiation clears them while leaving unrelated operation errors visible.
+
+Datasets retains a selected path rather than an obsolete entry object. Its
+listing generation rejects earlier refresh results, and selection derives from
+the fresh listing and classification rules. Rules, Safetensors and Parquet
+metadata refresh after native replacement; existing abort ownership prevents
+obsolete previews from publishing. Read-only dataset inspection is available
+under Large Files without configuring Crab storage. Tracking and storage views
+retain their setup requirement.
+
+The shared hydration store consumes repository-native ownership events. Loss
+clears the old inventory, admission refreshes it, and the existing version guard
+drains earlier reads. Repeated announcements of the same owner share one read;
+an unrelated repository's event cannot clear a healthy sibling. Components do
+not acquire another hydration cache or retry queue.
+
+Four packaged macOS arm64 cases remove a real repository's Git directory, kill
+the owned native child, restore the directory with a new commit/content and use
+the visible Retry action. Dashboard shows the new commit and updated persisted
+code-frequency values while retaining Month selection. Safetensors datasets
+with and without local Crab project configuration show a new listing and tensor
+count while retaining their filter and selected path. Parquet changes from one
+column/three rows to two columns/four rows, and a changed workspace rule moves it
+from Training Data to Evaluation Data. Content and the unrelated index remain
+byte-identical after reads. The tiny generated Parquet inputs require no Python
+dependency in the packaged smoke.
+
+All six current packaged cases pass, including native Crab/LFS recovery and SSH
+independent replay regressions. The seven focused owner/routing suites pass 104
+cases, and the standalone classifier, project/spec types, Cargo format and build
+checks pass. All 905 packaged renderer/Electron assets match the fresh build;
+the 1,680 Rust/Cargo inputs still match the qualified native producer. This
+closes those local repair and read-only catalog cases. Other provider/profile UI
+recovery, remaining P0 state and the full acceptance matrix stay open.
 
 ### Independent queued metadata recovery
 

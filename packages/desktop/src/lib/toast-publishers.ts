@@ -134,7 +134,8 @@ export function setupAgentErrorPublisher(): () => void {
         const reason = p.signal
           ? `Killed by signal ${p.signal}`
           : `Exited with code ${p.code}`;
-        publishToast({
+        if (unavailable) dismissToast(unavailable);
+        unavailable = publishToast({
           kind: "error",
           title: "Agent crashed",
           body: reason,

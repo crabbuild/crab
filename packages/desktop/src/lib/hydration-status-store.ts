@@ -13,6 +13,7 @@ interface Entry {
   snapshot: Snapshot;
   version: number;
   pending: boolean;
+  nativeSessionId?: string | null;
 }
 
 const EMPTY: Snapshot = { summary: null, byPath: new Map(), loading: false, error: null };
@@ -27,7 +28,7 @@ function publish(entry: Entry, snapshot: Snapshot) {
 function current(entry: Entry) { return entries.get(entry.repoId) === entry; }
 
 function read(entry: Entry) {
-  if (entry.pending) return;
+  if (entry.pending || entry.nativeSessionId === null) return;
   entry.pending = true;
   const version = entry.version;
   void rpc.hydrationStatus(entry.repoId).then(data => {
@@ -48,7 +49,7 @@ function refresh(repoId: string) {
   const entry = entries.get(repoId);
   if (!entry) return;
   entry.version++;
-  publish(entry, { ...EMPTY, loading: true });
+  publish(entry, { ...EMPTY, loading: entry.nativeSessionId !== null });
   read(entry);
 }
 
@@ -63,6 +64,17 @@ function subscribe(repoId: string, listener: () => void) {
   const notify = () => listener();
   entry.listeners.add(notify);
   if (!disconnect) disconnect = onAgentEvent(event => {
+    if (event.method === "repo:capabilities-changed" && event.params && typeof event.params === "object") {
+      const { repo_id, native_session_id } = event.params as { repo_id?: unknown; native_session_id?: unknown };
+      if (typeof repo_id !== "string" || (native_session_id !== null && typeof native_session_id !== "string")) return;
+      const entry = entries.get(repo_id);
+      if (!entry || entry.nativeSessionId === native_session_id) return;
+      // Logical identity survives native replacement. Revoke its inventory
+      // until admission, and let the version guard drain any earlier read.
+      entry.nativeSessionId = native_session_id;
+      refresh(repo_id);
+      return;
+    }
     if (event.method !== "progress/complete" || !event.params || typeof event.params !== "object") return;
     const { op } = event.params as { op?: unknown };
     if (op !== "hydrate" && op !== "dehydrate") return;
