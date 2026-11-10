@@ -1912,17 +1912,30 @@ async fn apply_workspace(
         .await?;
     }
 
+    let source_ref = crate::git_ref_merge::local_branch_ref(branch);
+    if crate::git_ref_merge::current_branch_ref(wt)
+        .await?
+        .as_deref()
+        != Some(&source_ref)
+    {
+        return Err(AgentError::Other(
+            "Task workspace branch changed before Apply".into(),
+        ));
+    }
+    // Use the exact task ref's object. Git resolves a short tag name before
+    // a branch with the same name, even if the task branch is checked out.
+    let source = crate::git_ref_merge::exact_branch_oid(wt, &source_ref).await?;
     let commit_msg = format!("Merge agent task branch '{branch}'");
 
     let current_ref = crate::git_ref_merge::current_branch_ref(repo_dir).await?;
 
     let mut merge_commit: Option<String> = None;
     let merge_result = if current_ref.as_deref() == Some(target_ref) {
-        run_git_cmd(repo_dir, &["merge", branch, "--no-ff", "-m", &commit_msg]).await
+        run_git_cmd(repo_dir, &["merge", &source, "--no-ff", "-m", &commit_msg]).await
     } else {
         match crate::git_ref_merge::merge_commit_without_checkout(
             repo_dir,
-            branch,
+            &source,
             target_branch,
             &commit_msg,
         )
@@ -1958,6 +1971,20 @@ async fn apply_workspace(
             )));
         }
         merge_result?;
+    }
+
+    // A Git merge receipt alone cannot authorize deleting the task. Verify the
+    // captured branch contains the pinned source before removing the checkout.
+    if !crate::git_ref_merge::branch_contains(repo_dir, target_ref, &source).await? {
+        return Err(AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: format!(
+                "Saved Apply target '{target_branch}' does not contain the task commit"
+            ),
+            remediation: "Inspect the repository checkout and task workspace before retrying"
+                .into(),
+            source: None,
+        });
     }
 
     let (worktree_removed, branch_deleted, cleanup_error) =

@@ -72,8 +72,10 @@ const DEFAULT_RETENTION_DAYS = 7;
 /** Reads the checked-out branch; detached HEAD has no branch, while Git failures reject. */
 export async function currentBranch(repoPath: string): Promise<string | undefined> {
   try {
-    const { stdout } = await execFile("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repoPath });
-    return stdout.trim() || undefined;
+    const { stdout } = await execFile("git", ["symbolic-ref", "--quiet", "--no-recurse", "HEAD"], { cwd: repoPath });
+    const ref = stdout.trim();
+    // Git's --short output depends on which tags and other refs exist.
+    return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : undefined;
   } catch (error: unknown) {
     if ((error as { code?: number | string }).code === 1) return undefined;
     throw error;

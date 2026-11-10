@@ -2278,12 +2278,50 @@ is recorded in `apply-explicit-ref-packaged.json` and
 `apply-explicit-ref-sidebar-timing.json`.
 
 Active checkout publication still redirects under the reproduced concurrent
-checkout. A tag with the same short name as the task branch can also make the
-sidecar report that the source is already merged and remove the task worktree.
-The next publication change must use the exact source ref and keep the target
-ref, worktree and index consistent through interruption. The rollback prototype
-restored the original checkout before aborting. When an editor changed the
-affected file during the transaction, rollback refused to overwrite it.
-Evidence is recorded in `apply-branch-race-exact-ref.json`,
-`apply-ambiguous-source-probe.json` and
-`apply-publication-intervening-edit-probe.json`.
+checkout. The rollback prototype restored the original checkout before
+aborting. When an editor changed the affected file during the transaction,
+rollback refused to overwrite it. Evidence is recorded in
+`apply-branch-race-exact-ref.json` and `apply-publication-intervening-edit-probe.json`.
+
+## Exact Apply source and cleanup proof (2026-11-10)
+
+A tag sharing the task branch's name previously made local Apply reject an
+unchanged checkout. SSH Apply resolved the tag, reported success and removed the
+task worktree even when the destination lacked the task's commit. Apply now
+compares the full checkout ref and pins the exact branch OID with `show-ref
+--verify --hash`. Full and selected Apply consume that commit. The sidecar
+verifies ancestry on the saved destination before deleting the worktree. Local
+full Apply also checks the saved branch after its active merge.
+[Git exact reference lookup](https://git-scm.com/docs/git-show-ref) and
+[revision disambiguation](https://git-scm.com/docs/gitrevisions).
+
+The five same-name tag regressions failed on the previous build and passed with
+the fix. The packaged app also passed all three local Apply modes through its
+preload bridge after loading the persisted tasks. It wrote the expected bytes,
+preserved the tags and recorded each task as applied. Selected Apply excluded
+unselected changes. All 306 touched desktop cases, 15 live SSH cases and five
+scoped Rust tests passed. Evidence is recorded in
+`apply-source-tag-before.json`, `apply-source-tag-local-family.json`,
+`apply-source-tag-ssh-after.json` and `apply-source-tag-packaged-probe.json`.
+
+The active checkout race still updates the other branch. Apply now reports the
+missing destination commit and retains the task worktree in that case. The
+checkout race was reproduced through SSH and in a direct Git probe. Evidence is
+recorded in `apply-checkout-proof-before.json` and
+`apply-checkout-proof-direct-after.json`.
+
+The release tag invokes Git's merge porcelain. A detached proposal preserves
+merge hooks but runs them in the proposal directory. A second prototype used a
+private Git directory and index with the actual working directory. Hooks ran in
+the original checkout, the target ref stayed unchanged and the prototype could
+reverse the file changes. The post-merge hook ran before real ref publication.
+This informs the remaining work on hook timing, index publication and durable
+recovery. Evidence is recorded in `apply-active-hooks-probe.json` and
+`apply-active-shadow-probe.json`.
+
+An end-to-end Git prototype published the private merge and index when the
+prepared transaction observed the saved checkout. When HEAD switched to another
+branch at the same OID, it aborted the ref update and restored a clean checkout.
+Both cases preserved the other ref. The prototype still needs a durable record
+for interruption between writing files, publishing the ref and replacing the
+index. Evidence is recorded in `apply-active-shadow-publication-probe.json`.

@@ -89,12 +89,19 @@ function shortBranch(branch: string): string {
 async function applyTarget(task: Task): Promise<string> {
   if (!task.baseBranch) throw new Error("Apply target was not recorded. Recover the task's destination before applying changes.");
   await assertWorkspace(task);
-  if (await currentBranch(task.worktreePath) !== shortBranch(task.branch)) throw new Error("Task workspace branch changed. Recover its ownership before applying changes.");
+  await taskBranchRef(task);
   const target = localBranchRef(task.baseBranch);
   try { await execFile("git", ["show-ref", "--verify", "--", target], { cwd: task.repoPath }); }
   catch (cause: unknown) { throw new Error("Saved Apply target is unavailable. Restore its branch before applying changes.", { cause }); }
   await requireDirectBranch(task.repoPath, target);
   return shortBranch(target);
+}
+
+async function taskBranchRef(task: Task): Promise<string> {
+  const ref = localBranchRef(task.branch);
+  if (await currentBranch(task.worktreePath) !== shortBranch(ref)) throw new Error("Task workspace branch changed. Recover its ownership before applying changes.");
+  await requireDirectBranch(task.worktreePath, ref);
+  return ref;
 }
 
 async function requireDirectBranch(repoPath: string, branchRef: string): Promise<void> {
@@ -104,7 +111,22 @@ async function requireDirectBranch(repoPath: string, branchRef: string): Promise
     if ((error as { code?: number | string }).code === 1) return;
     throw error;
   }
-  throw new Error(`Apply target "${branchRef}" is a symbolic branch ref. Restore its original direct branch before applying changes.`);
+  throw new Error(`Apply branch "${branchRef}" is a symbolic branch ref. Restore its original direct branch before applying changes.`);
+}
+
+async function exactBranchOid(repoPath: string, branchRef: string): Promise<string> {
+  const { stdout } = await execFile("git", ["show-ref", "--verify", "--hash", "--", branchRef], { cwd: repoPath });
+  return stdout.trim();
+}
+
+async function isAncestor(repoPath: string, source: string, target: string): Promise<boolean> {
+  try {
+    await execFile("git", ["merge-base", "--is-ancestor", source, target], { cwd: repoPath });
+    return true;
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return false;
+    throw error;
+  }
 }
 
 async function branchIsCheckedOut(repoPath: string, branchRef: string): Promise<boolean> {
@@ -148,7 +170,7 @@ async function mergeTreeConflictPaths(
 
 async function mergeWithoutCheckout(
   repoPath: string,
-  sourceBranch: string,
+  sourceSha: string,
   targetBranchInput: string,
   message: string,
 ): Promise<RefMergeResult> {
@@ -160,26 +182,8 @@ async function mergeWithoutCheckout(
     return { kind: "target-checked-out", targetBranch };
   }
 
-  const { stdout: targetOut } = await execFile(
-    "git",
-    ["rev-parse", `${targetRef}^{commit}`],
-    { cwd: repoPath },
-  );
-  const targetSha = targetOut.trim();
-
-  const { stdout: sourceOut } = await execFile(
-    "git",
-    ["rev-parse", `${sourceBranch}^{commit}`],
-    { cwd: repoPath },
-  );
-  const sourceSha = sourceOut.trim();
-
-  const sourceAlreadyMerged = await execFile("git", ["merge-base", "--is-ancestor", sourceSha, targetSha], { cwd: repoPath })
-    .then(() => true, (error: unknown) => {
-      if ((error as { code?: number | string }).code === 1) return false;
-      throw error;
-    });
-  if (sourceAlreadyMerged) {
+  const targetSha = await exactBranchOid(repoPath, targetRef);
+  if (await isAncestor(repoPath, sourceSha, targetSha)) {
     if (!await publishInactiveRef(repoPath, targetRef, targetSha, undefined, message)) {
       return { kind: "target-checked-out", targetBranch };
     }
@@ -526,10 +530,11 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
     await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
     await execFile("git", ["commit", "-m", "Agent work (auto-committed before apply)"], { cwd: task.worktreePath });
   }
+  const source = await exactBranchOid(task.worktreePath, await taskBranchRef(task));
 
   const activeBranch = await currentBranch(task.repoPath);
   if (activeBranch !== targetBranch) {
-    const refMerge = await mergeWithoutCheckout(task.repoPath, task.branch, targetBranch, commitMessage);
+    const refMerge = await mergeWithoutCheckout(task.repoPath, source, targetBranch, commitMessage);
     if (refMerge.kind === "merged") {
       return { success: true };
     }
@@ -542,10 +547,9 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
   try {
     await execFile(
       "git",
-      ["merge", task.branch, "--no-ff", "-m", commitMessage],
+      ["merge", source, "--no-ff", "-m", commitMessage],
       { cwd: task.repoPath },
     );
-    return { success: true };
   } catch (err: unknown) {
     // execFile errors include stdout/stderr as properties on the error object.
     const errObj = err as { message?: string; stdout?: string; stderr?: string };
@@ -569,6 +573,13 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
 
     throw err;
   }
+
+  const targetRef = localBranchRef(targetBranch);
+  await requireDirectBranch(task.repoPath, targetRef);
+  if (!await isAncestor(task.repoPath, source, await exactBranchOid(task.repoPath, targetRef))) {
+    throw new Error(`Saved Apply target "${targetBranch}" does not contain the task commit. Inspect the repository checkout and task workspace before retrying.`);
+  }
+  return { success: true };
 }
 
 /**
@@ -604,6 +615,7 @@ export async function cherryPickFiles(
   if (files.length === 0) return;
 
   const targetBranch = await applyTarget(task);
+  const source = await exactBranchOid(task.worktreePath, localBranchRef(task.branch));
   if (await currentBranch(task.repoPath) !== targetBranch) {
     await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
   }
@@ -612,7 +624,7 @@ export async function cherryPickFiles(
   for (const file of files) {
     await execFile(
       "git",
-      ["checkout", task.branch, "--", file],
+      ["checkout", source, "--", file],
       { cwd: task.repoPath },
     );
   }

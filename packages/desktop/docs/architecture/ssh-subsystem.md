@@ -129,7 +129,9 @@ persists the branch as the Apply destination and the commit as the comparison
 baseline. Apply rejects an absent, deleted or symbolic destination before
 staging source changes. For an inactive destination, it prepares a Git ref
 transaction with dereferencing disabled, verifies the locked branch and checks
-worktree occupancy again before committing. Existing saved paths stay opaque.
+worktree occupancy again before committing. Apply resolves the exact task branch
+to a commit and checks that the saved destination contains that commit before
+removing the remote checkout. Existing saved paths stay opaque.
 
 ## Disposable task workspace ownership
 

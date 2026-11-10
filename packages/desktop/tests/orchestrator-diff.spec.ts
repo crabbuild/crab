@@ -586,6 +586,24 @@ rename to new-name.ts
   });
 
   describe("captured Apply contract", () => {
+    it.each(["active", "inactive", "selected"] as const)("applies the task branch to the %s destination when a tag shares its name", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `task-source-tag-${mode}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+        const file = "src/index.ts";
+        const expected = fs.readFileSync(path.join(worktreePath, file), "utf8");
+        await execFile("git", ["tag", task.branch, baseRef], { cwd: repoDir });
+        if (mode === "inactive") await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        if (mode === "selected") await cherryPickFiles(task, [file]);
+        else await expect(applyAll(task)).resolves.toEqual({ success: true });
+        expect((await execFile("git", ["show", `refs/heads/main:${file}`], { cwd: repoDir })).stdout).toBe(expected);
+        expect((await execFile("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repoDir })).stdout.trim()).toBe(baseRef);
+      } finally { cleanup(worktreePath); }
+    });
+
     it.each(["all", "selected"].flatMap(operation => ["missing", "deleted", "symbolic"].map(target => ({ operation, target }))))(
       "refuses $operation Apply with a $target destination before changing either checkout", async ({ operation, target }) => {
         const baseRef = await getHead(repoDir);

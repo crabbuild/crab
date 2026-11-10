@@ -26,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -41,6 +41,17 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       await mkdir(bin);
       for (const binary of ["claude", "codex"]) await writeFile(path.join(bin, binary), `#!/bin/sh\nprintf '${binary} server-fixture\\n'\n`, { mode: 0o755 });
       server.env.PATH = `${bin}:/usr/bin:/bin`;
+    }
+    if (mode === "apply-target-checkout-race") {
+      const git = (await run("which", ["git"])).stdout.trim();
+      await mkdir(bin);
+      await writeFile(path.join(bin, "git"), `#!/bin/sh
+if [ "$1" = merge ] && [ "$2" != --abort ] && [ "$(pwd -P)" = ${quote(repo)} ]; then
+  ${quote(git)} checkout other || exit 1
+fi
+exec ${quote(git)} "$@"
+`, { mode: 0o755 });
+      server.env.PATH = `${bin}:${server.env.PATH}`;
     }
     // Keep temporary worktrees in this fixture; use the server account's
     // existing CLI configuration/login directories without copying credentials.
@@ -101,20 +112,29 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
         const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
         const originalIndex = await readFile(path.resolve(task.worktreePath, index));
         await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
-        if (mode !== "apply-target-active") await run("git", ["checkout", "-b", "other"], { cwd: repo });
+        const active = mode === "apply-target-active" || mode === "apply-target-active-source-tag";
+        const sourceTag = mode.endsWith("-source-tag");
+        if (sourceTag) await run("git", ["tag", task.branch, head.trim()], { cwd: repo });
+        if (mode === "apply-target-checkout-race") await run("git", ["branch", "other"], { cwd: repo });
+        else if (!active) await run("git", ["checkout", "-b", "other"], { cwd: repo });
         if (mode === "apply-target-deleted") await run("git", ["branch", "-D", "main"], { cwd: repo });
         if (mode === "apply-target-symbolic") {
           await run("git", ["branch", "alias-target"], { cwd: repo });
           await run("git", ["symbolic-ref", "refs/heads/main", "refs/heads/alias-target"], { cwd: repo });
         }
-        if (mode === "apply-target" || mode === "apply-target-active") {
+        if (mode === "apply-target-checkout-race") {
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target.*does not contain the task commit/i);
+          expect({ active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
+            bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), status: task.status
+          }).toEqual({ active: "other", bytes: "captured target bytes\n", status: "stopped" });
+        } else if (mode === "apply-target" || active || sourceTag) {
           await orchestrator.applyTask(task.id);
-          const active = mode === "apply-target-active";
           expect({ captured: task.baseBranch, active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
             target: (await run("git", ["show", "main:apply-target.txt"], { cwd: repo })).stdout,
             activeFiles: (await run("git", ["ls-tree", "--name-only", "HEAD", "apply-target.txt"], { cwd: repo })).stdout.trim(),
             checkout: active ? await readFile(path.join(repo, "apply-target.txt"), "utf8") : existsSync(path.join(repo, "apply-target.txt")),
             status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: active ? "main" : "other", target: "captured target bytes\n", activeFiles: active ? "apply-target.txt" : "", checkout: active ? "captured target bytes\n" : false, status: "applied", worktree: false });
+          if (sourceTag) expect((await run("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repo })).stdout).toBe(head);
         } else {
           await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target/i);
           // Apply drains a created conversation before backend validation;
@@ -343,7 +363,7 @@ wait "$child"
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode === "apply-eof" || mode === "apply-sidecar-kill") expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-eof" || mode === "apply-sidecar-kill") expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

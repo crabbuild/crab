@@ -157,11 +157,12 @@ async function mockCommand(command: string, cmdArgs: string[], options?: { cwd?:
   if (cmdArgs[0] === "symbolic-ref" && cmdArgs.at(-1) === "HEAD") {
     const directory = path.basename(options?.cwd ?? "");
     const branch = directory.startsWith("crab-agent-") ? `agent/${directory.slice("crab-agent-".length)}` : mockCurrentBranch;
-    return { stdout: `${branch}\n`, stderr: "" };
+    return { stdout: `refs/heads/${branch}\n`, stderr: "" };
   }
-  if (cmdArgs[0] === "symbolic-ref" && cmdArgs.includes("--no-recurse") && cmdArgs.at(-1) === "refs/heads/main") {
-    throw Object.assign(new Error("main is a direct ref"), { code: 1 });
+  if (cmdArgs[0] === "symbolic-ref" && cmdArgs.includes("--no-recurse") && cmdArgs.at(-1)?.startsWith("refs/heads/")) {
+    throw Object.assign(new Error("Fixture branch is a direct ref"), { code: 1 });
   }
+  if (cmdArgs[0] === "show-ref" && cmdArgs.includes("--hash")) return { stdout: "a".repeat(40) + "\n", stderr: "" };
   if (cmdArgs[0] === "checkout" && cmdArgs[1]) {
     mockCurrentBranch = cmdArgs[1];
     return { stdout: "", stderr: "" };

@@ -67,6 +67,38 @@ pub(crate) async fn require_direct_branch(work_dir: &Path, branch_ref: &str) -> 
     }
 }
 
+pub(crate) async fn exact_branch_oid(work_dir: &Path, branch_ref: &str) -> Result<String> {
+    Ok(git_stdout(
+        work_dir,
+        &["show-ref", "--verify", "--hash", "--", branch_ref],
+    )
+    .await?
+    .trim()
+    .to_owned())
+}
+
+pub(crate) async fn branch_contains(
+    work_dir: &Path,
+    branch_ref: &str,
+    source: &str,
+) -> Result<bool> {
+    require_direct_branch(work_dir, branch_ref).await?;
+    let target = exact_branch_oid(work_dir, branch_ref).await?;
+    is_ancestor(work_dir, source, &target).await
+}
+
+async fn is_ancestor(work_dir: &Path, source: &str, target: &str) -> Result<bool> {
+    let ancestry = git_output(work_dir, &["merge-base", "--is-ancestor", source, target]).await?;
+    match ancestry.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        status => Err(AgentError::Cli {
+            status,
+            stderr: ancestry.combined_output(),
+        }),
+    }
+}
+
 pub(crate) async fn merge_commit_without_checkout(
     work_dir: &Path,
     from: &str,
@@ -89,44 +121,24 @@ pub(crate) async fn merge_commit_without_checkout(
         });
     }
 
-    let target_sha = git_stdout(
-        work_dir,
-        &["rev-parse", &format!("{target_ref}^{{commit}}")],
-    )
-    .await?
-    .trim()
-    .to_owned();
+    let target_sha = exact_branch_oid(work_dir, &target_ref).await?;
     let source_sha = git_stdout(work_dir, &["rev-parse", &format!("{from}^{{commit}}")])
         .await?
         .trim()
         .to_owned();
 
-    let ancestry = git_output(
-        work_dir,
-        &["merge-base", "--is-ancestor", &source_sha, &target_sha],
-    )
-    .await?;
-    match ancestry.status {
-        0 => {
-            if !publish_inactive_ref(work_dir, &target_ref, &target_sha, None, message).await? {
-                return Ok(RefMergeOutcome::TargetCheckedOut {
-                    target_branch,
-                    target_ref,
-                });
-            }
-            return Ok(RefMergeOutcome::AlreadyUpToDate {
+    if is_ancestor(work_dir, &source_sha, &target_sha).await? {
+        if !publish_inactive_ref(work_dir, &target_ref, &target_sha, None, message).await? {
+            return Ok(RefMergeOutcome::TargetCheckedOut {
                 target_branch,
                 target_ref,
-                commit: target_sha,
             });
         }
-        1 => {}
-        status => {
-            return Err(AgentError::Cli {
-                status,
-                stderr: ancestry.combined_output(),
-            });
-        }
+        return Ok(RefMergeOutcome::AlreadyUpToDate {
+            target_branch,
+            target_ref,
+            commit: target_sha,
+        });
     }
 
     let merge_tree = git_output(
