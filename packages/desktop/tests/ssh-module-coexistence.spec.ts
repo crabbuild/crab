@@ -20,6 +20,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RemoteProvider, type RemoteProviderOptions } from "../electron/remote-provider";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 
 // ── Mock Factories ───────────────────────────────────────────────
 
@@ -63,14 +64,14 @@ function createMockCapabilityNegotiator() {
 }
 
 function createMockSessionManager() {
-  return {
+  return withRepositoryRuntimes({
     getStatus: vi.fn().mockReturnValue("connected"),
     getConnection: vi.fn().mockReturnValue({ client: {} }),
     agentSession: vi.fn().mockReturnValue("ssh:1"),
     on: vi.fn(),
     off: vi.fn(),
     emit: vi.fn(),
-  };
+  });
 }
 
 // ── Tests ────────────────────────────────────────────────────────

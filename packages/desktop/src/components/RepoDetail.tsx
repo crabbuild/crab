@@ -411,11 +411,11 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     }
   }, [refreshBranchInfo, refreshGitStatus, repo.repo_id, repo.deferred]);
 
-  // Fetch the flat listing once per repo+rev; both Explorer and the
+  // Fetch the flat listing for each native session+rev; both Explorer and the
   // quick-open finder reuse it. Explorer also re-fetches on refresh,
   // and that's fine — setState on `entries` here would be stale.
   useEffect(() => {
-    if (repo.deferred) return;
+    if (repo.deferred || !repo.native_session_id) return;
     let cancelled = false;
     (async () => {
       let pinned: string | undefined;
@@ -432,12 +432,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
         .then((r) => {
           if (!cancelled) setEntries(r.entries);
         })
-        .catch(() => setEntries([]));
+        .catch(() => { if (!cancelled) setEntries([]); });
     })();
     return () => {
       cancelled = true;
     };
-  }, [repo.repo_id, rev]);
+  }, [repo.repo_id, repo.native_session_id, rev]);
 
   // Validate the restored activeFile after entries load. If the file
   // no longer exists in the repo, clear the diff tab and activeKey so

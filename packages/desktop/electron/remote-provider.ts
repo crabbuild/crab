@@ -26,7 +26,7 @@ import {
   type FsRenameResult,
   type FsWriteResult,
 } from "./repo-provider";
-import { noCapabilities, type CapabilitySet } from "./repo-capabilities";
+import { noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
 import { parseRepoId } from "./ssh-types";
 import { type RpcRouter } from "./ssh-router";
 import type { RemoteFileEditor } from "./ssh-file-editor";
@@ -88,6 +88,7 @@ export class RemoteProvider extends BaseProvider {
   /** Bound handler for SSH connection status changes (stored for cleanup). */
   private readonly onStatusChanged: (payload: { profileId: string; status: SshConnectionStatus; error?: string }) => void;
   private readonly onAgentUnavailable: (payload: { profileId: string; message?: string }) => void;
+  private readonly onRepositoryRuntime: (payload: RepositoryRuntime & { profileId: string }) => void;
 
   constructor(options: RemoteProviderOptions) {
     super();
@@ -108,6 +109,11 @@ export class RemoteProvider extends BaseProvider {
       void this.emitCapabilityChanges(profileId, message ?? "Desktop services are unavailable.");
     };
     this.sessionManager.on("ssh:agent-unavailable", this.onAgentUnavailable);
+    this.onRepositoryRuntime = event => {
+      if (event.sessionId && this.watchedRepos.has(event.repoId)) void this.restartWatching(event.repoId, event.profileId);
+      void this.emitRepositoryCapabilities(event.repoId);
+    };
+    this.sessionManager.on("ssh:repository-runtime", this.onRepositoryRuntime);
   }
 
   // ── Core Dispatch ────────────────────────────────────────────
@@ -121,14 +127,17 @@ export class RemoteProvider extends BaseProvider {
 
     if (method === "close") {
       this.sessionManager.forgetRepository(parsed.profileId, repoId);
-      if (this.getConnectionStatus(parsed.profileId) !== "connected") return {};
+      if (!this.sessionManager.agentSession(parsed.profileId)) return {};
+    } else if (method !== "rpc/cancel" && this.getConnectionStatus(parsed.profileId) === "connected") {
+      const runtime = this.sessionManager.repositoryRuntime(parsed.profileId, repoId);
+      if (!runtime.sessionId) throw new Error(runtime.error ?? "SSH repository is unavailable. Retry reopening it.");
     }
     return this.router.route(repoId, method, params);
   }
 
   nativeSession(repoId: string): string | null {
     const remote = parseRepoId(repoId);
-    return remote ? this.sessionManager.agentSession(remote.profileId) : null;
+    return remote ? this.sessionManager.repositoryRuntime(remote.profileId, repoId).sessionId : null;
   }
 
   // ── File Watching ────────────────────────────────────────────
@@ -147,6 +156,7 @@ export class RemoteProvider extends BaseProvider {
       profileId: parsed.profileId,
       debounceTimer: null,
     });
+    if (!this.nativeSession(repoId)) return;
 
     const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop");
 
@@ -292,7 +302,7 @@ export class RemoteProvider extends BaseProvider {
 
     const status = this.getConnectionStatus(parsed.profileId);
 
-    if (status !== "connected" || !this.sessionManager.agentSession(parsed.profileId)) return noCapabilities();
+    if (status !== "connected" || !this.nativeSession(repoId)) return noCapabilities();
 
     return {
       canEdit: true,
@@ -317,6 +327,7 @@ export class RemoteProvider extends BaseProvider {
     // Unsubscribe from connection status changes
     this.sessionManager.off("ssh:status-changed", this.onStatusChanged);
     this.sessionManager.off("ssh:agent-unavailable", this.onAgentUnavailable);
+    this.sessionManager.off("ssh:repository-runtime", this.onRepositoryRuntime);
 
     // Clear all watch debounce timers
     for (const state of this.watchedRepos.values()) {
@@ -370,7 +381,7 @@ export class RemoteProvider extends BaseProvider {
     if (status === "connected") {
       // Connection restored — restart watching for all repos on this profile.
       for (const state of this.watchedRepos.values()) {
-        if (state.profileId !== profileId) continue;
+        if (state.profileId !== profileId || !this.nativeSession(state.repoId)) continue;
         // Fire-and-forget: restart watching in the background
         void this.restartWatching(state.repoId, profileId);
       }
@@ -409,20 +420,22 @@ export class RemoteProvider extends BaseProvider {
    * connection state transitions (connected ↔ disconnected ↔ reconnecting).
    */
   private async emitCapabilityChanges(profileId: string, error?: string): Promise<void> {
-    for (const state of this.watchedRepos.values()) {
-      if (state.profileId !== profileId) continue;
+    // Native availability belongs to opened repositories, including inactive
+    // views that stopped watching. Watching cannot own recovery notifications.
+    await Promise.all(this.sessionManager.repositoryRuntimes(profileId).map(runtime => this.emitRepositoryCapabilities(runtime.repoId, error)));
+  }
 
-      const nativeSessionId = this.sessionManager.agentSession(profileId);
-      const caps = await this.capabilities(state.repoId);
-      if (this.sessionManager.agentSession(profileId) !== nativeSessionId) continue;
-      this.emit("capabilities-changed", {
-        type: "capabilities-changed" as const,
-        repoId: state.repoId,
-        capabilities: caps,
-        nativeSessionId,
-        error,
-      });
-    }
+  private async emitRepositoryCapabilities(repoId: string, error?: string): Promise<void> {
+    const remote = parseRepoId(repoId);
+    if (!remote) return;
+    const runtime = this.sessionManager.repositoryRuntime(remote.profileId, repoId);
+    const caps = await this.capabilities(repoId);
+    const current = this.sessionManager.repositoryRuntime(remote.profileId, repoId);
+    if (runtime.sessionId !== current.sessionId || runtime.error !== current.error) return;
+    this.emit("capabilities-changed", {
+      type: "capabilities-changed" as const, repoId, capabilities: caps,
+      nativeSessionId: runtime.sessionId, error: error ?? runtime.error,
+    });
   }
 
   /**

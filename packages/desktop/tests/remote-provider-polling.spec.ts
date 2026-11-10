@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { RemoteProvider } from "../electron/remote-provider";
 
 // ── Mock factories ───────────────────────────────────────────────
@@ -51,11 +52,11 @@ function makeMockCapabilityNegotiator(supportsFileWatching = false) {
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, {
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
     agentSession: vi.fn().mockReturnValue("ssh:1"),
-  });
+  }));
 }
 
 // ── Tests ────────────────────────────────────────────────────────

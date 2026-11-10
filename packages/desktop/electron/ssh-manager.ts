@@ -10,6 +10,7 @@ import type { AgentDeployer } from "./ssh-deployer";
 import { DeployError } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { RpcRouter } from "./ssh-router";
+import type { RepositoryRuntime } from "./repo-capabilities";
 
 // ── Connection status ────────────────────────────────────────────
 
@@ -152,7 +153,8 @@ export class SshSessionManager extends EventEmitter {
   private openings = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private closing = new Map<string, Promise<void>>();
   private sftpOpen = new WeakMap<Client, Promise<SFTPWrapper>>();
-  private repositories = new Map<string, Map<string, { path: string; handle: Record<string, unknown>; sessionId: string }>>();
+  private repositories = new Map<string, Map<string, { path: string; handle: Record<string, unknown>; sessionId: string | null; error?: string }>>();
+  private repositoryOpenings = new Map<string, { sessionId: string; cancelled: boolean; promise: Promise<Record<string, unknown>> }>();
   private nextAgentSession = 1;
 
   constructor(private readonly verifyHostKey: VerifyHostKey = async () => false) {
@@ -368,15 +370,18 @@ export class SshSessionManager extends EventEmitter {
       connection.client.destroy();
       for (const jump of [...connection.jumpClients].reverse()) jump.destroy();
     }
-    if (opening) await opening.promise.catch(() => {});
-    // The bootstrap caller owns its error, but disconnect must join its cleanup.
-    if (deployment) await deployment.promise.catch(() => {});
+    const { client, channels } = connection;
+    // EOF must precede joining replay: the native owner needs that signal to
+    // cancel and drain an open that is still holding bootstrap's completion.
+    // Authentication/bootstrap callers retain their original terminal error.
+    const [native] = await Promise.allSettled([
+      channels.agent ? this.drainAgent(channels.agent) : Promise.resolve(),
+      opening?.promise,
+      deployment?.promise,
+    ]);
     this.agentDeps?.capabilityNegotiator.clearCache(profileId);
     this.agentDeps?.rpcRouter.clearQueue(profileId);
-    const { client, channels } = connection;
-    let failure: unknown;
-    try { if (channels.agent) await this.drainAgent(channels.agent); }
-    catch (error) { failure = error; }
+    const failure: unknown = native.status === "rejected" ? native.reason : undefined;
     for (const channel of channels.terminals.values()) channel.end();
     channels.sftp?.end();
     for (const channel of channels.portForwards.values()) channel.end();
@@ -695,6 +700,20 @@ export class SshSessionManager extends EventEmitter {
       ? connection.agentSessionId ?? null : null;
   }
 
+  repositoryRuntime(profileId: string, repoId: string): RepositoryRuntime {
+    const sessionId = this.agentSession(profileId);
+    const repository = this.repositories.get(profileId)?.get(repoId);
+    return { repoId, sessionId: sessionId && repository?.sessionId === sessionId ? sessionId : null, error: sessionId ? repository?.error : undefined };
+  }
+
+  repositoryRuntimes(profileId: string): RepositoryRuntime[] {
+    return [...this.repositories.get(profileId)?.keys() ?? []].map(repoId => this.repositoryRuntime(profileId, repoId));
+  }
+
+  private publishRepositoryRuntime(profileId: string, repoId: string): void {
+    this.emit("ssh:repository-runtime", { profileId, ...this.repositoryRuntime(profileId, repoId) });
+  }
+
   async ensureAgent(profileId: string): Promise<void> {
     const connection = this.connections.get(profileId);
     if (!connection || !["connected", "deploying"].includes(connection.status)) throw new Error("SSH connection is not ready for agent deployment");
@@ -712,25 +731,56 @@ export class SshSessionManager extends EventEmitter {
   async openRepository(profileId: string, remotePath: string): Promise<Record<string, unknown>> {
     if (!path.posix.isAbsolute(remotePath) || remotePath.includes("\0")) throw new Error("Choose an absolute remote repository path");
     if (this.getStatus(profileId) !== "connected" || !this.agentCapabilities(profileId)) throw new Error("Deploy the SSH agent before opening a repository");
-    const connection = this.connections.get(profileId)!;
-    const client = connection.client;
     const sessionId = this.agentSession(profileId);
+    if (!sessionId) throw new Error("Deploy the SSH agent before opening a repository");
+    return this.openRepositorySession(this.connections.get(profileId)!, remotePath, sessionId);
+  }
+
+  private openRepositorySession(connection: SshConnection, remotePath: string, sessionId: string): Promise<Record<string, unknown>> {
+    const profileId = connection.profile.id;
+    const client = connection.client;
     const repoId = `ssh://${profileId}${remotePath}`;
+    const pending = this.repositoryOpenings.get(repoId);
+    if (pending?.sessionId === sessionId) return pending.promise;
     const existing = this.repositories.get(profileId)?.get(repoId);
     // Bootstrap already reopened tracked repositories. Opening again removes
     // the native owner and invalidates readers captured by its ready event.
-    if (sessionId && existing?.sessionId === sessionId) return { ...existing.handle, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
-    const result = await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "open_local", { repo_id: repoId, path: remotePath });
-    if (!sessionId || this.connections.get(profileId) !== connection || connection.client !== client || this.agentSession(profileId) !== sessionId) throw new Error("SSH repository open was interrupted");
-    if (!result || typeof result !== "object" || !("repo_id" in result) || result.repo_id !== repoId) throw new Error("SSH agent returned an invalid repository handle");
-    let repositories = this.repositories.get(profileId);
-    if (!repositories) { repositories = new Map(); this.repositories.set(profileId, repositories); }
-    repositories.set(repoId, { path: remotePath, handle: result as Record<string, unknown>, sessionId });
-    return { ...result, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
+    if (existing?.sessionId === sessionId) return Promise.resolve({ ...existing.handle, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId });
+    const current = () => this.connections.get(profileId) === connection && connection.client === client && connection.agentSessionId === sessionId && !!connection.channels.agent;
+    const entry = { sessionId, cancelled: false, promise: Promise.resolve().then(async () => {
+      if (existing) { existing.sessionId = null; existing.error = undefined; this.publishRepositoryRuntime(profileId, repoId); }
+      try {
+        const result = await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "open_local", { repo_id: repoId, path: remotePath });
+        if (!current()) throw new Error("SSH repository open was interrupted");
+        if (!result || typeof result !== "object" || !("repo_id" in result) || result.repo_id !== repoId) throw new Error("SSH agent returned an invalid repository handle");
+        if (entry.cancelled) {
+          await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "close", { repo_id: repoId });
+          throw new Error("SSH repository closed during opening");
+        }
+        let repositories = this.repositories.get(profileId);
+        if (!repositories) { repositories = new Map(); this.repositories.set(profileId, repositories); }
+        repositories.set(repoId, { path: remotePath, handle: result as Record<string, unknown>, sessionId });
+        this.publishRepositoryRuntime(profileId, repoId);
+        return { ...result, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
+      } catch (error) {
+        if (existing && current() && this.repositories.get(profileId)?.get(repoId) === existing) {
+          existing.error = error instanceof Error ? error.message : String(error);
+          this.publishRepositoryRuntime(profileId, repoId);
+        }
+        throw error;
+      }
+    }) };
+    this.repositoryOpenings.set(repoId, entry);
+    const finished = () => { if (this.repositoryOpenings.get(repoId) === entry) this.repositoryOpenings.delete(repoId); };
+    void entry.promise.then(finished, finished);
+    return entry.promise;
   }
 
   forgetRepository(profileId: string, repoId: string): void {
+    const pending = this.repositoryOpenings.get(repoId);
+    if (pending) pending.cancelled = true;
     this.repositories.get(profileId)?.delete(repoId);
+    this.publishRepositoryRuntime(profileId, repoId);
   }
 
   private async deployAgent(connection: SshConnection, signal: AbortSignal): Promise<void> {
@@ -760,16 +810,12 @@ export class SshSessionManager extends EventEmitter {
         }
       });
       const capabilities = await capabilityNegotiator.negotiate(profile.id);
-      for (const [repoId, repository] of this.repositories.get(profile.id) ?? []) {
-        const result = await rpcRouter.sendToRemoteAgent(profile.id, "open_local", { repo_id: repoId, path: repository.path });
-        if (!current() || connection.channels.agent !== channel) throw new Error("SSH deployment superseded");
-        if (!result || typeof result !== "object" || !("repo_id" in result) || result.repo_id !== repoId) throw new Error("SSH agent returned an invalid repository handle");
-        if (this.repositories.get(profile.id)?.get(repoId) !== repository) await rpcRouter.sendToRemoteAgent(profile.id, "close", { repo_id: repoId });
-        else { repository.handle = result as Record<string, unknown>; repository.sessionId = sessionId; }
-      }
+      // A repository failure belongs to that repository. Keep the negotiated
+      // runtime alive so other repositories and an explicit retry can use it.
+      await Promise.allSettled([...this.repositories.get(profile.id)?.values() ?? []].map(repository => this.openRepositorySession(connection, repository.path, sessionId)));
       await rpcRouter.replayQueue(profile.id);
       signal.throwIfAborted();
-      if (!current()) throw new Error("SSH deployment superseded");
+      if (!current() || connection.channels.agent !== channel) throw new Error("SSH deployment superseded");
       this.setStatus(profile.id, "connected");
       this.emit("ssh:agent-capabilities", { profileId: profile.id, capabilities });
     } catch (error) {

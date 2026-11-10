@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
@@ -25,6 +25,9 @@ test("saved SSH repositories survive restart, failed restore and deferred select
     mkdirSync(directory); git(directory, ["init", "--initial-branch=main"]);
     git(directory, ["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Restore fixture"]);
   }
+  writeFileSync(path.join(second, "recovered.txt"), "Repository retry restored its file tree\n");
+  git(second, ["add", "recovered.txt"]);
+  git(second, ["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Recovery tree fixture"]);
   mkdirSync(path.join(first, ".crab"));
   writeFileSync(path.join(first, ".crab/config.toml"), `[cache]\nchunk_cache_dir = ${JSON.stringify(path.join(root, "cache/chunks"))}\n`);
   git(first, ["config", "filter.crab.process", "crab filter-process"]); git(first, ["config", "filter.crab.required", "true"]);
@@ -32,7 +35,8 @@ test("saved SSH repositories survive restart, failed restore and deferred select
   const header = Buffer.from(JSON.stringify({ [marker]: { dtype: "U8", shape: [size], data_offsets: [0, size] } }));
   const prefix = Buffer.alloc(8); prefix.writeBigUInt64LE(BigInt(header.length));
   writeFileSync(path.join(first, ".gitattributes"), "*.safetensors filter=crab -text\n");
-  writeFileSync(path.join(first, file), Buffer.concat([prefix, header, Buffer.alloc(size, 0x42)]));
+  const content = Buffer.concat([prefix, header, Buffer.alloc(size, 0x42)]);
+  writeFileSync(path.join(first, file), content);
   git(first, ["add", ".gitattributes", file]);
   const pointer = git(first, ["show", `:${file}`]); expect(pointer.length).toBeLessThan(1024);
   writeFileSync(path.join(first, file), pointer);
@@ -92,6 +96,37 @@ test("saved SSH repositories survive restart, failed restore and deferred select
     await page.getByRole("button", { name: "first-project", exact: true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(firstId);
     expect(fixture.connectionAttempts).toBe(1);
+    await showLogicalFile(page);
+    await page.getByRole("button", { name: "File details", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Hydrate to disk", exact: true })).toBeEnabled();
+    renameSync(path.join(second, ".git"), path.join(second, ".git-offline"));
+    await expect.poll(() => fixture.commands.size).toBe(1);
+    [...fixture.commands][0].stdin.end();
+    await page.getByRole("button", { name: "Retry reopening repository", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Hydrate to disk", exact: true })).toBeEnabled({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "New File", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Hydrate to disk", exact: true }).click();
+    await expect(page.getByText(/materialized on disk/)).toBeVisible();
+    expect(readFileSync(path.join(first, file))).toEqual(content);
+    expect(git(first, ["show", `:${file}`])).toEqual(pointer);
+    // Later restart checks require the original lazy working representation.
+    writeFileSync(path.join(first, file), pointer);
+    await page.screenshot({ path: test.info().outputPath("ssh-healthy-sibling-recovered.png") });
+    await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "second-project", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true }).locator("..")).toContainText(/repo|git/i);
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+    await expect(page.getByRole("button", { name: "New File", exact: true })).toBeDisabled();
+    await page.screenshot({ path: test.info().outputPath("ssh-failed-sibling-retryable.png") });
+    renameSync(path.join(second, ".git-offline"), path.join(second, ".git"));
+    const recoveredAgent = [...fixture.commands][0];
+    await page.getByRole("button", { name: "Retry reopening repository", exact: true }).click();
+    await expect(page.getByRole("button", { name: "New File", exact: true })).toBeEnabled();
+    await expect(page.locator('[role="treeitem"][data-item-path="recovered.txt"]')).toBeVisible();
+    expect([...fixture.commands]).toEqual([recoveredAgent]);
+    expect(fixture.connectionAttempts).toBe(1);
+    await page.screenshot({ path: test.info().outputPath("ssh-failed-sibling-restored.png") });
+    await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "first-project", exact: true }).click();
+    await showLogicalFile(page);
     await close();
 
     fixture.setAccepting(false);
@@ -131,7 +166,7 @@ test("saved SSH repositories survive restart, failed restore and deferred select
     await showLogicalFile(page);
     expect(fixture.connectionAttempts).toBe(beforeDisabled + 1);
     expect(fixture.uploadedBytes).toBe(uploaded);
-    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ openedSshFromEmptyStart: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
+    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ openedSshFromEmptyStart: true, failedSiblingDidNotDisableHealthyRepository: true, healthySiblingMaterializedExactly: true, indexPointerPreserved: true, inactiveSiblingFailureVisible: true, failedSiblingRetryReusedNativeAgent: true, retryReloadedFileTree: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
   } finally {
     if (application) {
       const page = application.windows()[0];

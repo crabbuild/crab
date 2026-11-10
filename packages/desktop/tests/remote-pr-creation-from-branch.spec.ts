@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { parseRepoId } from "../electron/ssh-types";
 import { RpcRouter } from "../electron/ssh-router";
 import { RemoteProvider } from "../electron/remote-provider";
@@ -34,6 +35,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  agentSession() { return "ssh:1"; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
 
@@ -81,7 +83,7 @@ const TEST_PROFILE_ID = "gpu-server";
 const TEST_REPO_ID = `ssh://${TEST_PROFILE_ID}/home/dev/my-project`;
 
 function createTestSetup() {
-  const sessionManager = new MockSessionManager();
+  const sessionManager = withRepositoryRuntimes(new MockSessionManager());
   const channel = new MockChannel();
   const localAgent = { request: vi.fn().mockResolvedValue({ ok: true }) };
 

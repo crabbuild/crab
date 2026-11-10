@@ -12,6 +12,13 @@ export interface CapabilitySet {
   canTrash: boolean;
 }
 
+/** Native availability and terminal recovery failure for one repository. */
+export interface RepositoryRuntime {
+  repoId: string;
+  sessionId: string | null;
+  error?: string;
+}
+
 /** Capabilities for a local repository with native services available. */
 export function fullCapabilities(): CapabilitySet {
   return {

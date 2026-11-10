@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { RemoteProvider } from "../electron/remote-provider";
 import { fullCapabilities, noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 
@@ -77,11 +78,11 @@ function makeMockCapabilityNegotiator(options?: {
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, {
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
     agentSession: vi.fn().mockReturnValue("ssh:1"),
-  });
+  }));
 }
 
 // ── LocalProvider capabilities tests ─────────────────────────────
@@ -237,6 +238,36 @@ describe("RemoteProvider capabilities", () => {
     const caps = await provider.capabilities("/local/path/to/repo");
 
     expect(caps).toEqual(noCapabilities());
+  });
+
+  it("a failed repository remains unavailable while its sibling uses the live agent", async () => {
+    const sibling = "ssh://profile-1/home/user/healthy";
+    mockSessionManager.repositoryRuntime.mockImplementation((_profileId, repoId) => ({ repoId, sessionId: repoId === REPO_ID ? null : "ssh:2", error: repoId === REPO_ID ? "Repository directory was removed" : undefined }));
+    expect(await provider.capabilities(REPO_ID)).toEqual(noCapabilities());
+    expect((await provider.capabilities(sibling)).canEdit).toBe(true);
+    await expect(provider.request("list", { repo_id: REPO_ID })).rejects.toThrow("Repository directory was removed");
+    expect(mockRouter.route).not.toHaveBeenCalled();
+    await provider.request("list", { repo_id: sibling });
+    expect(mockRouter.route).toHaveBeenCalledWith(sibling, "list", { repo_id: sibling });
+  });
+
+  it("publishes repository retry outcomes even when the view is not watching", async () => {
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockSessionManager.repositoryRuntime.mockReturnValue({ repoId: REPO_ID, sessionId: null, error: "Repository directory was removed" });
+    mockSessionManager.emit("ssh:repository-runtime", { profileId: "profile-1", repoId: REPO_ID, sessionId: null });
+    await Promise.resolve();
+    expect(changes).toEqual([expect.objectContaining({ repoId: REPO_ID, nativeSessionId: null, capabilities: noCapabilities(), error: "Repository directory was removed" })]);
+  });
+
+  it("revokes capabilities for an opened repository without a mounted watcher", async () => {
+    await provider.capabilities(REPO_ID);
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockSessionManager.getStatus.mockReturnValue("disconnected");
+    mockSessionManager.emit("ssh:status-changed", { profileId: "profile-1", status: "disconnected" });
+    await Promise.resolve();
+    expect(changes).toEqual([expect.objectContaining({ repoId: REPO_ID, nativeSessionId: null, capabilities: noCapabilities() })]);
   });
 });
 

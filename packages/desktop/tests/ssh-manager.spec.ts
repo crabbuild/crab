@@ -116,6 +116,27 @@ async function connectProfile(
   return client;
 }
 
+function nativeRuntime(manager: SshSessionManager) {
+  const channels: MockClientChannel[] = [];
+  const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
+  let cached = false;
+  const send = vi.fn(async (_profile: string, method: string, params: Record<string, unknown>): Promise<unknown> => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
+  manager.configureAgentDeployment({
+    agentDeployer: { ensureAgent: vi.fn(async () => {
+      const channel = new MockClientChannel();
+      channel.end.mockImplementation(() => { channel.emit("close", 0); });
+      channels.push(channel); return channel;
+    }) } as unknown as AgentDeployer,
+    capabilityNegotiator: {
+      getCached: () => cached ? capabilities : null,
+      negotiate: async () => { cached = true; return capabilities; },
+      clearCache: () => { cached = false; },
+    } as unknown as CapabilityNegotiator,
+    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
+  });
+  return { channels, send };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("SshSessionManager", () => {
@@ -251,6 +272,90 @@ describe("SshSessionManager", () => {
         await manager.openRepository(profile.id, "/repository");
         expect(send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(2);
       } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("a failed repository replay leaves its sibling ready and retries only the failed repository", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const native = runtime.send.getMockImplementation()!;
+      runtime.send.mockImplementation(async (id, method, params) => {
+        if (method === "open_local" && params.repo_id === second.repo_id) throw new Error("Repository directory was removed");
+        return native(id, method, params);
+      });
+      runtime.channels[0].emit("close", 0);
+      try {
+        await expect(manager.ensureAgent(profile.id)).resolves.toBeUndefined();
+        expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBeNull();
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id))).toMatchObject({ sessionId: null, error: "Repository directory was removed" });
+        runtime.send.mockImplementation(native); runtime.send.mockClear();
+        await manager.openRepository(profile.id, "/second");
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).not.toBeNull();
+        expect(runtime.send.mock.calls.map(([, method, params]) => [method, params.repo_id])).toEqual([["open_local", second.repo_id]]);
+        expect(runtime.channels).toHaveLength(2);
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("concurrent opens join the repository's native open outcome", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => outcome);
+      try {
+        const joined = Promise.all([manager.openRepository(profile.id, "/first"), manager.openRepository(profile.id, "/first")]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const sent = runtime.send.mock.calls.length;
+        release({ repo_id: `ssh://${profile.id}/first` });
+        await joined;
+        expect(sent).toBe(1);
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("forgetting a repository during replay closes the late native owner without restoring it", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const handle = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation((id, method, params) => method === "open_local" ? outcome : native(id, method, params));
+      runtime.send.mockClear();
+      runtime.channels[0].emit("close", 0);
+      try {
+        const restarting = manager.ensureAgent(profile.id);
+        await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(profile.id, "open_local", expect.objectContaining({ repo_id: handle.repo_id })));
+        manager.forgetRepository(profile.id, String(handle.repo_id));
+        release({ repo_id: handle.repo_id });
+        await restarting;
+        expect(manager.repositoryRuntimes(profile.id)).toEqual([]);
+        expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: handle.repo_id });
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("disconnect sends native EOF before joining an in-flight repository replay", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const handle = await manager.openRepository(profile.id, "/first");
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => outcome); runtime.send.mockClear();
+      runtime.channels[0].emit("close", 0);
+      const restarting = manager.ensureAgent(profile.id);
+      void restarting.catch(() => {});
+      await vi.waitFor(() => expect(runtime.send).toHaveBeenCalled());
+      const closing = manager.disconnect(profile.id);
+      void closing.catch(() => {});
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const sentEof = runtime.channels[1].end.mock.calls.length;
+      release({ repo_id: handle.repo_id });
+      await Promise.allSettled([restarting, closing]);
+      expect(sentEof).toBe(1);
     });
 
     it.each([false, true])("disconnect joins authentication without resurrection (handshake started: %s)", async started => {

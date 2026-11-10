@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import { app, dialog } from "electron";
 import type { StorageConnections } from "./storage-connections";
 import { parseAgentCapabilities, type AgentCapabilities } from "./ssh-types";
+import type { RepositoryRuntime } from "./repo-capabilities";
 
 interface RpcSuccess { jsonrpc: "2.0"; id: number | string | null; result: unknown }
 interface RpcError { jsonrpc: "2.0"; id: number | string | null; error: { code: number; message: string; data?: unknown } }
@@ -28,11 +29,6 @@ interface OpenRepository {
   params: Record<string, unknown>;
   sessionId: string | null;
   error?: Error;
-}
-export interface RepositoryRuntime {
-  repoId: string;
-  sessionId: string | null;
-  error?: string;
 }
 
 function fields(value: unknown): Record<string, unknown> | null {

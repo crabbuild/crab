@@ -161,18 +161,22 @@ export const ExplorerView = memo(function ExplorerView({
   }, [repoPath]);
 
   useEffect(() => {
+    let cancelled = false;
     setRefs(null);
+    if (!repo.native_session_id) return;
     rpc
       .listRefs(repo.repo_id)
-      .then((r) => setRefs(r.refs))
-      .catch(() => setRefs([]));
-  }, [repo.repo_id]);
+      .then((r) => { if (!cancelled) setRefs(r.refs); })
+      .catch(() => { if (!cancelled) setRefs([]); });
+    return () => { cancelled = true; };
+  }, [repo.repo_id, repo.native_session_id]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setEntries(null);
+    if (!repo.native_session_id) { setLoading(false); return; }
 
     (async () => {
       // Peel annotated tags to a commit before listing: the SDK's
@@ -202,7 +206,7 @@ export const ExplorerView = memo(function ExplorerView({
     return () => {
       cancelled = true;
     };
-  }, [repo.repo_id, rev]);
+  }, [repo.repo_id, repo.native_session_id, rev]);
 
   const branches = useMemo(() => refs?.filter((r) => r.kind === "branch") ?? [], [refs]);
   const tags = useMemo(() => refs?.filter((r) => r.kind === "tag") ?? [], [refs]);

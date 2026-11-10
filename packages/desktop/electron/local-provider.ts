@@ -12,8 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { shell } from "electron";
 
-import { fullCapabilities, noCapabilities, type CapabilitySet } from "./repo-capabilities";
-import { Agent, type RepositoryRuntime } from "./agent";
+import { fullCapabilities, noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
+import { Agent } from "./agent";
 import {
   BaseProvider,
   FsCreateResult,
