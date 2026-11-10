@@ -1,34 +1,35 @@
-import { useEffect, useState } from "react";
-import clsx from "clsx";
-import { Loader2, Table2, Terminal } from "lucide-react";
+import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
+import { Table2 } from "lucide-react";
 import { rpc, ParquetPreview } from "../../ipc";
 import { formatBytes } from "../../lib/format";
 import { useSetting } from "../../settings";
-import { DuckDbQueryPanel } from "./DuckDbQueryPanel";
+import { FileBrowseState, FileQueryMode, FileQueryPanel } from "./FileQueryPanel";
+import { fileQuery } from "../../lib/file-query";
 
 interface Props {
   repoId: string;
   path: string;
-  rev: string | null;
+  rev: string | null; nativeSessionId: string;
 }
 
-type ViewMode = "browse" | "sql";
 
 // Parquet preview: the agent parses the file footer + first row
 // group and returns summary + rows. The UI stays dumb on purpose.
-export function ParquetView({ repoId, path, rev }: Props) {
+export function ParquetView({ repoId, path, rev, nativeSessionId }: Props) {
   const [data, setData] = useState<ParquetPreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [mode, setMode] = useState<ViewMode>("browse");
+  const query = useMemo(() => fileQuery(repoId, path, rev), [repoId, path, rev]);
+  const { mode } = useSyncExternalStore(query.subscribe, query.snapshot, query.snapshot);
   const maxRows = useSetting("parquetPreviewRows");
 
   useEffect(() => {
+    if (mode === "sql") return;
     let cancelled = false;
     const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewParquet(repoId, path, { rev: rev ?? undefined, max_rows: maxRows, signal: controller.signal })
+      .previewParquet(repoId, path, { rev: rev ?? undefined, native_session_id: nativeSessionId, max_rows: maxRows, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -39,81 +40,32 @@ export function ParquetView({ repoId, path, rev }: Props) {
       cancelled = true;
       controller.abort();
     };
-  }, [repoId, path, rev, maxRows]);
-
-  if (err) {
-    return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
-        {err}
-      </div>
-    );
-  }
-  if (!data) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Reading Parquet metadata…
-      </div>
-    );
-  }
-
-  const rowsAny = data.preview_rows ?? [];
+  }, [repoId, path, rev, nativeSessionId, maxRows, mode]);
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-4 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
         <Table2 size={13} className="text-gx-accent" />
-        <span>
-          <strong className="text-gx-text">{data.num_rows.toLocaleString()}</strong> rows
-        </span>
-        <span>
-          <strong className="text-gx-text">{data.num_columns}</strong> columns
-        </span>
-        <span>
-          <strong className="text-gx-text">{data.num_row_groups}</strong> row groups
-        </span>
-        {data.created_by && <span className="truncate">· {data.created_by}</span>}
-
-        {/* Mode toggle */}
-        <div className="ml-4 flex items-center rounded border border-gx-border bg-gx-bg-sub">
-          <button
-            type="button"
-            onClick={() => setMode("browse")}
-            className={clsx(
-              "flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition rounded-l",
-              mode === "browse"
-                ? "bg-gx-accent/15 text-gx-accent"
-                : "text-gx-muted hover:text-gx-text",
-            )}
-          >
-            <Table2 size={10} />
-            Browse
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("sql")}
-            className={clsx(
-              "flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition rounded-r",
-              mode === "sql"
-                ? "bg-gx-accent/15 text-gx-accent"
-                : "text-gx-muted hover:text-gx-text",
-            )}
-          >
-            <Terminal size={10} />
-            SQL
-          </button>
-        </div>
-
-        <span className="ml-auto">preview · first {data.preview_row_count} rows</span>
+        <FileQueryMode query={query} mode={mode} />
+        {data && (
+          <>
+            <span><strong className="text-gx-text">{data.num_rows.toLocaleString()}</strong> rows</span>
+            <span><strong className="text-gx-text">{data.num_columns}</strong> columns</span>
+            <span><strong className="text-gx-text">{data.num_row_groups}</strong> row groups</span>
+            {data.created_by && <span className="truncate">· {data.created_by}</span>}
+          </>
+        )}
+        {mode === "browse" && data && <span className="ml-auto">preview · first {data.preview_row_count} rows</span>}
       </div>
 
       {mode === "browse" ? (
-        <div className="grid min-h-0 flex-1 grid-cols-[300px_1fr]">
+        data ? <div className="grid min-h-0 flex-1 grid-cols-[300px_1fr]">
           <SchemaPanel data={data} />
-          <RowsGrid data={data} rows={rowsAny} />
-        </div>
+          <RowsGrid data={data} rows={data.preview_rows ?? []} />
+        </div> : <FileBrowseState error={err} loading="Reading Parquet metadata…" />
       ) : (
         <div className="min-h-0 flex-1">
-          <DuckDbQueryPanel repoId={repoId} filePath={path} />
+          <FileQueryPanel query={query} nativeSessionId={nativeSessionId} />
         </div>
       )}
     </div>

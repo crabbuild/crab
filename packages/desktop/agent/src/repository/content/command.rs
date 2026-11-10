@@ -102,6 +102,31 @@ pub(super) async fn blob(
     Ok(output.stdout.into())
 }
 
+pub(super) async fn blob_to_file(
+    root: &Path,
+    oid: &str,
+    size: u64,
+    mut file: std::fs::File,
+    scope: &ReadScope,
+) -> Result<()> {
+    let command = git_command(root, &["--no-replace-objects", "cat-file", "blob", oid]);
+    let read = move |mut stdout: std::process::ChildStdout| {
+        let copied = std::io::copy(&mut (&mut stdout).take(size), &mut file)?;
+        if copied != size || stdout.read(&mut [0])? != 0 {
+            return Err(std::io::Error::other("Git blob differs from captured size"));
+        }
+        Ok(Vec::new())
+    };
+    let output = execute(command, scope, read, false).await?;
+    if !output.status.success() {
+        return Err(AgentError::Cli {
+            status: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
 async fn execute(
     command: std::process::Command,
     scope: &ReadScope,

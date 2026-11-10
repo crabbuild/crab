@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import clsx from "clsx";
 import {
   ChevronLeft,
@@ -15,10 +15,41 @@ import {
   SortAsc,
   SortDesc,
   Table2,
+  Terminal,
   History,
   Columns3,
 } from "lucide-react";
-import { DuckDbQueryResult, rpc } from "../../ipc";
+import type { FileQueryResult } from "../../ipc";
+import type { FileQuery } from "../../lib/file-query";
+
+export function FileQueryMode({ query, mode }: { query: FileQuery; mode: "browse" | "sql" }) {
+  return (
+    <div className="flex items-center rounded border border-gx-border bg-gx-bg-sub" role="group" aria-label="File view">
+      {(["browse", "sql"] as const).map(value => {
+        const Icon = value === "browse" ? Table2 : Terminal;
+        return (
+          <button key={value} type="button" aria-pressed={mode === value}
+            onClick={() => query.setMode(value)}
+            className={clsx("flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition",
+              mode === value ? "bg-gx-accent/15 text-gx-accent" : "text-gx-muted hover:text-gx-text")}>
+            <Icon size={10} /> {value === "browse" ? "Browse" : "SQL"}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function FileBrowseState({ error, loading }: { error: string | null; loading: string }) {
+  if (error) {
+    return <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{error}</div>;
+  }
+  return (
+    <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted">
+      <Loader2 size={14} className="animate-spin" /> {loading}
+    </div>
+  );
+}
 
 /** Table metadata passed from the parent (SqliteView already has this). */
 export interface TableMeta {
@@ -28,8 +59,8 @@ export interface TableMeta {
 }
 
 interface Props {
-  repoId: string;
-  filePath?: string;
+  query: FileQuery;
+  nativeSessionId: string;
   tables?: TableMeta[];
 }
 
@@ -43,27 +74,13 @@ interface PageState {
   limit: number;
 }
 
-/**
- * Enhanced DuckDB SQL query panel — SQLite Studio-like experience.
- *
- * Features:
- *   - Left sidebar: table tree with expandable column schemas
- *   - Quick-action buttons: SELECT, COUNT, Schema per table
- *   - SQL editor with Cmd+Enter execution
- *   - Sortable columns (click header to toggle ASC/DESC)
- *   - Pagination (prev/next page navigation)
- *   - Export results as CSV
- *   - Copy cell value on click
- *   - Query history with re-run
- *   - Column click in sidebar inserts into editor
- */
-export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
-  const [sql, setSql] = useState(() => defaultQuery(filePath, tables));
-  const [result, setResult] = useState<DuckDbQueryResult | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [elapsed, setElapsed] = useState<number | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
+export function FileQueryPanel({ query, nativeSessionId, tables }: Props) {
+  const { sql: draft, result, elapsed, history, error: err, status } = useSyncExternalStore(query.subscribe, query.snapshot, query.snapshot);
+  const filePath = query.path;
+  const initialSql = defaultQuery(filePath, tables);
+  const sql = draft ?? initialSql;
+  const loading = status === "running" || status === "cancelling";
+  const setSql = useCallback((text: string) => query.setSql(text), [query]);
   const [expandedTable, setExpandedTable] = useState<string | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(
     tables && tables.length > 0 ? tables[0].name : null,
@@ -75,37 +92,9 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
   const [isBrowsingTable, setIsBrowsingTable] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const execute = useCallback(
-    async (overrideSql?: string) => {
-      const queryToRun = overrideSql ?? sql;
-      if (!queryToRun.trim()) return;
-      setLoading(true);
-      setErr(null);
-      setResult(null);
-      setElapsed(null);
-      const t0 = performance.now();
-      try {
-        const res = await rpc.duckdbQuery(repoId, queryToRun.trim(), {
-          file_path: filePath,
-          max_rows: 1000,
-        });
-        setResult(res);
-        setElapsed(performance.now() - t0);
-        setHistory((prev) => {
-          const trimmed = queryToRun.trim();
-          const filtered = prev.filter((q) => q !== trimmed);
-          return [trimmed, ...filtered].slice(0, 30);
-        });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setErr(msg);
-        setElapsed(performance.now() - t0);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [repoId, sql, filePath],
-  );
+  const execute = useCallback((overrideSql?: string) => {
+    void query.run(nativeSessionId, overrideSql ?? sql);
+  }, [query, nativeSessionId, sql]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -124,12 +113,12 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
       const s = sortOvr !== undefined ? sortOvr : sort;
       const p = pageOvr ?? page;
       const f = filter !== undefined ? filter : filterText;
-      let q = `SELECT * FROM "${tableName}"`;
+      let q = `SELECT * FROM ${identifier(tableName)}`;
       if (f.trim()) {
         q += ` WHERE ${f}`;
       }
       if (s) {
-        q += ` ORDER BY "${s.column}" ${s.dir}`;
+        q += ` ORDER BY ${identifier(s.column)} ${s.dir}`;
       }
       q += ` LIMIT ${p.limit} OFFSET ${p.offset};`;
       setSql(q);
@@ -148,7 +137,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
       setFilterText("");
       setActiveTable(tableName);
       setIsBrowsingTable(true);
-      const q = `SELECT * FROM "${tableName}" LIMIT 100;`;
+      const q = `SELECT * FROM ${identifier(tableName)} LIMIT 100;`;
       setSql(q);
       execute(q);
     },
@@ -159,7 +148,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
   const handleCountTable = useCallback(
     (tableName: string) => {
       setIsBrowsingTable(false);
-      const q = `SELECT COUNT(*) AS total FROM "${tableName}";`;
+      const q = `SELECT COUNT(*) AS total FROM ${identifier(tableName)};`;
       setSql(q);
       execute(q);
     },
@@ -169,7 +158,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
   const handleSchemaTable = useCallback(
     (tableName: string) => {
       setIsBrowsingTable(false);
-      const q = `PRAGMA table_info('${tableName}');`;
+      const q = `PRAGMA table_info('${tableName.replaceAll("'", "''")}');`;
       setSql(q);
       execute(q);
     },
@@ -179,7 +168,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
   const handleIndexesTable = useCallback(
     (tableName: string) => {
       setIsBrowsingTable(false);
-      const q = `PRAGMA index_list('${tableName}');`;
+      const q = `PRAGMA index_list('${tableName.replaceAll("'", "''")}');`;
       setSql(q);
       execute(q);
     },
@@ -225,7 +214,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
     const end = ta.selectionEnd;
     const before = ta.value.slice(0, start);
     const after = ta.value.slice(end);
-    const insert = `"${colName}"`;
+    const insert = `${identifier(colName)}`;
     setSql(before + insert + after);
     setTimeout(() => {
       ta.focus();
@@ -266,17 +255,9 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
     URL.revokeObjectURL(url);
   }, [result]);
 
-  // Auto-run on mount
   useEffect(() => {
-    if (filePath && !tables) execute();
-    if (tables && tables.length > 0) {
-      setIsBrowsingTable(true);
-      const q = `SELECT * FROM "${tables[0].name}" LIMIT 100;`;
-      setSql(q);
-      execute(q);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    query.startDefault(nativeSessionId, initialSql);
+  }, [query, nativeSessionId, initialSql]);
 
   const hasSidebar = tables && tables.length > 0;
   const currentTableMeta = tables?.find((t) => t.name === activeTable);
@@ -395,7 +376,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
                         type="button"
                         onClick={() => {
                           setIsBrowsingTable(false);
-                          const q = `SELECT sql FROM sqlite_master WHERE name='${t.name}';`;
+                          const q = `SELECT sql FROM sqlite_master WHERE name='${t.name.replaceAll("'", "''")}';`;
                           setSql(q);
                           execute(q);
                         }}
@@ -476,6 +457,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
               value={sql}
               onChange={(e) => setSql(e.target.value)}
               onKeyDown={handleKeyDown}
+              aria-label="SQL query"
               spellCheck={false}
               className={clsx(
                 "w-full resize-y rounded border border-gx-border bg-gx-bg-sub px-3 py-2",
@@ -486,25 +468,28 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
               placeholder={
                 hasSidebar
                   ? "Click a table or write SQL. Click columns to insert references."
-                  : "SELECT * FROM 'file.parquet' LIMIT 100"
+                  : "SELECT * FROM data LIMIT 100"
               }
               rows={2}
             />
+            {loading ? (
+              <button type="button" className="btn absolute bottom-4 right-5" onClick={() => query.cancel()} disabled={status === "cancelling"}>
+                {status === "cancelling" ? "Cancelling…" : "Cancel query"}
+              </button>
+            ) : (
             <button
               type="button"
               onClick={() => { setIsBrowsingTable(false); execute(); }}
-              disabled={loading || !sql.trim()}
+              disabled={!sql.trim()}
               className={clsx(
                 "absolute bottom-4 right-5 flex items-center gap-1.5 rounded px-2.5 py-1",
                 "text-[11px] font-medium transition",
-                loading
-                  ? "cursor-wait bg-gx-accent/30 text-gx-muted"
-                  : "bg-gx-accent text-white hover:bg-gx-accent/90",
+                "bg-gx-accent text-white hover:bg-gx-accent/90",
               )}
             >
-              {loading ? <Loader2 size={11} className="animate-spin" /> : <Play size={10} />}
-              Run
+              <Play size={10} /> Run
             </button>
+            )}
           </div>
         </div>
 
@@ -546,7 +531,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
         {/* Results area */}
         <div className="min-h-0 flex-1 overflow-hidden bg-gx-bg-sub">
           {err && (
-            <div className="m-3 flex items-start gap-2 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div role="alert" className="m-3 flex items-start gap-2 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
               <pre className="whitespace-pre-wrap break-all">{err}</pre>
             </div>
@@ -562,17 +547,18 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
               sortable={isBrowsingTable}
             />
           )}
-          {!result && !err && !loading && (
+          {!result && !err && status === "idle" && (
             <div className="flex h-full items-center justify-center text-sm text-gx-muted">
               {hasSidebar
                 ? "Click a table or write a query to get started"
                 : "Write a SQL query and press ⌘+Enter"}
             </div>
           )}
+          {status === "cancelled" && <p role="status" className="p-3 text-xs text-gx-muted">Query cancelled</p>}
           {loading && (
-            <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+            <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
               <Loader2 size={14} className="animate-spin" />
-              Executing…
+              {status === "cancelling" ? "Cancelling query…" : "Executing query…"}
             </div>
           )}
         </div>
@@ -620,7 +606,7 @@ export function DuckDbQueryPanel({ repoId, filePath, tables }: Props) {
 // ─── Result Grid with resizable columns, per-column filter, pivot ────
 
 interface ResultGridProps {
-  result: DuckDbQueryResult;
+  result: FileQueryResult;
   elapsed: number | null;
   sort: SortState | null;
   onSort: (column: string) => void;
@@ -772,7 +758,7 @@ function ResultGrid({ result, elapsed, sort, onSort, onCellCopy, copiedCell, sor
           </strong>{" "}
           rows
           {result.truncated && (
-            <span className="ml-1 text-gx-warn">(limit {result.max_rows})</span>
+            <span className="ml-1 text-gx-warn">(result truncated)</span>
           )}
           {showFilters && filteredRows.length !== result.row_count && (
             <span className="ml-1 text-gx-accent">
@@ -1121,27 +1107,12 @@ function renderCell(v: unknown): string {
   return String(v);
 }
 
-function defaultQuery(filePath?: string, tables?: TableMeta[]): string {
-  if (!filePath) return "";
-  if (tables && tables.length > 0) {
-    return `SELECT * FROM "${tables[0].name}" LIMIT 100;`;
-  }
-  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
-  switch (ext) {
-    case "db":
-    case "sqlite":
-    case "sqlite3":
-      return "SELECT * FROM sqlite_master WHERE type='table' ORDER BY name;";
-    case "parquet":
-    case "pq":
-      return `SELECT * FROM '${filePath}' LIMIT 100;`;
-    case "csv":
-      return `SELECT * FROM read_csv_auto('${filePath}') LIMIT 100;`;
-    case "json":
-    case "jsonl":
-    case "ndjson":
-      return `SELECT * FROM read_json_auto('${filePath}') LIMIT 100;`;
-    default:
-      return "";
-  }
+function defaultQuery(filePath: string, tables?: TableMeta[]): string {
+  if (tables?.length) return `SELECT * FROM ${identifier(tables[0].name)} LIMIT 100;`;
+  if (/\.(db|sqlite|sqlite3)$/i.test(filePath)) return "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name;";
+  return "SELECT * FROM data LIMIT 100;";
+}
+
+function identifier(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
 }

@@ -117,7 +117,7 @@ const ALLOWED_METHODS = new Set([
   "repo_size_history",
   "dedup_savings",
   "preview_sqlite",
-  "duckdb_query",
+  "file_query",
   "preview_onnx",
   "preview_hdf5",
   "preview_protobuf",

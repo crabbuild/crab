@@ -13,7 +13,7 @@ record historical evidence rather than separate work queues.
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Local post-idle output routing and readiness/restart cancellation are qualified below. Token-authenticated Jupyter Server execution and cleanup have bounded macOS proof. Decoded/output budgets and query paths remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
@@ -31,7 +31,7 @@ broadening profiles. Keep provider/platform qualification alongside the work.
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
 | P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, output budgets, and remote network loss. Local execution and token-authenticated Jupyter Server execution now have bounded packaged proof. Broader runtime, TLS, SSH and platform profiles remain open. |
-| P0 | Correct and bound SQL queries | The existing [captured reader](../agent/src/preview/reader.rs), native query handler and [query panel](../src/components/previews/DuckDbQueryPanel.tsx). | Parquet/SQLite queries must retain the selected revision and source, work with Crab/LFS and SDK snapshots, cancel real work, and enforce decoded, result-byte/row and execution budgets. Preserve SQL drafts, results and history across tab disposal/native repair; reject stale replies. Current query RPC opens physical working-tree paths, has no revision parameter and collects all rows before truncating. A UI row limit does not close this gap. |
+| P0 | Qualify database queries on large and remote sources | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs) and [file query session](../src/lib/file-query.ts). | Packaged local Crab/LFS and native cold SDK proof passed. Drive cold SDK and SSH queries through the packaged UI. Measure multi-GiB scan memory, interruption and restart cleanup. Use captured ranges for selective Parquet scans to avoid copying the full input. Qualify SQLite databases with WAL history as an explicit source contract. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree/cross-repository comparisons and read-only model isolation through their UI entry points. Qualify Dashboard/Datasets/cached metrics/shared hydration state under storage rebind and SSH reconnect; removal during admitted SDK opening; real jump-host cancellation; broader media profiles and repeated shutdown. Native/local publication has bounded mode/symlink/cleanup proof; other filesystem metadata and platforms remain open. |
 | P1 | Complete one Crab and LFS repository lifecycle per supported profile | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Create/edit/rename/delete, track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate; compare exact bytes, identities, executable modes and unrelated index entries. Finish remote physical mutations, standalone editor RPC parity and admitted task-worktree ownership. Optional SDK configuration needs typed path absence distinct from missing content objects. Qualify migrations/extensions/supported locks, ordinary Git captures, review/mode diffs, plain Git patch cancellation and crash drafts. |
 | P1 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect/restart and retry from supported state. Prove acknowledged cancellation, cleanup and publication outcomes; durable terminal/journal ownership; logical versus network counters; active-reader pins, budget enforcement, SDK namespace eviction and offline retention. Remove component-owned publishing rather than add another retry queue. |
@@ -45,6 +45,42 @@ or hide unsupported actions. Each row closes with user action → real side effe
 multi-GiB bounds, small-edit dedup, cold interruption/restart, corrupt/missing
 objects and the cross-OS/provider matrix remain release gates for the whole
 feature; a successful preview smoke does not substitute for them.
+
+## Captured database query checkpoint
+
+Browse and SQL share the file revision. SQL remains available while Browse is
+loading or has failed. It cancels an unfinished browse when the user switches
+modes. The repository session retains SQL drafts, results and recent statements
+across file switches and native-session recovery. Late completions from a retired
+session are ignored.
+
+The native query owns one private snapshot at a time per agent. Git reads use a
+single sequential blob stream, and Crab/LFS reads verify the complete file
+before SQL can open it. The query shares a 60-second budget between admission,
+snapshot creation and engine execution after source capture. Input is capped at
+8 GiB. The engines return at most 1,000 rows and about 2 MiB of serialized results.
+Large integers and decimals retain exact text. Cancel joins the engine and
+removes the snapshot before the query reports its terminal status.
+
+SQLite queries operate on standalone database bytes. DuckDB opens the captured
+Parquet file through the `data` view and streams result batches. Both engines
+still copy the full captured input for each operation. SQLite WAL capture,
+process-wide memory limits, selective Parquet reads and snapshot recovery after
+abrupt process exit remain open.
+
+The unsigned macOS arm64 package returned historical rows for SQLite, LFS Parquet
+and Crab-chunked Parquet. It retained SQL drafts and results through file changes
+and a real native restart, cancelled a running DuckDB aggregation, removed the
+temporary snapshot, and showed result truncation and exact large-number values.
+The database, pointers and index stayed byte-identical. The desktop workflow runs
+the same packaged case on its platform matrix.
+
+The bundled native agent also queried an isolated RustFS repository through its
+SDK session, with a fresh content cache. Historical and latest Crab and LFS
+Parquet counts differed as expected, and SQLite returned the selected revision's
+value. With the LFS object read held at the transport, cancellation joined and
+removed the snapshot before storage was released. Retry succeeded. The read-only
+proxy observed 42 GETs, one HEAD and zero storage writes across the run.
 
 ## Local notebook execution checkpoint
 

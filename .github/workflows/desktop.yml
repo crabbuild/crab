@@ -232,6 +232,14 @@ jobs:
       - name: Smoke packaged Electron under Xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:e2e-smoke
+      - name: Qualify captured database queries in packaged Electron
+        run: |
+          export E2E_SMOKE=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+          else
+            npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

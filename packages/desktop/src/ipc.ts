@@ -308,17 +308,16 @@ export interface ZipPreview {
   }>;
 }
 
-export interface DuckDbColumn {
+export interface FileQueryColumn {
   name: string;
   type: string;
 }
 
-export interface DuckDbQueryResult {
-  kind: "duckdb_result";
-  columns: DuckDbColumn[];
+export interface FileQueryResult {
+  kind: "file_query";
+  columns: FileQueryColumn[];
   rows: Array<Record<string, unknown>>;
   row_count: number;
-  total_rows: number;
   truncated: boolean;
   max_rows: number;
 }
@@ -1799,7 +1798,7 @@ export const rpc = {
   previewParquet: (
     repo_id: string,
     path: string,
-    { signal, ...opts }: { rev?: string; max_rows?: number; signal?: AbortSignal } = {},
+    { signal, ...opts }: { native_session_id?: string; rev?: string; max_rows?: number; signal?: AbortSignal } = {},
   ) => call<ParquetPreview>("preview_parquet", { repo_id, path, ...opts }, signal),
 
   previewSafetensors: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
@@ -2216,7 +2215,7 @@ export const rpc = {
   dedupSavings: (repo_id: string) =>
     call<DedupSavingsResult>("dedup_savings", { repo_id }),
 
-  previewSqlite: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
+  previewSqlite: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
     call<{
       kind: "sqlite";
       file_size: number;
@@ -2227,14 +2226,15 @@ export const rpc = {
         row_count: number;
         preview_rows: Array<Record<string, unknown>>;
       }>;
-    }>("preview_sqlite", { repo_id, path, ...opts }),
+    }>("preview_sqlite", { repo_id, path, ...opts }, signal),
 
-  duckdbQuery: (
+  fileQuery: (
     repo_id: string,
+    path: string,
     sql: string,
-    opts: { file_path?: string; max_rows?: number } = {},
+    opts: { native_session_id: string; rev?: string; max_rows?: number },
   ) =>
-    call<DuckDbQueryResult>("duckdb_query", { repo_id, sql, ...opts }),
+    callCancellable<FileQueryResult>("file_query", { repo_id, path, sql, ...opts }),
 
   previewOnnx: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
     call<{

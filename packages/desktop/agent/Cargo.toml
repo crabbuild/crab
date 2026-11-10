@@ -114,10 +114,10 @@ arrow = { version = "55", default-features = false, features = ["json"] }
 safetensors = "0.4"
 
 # SQLite table listing + query preview.
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "limits"] }
 
-# DuckDB for SQL analytics over SQLite / Parquet / CSV files.
-duckdb = { version = "1.20000.1", features = ["bundled"] }
+# DuckDB scans Parquet without downloading extensions at runtime.
+duckdb = { version = "1.20000.1", features = ["bundled", "parquet"] }
 
 # ONNX model + protobuf descriptor parsing.
 prost = "0.13"

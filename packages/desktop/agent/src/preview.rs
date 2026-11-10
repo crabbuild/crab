@@ -35,6 +35,7 @@ fn parse_error(
     }
 }
 
+pub(crate) mod query;
 mod reader;
 pub(crate) use reader::PreviewReader;
 

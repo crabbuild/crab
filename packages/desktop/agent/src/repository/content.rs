@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use crab_sdk::operation::{Cancellation, Options, ReadOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use super::*;
@@ -49,6 +49,13 @@ impl ReadScope {
     pub(crate) fn cancel(&self) {
         self.sdk.cancel();
         self.stop.cancel();
+    }
+
+    pub(crate) async fn cancelled(&self) -> AgentError {
+        self.stop.cancelled().await;
+        self.record(AgentError::OpCancelled {
+            op_id: self.id.clone(),
+        })
     }
 
     pub(crate) fn check(&self) -> Result<()> {
@@ -545,29 +552,69 @@ impl FileSource {
         output
             .try_reserve_exact(length)
             .map_err(std::io::Error::other)?;
-        if length == 0 {
-            self.read_range(0, 0).await?;
-        }
-        while output.len() < length {
-            let count = (length - output.len()).min(MAX_RANGE_BYTES as usize) as u32;
-            output.extend_from_slice(&self.read_range(output.len() as u64, count).await?);
-        }
-        if let Source::Pointer { identity, .. } = self.source.as_ref() {
-            let identity = *identity;
-            // Native ranges authenticate their selected chunks/blocks. Binding
-            // the assembled response to its whole-file identity is a separate
-            // check, including empty pointers and ranges stitched across calls.
-            let output = tokio::task::spawn_blocking(move || {
-                identity.verify(&output)?;
-                Ok::<_, AgentError>(Bytes::from(output))
-            })
-            .await
-            .map_err(std::io::Error::other)??;
-            self.scope.check()?;
-            return Ok(output);
-        }
-        self.scope.check()?;
+        self.write_ranges(&mut output).await?;
         Ok(output.into())
+    }
+
+    pub(crate) async fn copy_complete_to_file(&self, file: std::fs::File) -> Result<()> {
+        self.scope.check()?;
+        if let Source::Git { root, oid } = self.source.as_ref() {
+            return command::blob_to_file(root, oid, self.size, file, &self.scope).await;
+        }
+        let mut output = tokio::fs::File::from_std(file);
+        let copied = match self.source.as_ref() {
+            Source::Remote { snapshot, path, .. } => match self.content_options() {
+                Ok(options) => {
+                    self.scope
+                        .run(remote_write(
+                            snapshot,
+                            path,
+                            options,
+                            self.size,
+                            &mut output,
+                        ))
+                        .await
+                }
+                Err(error) => Err(error),
+            },
+            _ => self.write_ranges(&mut output).await,
+        };
+        // Tokio may still own the last buffered write when capture fails. Join
+        // it before the query owner closes and removes the temporary snapshot.
+        let flushed = output.flush().await;
+        match (copied, flushed) {
+            (Err(operation), Err(cleanup)) => Err(AgentError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup.into()),
+            }),
+            (Err(error), Ok(())) => Err(self.scope.record(error)),
+            (Ok(()), Err(error)) => Err(error.into()),
+            (Ok(()), Ok(())) => self.scope.check(),
+        }
+    }
+
+    async fn write_ranges(&self, output: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
+        let mut digest = match self.source.as_ref() {
+            Source::Pointer { identity, .. } => Some((*identity, identity.hasher())),
+            _ => None,
+        };
+        let mut offset = 0;
+        while offset < self.size {
+            let count = (self.size - offset).min(u64::from(MAX_RANGE_BYTES)) as u32;
+            let bytes = self.read_range(offset, count).await?;
+            if let Some((_, hasher)) = &mut digest {
+                hasher.update(&bytes);
+            }
+            output.write_all(&bytes).await?;
+            offset += bytes.len() as u64;
+        }
+        // Ranges authenticate their individual blocks. Verify the stitched
+        // stream against its complete pointer identity before opening it.
+        if let Some((identity, hasher)) = digest {
+            identity.verify_digest(hasher.finish())?;
+        }
+        self.read_range(self.size, 0).await?;
+        self.scope.check()
     }
 
     async fn read_git(&self, root: &Path, oid: &str, start: u64, length: usize) -> Result<Bytes> {
@@ -585,20 +632,33 @@ async fn remote_bytes(
     bytes
         .try_reserve_exact(length)
         .map_err(std::io::Error::other)?;
+    remote_write(snapshot, path, options, length as u64, &mut bytes).await?;
+    Ok(bytes.into())
+}
+
+async fn remote_write(
+    snapshot: &Snapshot,
+    path: &GitPath,
+    options: ReadOptions,
+    length: u64,
+    output: &mut (impl AsyncWrite + Unpin),
+) -> Result<()> {
     let mut stream = snapshot
         .open_file(path.clone())
         .with_options(options)
         .await?;
     let result = async {
+        let mut written = 0;
         while let Some(chunk) = stream.next().await? {
-            if chunk.len() > length - bytes.len() {
+            if chunk.len() as u64 > length - written {
                 return Err(AgentError::Other(
                     "content stream exceeded captured length".into(),
                 ));
             }
-            bytes.extend_from_slice(&chunk);
+            output.write_all(&chunk).await?;
+            written += chunk.len() as u64;
         }
-        if bytes.len() != length {
+        if written != length {
             return Err(AgentError::Other(
                 "content stream ended before captured length".into(),
             ));
@@ -608,8 +668,7 @@ async fn remote_bytes(
     .await;
     let closed = stream.close().await;
     closed?;
-    result?;
-    Ok(bytes.into())
+    result
 }
 
 #[derive(Clone, Copy)]
@@ -619,12 +678,6 @@ enum Identity {
 }
 
 impl Identity {
-    fn verify(self, bytes: &[u8]) -> Result<()> {
-        let mut hasher = self.hasher();
-        hasher.update(bytes);
-        self.verify_digest(hasher.finish())
-    }
-
     fn hasher(self) -> ContentHasher {
         use sha2::Digest as _;
         match self {

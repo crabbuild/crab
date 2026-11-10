@@ -86,16 +86,27 @@ Opening a file in the editor pane triggers format-specific rendering:
 | File Type | Preview |
 |-----------|---------|
 | Text/Code | Syntax-highlighted editor (Monaco) |
-| Parquet | Schema + sample rows table |
+| Parquet | Schema, sample rows and SQL |
 | SafeTensors | Tensor names, shapes, dtypes |
 | Jupyter (.ipynb) | Rendered notebook cells |
 | Images | Inline image preview |
-| SQLite/DuckDB | Table list + query interface |
+| SQLite | Table list, sample rows and SQL |
 | ZIP archives | File listing with sizes |
 | NumPy (.npy/.npz) | Array shape and dtype |
 
 Previews are generated server-side by the Rust agent, keeping the
 renderer lightweight even for multi-gigabyte files.
+
+Choose **SQL** in the preview to query the file at the selected revision. In
+Parquet SQL, `data` is the selected file. In SQLite SQL, use the database's table
+names. Drafts, results and recent queries stay with the file and revision while
+the repository remains open. **Cancel query** stops native work and waits for
+cleanup. Results indicate when they reach the row or byte limit.
+
+SQL works from a private, temporary copy of the captured file. SQLite reads the
+database file bytes at that selection. Checkpoint active WAL transactions before
+capturing a standalone database with those changes. Input snapshots are limited
+to 8 GiB, and snapshot creation and execution share a 60-second budget.
 
 ## Drag and Drop
 

@@ -525,27 +525,27 @@ function PreviewBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
   // Read-only previews must recapture after native replacement. Editors,
   // notebook kernels and media retain their existing lifecycle owners.
   if (!repo.native_session_id) return <div role="status" className="p-4 text-xs text-gx-muted">Waiting for repository services…</div>;
-  return <NativePreview key={repo.native_session_id} {...common} kind={kind} entryKind={tab.entry.kind} />;
+  return <NativePreview key={repo.native_session_id} {...common} nativeSessionId={repo.native_session_id} kind={kind} entryKind={tab.entry.kind} />;
 }
 
 type NativePreviewKind = Exclude<PreviewKind, "pointer" | "card-editor" | "text" | "binary" | "html" | "video" | "audio" | "notebook">;
 
-function NativePreview({ kind, entryKind, ...common }: { kind: NativePreviewKind; entryKind: DirEntry["kind"]; repoId: string; path: string; rev: string | null }) {
+function NativePreview({ kind, entryKind, nativeSessionId, ...common }: { nativeSessionId: string; kind: NativePreviewKind; entryKind: DirEntry["kind"]; repoId: string; path: string; rev: string | null }) {
   if (kind === "image") return <ImageView {...common} entryKind={entryKind} />;
   if (kind === "markdown") return <MarkdownView {...common} />;
   if (kind === "json") return <JsonView {...common} />;
   if (kind === "jsonl") return <JsonView {...common} jsonl />;
   if (kind === "csv") return <CsvView {...common} sep="," />;
   if (kind === "tsv") return <CsvView {...common} sep={"\t"} />;
-  if (kind === "parquet") return <ParquetView {...common} />;
-  if (kind === "arrow") return <ParquetView {...common} />;
+  if (kind === "parquet") return <ParquetView {...common} nativeSessionId={nativeSessionId} />;
+  if (kind === "arrow") return <ParquetView {...common} nativeSessionId={nativeSessionId} />;
   if (kind === "safetensors") return <SafetensorsView {...common} />;
   if (kind === "npy") return <NumpyView kind="npy" {...common} />;
   if (kind === "npz") return <NumpyView kind="npz" {...common} />;
   if (kind === "zip") return <ZipView {...common} />;
   if (kind === "pdf") return <PdfView {...common} />;
   if (kind === "geojson") return <GeoJsonView {...common} />;
-  if (kind === "sqlite") return <SqliteView {...common} />;
+  if (kind === "sqlite") return <SqliteView {...common} nativeSessionId={nativeSessionId} />;
   if (kind === "onnx") return <OnnxView {...common} />;
   if (kind === "hdf5") return <Hdf5View {...common} />;
   if (kind === "protobuf") return <ProtobufView {...common} />;

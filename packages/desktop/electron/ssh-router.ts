@@ -61,7 +61,7 @@ const OWNED_METHODS = new Set([
   "open_local", "open_url",
   "file_open", "file_diff", "file_chunks", "file_materialize", "read_range", "read_text", "read_bytes",
   "preview_parquet", "preview_safetensors", "preview_npy", "preview_npz", "preview_zip",
-  "preview_notebook_meta", "preview_torch_checkpoint",
+  "preview_notebook_meta", "preview_torch_checkpoint", "preview_sqlite", "file_query",
 ]);
 const CACHEABLE_READ_METHODS = new Set([
   "git_status_porcelain", "git_log", "list_refs", "repo_summary", "hydration_status",

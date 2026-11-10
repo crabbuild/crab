@@ -140,6 +140,14 @@ deletion fallback; retained, unknown and busy state stays with its owner.
 - `read_text`, `read_bytes`, `read_range`
 - `preview_parquet`, `preview_safetensors`, `preview_npy`, `preview_npz`
 - `preview_zip`, `preview_notebook_meta`, `preview_torch_checkpoint`
+- `preview_sqlite`, `file_query`
+
+`file_query {repo_id, path, rev?, op_id?, sql, max_rows?}` captures a Parquet or
+SQLite source and runs SQL on its private snapshot. It returns columns, rows,
+returned row count and a truncation flag. `max_rows` defaults to 500 and is
+capped at 1,000. The original query returns its cancellation result after engine
+shutdown and snapshot cleanup. The desktop bridge validates the observed repository
+session before admitting the operation.
 
 `file_open {repo_id, path, rev?, op_id?}` captures a file and returns an opaque
 `file_id`, logical `size`, `kind`, `representation`, `can_materialize`, and available identities.
