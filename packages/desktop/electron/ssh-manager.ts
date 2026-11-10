@@ -521,6 +521,10 @@ export class SshSessionManager extends EventEmitter {
   private attemptReconnection(profileId: string): void {
     // Don't start a new reconnection if one is already in progress
     if (this.reconnectionState.has(profileId)) {
+      // An adopted retry transport can fail during native bootstrap. Revoke
+      // that deployment before its error path can report the dead SSH as ready.
+      this.setStatus(profileId, "reconnecting");
+      this.deployments.get(profileId)?.controller.abort(new Error("SSH connection lost during deployment"));
       return;
     }
 

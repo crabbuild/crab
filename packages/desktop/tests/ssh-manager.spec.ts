@@ -9,6 +9,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Client, ClientChannel, SFTPWrapper } from "ssh2";
+import type { AgentDeployer } from "../electron/ssh-deployer";
+import type { CapabilityNegotiator } from "../electron/ssh-capabilities";
+import type { RpcRouter } from "../electron/ssh-router";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -261,6 +264,30 @@ describe("SshSessionManager", () => {
   // ── Reconnection logic ───────────────────────────────────────────
 
   describe("reconnection logic", () => {
+    it("a transport lost during reconnect bootstrap remains reconnecting", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      let fail!: (error: Error) => void;
+      const ensureAgent = vi.fn(() => new Promise<never>((_resolve, reject) => { fail = reject; }));
+      manager.configureAgentDeployment({
+        agentDeployer: { ensureAgent } as unknown as AgentDeployer,
+        capabilityNegotiator: { clearCache: vi.fn() } as unknown as CapabilityNegotiator,
+        rpcRouter: { clearQueue: vi.fn() } as unknown as RpcRouter,
+      });
+      profile.autoDeployAgent = true;
+      initial.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      replacement.emit("end");
+      fail(new Error("SSH transport ended during deployment"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getStatus(profile.id)).toBe("reconnecting");
+      await manager.disconnect(profile.id);
+    });
+
     it("repository reopen joins the background reconnect", async () => {
       const profile = makeProfile();
       const initial = await connectProfile(manager, profile);
