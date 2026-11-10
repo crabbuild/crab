@@ -39,6 +39,7 @@ import { RpcRouter } from "./ssh-router";
 import { getProviderRegistry } from "./provider-registry";
 import { LocalProvider } from "./local-provider";
 import { readTextFile } from "./file-read";
+import { stopFileWrites } from "./file-write";
 import { RemoteProvider } from "./remote-provider";
 import { AgentDeployer } from "./ssh-deployer";
 import { RemoteFileBrowser } from "./ssh-file-browser";
@@ -256,7 +257,7 @@ async function createWindow() {
     const choice = dialog.showMessageBoxSync(window, {
       type: "warning", buttons: ["Keep editing", "Discard edits"], defaultId: 0, cancelId: 0,
       message: "Some file edits have not been saved.",
-      detail: "Keep editing to retry saving. Discarding will lose the pending edits.",
+      detail: "Keep editing to retry saving. Discarding loses unsaved edits; Crab waits for saves already in progress.",
     });
     if (choice === 1) event.preventDefault();
     else quitRequested = false;
@@ -2392,6 +2393,7 @@ app.on("will-quit", (e) => {
   e.preventDefault();
   stopAutoUpdater();
   Promise.allSettled([
+    stopFileWrites(),
     stopAllWatchers(),
     (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
     sidecarManager.stopAll(),

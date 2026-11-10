@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const active = new Set<string>();
+const pending = new Set<Promise<number>>();
+let stopping = false;
 const openings = new Map<Promise<fs.promises.FileHandle>, string>();
 const snapshots = new Set<{ root: string; paths: Set<string>; openings: Set<Promise<fs.promises.FileHandle>> }>();
 
@@ -49,8 +51,24 @@ async function destination(fullPath: string): Promise<string> {
   }
 }
 
+/** Reject new saves and join admitted publications, including failed cleanup. */
+export async function stopFileWrites(): Promise<void> {
+  stopping = true;
+  // The original caller owns success/failure. Shutdown still joins rejection,
+  // which is delivered only after the writer has completed its cleanup.
+  await Promise.allSettled([...pending]);
+}
+
 /** Publish complete text without mutating an existing source before commit. */
-export async function writeTextAtomically(fullPath: string, content: string): Promise<number> {
+export function writeTextAtomically(fullPath: string, content: string): Promise<number> {
+  if (stopping) return Promise.reject(Object.assign(new Error("Local file services are shutting down."), { code: "ESHUTDOWN" }));
+  const work = publishText(fullPath, content);
+  pending.add(work);
+  void work.then(() => pending.delete(work), () => pending.delete(work));
+  return work;
+}
+
+async function publishText(fullPath: string, content: string): Promise<number> {
   if (!path.isAbsolute(fullPath)) throw Object.assign(new Error("The write target must be an absolute local filesystem path."), { code: "EINVAL" });
   const target = await destination(fullPath);
   let previous: fs.Stats | undefined;

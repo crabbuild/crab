@@ -47,6 +47,9 @@ Selected comparisons keep their version selector through native recovery and
 refresh their content after the repository reopens. Clean local text/Markdown
 buffers refresh too; pending edits remain visible until saving finishes. Local
 save failures retain the buffer and offer **Retry saving**.
+Quit offers **Keep editing** or **Discard edits** while edits are pending.
+Discarding drops unsent edits; Crab waits for admitted local saves and their
+failure cleanup before exiting.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

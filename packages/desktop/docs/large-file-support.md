@@ -30,7 +30,7 @@ provider qualification run alongside each slice, rather than after all features.
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
 | P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local repository-switch watcher stalls now have a measured fix and packaged proof below. Remaining: caller-session ownership across physical read/save IPC, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader repeatability/profile qualification. |
-| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit during an admitted local publication, full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
+| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit now drains admitted local publication and failure cleanup, with packaged proof below. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Background workspace/batch dirty counts still need the publication-ownership rule. Very large file-count/network-filesystem monitor costs, other format comparisons and parser/query budgets remain open. |
@@ -52,8 +52,8 @@ alongside each slice.
    transfer features: the remote provider currently selects the admitted native
    session at dispatch; renderer binding-change checks do not alone prove the
    read-to-write handoff on the real wire. Keep one provider writer and retain
-   local filesystem independence. Qualify discard-quit while a local publication
-   is admitted, alongside the existing keep-editing proof. Finish recovery parity:
+   local filesystem independence. Discard-quit now joins admitted local saves;
+   broaden shutdown qualification alongside the keep-editing proof. Finish recovery parity:
    the shared working
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
@@ -99,6 +99,31 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Local save shutdown checkpoint
+
+Packaged macOS checks held a real local save during rename and during cleanup
+after a rename failure. Both prior-package runs exited after the Discard edits
+prompt but before releasing the filesystem operation, leaving an owned temporary
+behind. Native shutdown already joins its requests; the independent Electron
+writer was missing from the main process's shutdown join.
+
+`electron/file-write.ts` now owns each admitted save from destination preparation
+through publication or checked cleanup. Once Quit passes the renderer's decision,
+`will-quit` closes local save admission and joins those complete promises before
+`app.exit`. Write success or failure still belongs to the original caller.
+Cancelling Quit does not close admission. The prompt explains that saves already
+in progress finish; later unsent edits can be discarded. The existing local
+provider is the only caller, so text, Markdown and workspace-document saves use
+the same owner without depending on native readiness. Native and SSH publication
+retain their existing owners; physical create/rename/delete parity remains open.
+
+Three real-filesystem cases cover preparation, publication, cleanup and rejection
+of late saves. Nine focused suites pass 139 cases. Six packaged local cases pass
+together, including both discard outcomes, keep-editing, failed-buffer recovery,
+native-offline retry and metadata monitoring. Exact UTF-8 bytes, existing modes,
+unchanged index bytes and removal of owned temporaries are checked after exit.
+These are bounded macOS arm64 results; the remaining matrix is still open.
 
 ## Local monitor and repository-switch checkpoint
 
