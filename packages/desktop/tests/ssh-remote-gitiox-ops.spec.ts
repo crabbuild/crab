@@ -11,7 +11,8 @@ import type { SshSessionManager } from "../electron/ssh-manager";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter } from "../electron/ssh-router";
 
 // ─── Mock Infrastructure ─────────────────────────────────────────
 

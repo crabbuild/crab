@@ -27,7 +27,8 @@ import {
   type FsWriteResult,
 } from "./repo-provider";
 import { noCapabilities, type CapabilitySet } from "./repo-capabilities";
-import { parseRepoId, type RpcRouter } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
+import { type RpcRouter } from "./ssh-router";
 import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { RemoteGitManager } from "./ssh-remote-git";
 import type { CapabilityNegotiator } from "./ssh-capabilities";

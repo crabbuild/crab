@@ -252,10 +252,7 @@ export function Sidebar({ onCollapse }: Props) {
       setActive(repo.repo_id);
       return;
     }
-    // Deferred entries carry the synthetic id `deferred-${path}`; the
-    // agent only understands real filesystem paths, so route through
-    // `repo.path`. Without this, the open call fails canonicalize and
-    // surfaces as a generic "internal crab error".
+    // A saved path identifies either a local repository or an SSH profile/path.
     if (!repo.path) {
       setError("Cannot open repository: missing path");
       removeRepo(repo.repo_id);
@@ -264,9 +261,7 @@ export function Sidebar({ onCollapse }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const handle = await rpc.openLocal(repo.path);
-      // Replace the deferred placeholder with the real handle.
-      removeRepo(repo.repo_id);
+      const handle = await rpc.reopen(repo.path);
       addRepo({
         ...handle,
         label: repo.label,
@@ -277,8 +272,8 @@ export function Sidebar({ onCollapse }: Props) {
       setActive(handle.repo_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      // Remove the broken deferred entry so it doesn't linger.
-      removeRepo(repo.repo_id);
+      // Keep the saved entry: a disconnected host or missing credential can
+      // recover, and selecting it again retries without losing session state.
     } finally {
       setBusy(false);
     }

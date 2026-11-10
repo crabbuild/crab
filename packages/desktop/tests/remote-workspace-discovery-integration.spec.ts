@@ -72,7 +72,6 @@ describe("remote workspace orchestration", () => {
   });
 
   it("disconnect pauses polling and reconnect resumes its owned workspace", async () => {
-    orchestrator.on("error", () => {});
     await orchestrator.openWorkspace("host", "/projects");
     sessions.emit("ssh:status-changed", { profileId: "host", status: "disconnected" });
     router.sendToRemoteAgent.mockClear();
@@ -80,6 +79,31 @@ describe("remote workspace orchestration", () => {
     expect(router.sendToRemoteAgent).not.toHaveBeenCalled();
     sessions.emit("ssh:status-changed", { profileId: "host", status: "connected" });
     expect(router.sendToRemoteAgent).toHaveBeenCalledWith("host", "batch_git_status", { repo_paths: ["/projects/api"] });
+  });
+
+  it("a disconnected profile without an open workspace has no workspace failure", () => {
+    expect(() => sessions.emit("ssh:status-changed", { profileId: "unopened", status: "disconnected" })).not.toThrow();
+  });
+
+  it("failed polls publish repository errors through the existing status channel", async () => {
+    await orchestrator.openWorkspace("host", "/projects");
+    const updated = vi.fn(); orchestrator.on("status-update", updated);
+    router.sendToRemoteAgent.mockRejectedValue(new Error("Host unavailable"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(updated).toHaveBeenCalledWith({ profileId: "host", statuses: [{ relative_path: "api", branch: null, dirty_count: 0, ahead: null, behind: null, error: "Host unavailable" }], poll_timestamp: expect.any(Number) });
+  });
+
+  it("closing a workspace discards an in-flight poll result", async () => {
+    await orchestrator.openWorkspace("host", "/projects");
+    await vi.advanceTimersByTimeAsync(0);
+    let finish!: (value: unknown) => void;
+    router.sendToRemoteAgent.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const updated = vi.fn(); orchestrator.on("status-update", updated);
+    await vi.advanceTimersByTimeAsync(30_000);
+    orchestrator.closeWorkspace("host");
+    finish({ statuses: [], poll_timestamp: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updated).not.toHaveBeenCalled();
   });
 
   it("a failed discovery does not register a workspace or poller", async () => {

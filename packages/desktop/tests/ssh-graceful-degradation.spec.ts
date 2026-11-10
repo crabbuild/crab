@@ -11,7 +11,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, isCacheableReadMethod } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, isCacheableReadMethod } from "../electron/ssh-router";
 import { RemoteCache } from "../electron/ssh-cache";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────

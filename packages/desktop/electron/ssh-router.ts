@@ -1,3 +1,4 @@
+import { parseRepoId } from "./ssh-types";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { TextDecoder } from "node:util";
@@ -61,12 +62,6 @@ const PROGRESS_METHODS = new Set([
   "crab/add_progress", "crab/push_step", "crab/push_progress",
 ]);
 
-export function parseRepoId(repoId: string): { profileId: string; remotePath: string } | null {
-  if (!repoId.startsWith("ssh://")) return null;
-  const value = repoId.slice(6);
-  const slash = value.indexOf("/");
-  return slash < 0 ? { profileId: value, remotePath: "/" } : { profileId: value.slice(0, slash), remotePath: value.slice(slash) };
-}
 export function isCacheableReadMethod(method: string): boolean { return CACHEABLE_READ_METHODS.has(method); }
 
 export interface BandwidthStats { bytesIn: number; bytesOut: number }

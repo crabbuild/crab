@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import type { Client, ClientChannel, SFTPWrapper } from "ssh2";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ class MockClientChannel extends EventEmitter {
 class MockClient extends EventEmitter {
   connect = vi.fn();
   end = vi.fn();
-  destroy = vi.fn();
+  destroy = vi.fn(() => { this.emit("close"); return this; });
   exec = vi.fn();
   shell = vi.fn();
   forwardOut = vi.fn();
@@ -202,35 +203,98 @@ describe("SshSessionManager", () => {
       await expect(manager.disconnect("non-existent")).resolves.toBeUndefined();
     });
 
-    it("connect disconnects existing connection before reconnecting (idempotent)", async () => {
+    it("connected profiles reuse the authenticated connection", async () => {
       const profile = makeProfile();
-
-      // First connection
       const client1 = await connectProfile(manager, profile);
-      expect(manager.getStatus("test-profile-1")).toBe("connected");
+      const reopened = manager.connect(profile);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for (const client of mockClientInstances) client.emit("ready");
+      await reopened;
+      expect(mockClientInstances).toHaveLength(1);
+      expect(client1.end).not.toHaveBeenCalled();
+    });
 
-      // Second connection to same profile — should disconnect first
-      const initialCount = mockClientInstances.length;
-      const connectPromise2 = manager.connect(profile);
+    it("concurrent repository restores share the same connection attempt", async () => {
+      const profile = makeProfile();
+      const joined = Promise.allSettled([manager.connect(profile), manager.connect(profile)]);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for (const client of mockClientInstances) client.emit("ready");
+      expect((await joined).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(mockClientInstances).toHaveLength(1);
+    });
 
-      // Wait for the new client to be created and connect() called
-      await vi.waitFor(() => {
-        expect(mockClientInstances.length).toBeGreaterThan(initialCount);
-      });
-      const client2 = mockClientInstances[mockClientInstances.length - 1];
-      await vi.waitFor(() => expect(client2.connect).toHaveBeenCalled());
-      client2.emit("ready");
-      await connectPromise2;
+    it.each([false, true])("disconnect joins authentication without resurrection (handshake started: %s)", async started => {
+      const profile = makeProfile();
+      const opening = manager.connect(profile);
+      const checked = expect(opening).rejects.toThrow("SSH connection closed");
+      const client = mockClientInstances[0];
+      if (started) await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
+      await manager.disconnect(profile.id);
+      await checked;
+      client.emit("ready");
+      expect(manager.getStatus(profile.id)).toBe("disconnected");
+      expect(client.destroy).toHaveBeenCalled();
+    });
 
-      // First client should have been ended (disconnect was called)
-      expect(client1.end).toHaveBeenCalled();
-      expect(manager.getStatus("test-profile-1")).toBe("connected");
+    it("concurrent jump profiles retain their own transports", async () => {
+      const first = makeProfile({ id: "first", jumpHost: "first-hop" });
+      const second = makeProfile({ id: "second", jumpHost: "second-hop" });
+      const opening = Promise.all([manager.connect(first), manager.connect(second)]);
+      await vi.waitFor(() => expect(mockClientInstances).toHaveLength(4));
+      const [firstTarget, secondTarget, firstJump, secondJump] = mockClientInstances;
+      for (const jump of [firstJump, secondJump]) {
+        jump.forwardOut.mockImplementation((_from, _port, _host, _target, callback) => callback(undefined, new MockClientChannel() as unknown as ClientChannel));
+        jump.emit("ready");
+      }
+      await vi.waitFor(() => expect(secondTarget.connect).toHaveBeenCalled());
+      firstTarget.emit("ready"); secondTarget.emit("ready");
+      await opening;
+      expect(manager.getConnection(first.id)?.jumpClients).toEqual([firstJump as unknown as Client]);
+      expect(manager.getConnection(second.id)?.jumpClients).toEqual([secondJump as unknown as Client]);
+      await manager.disconnect(first.id);
+      expect(firstJump.end).toHaveBeenCalled();
+      expect(secondJump.end).not.toHaveBeenCalled();
+      await manager.disconnect(second.id);
     });
   });
 
   // ── Reconnection logic ───────────────────────────────────────────
 
   describe("reconnection logic", () => {
+    it("repository reopen joins the background reconnect", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      initial.emit("end");
+      const reopened = manager.connect(profile);
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await reopened;
+      expect(mockClientInstances).toHaveLength(2);
+      expect(manager.getStatus(profile.id)).toBe("connected");
+    });
+
+    it("rejects an SFTP callback from the replaced transport", async () => {
+      const profile = makeProfile();
+      const first = await connectProfile(manager, profile);
+      let finish: ((error: undefined, sftp: SFTPWrapper) => void) | undefined;
+      first.sftp.mockImplementation(callback => { finish = callback; });
+      const opening = manager.getSftp(profile.id);
+      const checked = expect(opening).rejects.toThrow("SSH connection closed while opening SFTP");
+      first.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      const stale = new MockClientChannel();
+      if (!finish) throw new Error("SFTP callback was not registered");
+      finish(undefined, stale as unknown as SFTPWrapper);
+      await checked;
+      expect(stale.end).toHaveBeenCalled();
+    });
+
     beforeEach(() => {
       vi.useFakeTimers();
     });

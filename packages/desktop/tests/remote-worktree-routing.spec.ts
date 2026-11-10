@@ -28,7 +28,8 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { RpcRouter, parseRepoId } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter } from "../electron/ssh-router";
 import { RemoteProvider } from "../electron/remote-provider";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────

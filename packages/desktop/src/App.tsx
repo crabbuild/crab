@@ -28,6 +28,7 @@ import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
 import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
+import { dismissToast, publishToast } from "./lib/toasts";
 import { localPathName } from "./lib/local-path-name";
 import type { SshTerminalRequest, TerminalStartupRequest } from "./views/TerminalView";
 import type { StartupCommand } from "./lib/terminal-presets";
@@ -40,7 +41,7 @@ const LS_REPO_SIDEBAR = "crab.repoSidebarOpen";
 
 function Shell() {
   const active = useActiveRepo();
-  const { state, dispatch, addRepo, setActive, setMaxLogLines } = useStore();
+  const { state, dispatch, addRepo, setMaxLogLines } = useStore();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const maxLogLines = useSetting("maxLogLines");
   const showActivityBar = useSetting("showActivityBar");
@@ -405,65 +406,37 @@ function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxLogLines]);
 
-  // Reopen persisted repositories on first render, once. We keep a
-  // ref guard so React Strict Mode's double-invoke doesn't open each
-  // repo twice during dev. Failures per-repo are non-fatal — a repo
-  // whose path no longer exists simply drops out of the list.
-  //
-  // Optimisation: only the last-active repo is opened immediately via
-  // `rpc.openLocal`. The remaining repos are added as deferred entries
-  // (no agent round-trip) and opened on-demand when the user selects
-  // them in the sidebar. This avoids scanning every repo at startup.
+  // The store loads saved entries as inert placeholders before persistence runs.
+  // Reopen only the selected path eagerly; the sidebar opens others on demand.
   const reopenedRef = useRef(false);
   useEffect(() => {
     if (reopenedRef.current) return;
     reopenedRef.current = true;
     if (!reopenReposOnStartup) return;
-    try {
-      const raw = localStorage.getItem("crab.recentRepos.v1");
-      const activePath = localStorage.getItem("crab.activeRepoPath.v1");
-      if (!raw) return;
-      const persisted = JSON.parse(raw) as Array<{ path: string; label: string; openedAt: number }>;
-      if (!Array.isArray(persisted)) return;
-
-      // Add non-active repos as deferred entries immediately (no RPC).
-      for (const p of persisted) {
-        if (p.path === activePath) continue; // handled below
-        addRepo({
-          repo_id: `deferred-${p.path}`,
-          url: "",
-          is_remote: false,
-          cache_dir: "",
-          label: p.label.replace(/^(↳\s*)wt:/, "$1worktree:"),
-          path: p.path,
-          openedAt: p.openedAt,
-          deferred: true,
-        });
+    const activePath = localStorage.getItem("crab.activeRepoPath.v1");
+    const entry = state.repos.find(repo => repo.deferred && repo.path === activePath);
+    if (!entry?.path) return;
+    const path = entry.path;
+    const { label, openedAt } = entry;
+    let failureToast: string | undefined;
+    let pending = false;
+    async function reopen() {
+      if (pending) return;
+      pending = true;
+      if (failureToast) dismissToast(failureToast);
+      try {
+        const handle = await rpc.reopen(path);
+        // A delayed startup connection must not steal focus from a repository
+        // the user selected while authentication or deployment was pending.
+        dispatch({ type: "add-repo", activation: "if-empty", repo: { ...handle, path, label, openedAt } });
+      } catch (error) {
+        failureToast = publishToast({ kind: "error", title: "Could not reopen repository", body: `${label}: ${error instanceof Error ? error.message : String(error)}`, duration: 0, action: { label: "Retry", onClick: () => { void reopen(); } } });
+      } finally {
+        pending = false;
       }
-
-      // Open only the last-active repo eagerly.
-      if (activePath) {
-        const activeEntry = persisted.find((p) => p.path === activePath);
-        if (activeEntry) {
-          (async () => {
-            try {
-              const handle = await rpc.openLocal(activeEntry.path);
-              addRepo({
-                ...handle,
-                label: activeEntry.label.replace(/^(↳\s*)wt:/, "$1worktree:"),
-                path: activeEntry.path,
-                openedAt: activeEntry.openedAt,
-              });
-              setActive(handle.repo_id);
-            } catch {
-              // Agent down or path gone — skip.
-            }
-          })();
-        }
-      }
-    } catch {
-      // Corrupt localStorage blob — ignore.
     }
+    void reopen();
+    // Startup consumes one saved selection; later changes are user navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

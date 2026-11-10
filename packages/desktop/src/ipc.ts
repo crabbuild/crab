@@ -1,4 +1,5 @@
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
+import { parseRepoId } from "../electron/ssh-types";
 // Typed wrapper around the `window.crab` bridge exposed by
 // `electron/preload.ts`. Centralising the types here keeps components
 // free of `unknown` assertions and makes the agent's RPC surface
@@ -1720,6 +1721,12 @@ export const rpc = {
 
   openLocal: (path: string, storage_connection_id?: string | null) =>
     call<RepoHandle>("open_local", { repo_id: nextRepoId("local"), path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+
+  reopen: async (path: string): Promise<RepoHandle> => {
+    const remote = parseRepoId(path);
+    if (!remote) return rpc.openLocal(path);
+    return window.crab.ssh.openAsRepo(remote.profileId, remote.remotePath);
+  },
 
   openUrl: (url: string, storage_connection_id?: string | null) =>
     call<RepoHandle>("open_url", { repo_id: nextRepoId("url"), url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),

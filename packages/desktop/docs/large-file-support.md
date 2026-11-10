@@ -16,7 +16,7 @@ completion. This record tracks implementation and qualification separately.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, Safetensors preview, exact materialization, independent sessions and reconnect metadata replay are qualified. Complete RPC parity, persistence, multi-hop cancellation and other targets/providers remain open. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay and saved-repository restart/retry are qualified. Complete RPC parity, native restart/capture recovery, real multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
@@ -28,7 +28,7 @@ provider qualification run alongside each slice, rather than after all features.
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
 | P0 | Reliable operation routing and controls | `ProviderRegistry` rejects unopened SSH identities; `RpcRouter` owns progress identity; one capability contract and one renderer event bridge. | Local packaged proof: rejected SSH writes do not touch local files, remote progress/cancellation reaches Activity, and remote native exit disables editing. Fresh cross-platform CI remains required. |
-| P0 | Reopen and connection lifetime | One saved-repository open path for startup/sidebar; one profile connection/bootstrap owner; each jump/SFTP attempt owns its transport. | Restart into an SSH repo, reconnect multiple repos, cancel authentication/deployment, and reject late old-transport callbacks without losing saved entries or resurrecting work. Local native restart, retained captures after restart, and single-file versus bulk hydration gates also remain open. |
+| P0 | Reopen and connection lifetime | One saved-repository open path for startup/sidebar; one profile connection/bootstrap owner; each jump/SFTP attempt owns its transport. | Packaged restart, failed restore/retry, deferred second-repository selection and runtime reuse pass. Focused cancellation and stale-transport checks pass. Local native restart, retained captures after restart, single-file versus bulk hydration gates and real multi-hop cancellation remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -927,3 +927,44 @@ acceptance matrix above remains the completion boundary.
   open. Unknown pointer formats, including plain `.txt`, currently open metadata
   rather than a bounded text preview. Cross-OS/architecture and provider proof
   remains required; this local package contains only macOS arm64 native payloads.
+
+## Saved SSH repository checkpoint
+
+- Startup and deferred sidebar selection share `rpc.reopen`. A saved `ssh://`
+  identity resolves its saved profile, joins connection/bootstrap, and opens
+  through the remote provider. Explicit repository opening requests native
+  services even when automatic deployment is disabled for SFTP browsing.
+  The literal-path parser now lives in the existing Node-free SSH contract;
+  renderer and main-process callers use the same implementation.
+- The store loads inert saved entries before its first persistence effect.
+  Failed connections preserve entries and the selected path; the startup error
+  remains visible with Retry. A delayed startup success does not take focus
+  from a repository selected meanwhile. Disabling automatic reopen leaves
+  saved entries available for manual selection without starting SSH work.
+- Concurrent opens join one profile connection, including background reconnect.
+  Authentication cancellation is joined; each jump attempt owns its hops.
+  Pending SFTP opens are keyed by authenticated client, and late old-client
+  callbacks close their wrapper rather than adopting it after reconnect.
+- The packaged outage test reproduced an unhandled workspace `error` event.
+  Workspace polling now owns only open workspaces, revokes late replies on
+  close/reconnect, and reports failures through existing repository status
+  errors. Unrelated profile failure cannot crash workspace orchestration.
+- The unsigned macOS arm64 packaged smoke passes in 18.7 seconds: real key-file
+  authentication/trust, manual native deployment, failed restart with saved
+  entries/selection intact, visible Retry, logical 4 MiB Safetensors preview,
+  deferred second-repository opening over the same connection, another restart
+  without an archive upload, and manual access with automatic reopen disabled.
+  Working-tree and index pointers remain unchanged. The peer application was
+  restored to its original idle workflow after each prepared smoke.
+- The real packaged bootstrap and native Crab/LFS transport checks pass in
+  20.4 seconds together, covering independent profiles, explicit/automatic
+  reconnect, repository replay, exact bytes, cancellation and drained cleanup.
+  There are 159 passing focused cases across eight touched ownership/routing
+  surfaces; renderer/Electron and strict integration-spec types pass. Evidence:
+  `desktop-reopen-ui-proof-v4/`, `desktop-reopen-backend-proof/` and
+  `desktop-reopen-qualification.json` in the external build directory.
+- This closes the saved-repository slice, not the acceptance matrix. Local
+  native restart/captured-file recovery and separate single-file/bulk hydration
+  gates are the next P0 work. Real multi-hop cancellation, empty-start SSH entry,
+  complete remote file mutations, provider identity, durable transfers and the
+  P1 lifecycle/inspection/storage rows still require implementation or proof.

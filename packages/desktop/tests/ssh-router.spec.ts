@@ -8,7 +8,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, routeRpcCall } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, routeRpcCall } from "../electron/ssh-router";
 import type { RpcRouterOptions } from "../electron/ssh-router";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────

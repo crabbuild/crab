@@ -26,7 +26,7 @@ import { loadAgentConfig, migrateSettings } from "./orchestrator-settings";
 import { CheckpointManager } from "./orchestrator-checkpoints";
 import { createWorktree, removeWorktree, readTaskMetadata } from "./orchestrator-worktree";
 import { loadNonconcurrentRun } from "./orchestrator-scripts";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 import type { RpcRouter } from "./ssh-router";
 import {
   RemoteScriptRunner,

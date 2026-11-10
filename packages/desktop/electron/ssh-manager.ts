@@ -138,14 +138,19 @@ export class SshSessionManager extends EventEmitter {
     attempt: number;
     startedAt: number;
     client?: Client;
+    jumpClients: Client[];
+    controller: AbortController;
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: Error) => void;
   }>();
-  private pendingJumpClients: Client[] = [];
   private _suspendedAt: number | null = null;
   private agentDeps: AgentDeployDeps | null = null;
 
   private deployments = new Map<string, { client: Client; controller: AbortController; promise: Promise<void> }>();
+  private openings = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private closing = new Map<string, Promise<void>>();
-  private sftpOpen = new WeakMap<SshConnection, Promise<SFTPWrapper>>();
+  private sftpOpen = new WeakMap<Client, Promise<SFTPWrapper>>();
   private repositories = new Map<string, Map<string, string>>();
 
   constructor(private readonly verifyHostKey: VerifyHostKey = async () => false) {
@@ -260,21 +265,45 @@ export class SshSessionManager extends EventEmitter {
    * verifies host key, and transitions through connecting → connected.
    */
   async connect(profile: SshProfile): Promise<void> {
+    const closing = this.closing.get(profile.id);
+    if (closing) await closing;
+    const pending = this.openings.get(profile.id);
+    if (pending) return pending.promise;
+    const reconnecting = this.reconnectionState.get(profile.id);
+    if (reconnecting) return reconnecting.promise;
     const existing = this.connections.get(profile.id);
-    if (existing && existing.status !== "disconnected") await this.disconnect(profile.id);
+    if (existing?.status === "connected") return;
+    if (existing?.status === "deploying") return this.ensureAgent(profile.id);
+    if (existing && existing.status !== "disconnected") {
+      await this.disconnect(profile.id);
+      return this.connect(profile);
+    }
     const client = new Client();
     const connection: SshConnection = {
       profile, client, status: "connecting",
       channels: { terminals: new Map(), portForwards: new Map() }, jumpClients: [],
     };
+    const controller = new AbortController();
+    const entry = { controller, promise: Promise.resolve().then(() => this.establish(connection, controller.signal)) };
+    this.openings.set(profile.id, entry);
     this.connections.set(profile.id, connection);
     this.setStatus(profile.id, "connecting");
     this.watchClient(connection, client);
+    try { await entry.promise; }
+    finally { if (this.openings.get(profile.id) === entry) this.openings.delete(profile.id); }
+  }
+
+  private async establish(connection: SshConnection, signal: AbortSignal): Promise<void> {
+    const { client, profile, jumpClients } = connection;
+    let authenticated = false;
     try {
-      const config = await this.buildConnectConfig(profile, { readyTimeout: profile.connectionTimeoutMs ?? 10000 });
+      signal.throwIfAborted();
+      const config = await this.buildConnectConfig(profile, { readyTimeout: profile.connectionTimeoutMs ?? 10000, jumpClients, signal });
+      signal.throwIfAborted();
       if (this.connections.get(profile.id) !== connection || connection.status !== "connecting") throw new Error("SSH connection superseded");
-      if (profile.jumpHost && config.sock) connection.jumpClients = this.pendingJumpClients.splice(0);
       await connectVerified(client, config, profile.host, profile.port, this.verifyHostKey);
+      authenticated = true;
+      signal.throwIfAborted();
       if (connection.status !== "connecting") throw new Error("SSH connection superseded");
       if (profile.autoDeployAgent || this.repositories.get(profile.id)?.size) {
         this.setStatus(profile.id, "deploying");
@@ -283,7 +312,10 @@ export class SshSessionManager extends EventEmitter {
     } catch (error) {
       if (this.connections.get(profile.id) === connection && connection.status === "connecting") {
         this.setStatus(profile.id, "error", error instanceof Error ? error.message : String(error));
+      }
+      if (!authenticated) {
         client.destroy();
+        for (const jump of jumpClients.splice(0).reverse()) jump.destroy();
       }
       throw error;
     }
@@ -324,8 +356,17 @@ export class SshSessionManager extends EventEmitter {
     const profileId = connection.profile.id;
     this.cancelReconnection(profileId);
     this.setStatus(profileId, "disconnecting");
+    const opening = this.openings.get(profileId);
+    opening?.controller.abort(new Error("SSH connection closed during authentication"));
     const deployment = this.deployments.get(profileId);
     deployment?.controller.abort(new Error("SSH connection closed during deployment"));
+    // Authentication can be destroyed immediately. Deployment/native work needs
+    // the transport to acknowledge cancellation and remove its temporary state.
+    if (opening && !deployment && !connection.channels.agent) {
+      connection.client.destroy();
+      for (const jump of [...connection.jumpClients].reverse()) jump.destroy();
+    }
+    if (opening) await opening.promise.catch(() => {});
     // The bootstrap caller owns its error, but disconnect must join its cleanup.
     if (deployment) await deployment.promise.catch(() => {});
     this.agentDeps?.capabilityNegotiator.clearCache(profileId);
@@ -340,7 +381,7 @@ export class SshSessionManager extends EventEmitter {
     client.end();
     // Opening SFTP owns no native work; close the transport first so a pending
     // subsystem request can fail instead of blocking disconnect indefinitely.
-    await this.sftpOpen.get(connection)?.catch(() => {});
+    await this.sftpOpen.get(client)?.catch(() => {});
     for (const jump of [...connection.jumpClients].reverse()) jump.end();
     connection.jumpClients = [];
     channels.agent = undefined; channels.terminals.clear(); channels.sftp = undefined; channels.portForwards.clear();
@@ -375,17 +416,11 @@ export class SshSessionManager extends EventEmitter {
     let client: Client | undefined;
     let jumpClients: Client[] = [];
     try {
-      const config = await this.buildConnectConfig(profile, { readyTimeout: 5000 }, passwordOverride);
-      // Capture any jump clients created during buildConnectConfig
-      jumpClients = this.pendingJumpClients.splice(0);
+      const config = await this.buildConnectConfig(profile, { readyTimeout: 5000, jumpClients }, passwordOverride);
       client = new Client();
 
       // Connect and wait for ready
-      await new Promise<void>((resolve, reject) => {
-        client!.on("ready", () => resolve());
-        client!.on("error", (err: Error) => reject(err));
-        void connectVerified(client!, config, profile.host, profile.port, this.verifyHostKey).catch(reject);
-      });
+      await connectVerified(client, config, profile.host, profile.port, this.verifyHostKey);
 
       // Run `echo ok` and verify output
       const output = await new Promise<string>((resolve, reject) => {
@@ -472,7 +507,10 @@ export class SshSessionManager extends EventEmitter {
 
     this.agentDeps?.rpcRouter.clearQueue(profileId);
 
+    state.controller.abort(new Error("SSH reconnection cancelled"));
     state.client?.destroy();
+    for (const jump of state.jumpClients.splice(0).reverse()) jump.destroy();
+    state.reject(new Error("SSH reconnection cancelled"));
     this.reconnectionState.delete(profileId);
   }
 
@@ -492,10 +530,17 @@ export class SshSessionManager extends EventEmitter {
     }
 
     this.deployments.get(profileId)?.controller.abort(new Error("SSH connection lost during deployment"));
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((done, failed) => { resolve = done; reject = failed; });
+    // Background retries report through status events; repository opens can
+    // join the same outcome without creating a second authenticated transport.
+    void promise.catch(() => {});
     this.reconnectionState.set(profileId, {
       timer: null,
       attempt: 0,
       startedAt: Date.now(),
+      jumpClients: [], controller: new AbortController(), promise, resolve, reject,
     });
 
     this.setStatus(profileId, "reconnecting");
@@ -524,7 +569,7 @@ export class SshSessionManager extends EventEmitter {
 
       const conn = this.connections.get(profileId);
       if (!conn) {
-        this.reconnectionState.delete(profileId);
+        this.cancelReconnection(profileId);
         return;
       }
 
@@ -532,14 +577,10 @@ export class SshSessionManager extends EventEmitter {
         // Attempt to reconnect using the stored profile
         const client = new Client();
         currentState.client = client;
-        const config = await this.buildConnectConfig(conn.profile, { readyTimeout: 10000 });
+        const config = await this.buildConnectConfig(conn.profile, { readyTimeout: 10000, jumpClients: currentState.jumpClients, signal: currentState.controller.signal });
         if (this.reconnectionState.get(profileId) !== currentState) { client.destroy(); return; }
 
-        await new Promise<void>((resolve, reject) => {
-          client.on("ready", () => resolve());
-          client.on("error", (err: Error) => reject(err));
-          void connectVerified(client, config, conn.profile.host, conn.profile.port, this.verifyHostKey).catch(reject);
-        });
+        await connectVerified(client, config, conn.profile.host, conn.profile.port, this.verifyHostKey);
 
         // Cancellation revokes an unadopted transport. A late authentication
         // reply must not restart an agent after the user disconnected.
@@ -552,7 +593,7 @@ export class SshSessionManager extends EventEmitter {
         };
 
         // Track jump clients from the new connection
-        if (conn.profile.jumpHost && this.pendingJumpClients.length > 0) {
+        if (conn.profile.jumpHost) {
           // Close old jump clients first
           for (const oldJumpClient of [...conn.jumpClients].reverse()) {
             try {
@@ -561,7 +602,7 @@ export class SshSessionManager extends EventEmitter {
               // Already closed
             }
           }
-          conn.jumpClients = this.pendingJumpClients.splice(0);
+          conn.jumpClients = currentState.jumpClients.splice(0);
         }
 
         this.watchClient(conn, client);
@@ -569,10 +610,17 @@ export class SshSessionManager extends EventEmitter {
           this.setStatus(profileId, "deploying");
           await this.ensureAgent(profileId);
         } else this.setStatus(profileId, "connected");
+        if (this.reconnectionState.get(profileId) !== currentState || conn.client !== client || this.getStatus(profileId) !== "connected") throw new Error("SSH reconnection superseded");
+        currentState.resolve();
         this.reconnectionState.delete(profileId);
 
-      } catch {
+      } catch (error) {
+        currentState.client?.destroy();
+        currentState.client = undefined;
+        for (const jump of currentState.jumpClients.splice(0).reverse()) jump.destroy();
+        if (this.reconnectionState.get(profileId) !== currentState) return;
         if (conn.status === "connected" || conn.status === "disconnecting" || conn.status === "disconnected") {
+          currentState.reject(error instanceof Error ? error : new Error("SSH reconnection failed", { cause: error }));
           this.reconnectionState.delete(profileId);
           this.agentDeps?.rpcRouter.clearQueue(profileId);
           return;
@@ -582,6 +630,7 @@ export class SshSessionManager extends EventEmitter {
         if (elapsed >= 60000) {
           // Give up
           this.reconnectionState.delete(profileId);
+          currentState.reject(new Error("Reconnection timed out after 60s", { cause: error }));
           this.setStatus(profileId, "disconnected");
           this.emit("ssh:status-changed", { profileId, status: "disconnected", error: "Reconnection timed out after 60s" });
 
@@ -608,20 +657,21 @@ export class SshSessionManager extends EventEmitter {
   async getSftp(profileId: string): Promise<SFTPWrapper> {
     const connection = this.connections.get(profileId);
     if (!connection || connection.status !== "connected") throw new Error("SSH connection is not ready");
+    const client = connection.client;
     if (connection.channels.sftp) return connection.channels.sftp;
-    const pending = this.sftpOpen.get(connection);
+    const pending = this.sftpOpen.get(client);
     if (pending) return pending;
-    const opening = new Promise<SFTPWrapper>((resolve, reject) => connection.client.sftp((error, stream) => {
+    const opening = new Promise<SFTPWrapper>((resolve, reject) => client.sftp((error, stream) => {
       if (error) { reject(error); return; }
-      if (this.connections.get(profileId) !== connection || connection.status !== "connected") {
+      if (this.connections.get(profileId) !== connection || connection.client !== client || connection.status !== "connected") {
         stream.end(); reject(new Error("SSH connection closed while opening SFTP")); return;
       }
       connection.channels.sftp = stream;
       stream.once("close", () => { if (connection.channels.sftp === stream) connection.channels.sftp = undefined; });
       resolve(stream);
     }));
-    this.sftpOpen.set(connection, opening);
-    try { return await opening; } finally { this.sftpOpen.delete(connection); }
+    this.sftpOpen.set(client, opening);
+    try { return await opening; } finally { this.sftpOpen.delete(client); }
   }
 
   configureAgentDeployment(deps: AgentDeployDeps): void {
@@ -727,9 +777,10 @@ export class SshSessionManager extends EventEmitter {
    */
   private async buildConnectConfig(
     profile: SshProfile,
-    options: { readyTimeout: number },
+    options: { readyTimeout: number; jumpClients: Client[]; signal?: AbortSignal },
     passwordOverride?: string,
   ): Promise<ConnectConfig> {
+    options.signal?.throwIfAborted();
     const config: ConnectConfig = {
       host: profile.host,
       port: profile.port,
@@ -782,6 +833,7 @@ export class SshSessionManager extends EventEmitter {
       }
     }
 
+    options.signal?.throwIfAborted();
     if (profile.forwardAgent) {
       config.agentForward = true;
     }
@@ -792,6 +844,8 @@ export class SshSessionManager extends EventEmitter {
         profile.jumpHost,
         profile.host,
         profile.port,
+        options.jumpClients,
+        options.signal,
       );
       config.sock = channel;
       delete config.host;
@@ -863,6 +917,8 @@ export class SshSessionManager extends EventEmitter {
     jumpHostSpec: string,
     targetHost: string,
     targetPort: number,
+    jumpClients: Client[],
+    signal?: AbortSignal,
   ): Promise<ClientChannel> {
     // Split comma-separated hops
     const hops = jumpHostSpec.split(",").map((s) => s.trim()).filter(Boolean);
@@ -871,10 +927,10 @@ export class SshSessionManager extends EventEmitter {
       throw new Error("Jump host spec is empty");
     }
 
-    const jumpClients: Client[] = [];
     const agentSocket = this.resolveAgentSocket();
 
     try {
+      signal?.throwIfAborted();
       // Connect to the first jump host directly
       const firstHop = this.parseJumpHostSpec(hops[0]);
       const firstClient = new Client();
@@ -888,16 +944,13 @@ export class SshSessionManager extends EventEmitter {
         ...(agentSocket ? { agent: agentSocket } : {}),
       };
 
-      await new Promise<void>((resolve, reject) => {
-        firstClient.on("ready", () => resolve());
-        firstClient.on("error", (err: Error) => reject(err));
-        void connectVerified(firstClient, firstConfig, firstHop.host, firstHop.port, this.verifyHostKey).catch(reject);
-      });
+      await connectVerified(firstClient, firstConfig, firstHop.host, firstHop.port, this.verifyHostKey);
 
       // For multi-hop: chain through intermediate hosts using forwardOut
       let currentClient = firstClient;
 
       for (let i = 1; i < hops.length; i++) {
+        signal?.throwIfAborted();
         const nextHop = this.parseJumpHostSpec(hops[i]);
 
         // Open a TCP tunnel from the current hop to the next hop
@@ -925,15 +978,13 @@ export class SshSessionManager extends EventEmitter {
           ...(agentSocket ? { agent: agentSocket } : {}),
         };
 
-        await new Promise<void>((resolve, reject) => {
-          nextClient.on("ready", () => resolve());
-          nextClient.on("error", (err: Error) => reject(err));
-          void connectVerified(nextClient, nextConfig, nextHop.host, nextHop.port, this.verifyHostKey).catch(reject);
-        });
+        signal?.throwIfAborted();
+        await connectVerified(nextClient, nextConfig, nextHop.host, nextHop.port, this.verifyHostKey);
 
         currentClient = nextClient;
       }
 
+      signal?.throwIfAborted();
       // Open a TCP tunnel from the last hop to the final target
       const targetChannel = await new Promise<ClientChannel>((resolve, reject) => {
         currentClient.forwardOut(
@@ -948,13 +999,11 @@ export class SshSessionManager extends EventEmitter {
         );
       });
 
-      // Store jump clients for later cleanup
-      this.pendingJumpClients = jumpClients;
-
+      signal?.throwIfAborted();
       return targetChannel;
     } catch (err) {
       // Clean up any clients that were connected before the failure
-      for (const client of jumpClients.reverse()) {
+      for (const client of [...jumpClients].reverse()) {
         try {
           client.end();
         } catch {

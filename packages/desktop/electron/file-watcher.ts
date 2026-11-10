@@ -16,7 +16,7 @@ import * as path from "node:path";
 import type { BrowserWindow } from "electron";
 import { ipcMain } from "electron";
 import { getProviderRegistry } from "./provider-registry";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 
 // Directories to ignore entirely — changes here don't affect git status.
 const IGNORED_DIRS = new Set([

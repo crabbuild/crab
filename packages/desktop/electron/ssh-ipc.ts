@@ -253,6 +253,12 @@ export function registerSshIpcHandlers(
   ipcMain.handle(
     "ssh:open-as-repo",
     async (_event, profileId: string, path: string) => {
+      const profile = profileManager.get(profileId);
+      if (!profile) throw new Error("The saved SSH connection no longer exists. Choose a connection in SSH Connections.");
+      await sessionManager.connect(profile);
+      // Opening a repository explicitly requests native services even when
+      // automatic deployment is disabled for an ordinary SFTP connection.
+      await sessionManager.ensureAgent(profileId);
       return fileBrowser.openAsRepo(profileId, path);
     },
   );

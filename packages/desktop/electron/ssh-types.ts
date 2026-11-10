@@ -6,6 +6,14 @@
  * quality monitoring, bookmarks, and agent capability negotiation.
  */
 
+/** Parse a saved SSH identity without URL-decoding its literal remote path. */
+export function parseRepoId(repoId: string): { profileId: string; remotePath: string } | null {
+  if (!repoId.startsWith("ssh://")) return null;
+  const value = repoId.slice(6);
+  const slash = value.indexOf("/");
+  return slash < 0 ? { profileId: value, remotePath: "/" } : { profileId: value.slice(0, slash), remotePath: value.slice(slash) };
+}
+
 // ── Transfer Types ───────────────────────────────────────────────
 
 export type TransferDirection = "upload" | "download";

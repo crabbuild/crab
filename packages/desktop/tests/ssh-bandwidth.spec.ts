@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { RpcRouter, parseRepoId, type BandwidthStats } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, type BandwidthStats } from "../electron/ssh-router";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { EventEmitter } from "node:events";
 

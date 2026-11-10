@@ -13,7 +13,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 import type { RepoProvider } from "./repo-provider";
 
 // ── Registry Events ──────────────────────────────────────────────

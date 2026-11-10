@@ -42,33 +42,31 @@ export interface RemoteWorkspace {
  * Events emitted:
  * - "discovered" → { profileId, rootPath, repos: DiscoveredRepo[] }
  * - "status-update" → { profileId, statuses: RemoteRepoStatus[], poll_timestamp: number }
- * - "error" → { profileId, message: string }
+ * Failed polls use each repository's `error` field on "status-update".
  */
 export class RemoteWorkspaceOrchestrator extends EventEmitter {
   private rpcRouter: RpcRouter;
   private sessionManager: SshSessionManager;
-  private pollingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+  private pollingIntervals = new Map<string, { timer: ReturnType<typeof setInterval> }>();
   private openWorkspaces = new Map<string, RemoteWorkspace>();
+
+  private readonly onStatusChanged = (payload: { profileId: string; status: string }) => {
+    const workspace = this.openWorkspaces.get(payload.profileId);
+    if (!workspace) return;
+    if (payload.status === "connected") {
+      this.startPolling(payload.profileId, workspace.repos.map(repo => repo.absolute_path));
+    } else {
+      this.stopPolling(payload.profileId);
+      this.publishFailure(payload.profileId, "SSH connection unavailable");
+    }
+  };
 
   constructor(rpcRouter: RpcRouter, sessionManager: SshSessionManager) {
     super();
     this.rpcRouter = rpcRouter;
     this.sessionManager = sessionManager;
 
-    // Listen for SSH disconnections to pause polling
-    this.sessionManager.on("ssh:status-changed", (payload: { profileId: string; status: string }) => {
-      if (payload.status === "disconnected") {
-        this.stopPolling(payload.profileId);
-        this.emit("error", { profileId: payload.profileId, message: "SSH connection lost" });
-      } else if (payload.status === "connected") {
-        // Resume polling for any open workspaces on this profile
-        const ws = this.openWorkspaces.get(payload.profileId);
-        if (ws && ws.repos.length > 0) {
-          const repoPaths = ws.repos.map((r) => r.absolute_path);
-          this.startPolling(payload.profileId, repoPaths);
-        }
-      }
-    });
+    this.sessionManager.on("ssh:status-changed", this.onStatusChanged);
   }
 
   /**
@@ -109,22 +107,30 @@ export class RemoteWorkspaceOrchestrator extends EventEmitter {
         const result = (await this.rpcRouter.sendToRemoteAgent(profileId, "batch_git_status", {
           repo_paths: repoPaths,
         })) as { statuses: RemoteRepoStatus[]; poll_timestamp: number };
-
+        if (this.pollingIntervals.get(profileId) !== owner) return;
         this.emit("status-update", {
           profileId,
           statuses: result.statuses ?? [],
           poll_timestamp: result.poll_timestamp,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.emit("error", { profileId, message });
+        if (this.pollingIntervals.get(profileId) !== owner) return;
+        this.publishFailure(profileId, err instanceof Error ? err.message : String(err));
       }
     };
 
-    // Poll immediately, then every 30s
+    // The owner is installed before the first RPC so close/reconnect can revoke
+    // its late replies. Failed polls use the same status contract as successes.
+    const owner = { timer: setInterval(poll, 30_000) };
+    this.pollingIntervals.set(profileId, owner);
     void poll();
-    const interval = setInterval(poll, 30_000);
-    this.pollingIntervals.set(profileId, interval);
+  }
+
+  private publishFailure(profileId: string, message: string): void {
+    const workspace = this.openWorkspaces.get(profileId);
+    if (!workspace) return;
+    const statuses: RemoteRepoStatus[] = workspace.repos.map(repo => ({ relative_path: repo.relative_path, branch: null, dirty_count: 0, ahead: null, behind: null, error: message }));
+    this.emit("status-update", { profileId, statuses, poll_timestamp: Date.now() });
   }
 
   /**
@@ -133,7 +139,7 @@ export class RemoteWorkspaceOrchestrator extends EventEmitter {
   stopPolling(profileId: string): void {
     const interval = this.pollingIntervals.get(profileId);
     if (interval) {
-      clearInterval(interval);
+      clearInterval(interval.timer);
       this.pollingIntervals.delete(profileId);
     }
   }
@@ -184,6 +190,7 @@ export class RemoteWorkspaceOrchestrator extends EventEmitter {
    * Stop all polling and clean up. Call on app shutdown.
    */
   dispose(): void {
+    this.sessionManager.removeListener("ssh:status-changed", this.onStatusChanged);
     for (const [profileId] of this.pollingIntervals) {
       this.stopPolling(profileId);
     }

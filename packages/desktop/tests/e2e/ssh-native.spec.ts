@@ -49,6 +49,7 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
   delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
   const routerPath = path.join(root, "ssh-router.cjs");
+  writeFileSync(path.join(root, "ssh-types.cjs"), extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-types.cjs"));
   writeFileSync(routerPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-router.cjs"));
   const capabilitiesPath = path.join(root, "ssh-capabilities.cjs");
   writeFileSync(capabilitiesPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-capabilities.cjs"));

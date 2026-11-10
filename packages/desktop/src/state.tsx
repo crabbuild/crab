@@ -1,5 +1,6 @@
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
+import { parseRepoId } from "../electron/ssh-types";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
 import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError } from "./ipc";
 
@@ -159,7 +160,7 @@ export interface OpenRepo extends RepoHandle {
   path?: string;
   openedAt: number;
   /** When true, the repo was restored from localStorage but hasn't
-   *  been opened via `rpc.openLocal` yet. The sidebar triggers the
+   *  been reopened yet. The sidebar triggers the
    *  actual open on first selection. */
   deferred?: boolean;
   /** When set, RepoDetail switches to this view on first render for
@@ -232,6 +233,24 @@ interface PersistedRepo {
   path: string;
   label: string;
   openedAt: number;
+}
+
+function loadPersistedRepos(): OpenRepo[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(LS_RECENT_REPOS) ?? "[]");
+    if (!Array.isArray(value)) return [];
+    const paths = new Set<string>();
+    const repos: OpenRepo[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") continue;
+      const { path, label, openedAt } = entry as Record<string, unknown>;
+      if (typeof path !== "string" || !path || typeof label !== "string" || typeof openedAt !== "number" || !Number.isFinite(openedAt) || paths.has(path)) continue;
+      paths.add(path);
+      const remote = parseRepoId(path);
+      repos.push({ repo_id: `deferred-${path}`, url: remote ? path : "", is_remote: !!remote, cache_dir: "", path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
+    }
+    return repos;
+  } catch { return []; }
 }
 
 function savePersistedRepos(repos: OpenRepo[]) {
@@ -316,7 +335,7 @@ const MAX_LOG_LINES_HARD_CAP = 20_000;
 let runtimeMaxLogLines = 2000;
 
 export type Action =
-  | { type: "add-repo"; repo: OpenRepo }
+  | { type: "add-repo"; repo: OpenRepo; activation?: "if-empty" }
   | { type: "remove-repo"; repo_id: string }
   | { type: "set-active"; repo_id: string | null }
   | { type: "pin-repo"; path: string }
@@ -345,7 +364,7 @@ export type Action =
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "add-repo": {
-      const repos = [action.repo, ...state.repos.filter((r) => r.repo_id !== action.repo.repo_id)];
+      const repos = [action.repo, ...state.repos.filter(r => r.repo_id !== action.repo.repo_id && !(r.deferred && r.path === action.repo.path))];
       // If the new repo isn't in the order list yet, append it
       const repoOrder =
         action.repo.path && !state.repoOrder.includes(action.repo.path)
@@ -357,7 +376,7 @@ function reducer(state: AppState, action: Action): AppState {
       // TimelineView, etc.) to fire RPCs against an id the agent has never
       // seen, producing "repository not open" errors and unbounded memory
       // growth from concurrent git_log / read_text calls.
-      const activeRepoId = action.repo.deferred
+      const activeRepoId = action.repo.deferred || (action.activation === "if-empty" && state.activeRepoId !== null)
         ? state.activeRepoId
         : action.repo.repo_id;
       return { ...state, repos, activeRepoId, repoOrder };
@@ -607,18 +626,23 @@ function reducer(state: AppState, action: Action): AppState {
   }
 }
 
-const initialState: AppState = {
-  repos: [],
-  activeRepoId: null,
-  logs: [],
-  jobs: {},
-  pinnedPaths: loadPinnedPaths(),
-  repoOrder: loadRepoOrder(),
-  workspaces: [],
-  activeWorkspaceRootPath: null,
-  tabBar: [],
-  sshConnections: new Map(),
-};
+function initialState(): AppState {
+  const repos = loadPersistedRepos();
+  const repoOrder = loadRepoOrder();
+  for (const repo of repos) if (repo.path && !repoOrder.includes(repo.path)) repoOrder.push(repo.path);
+  return {
+    repos,
+    activeRepoId: null,
+    logs: [],
+    jobs: {},
+    pinnedPaths: loadPinnedPaths(),
+    repoOrder,
+    workspaces: [],
+    activeWorkspaceRootPath: null,
+    tabBar: [],
+    sshConnections: new Map(),
+  };
+}
 
 interface Ctx {
   state: AppState;
@@ -638,7 +662,7 @@ interface Ctx {
 const StoreContext = createContext<Ctx | null>(null);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, dispatch] = useReducer(reducer, undefined, initialState);
 
   useEffect(() => {
     // Batch progress lines to avoid re-rendering the entire tree on every
@@ -717,7 +741,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const activePath =
       state.repos.find((r) => r.repo_id === state.activeRepoId)?.path ?? null;
     if (activePath) localStorage.setItem(LS_ACTIVE_PATH, activePath);
-    else localStorage.removeItem(LS_ACTIVE_PATH);
+    else {
+      const pendingPath = localStorage.getItem(LS_ACTIVE_PATH);
+      // Startup may be waiting for host trust or a recoverable connection error.
+      // Keep the selected path while its deferred entry remains available to retry.
+      if (!state.repos.some(repo => repo.deferred && repo.path === pendingPath)) localStorage.removeItem(LS_ACTIVE_PATH);
+    }
   }, [state.repos, state.activeRepoId]);
 
   // Persist pin and order state

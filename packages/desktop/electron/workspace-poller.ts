@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { parseRepoId, type RpcRouter } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
+import { type RpcRouter } from "./ssh-router";
 import type { ProviderRegistry } from "./provider-registry";
 import type { SshSessionManager } from "./ssh-manager";
 

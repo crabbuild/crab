@@ -18,7 +18,7 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
   const connections = new Set<Connection>();
   const commands = new Set<ChildProcessWithoutNullStreams>();
   const failures: Error[] = [];
-  let uploadedBytes = 0, openFiles = 0;
+  let uploadedBytes = 0, openFiles = 0, connectionAttempts = 0, accepting = true;
   const requests: Array<{ method: string; repo_id?: string; path?: string }> = [];
   const inside = (name: string) => {
     const resolved = name === "." ? home : path.resolve(name);
@@ -28,6 +28,8 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
   const attrs = (stat: Stats) => ({ mode: stat.mode, uid: stat.uid, gid: stat.gid, size: stat.size, atime: Math.floor(stat.atimeMs / 1000), mtime: Math.floor(stat.mtimeMs / 1000) });
   const server = new Server({ hostKeys: [host.privateKey] }, connection => {
     connections.add(connection); connection.on("close", () => connections.delete(connection)); connection.on("error", () => {});
+    connectionAttempts++;
+    if (!accepting) { connection.end(); return; }
     connection.on("authentication", context => {
       if (context.method !== "publickey" || !context.key.data.equals(authKey.getPublicSSH())) { context.reject(); return; }
       if (context.signature && (!context.blob || authKey.verify(context.blob, context.signature, context.hashAlgo) !== true)) { context.reject(); return; }
@@ -129,6 +131,8 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
     home, keyPath, port: address.port, commands, failures, requests,
     verify: async (_hostname: string, _port: number, key: Buffer) => key.length === hostKey.getPublicSSH().length && timingSafeEqual(key, hostKey.getPublicSSH()),
     get uploadedBytes() { return uploadedBytes; }, get openFiles() { return openFiles; },
+    get connectionAttempts() { return connectionAttempts; },
+    setAccepting(value: boolean) { accepting = value; },
     async close() {
       connections.forEach(connection => connection.end());
       await Promise.all([...commands].map(child => { const exited = once(child, "close"); child.stdin.end(); return exited; }));
