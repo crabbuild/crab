@@ -212,7 +212,7 @@ let memoryManager: MemoryManager | null = null;
 let auditLogger: AuditLogger | null = null;
 let isShuttingDown = false;
 
-async function gracefulShutdown(reason: string): Promise<void> {
+async function gracefulShutdown(reason: string, killSessions = true): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
@@ -226,12 +226,11 @@ async function gracefulShutdown(reason: string): Promise<void> {
   try {
     // Persist latest state before closing sessions
     if (checkpointTimer) {
+      checkpointTimer.stop();
       checkpointTimer.finalCheckpoint();
     }
 
-    // Shutdown the server — this sends SIGHUP to all PTY processes,
-    // waits up to 5s for graceful exit, then terminates them
-    await server.shutdown({ killSessions: true });
+    await server.shutdown({ killSessions });
     logger.info("Shutdown complete");
   } catch (err) {
     logger.error("Error during shutdown", { error: (err as Error).message });
@@ -380,9 +379,8 @@ async function main(): Promise<void> {
     tokenPath,
     pidPath,
     spawnSubprocess: createNodePtySpawner(),
-    onIdleShutdown: () => {
-      logger.info("Idle timeout reached — shutting down");
-      void gracefulShutdown("idle-timeout");
+    onShutdownRequested: (reason, killSessions) => {
+      void gracefulShutdown(reason, killSessions);
     },
     hooks: {
       beforeSpawn: () => quotaManager!.checkCanCreateSession(server!.sessionCount),

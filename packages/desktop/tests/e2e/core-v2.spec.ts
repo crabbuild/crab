@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parse } from "yaml";
+import { DaemonClient } from "../../electron/daemon/daemon-client";
+import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
+import { socketAddress } from "../../electron/daemon/socket-address";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -48,6 +51,33 @@ async function closeFixtureTerminals(application: ElectronApplication, directory
       return false;
     }
   }).map(session => session.pid), { timeout: 10_000 }).toEqual([]);
+}
+
+async function closeFixtureDaemon(home: string): Promise<void> {
+  // Only callers that created this HOME own its daemon. Tests inheriting the
+  // developer's HOME must leave that durable process running.
+  const socketDir = path.join(home, ".crab", "desktop", "daemon");
+  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
+  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
+  const client = new DaemonClient({
+    socketDir, daemonEntryPath: "",
+    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
+  });
+  try {
+    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
+  } finally { client.disconnect(); }
+  await expect.poll(() => {
+    try { process.kill(pid, 0); return false; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      return true;
+    }
+  }, { timeout: 10_000 }).toBe(true);
+  const address = socketAddress(`${base}.sock`);
+  if (process.platform !== "win32" && address !== `${base}.sock`) {
+    rmSync(path.dirname(address), { recursive: true });
+  }
 }
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
@@ -191,8 +221,8 @@ test("workflow commands stream output and surface failures through the packaged 
     expect(rendererErrors).toEqual([]);
   } finally {
     await application.close();
-    // Agent discovery probes can finish writing after Electron closes.
-    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+    await closeFixtureDaemon(home);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -404,7 +434,7 @@ test("terminal restore is isolated by profile and repository", async () => {
   mkdirSync(repository);
   execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
   const profile = path.join(root, "profile-a");
-  const env = { ...process.env, HOME: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
+  const env = { ...process.env, HOME: testHome, USERPROFILE: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
   let application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
   const savedLayout = { version: 1, tabs: [{ id: "old-tab", title: "Other repository shell", shell: "", cwd: path.join(root, "removed-repository") }], splits: [], activeTabIndex: 0 };
   try {
@@ -441,6 +471,7 @@ test("terminal restore is isolated by profile and repository", async () => {
   } finally {
     try { await closeFixtureTerminals(application, repository); }
     finally { await application.close(); }
+    await closeFixtureDaemon(testHome);
     rmSync(root, { recursive: true, force: true });
   }
 });

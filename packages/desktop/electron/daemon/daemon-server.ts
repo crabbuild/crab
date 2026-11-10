@@ -118,8 +118,8 @@ export interface DaemonServerOptions {
   spawnSubprocess: SubprocessSpawner;
   /** Lifecycle hooks for durability subsystems (history, audit, quotas, etc.). */
   hooks?: DaemonServerHooks;
-  /** Called when the idle timer fires (self-terminate). */
-  onIdleShutdown?: () => void;
+  /** Delegates shutdown to the process owner, including its durability timers. */
+  onShutdownRequested?: (reason: string, killSessions: boolean) => void;
 }
 
 interface ConnectedClient {
@@ -153,7 +153,7 @@ export class DaemonServer {
   private socketPath: string;
   private tokenPath: string;
   private pidPath: string;
-  private onIdleShutdown?: () => void;
+  private onShutdownRequested?: DaemonServerOptions["onShutdownRequested"];
 
   /** Tracks which sessions have backpressure active (PTY paused). */
   private backpressuredSessions: Set<string> = new Set();
@@ -180,7 +180,7 @@ export class DaemonServer {
     this.tokenPath = opts.tokenPath;
     this.pidPath = opts.pidPath;
     this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-    this.onIdleShutdown = opts.onIdleShutdown;
+    this.onShutdownRequested = opts.onShutdownRequested;
     this.hooks = opts.hooks ?? {};
 
     this.host = new TerminalHost({
@@ -809,8 +809,8 @@ export class DaemonServer {
 
       case "shutdown": {
         const { killSessions } = request.payload;
-        // Perform shutdown asynchronously
-        setImmediate(() => this.shutdown({ killSessions }));
+        // Send the acknowledgement before the process owner closes clients.
+        setImmediate(() => this.requestShutdown("request", killSessions));
         return { acknowledged: true };
       }
 
@@ -851,8 +851,7 @@ export class DaemonServer {
         ptyFds,
         snapshotDir,
         onSuccess: () => {
-          // Predecessor should exit — perform graceful shutdown without killing sessions
-          setImmediate(() => void this.shutdown({ killSessions: false }));
+          setImmediate(() => this.requestShutdown("upgrade", false));
         },
       });
 
@@ -1213,6 +1212,16 @@ export class DaemonServer {
   // Idle timer
   // -------------------------------------------------------------------------
 
+  private requestShutdown(reason: string, killSessions: boolean): void {
+    if (this.onShutdownRequested) {
+      this.onShutdownRequested(reason, killSessions);
+      return;
+    }
+    // Standalone servers own only the transport and terminals. The daemon
+    // process injects its owner to close history, quotas and memory timers too.
+    void this.shutdown({ killSessions });
+  }
+
   private resetIdleTimer(): void {
     this.clearIdleTimer();
 
@@ -1222,7 +1231,7 @@ export class DaemonServer {
       this.idleTimer = null;
       // Only self-terminate if no clients and no sessions
       if (this.clients.size === 0 && this.host.sessionCount === 0) {
-        this.onIdleShutdown?.();
+        this.requestShutdown("idle-timeout", true);
       } else {
         // Still active — reset
         this.resetIdleTimer();
