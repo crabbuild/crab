@@ -1755,6 +1755,45 @@ build pass. Evidence: `pty-kill-contract-before.json`,
 `pty-kill-fixture-types.log`. Native Windows packaged cleanup and descendant
 ownership still require CI; this local result does not establish either.
 
+### Long-home terminal startup correction
+
+Both macOS jobs in run `42843352759` fail the terminal profile-isolation case
+while waiting for a terminal input. The same case reproduces against the
+rebased package. A separate real-package probe establishes the boundary:
+an 88-byte socket path starts a working daemon terminal; a 135-byte path
+reports `Socket path exceeds 104-byte limit` and leaves the terminal empty.
+Node's [IPC contract](https://nodejs.org/docs/latest-v22.x/api/net.html#ipc-support)
+limits Unix socket pathnames to 103 bytes on macOS and 107 on Linux before
+truncation. The old validator also allowed one byte beyond those limits.
+
+The shared address resolver now hashes unrepresentable paths into a bounded
+endpoint under `/tmp`, with a private 0700 directory owned by the current
+user. Tokens and PID files retain the original home identity. Startup rejects
+public or symlinked socket directories; clients, stale cleanup and shutdown
+all resolve the same endpoint. Representable Unix addresses retain the
+v2.0.0-alpha.1 daemon reuse boundary until a protocol migration explicitly
+retires it. Windows retains its named-pipe transport. Obsolete long-path
+rejection tests are replaced by bounded, distinct UTF-8 address and actual
+long-path startup/cleanup checks; Windows fixtures no longer invent socket
+files for named pipes.
+
+All 132 scoped checks pass, including real short/long-path daemon commands,
+Kill with confirmed shell disappearance, private-directory rejection, stale
+cleanup, client, upgrade and sibling adapter cases. Production and touched
+fixture types and the Electron build pass. The rebuilt unsigned macOS
+package passes the previously failing profile-isolation case in an owned
+home, and its owned daemon is stopped with matching birth time and confirmed
+PID disappearance. Evidence: `long-socket-address-before.json`,
+`long-socket-final.json`, `long-home-packaged-before.json`,
+`profile-packaged-current.json`, and `profile-packaged-home.json`.
+The combined packaged rerun passes updater, workflow output, repository/chat/
+terminal and profile-isolation cases, skips the storage case without an owned
+bucket, and fails the separate workspace-sidebar scroll-restoration assertion
+at `core-v2.spec.ts:524`. Its three owned daemons are stopped with verified
+identity and confirmed disappearance. Evidence: `full-packaged-current.json`
+and `full-packaged-home.json`. Sidebar persistence and new-head cross-platform
+qualification remain required; the combined suite is not reported as passing.
+
 ## Electron runtime release gate (2026-11-10)
 
 `package.json` selects Electron `^33.2.0`; the lockfile and installed package

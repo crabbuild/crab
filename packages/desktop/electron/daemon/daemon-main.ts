@@ -16,6 +16,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { socketAddress } from "./socket-address";
 
 import { DaemonServer } from "./daemon-server";
 import { createNodePtySpawner } from "./subprocess-handle";
@@ -145,7 +146,7 @@ function cleanupStaleSocket(socketPath: string, pidPath: string): void {
 
   // Remove stale socket file
   try {
-    fs.unlinkSync(socketPath);
+    fs.unlinkSync(socketAddress(socketPath));
   } catch {
     // May not exist
   }
@@ -347,7 +348,7 @@ async function main(): Promise<void> {
   // Check for stale socket and clean up if needed
   // Windows pipes have no socket file. The PID guard must still protect a live
   // daemon's token from being overwritten by a duplicate startup.
-  if (fs.existsSync(socketPath) || fs.existsSync(pidPath)) {
+  if (fs.existsSync(socketAddress(socketPath)) || fs.existsSync(pidPath)) {
     cleanupStaleSocket(socketPath, pidPath);
   }
 

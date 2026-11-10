@@ -27,12 +27,6 @@ type DaemonResponse,
 // Constants
 // ---------------------------------------------------------------------------
 
-/** macOS limits Unix socket paths to 104 bytes (sun_path in sockaddr_un). */
-const MACOS_SOCKET_PATH_LIMIT = 104;
-
-/** Linux limit is 108 bytes. */
-const LINUX_SOCKET_PATH_LIMIT = 108;
-
 /** Timeout for socket probe (connect attempt). */
 const PROBE_TIMEOUT_MS = 1000;
 
@@ -208,9 +202,6 @@ export class DaemonSpawner {
     const entry = entryPath ?? this.entryPath;
     const target = socketPath ?? this.socketPath;
 
-    // Validate socket path length
-    this.validateSocketPathLength(target);
-
     // Ensure socket directory exists
     const dir = path.dirname(target);
     fs.mkdirSync(dir, { recursive: true });
@@ -310,7 +301,7 @@ export class DaemonSpawner {
     }
 
     // Remove stale files
-    safeUnlink(target);
+    safeUnlink(socketAddress(target));
     safeUnlink(pidFile);
 
     // Derive and remove token file
@@ -359,33 +350,6 @@ export class DaemonSpawner {
     // Daemon is not running or not healthy — clean up and spawn
     this.cleanupStaleSocket();
     await this.spawn();
-  }
-
-  // -------------------------------------------------------------------------
-  // Socket path validation
-  // -------------------------------------------------------------------------
-
-  /**
-   * Validate that the socket path doesn't exceed the OS limit.
-   * macOS: 104 bytes, Linux: 108 bytes.
-   *
-   * @throws Error if the path is too long.
-   */
-  validateSocketPathLength(socketPath: string): void {
-    // Named-pipe addresses are bounded separately from their control-file paths.
-    if (process.platform === "win32") return;
-    const pathBytes = Buffer.byteLength(socketPath, "utf-8");
-    const limit =
-      process.platform === "darwin"
-        ? MACOS_SOCKET_PATH_LIMIT
-        : LINUX_SOCKET_PATH_LIMIT;
-
-    if (pathBytes > limit) {
-      throw new Error(
-        `Socket path exceeds ${limit}-byte limit for ${process.platform}: ` +
-          `${pathBytes} bytes ("${socketPath}")`,
-      );
-    }
   }
 
   // -------------------------------------------------------------------------

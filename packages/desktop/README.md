@@ -230,6 +230,10 @@ when no shell executable is supplied. Live descriptor handoff and POSIX file
 mode checks run on macOS and Linux. Windows still runs the common terminal
 tests and packaged storage qualification.
 
+Long Unix home paths use a bounded socket address in a private, user-owned
+directory under `/tmp`. Daemon authentication and PID files retain their home
+location; existing Unix addresses that fit the OS limit remain unchanged.
+
 ## v2 behavior
 
 - Remote repository authority and verified content come from the current SDK;

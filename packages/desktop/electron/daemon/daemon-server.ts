@@ -224,6 +224,17 @@ export class DaemonServer {
    * Start the server: generate token, bind socket, write PID file.
    */
   async start(): Promise<void> {
+    const address = socketAddress(this.socketPath);
+    if (process.platform !== "win32" && address !== this.socketPath) {
+      // A short endpoint lives outside the home directory. Require a private,
+      // owned directory so another user cannot replace its socket pathname.
+      const directory = path.dirname(address);
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o700) {
+        throw new Error(`Daemon socket directory is not private and owned: ${directory}`);
+      }
+    }
     // Generate auth token
     this.token = crypto.randomUUID();
 
@@ -238,8 +249,7 @@ export class DaemonServer {
     });
     fs.writeFileSync(this.pidPath, pidData, { mode: 0o600 });
 
-    // Keep disk control files separate from the Windows named-pipe namespace.
-    const address = socketAddress(this.socketPath);
+    // Tokens and PID metadata retain their home-scoped control-file identity.
     this.server = net.createServer((socket) => this.handleConnection(socket));
 
     await new Promise<void>((resolve, reject) => {
@@ -247,7 +257,7 @@ export class DaemonServer {
       this.server!.listen(address, () => {
         // Set socket file permissions to 0600
         try {
-          fs.chmodSync(this.socketPath, 0o600);
+          fs.chmodSync(address, 0o600);
         } catch {
           // May fail on some systems, non-fatal
         }
@@ -1278,7 +1288,7 @@ export class DaemonServer {
 
   private cleanupFiles(): void {
     try {
-      fs.unlinkSync(this.socketPath);
+      fs.unlinkSync(socketAddress(this.socketPath));
     } catch {
       // May not exist
     }

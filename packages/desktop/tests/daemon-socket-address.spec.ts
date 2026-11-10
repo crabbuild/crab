@@ -39,3 +39,10 @@ it("isolates profiles and protocol versions in the IPC namespace", () => {
   ];
   expect(new Set(files.map(socketAddress)).size).toBe(files.length);
 });
+
+it("keeps long UTF-8 control paths distinct within the Unix socket limit", () => {
+  const directory = path.join(os.tmpdir(), "长家-".repeat(40));
+  const addresses = ["profile-a", "profile-b"].map(profile => socketAddress(path.join(directory, profile, "daemon-v2.sock")));
+  expect(new Set(addresses.map(address => Buffer.from(address).subarray(0, 103).toString())).size).toBe(2);
+  if (process.platform !== "win32") expect(addresses.every(address => Buffer.byteLength(address) <= 103)).toBe(true);
+});
