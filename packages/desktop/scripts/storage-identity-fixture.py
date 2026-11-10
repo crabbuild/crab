@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import select
 import shutil
 import socket
 import struct
@@ -37,7 +38,9 @@ def stop(server: subprocess.Popen) -> None:
 
 
 def proxy(port: int) -> http.server.ThreadingHTTPServer:
-    counts = {"get": 0, "head": 0, "writes": 0}
+    counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0}
+    gate = threading.Event()
+    gate.set()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -52,14 +55,34 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
         do_PUT = do_POST = do_DELETE = do_PATCH = reject
 
         def forward(self):
-            if self.path == "/__fixture_stats":
-                body = json.dumps(counts).encode()
+            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_release"):
+                if self.path == "/__fixture_pause":
+                    gate.clear()
+                elif self.path == "/__fixture_release":
+                    gate.set()
+                body = json.dumps({**counts, "paused": not gate.is_set()}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
             counts["get" if self.command == "GET" else "head"] += 1
+            if not gate.is_set():
+                counts["blocked"] += 1
+                try:
+                    deadline = time.monotonic() + 30
+                    while not gate.wait(0.05):
+                        # Cancellation must finish while storage is still held.
+                        # Stop the owned handler when its native client leaves.
+                        readable, _, _ = select.select([self.connection], [], [], 0)
+                        if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                            self.close_connection = True
+                            return
+                        if time.monotonic() >= deadline:
+                            self.send_error(504, "Qualification storage gate expired")
+                            return
+                finally:
+                    counts["blocked"] -= 1
             backend = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
             try:
                 # Preserve Host: SigV4 authenticates the endpoint selected by

@@ -1677,11 +1677,15 @@ export function fileDiffCancellable(
   return callCancellable("file_diff", { repo_id, path, ...opts });
 }
 
-// Naive unique id for repo handles. Collisions are harmless (the
-// backend uses it as a map key) but we avoid them anyway.
+// Logical repository identity is distinct from each native session's lifetime.
 let repoCounter = 1;
 function nextRepoId(prefix: string): string {
   return `${prefix}-${Date.now()}-${repoCounter++}`;
+}
+
+/** Recognize the object-storage schemes accepted by native SDK opening. */
+export function isStorageRepositoryUrl(value: string): boolean {
+  return /^(crab|s3|gs|gcs|az|azure):\/\//.test(value);
 }
 
 let jobCounter = 1;
@@ -1726,12 +1730,13 @@ export const rpc = {
 
   reopen: async (path: string, repository?: Pick<RepoHandle, "repo_id" | "is_remote" | "url">): Promise<RepoHandle> => {
     const remote = parseRepoId(path);
-    if (!remote) return repository?.is_remote ? rpc.openUrl(repository.url, undefined, repository.repo_id) : rpc.openLocal(path, undefined, repository?.repo_id);
-    return window.crab.ssh.openAsRepo(remote.profileId, remote.remotePath);
+    if (remote) return window.crab.ssh.openAsRepo(remote.profileId, remote.remotePath);
+    if (isStorageRepositoryUrl(path)) return rpc.openUrl(path, undefined, repository?.repo_id);
+    return rpc.openLocal(path, undefined, repository?.repo_id);
   },
 
-  openUrl: (url: string, storage_connection_id?: string | null, repo_id = nextRepoId("url")) =>
-    call<RepoHandle>("open_url", { repo_id, url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+  openUrl: (url: string, storage_connection_id?: string | null, repo_id = nextRepoId("url"), signal?: AbortSignal) =>
+    call<RepoHandle>("open_url", { repo_id, url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }, signal),
 
   close: (repo_id: string) => call<{ closed: string }>("close", { repo_id }),
 

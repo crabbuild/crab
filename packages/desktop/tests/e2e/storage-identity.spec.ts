@@ -18,15 +18,20 @@ interface Fixture {
 }
 interface Runtime { repo_id: string; native_session_id: string | null; error?: string }
 
+function isolatedEnvironment(root: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), AWS_ACCESS_KEY_ID: "invalid-ambient-access", AWS_SECRET_ACCESS_KEY: "invalid-ambient-secret", AWS_SESSION_TOKEN: "invalid-ambient-session", AWS_ENDPOINT_URL: "http://127.0.0.1:1", AWS_ENDPOINT_URL_S3: "http://127.0.0.1:1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(root, "gitconfig") };
+  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+  writeFileSync(path.join(root, "gitconfig"), "");
+  return env;
+}
+
 test("storage settings replace local and SDK reader identities across distinct real stores", async () => {
   const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
   test.skip(!descriptor, "Requires the owned two-store storage identity fixture");
   test.setTimeout(180_000);
   const fixture = JSON.parse(readFileSync(descriptor!, "utf8")) as Fixture;
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-storage-identity-"));
-  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), AWS_ACCESS_KEY_ID: "invalid-ambient-access", AWS_SECRET_ACCESS_KEY: "invalid-ambient-secret", AWS_SESSION_TOKEN: "invalid-ambient-session", AWS_ENDPOINT_URL: "http://127.0.0.1:1", AWS_ENDPOINT_URL_S3: "http://127.0.0.1:1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(root, "gitconfig") };
-  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
-  writeFileSync(path.join(root, "gitconfig"), "");
+  const env = isolatedEnvironment(root);
   const git = (args: string[]) => execFileSync("git", args, { cwd: fixture.local, env });
   const pointer = git(["show", ":lfs.safetensors"]);
   for (const file of ["weights.safetensors", "lfs.safetensors"]) {
@@ -163,9 +168,7 @@ test("saved local storage identity survives a cold app restart without ambient c
   const fixture = JSON.parse(readFileSync(descriptor!, "utf8")) as Fixture;
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-cold-identity-"));
   const profile = path.join(root, "profile");
-  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), AWS_ACCESS_KEY_ID: "invalid-ambient-access", AWS_SECRET_ACCESS_KEY: "invalid-ambient-secret", AWS_SESSION_TOKEN: "invalid-ambient-session", AWS_ENDPOINT_URL: "http://127.0.0.1:1", AWS_ENDPOINT_URL_S3: "http://127.0.0.1:1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(root, "gitconfig") };
-  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
-  writeFileSync(path.join(root, "gitconfig"), "");
+  const env = isolatedEnvironment(root);
   const pointer = execFileSync("git", ["show", ":cold.safetensors"], { cwd: fixture.local, env });
   writeFileSync(path.join(fixture.local, "cold.safetensors"), pointer);
   const launch = () => electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
@@ -207,6 +210,107 @@ test("saved local storage identity survives a cold app restart without ambient c
     writeFileSync(test.info().outputPath("cold-storage-identity-proof.json"), JSON.stringify({ encryptedSecretAbsentFromPlaintext: true, restartedLocalBindingUsedWithoutExplicitSelection: true, uncachedLfsExactBytes: true, workingPointerUnchanged: true, before, after }, null, 2));
   } finally {
     await application?.close();
+    writeFileSync(test.info().outputPath("application-stderr.log"), stderr);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("GUI snapshots at the same URL restore separate saved identities and cold content after restart", async () => {
+  const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
+  test.skip(!descriptor, "Requires the owned two-store storage identity fixture");
+  test.setTimeout(150_000);
+  const fixture = JSON.parse(readFileSync(descriptor!, "utf8")) as Fixture;
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-saved-snapshots-"));
+  const env = isolatedEnvironment(root);
+  const profile = path.join(root, "profile");
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  let stderr = "";
+  async function launch() {
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
+    application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
+    return application.firstWindow();
+  }
+  const recent = (page: Page) => page.evaluate(() => JSON.parse(localStorage.getItem("crab.recentRepos.v1") ?? "[]") as Array<{ repo_id: string; path: string; label: string }>);
+  const stats = async () => Promise.all(fixture.profiles.map(async connection => await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { get: number; head: number; writes: number }));
+  async function view(page: Page, file: string, marker: string) {
+    const row = page.locator(`[role="treeitem"][data-item-path="${file}"]`);
+    if (!await row.isVisible()) {
+      const nav = page.getByRole("navigation", { name: "Primary", exact: true });
+      await nav.getByRole("button", { name: "Settings", exact: true }).click();
+      await nav.getByRole("button", { name: "Files", exact: true }).click();
+    }
+    await row.click();
+    await expect(page.getByText(marker, { exact: false }).first()).toBeVisible();
+  }
+  try {
+    let page = await launch();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const selected: string[] = [];
+    for (const [index, connection] of fixture.profiles.entries()) {
+      selected.push(String((await call(page, "storage_connections_save", { connection })).id));
+      if (index === 0) {
+        await fetch(connection.endpoint + "/__fixture_pause");
+        await page.getByRole("button", { name: "More actions", exact: true }).click();
+        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        const pending = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
+        await pending.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
+        await pending.getByRole("button", { name: "Edit Alpha", exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
+        await pending.getByRole("button", { name: "Open snapshot", exact: true }).click();
+        await expect.poll(async () => (await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBeGreaterThan(0);
+        await pending.getByRole("button", { name: "Cancel", exact: true }).click();
+        await expect(pending).toHaveCount(0, { timeout: 10_000 });
+        expect((await (await fetch(connection.endpoint + "/__fixture_stats")).json() as { paused: boolean }).paused).toBe(true);
+        expect(await recent(page)).toHaveLength(0);
+        await fetch(connection.endpoint + "/__fixture_release");
+      }
+      await page.getByRole("button", { name: "More actions", exact: true }).click();
+      await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
+      await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
+      await dialog.getByLabel("Name (optional)", { exact: true }).fill(connection.name + " snapshot");
+      await dialog.getByRole("button", { name: `Edit ${connection.name}`, exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
+      await dialog.getByRole("button", { name: "Open snapshot", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await view(page, "weights.safetensors", fixture.payloads[index].marker);
+    }
+    await expect.poll(async () => (await recent(page)).length).toBe(2);
+    const bookmarks = await recent(page);
+    const ids = fixture.profiles.map(connection => bookmarks.find(bookmark => bookmark.label === connection.name + " snapshot")!.repo_id);
+    expect(new Set(ids).size).toBe(2);
+    expect(bookmarks.every(bookmark => bookmark.path === fixture.url)).toBe(true);
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(ids[1]);
+    const beforeRestart = await stats();
+    await application!.close(); application = undefined;
+    page = await launch();
+    // The selected SDK snapshot reopens automatically; its sibling remains
+    // deferred until the sidebar action admits that logical identity.
+    await expect(page.getByRole("button", { name: "Beta snapshot", exact: true })).toBeVisible();
+    await view(page, "cold.safetensors", fixture.cold_payloads[1].marker);
+    for (const index of [1, 0]) {
+      if (index === 0) {
+        await page.getByRole("button", { name: "Alpha snapshot", exact: true }).click();
+        await expect.poll(() => page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(ids[0]);
+        await view(page, "cold.safetensors", fixture.cold_payloads[0].marker);
+      }
+      await expect.poll(() => page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(ids[index]);
+      expect((await call(page, "storage_connections_list", { repo_id: ids[index] })).selected_id).toBe(selected[index]);
+      const payload = fixture.cold_payloads[index];
+      const content = await call(page, "read_bytes", { repo_id: ids[index], path: "cold.safetensors", max_bytes: payload.size + 1 });
+      expect(createHash("sha256").update(Buffer.from(String(content.bytes_b64), "base64")).digest("hex")).toBe(payload.sha256);
+      expect(await page.evaluate(repo => window.crab.getCapabilities(repo), ids[index])).toMatchObject({ canEdit: false, canMaterialize: false });
+    }
+    const afterRestart = await stats();
+    for (const index of [0, 1]) {
+      expect(afterRestart[index].get).toBeGreaterThan(beforeRestart[index].get);
+      expect(afterRestart[index].writes).toBe(0);
+    }
+    expect((await recent(page)).map(bookmark => bookmark.repo_id).sort()).toEqual([...ids].sort());
+    await page.screenshot({ path: test.info().outputPath("saved-sdk-snapshots.png") });
+    writeFileSync(test.info().outputPath("saved-sdk-snapshots-proof.json"), JSON.stringify({ blockedSdkCancelledBeforeStorageRelease: true, sameUrlDistinctIdentities: true, guiOpenedBothStores: true, activeSdkRestored: true, deferredSdkRestored: true, coldBytesExact: true, readOnlyCapabilities: true, ids, beforeRestart, afterRestart }, null, 2));
+  } finally {
+    try { await fetch(fixture.profiles[0].endpoint + "/__fixture_release"); }
+    finally { await application?.close(); }
     writeFileSync(test.info().outputPath("application-stderr.log"), stderr);
     rmSync(root, { recursive: true, force: true });
   }

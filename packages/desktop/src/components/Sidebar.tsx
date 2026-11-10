@@ -42,9 +42,10 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useStore, OpenRepo, sortRepos, getActiveWorkspace } from "../state";
-import { dialogs, rpc, WorktreeEntry } from "../ipc";
+import { useStore, OpenRepo, sortRepos, getActiveWorkspace, repositoryKey } from "../state";
+import { dialogs, isStorageRepositoryUrl, rpc, WorktreeEntry } from "../ipc";
 import { CloneDialog } from "./CloneDialog";
+import { OpenSnapshotDialog } from "./OpenSnapshotDialog";
 import { WorkspaceSidebar } from "./workspace/WorkspaceSidebar";
 import { WorkspaceSettings } from "./workspace/WorkspaceSettings";
 import { RemoteWorkspaceDialog } from "./workspace/RemoteWorkspaceDialog";
@@ -87,6 +88,7 @@ export function Sidebar({ onCollapse }: Props) {
     return () => window.removeEventListener("beforeunload", saveScroll);
   }, [scrollKey]);
   const [cloneOpen, setCloneOpen] = useState(false);
+  const [snapshotOpen, setSnapshotOpen] = useState(false);
   const [cloneTargetWorkspace, setCloneTargetWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -252,7 +254,7 @@ export function Sidebar({ onCollapse }: Props) {
       setActive(repo.repo_id);
       return;
     }
-    // A saved path identifies either a local repository or an SSH profile/path.
+    // Keep the logical SDK ID so its encrypted binding survives deferred opening.
     if (!repo.path) {
       setError("Cannot open repository: missing path");
       removeRepo(repo.repo_id);
@@ -261,13 +263,13 @@ export function Sidebar({ onCollapse }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const handle = await rpc.reopen(repo.path);
+      const handle = await rpc.reopen(repo.path, repo);
       addRepo({
         ...handle,
         label: repo.label,
         path: repo.path,
         openedAt: Date.now(),
-        initialView: "dashboard",
+        initialView: isStorageRepositoryUrl(repo.path) ? "explorer" : "dashboard",
       });
       setActive(handle.repo_id);
     } catch (e) {
@@ -352,15 +354,14 @@ export function Sidebar({ onCollapse }: Props) {
     if (!over || active.id === over.id) return;
 
     // Only allow reordering among unpinned repos
-    const unpinnedRepos = visibleRepos.filter((r) => !r.path || !state.pinnedPaths.has(r.path));
+    const unpinnedRepos = visibleRepos.filter((r) => !state.pinnedPaths.has(repositoryKey(r)));
     const oldIndex = unpinnedRepos.findIndex((r) => r.repo_id === active.id);
     const newIndex = unpinnedRepos.findIndex((r) => r.repo_id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
 
     const reordered = arrayMove(unpinnedRepos, oldIndex, newIndex);
     const newOrder = reordered
-      .map((r) => r.path)
-      .filter((p): p is string => typeof p === "string" && p.length > 0);
+      .map(repositoryKey);
     reorderRepos(newOrder);
   }
 
@@ -392,6 +393,9 @@ export function Sidebar({ onCollapse }: Props) {
           </button>
           {addMenuOpen && (
             <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded border border-gx-border bg-gx-surface shadow-xl py-1">
+              <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition" onClick={() => { setAddMenuOpen(false); setSnapshotOpen(true); }}>
+                <Cloud size={12} /> Open storage snapshot
+              </button>
               <button
                 type="button"
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition"
@@ -528,15 +532,15 @@ export function Sidebar({ onCollapse }: Props) {
                     <li className="px-2 py-6 text-center text-xs text-gx-muted">{query.trim() ? "No matching repositories" : "No repositories open yet."}</li>
                   )}
                   {/* Pinned repos (not draggable, always on top, alphabetic) */}
-                  {reposToShow.filter((r) => r.path && state.pinnedPaths.has(r.path)).map((repo) => (
+                  {reposToShow.filter((r) => state.pinnedPaths.has(repositoryKey(r))).map((repo) => (
                     <RepoSidebarEntry
                       key={repo.repo_id}
                       repo={repo}
                       activeRepoId={state.activeRepoId}
                       allRepos={state.repos}
                       isPinned={true}
-                      onPin={() => repo.path && pinRepo(repo.path)}
-                      onUnpin={() => repo.path && unpinRepo(repo.path)}
+                      onPin={() => pinRepo(repositoryKey(repo))}
+                      onUnpin={() => unpinRepo(repositoryKey(repo))}
                       onSelect={() => handleSelectRepo(repo)}
                       onClose={() => {
                         void rpc.close(repo.repo_id).catch(() => undefined);
@@ -571,18 +575,18 @@ export function Sidebar({ onCollapse }: Props) {
                   {/* Unpinned repos (draggable, user-ordered or alphabetic) */}
                   <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                     <SortableContext
-                      items={reposToShow.filter((r) => !r.path || !state.pinnedPaths.has(r.path)).map((r) => r.repo_id)}
+                      items={reposToShow.filter((r) => !state.pinnedPaths.has(repositoryKey(r))).map((r) => r.repo_id)}
                       strategy={verticalListSortingStrategy}
                     >
-                      {reposToShow.filter((r) => !r.path || !state.pinnedPaths.has(r.path)).map((repo) => (
+                      {reposToShow.filter((r) => !state.pinnedPaths.has(repositoryKey(r))).map((repo) => (
                         <SortableRepoEntry
                           key={repo.repo_id}
                           repo={repo}
                           activeRepoId={state.activeRepoId}
                           allRepos={state.repos}
                           isPinned={false}
-                          onPin={() => repo.path && pinRepo(repo.path)}
-                          onUnpin={() => repo.path && unpinRepo(repo.path)}
+                          onPin={() => pinRepo(repositoryKey(repo))}
+                          onUnpin={() => unpinRepo(repositoryKey(repo))}
                           onSelect={() => handleSelectRepo(repo)}
                           onClose={() => {
                             void rpc.close(repo.repo_id).catch(() => undefined);
@@ -628,6 +632,7 @@ export function Sidebar({ onCollapse }: Props) {
         onClose={() => { setCloneOpen(false); setCloneTargetWorkspace(null); }}
         targetWorkspaceRootPath={cloneTargetWorkspace}
       />
+      {snapshotOpen && <OpenSnapshotDialog onClose={() => setSnapshotOpen(false)} />}
 
       {/* Workspace picker modal — shown when multiple workspaces exist and user
           needs to choose which one to add/clone into */}

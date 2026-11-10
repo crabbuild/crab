@@ -70,7 +70,7 @@ export class StorageConnections {
   private mutations: Promise<unknown> = Promise.resolve();
   private cached: Vault | undefined;
   private inFlight = new Set<StorageConnection>();
-  private sessions = new Map<string, { key: string; remote: boolean }>();
+  private sessions = new Map<string, string>();
 
   constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform) {}
 
@@ -157,7 +157,7 @@ export class StorageConnections {
     };
     const send: Send = async (name, payload) => {
       const repoId = record(payload) ? text(payload.repo_id) : "";
-      const binding = this.cached?.bindings[this.sessions.get(repoId)?.key ?? repoId];
+      const binding = this.cached?.bindings[this.sessions.get(repoId) ?? repoId];
       const selected = record(payload) && record(payload.__storage_auth)
         ? connection(payload.__storage_auth)
         : this.cached?.connections.find(item => item.id === binding);
@@ -178,7 +178,7 @@ export class StorageConnections {
     if (method === "storage_connections_list") {
       const vault = await this.read();
       const repoId = text(payload.repo_id);
-      const selected_id = vault.bindings[this.sessions.get(repoId)?.key ?? repoId] ?? null;
+      const selected_id = vault.bindings[this.sessions.get(repoId) ?? repoId] ?? null;
       return { connections: vault.connections.map(info), selected_id, secure_storage: this.available() };
     }
     if (method === "storage_connections_save") {
@@ -215,12 +215,12 @@ export class StorageConnections {
       const repo = text(payload.repo_id), id = text(payload.id);
       const session = this.sessions.get(repo);
       if (!session) throw new Error("Open a repository on this device before selecting its storage connection.");
-      if (!id && !(await this.read()).bindings[session.key]) return { ok: true };
+      if (!id && !(await this.read()).bindings[session]) return { ok: true };
       const repositories = await this.mutate(vault => {
         const selected = vault.connections.find(item => item.id === id);
         if (id && !selected) throw new Error("Storage connection was not found.");
-        if (id) vault.bindings[session.key] = id; else delete vault.bindings[session.key];
-        return [session.key];
+        if (id) vault.bindings[session] = id; else delete vault.bindings[session];
+        return [session];
       });
       // Persist before replacing native owners, including on failed reconnect.
       // Release vault admission before Agent's repository admission: opening
@@ -237,7 +237,11 @@ export class StorageConnections {
     }
     const repoId = text(payload.repo_id);
     const session = this.sessions.get(repoId);
-    const key = session?.key || (typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd));
+    const opening = method === "open_local" || method === "open_url";
+    // Replacement resolves its destination, not the previous native owner's
+    // path. Other calls retain the binding captured by their logical session.
+    const key = opening ? storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined)
+      : session ?? (typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd));
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
     const capture = method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
@@ -254,13 +258,12 @@ export class StorageConnections {
     }
     // Record explicit identity before opening or cloning. If encrypted storage
     // cannot be written, do not create a cloud session or an unbound checkout.
-    if (explicit && (method === "open_local" || method === "open_url")) {
-      const openingKey = storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined);
-      if (id || vault?.bindings[openingKey] || this.available()) {
+    if (explicit && opening) {
+      if (id || vault?.bindings[key] || this.available()) {
         selected = await this.mutate(vault => {
           const current = id ? vault.connections.find(item => item.id === id) : undefined;
           if (id && !current) throw new Error("This repository's saved connection was removed. Select another connection in Storage settings.");
-          if (id) vault.bindings[openingKey] = id; else delete vault.bindings[openingKey];
+          if (id) vault.bindings[key] = id; else delete vault.bindings[key];
           return current;
         });
       }
@@ -279,16 +282,12 @@ export class StorageConnections {
     const result = await send(method, payload);
     if ((method === "open_local" || method === "open_url") && record(result) && typeof result.repo_id === "string") {
       const repo_id = result.repo_id;
-      const remote = method === "open_url";
-      const sessionKey = storageBindingKey(repo_id, remote ? undefined : text(payload.path));
-      this.sessions.set(repo_id, { key: sessionKey, remote });
+      const sessionKey = storageBindingKey(repo_id, method === "open_url" ? undefined : text(payload.path));
+      this.sessions.set(repo_id, sessionKey);
     }
-    if (method === "close" && session) {
-      this.sessions.delete(repoId);
-      if (session.remote && this.cached?.bindings[session.key]) {
-        await this.mutate(vault => { delete vault.bindings[session.key]; });
-      }
-    }
+    // Closing a reader is not forgetting its saved storage identity. Reopening
+    // the logical snapshot must resolve the same binding after an app restart.
+    if (method === "close") this.sessions.delete(repoId);
     return result;
   }
 }

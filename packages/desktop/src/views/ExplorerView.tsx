@@ -6,7 +6,7 @@ import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
 
 interface Props {
@@ -43,7 +43,7 @@ export const ExplorerView = memo(function ExplorerView({
   hydrationByPath,
 }: Props) {
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
 
   const [refs, setRefs] = useState<RefEntry[] | null>(null);
   const [entries, setEntries] = useState<DirEntry[] | null>(null);

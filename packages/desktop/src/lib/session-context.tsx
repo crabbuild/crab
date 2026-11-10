@@ -10,12 +10,12 @@
  *   // Consume anywhere:
  *   const session = useSession();
  *   const wsSession = useWorkspaceSession();
- *   const repoPath = useActiveRepoPath();
+ *   const repoPath = useActiveRepoKey();
  */
 
 import { createContext, useContext, useRef, type ReactNode } from "react";
 
-import { useStore } from "../state";
+import { repositoryKey, useStore } from "../state";
 import { SessionManager, type ISessionManager } from "./session-manager";
 import { WorkspaceSessionManager, type IWorkspaceSessionManager } from "./workspace-session-manager";
 
@@ -33,7 +33,7 @@ const WorkspaceSessionContext = createContext<IWorkspaceSessionManager | null>(n
 /**
  * Instantiates a single SessionManager and WorkspaceSessionManager and
  * provides them via context. Must be rendered inside StoreProvider
- * (useActiveRepoPath depends on it).
+ * (useActiveRepoKey depends on it).
  */
 export function SessionProvider({ children }: { children: ReactNode }) {
   const managerRef = useRef<ISessionManager | null>(null);
@@ -84,12 +84,12 @@ export function useWorkspaceSession(): IWorkspaceSessionManager {
 }
 
 /**
- * Convenience hook that returns the active repo's absolute path,
+ * Return the active repository's stable UI/session identity,
  * or null if no repo is active.
  */
-export function useActiveRepoPath(): string | null {
+export function useActiveRepoKey(): string | null {
   const { state } = useStore();
   if (!state.activeRepoId) return null;
   const repo = state.repos.find((r) => r.repo_id === state.activeRepoId);
-  return repo?.path ?? null;
+  return repo ? repositoryKey(repo) : null;
 }

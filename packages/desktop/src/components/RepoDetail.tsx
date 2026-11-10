@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { OpenRepo } from "../state";
-import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, rpc } from "../ipc";
+import { OpenRepo, repositoryKey } from "../state";
+import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, isStorageRepositoryUrl, rpc } from "../ipc";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { isSidebarView, type SidebarView } from "../lib/navigation";
@@ -61,6 +61,8 @@ interface RepoDetailProps {
  */
 export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
   const sessionManager = useSession();
+  const sessionKey = repositoryKey(repo);
+  const defaultView = isStorageRepositoryUrl(repo.path ?? repo.url) ? "explorer" : "dashboard";
   const [reopening, setReopening] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
   useEffect(() => setReopenError(null), [repo.native_session_id]);
@@ -76,7 +78,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     // Priority: 1) repo.initialView (deferred open), 2) saved session, 3) "dashboard"
     if (repo.initialView && isSidebarView(repo.initialView)) return repo.initialView;
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeView && isSidebarView(session.activeView)) {
         const savedView = session.activeView;
         // If the saved view is a non-full-pane view (e.g. "explorer") but
@@ -88,12 +90,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
           "pull-requests", "branches", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
-          return "dashboard";
+          return defaultView;
         }
         return savedView;
       }
     }
-    return "dashboard";
+    return defaultView;
   });
   const [timelineConflictsTab, setTimelineConflictsTabRaw] = useState<"timeline" | "conflicts">(() => {
     const stored = localStorage.getItem("crab.timelineConflicts.tab");
@@ -132,7 +134,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     // Restore selectedCommit from session if the view is "timeline"
     // so the user returns to the exact commit they were looking at.
     if (activeView === "timeline" && repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       const savedCommit = session?.viewState?.selectedCommit;
       if (typeof savedCommit === "string" && savedCommit.length > 0) {
         return savedCommit;
@@ -145,7 +147,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
   const [selectedBranch, setSelectedBranch] = useState<string | null>(() => {
     // Branch selection belongs to its own route, independently of worktrees.
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       const savedBranch = session?.viewState?.selectedBranch;
       if (typeof savedBranch === "string" && savedBranch.length > 0) {
         return savedBranch;
@@ -179,12 +181,12 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     const handler = (e: Event) => {
       const view = (e as CustomEvent<{ view: string }>).detail?.view;
       if (view && repo.path) {
-        sessionManager.update(repo.path, { activeView: view });
+        sessionManager.update(sessionKey, { activeView: view });
       }
     };
     window.addEventListener("crab:active-view-changed", handler);
     return () => window.removeEventListener("crab:active-view-changed", handler);
-  }, [repo.path, sessionManager]);
+  }, [sessionKey, sessionManager]);
 
   const terminalReturnView = useRef<SidebarView>("dashboard");
   useEffect(() => {
@@ -244,7 +246,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     // Editor tabs require a DirEntry (loaded async), so those are
     // restored in an effect after entries load.
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeFile) {
         // Restore as a diff key — the diff tab will be created below.
         return `diff::${session.activeFile}`;
@@ -258,7 +260,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     // If we have a saved activeFile, pre-populate a diff tab so the
     // file is visible on first render (zero-flicker restore).
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeFile) {
         const key = `diff::${session.activeFile}`;
         return [{ key, path: session.activeFile }];
@@ -449,7 +451,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
 
     restoredFileValidated.current = true;
 
-    const sessionKey = repo.path ?? repo.repo_id;
     const session = sessionManager.activate(sessionKey);
     const savedFile = session?.activeFile;
     if (!savedFile) return;
@@ -465,7 +466,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
       });
       sessionManager.update(sessionKey, { activeFile: undefined });
     }
-  }, [entries, repo.path, repo.repo_id, sessionManager]);
+  }, [entries, sessionKey, sessionManager]);
 
   // RepoDetail is keyed by repo_id in App; changing identity remounts its state.
   const entryByPath = useMemo(() => {

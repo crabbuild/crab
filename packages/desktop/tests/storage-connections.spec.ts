@@ -70,6 +70,16 @@ describe("built-in storage connections", () => {
     expect((await list()).connections).toEqual([saved]);
   });
 
+  it("retains a snapshot binding after close and restores it through a cold vault", async () => {
+    const saved = await save();
+    await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
+    await call("close", { repo_id: "saved-snapshot" });
+    store = new StorageConnections(file, crypto, "darwin");
+    send.mockClear();
+    await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo" });
+    expect(send).toHaveBeenCalledWith("open_url", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
+  });
+
   it("reopens a native repository with its current binding instead of its original selection", async () => {
     const first = await save(fixture("First"));
     const second = await save(fixture("Second"));
@@ -164,6 +174,26 @@ describe("built-in storage connections", () => {
     await call("open_local", { repo_id: "new-renderer-id", path: dest });
     await call("crab_push_structured", { repo_id: "new-renderer-id" });
     expect(send).toHaveBeenLastCalledWith("crab_push_structured", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
+  });
+
+  it("selects the destination worktree binding when an existing handle changes path", async () => {
+    const first = await save(fixture("First")), second = await save(fixture("Second"));
+    const destination = path.join(directory, "destination");
+    await call("open_local", { repo_id: "replaced", path: directory, storage_connection_id: first.id });
+    await call("open_local", { repo_id: "destination", path: destination, storage_connection_id: second.id });
+    send.mockClear();
+    await call("open_local", { repo_id: "replaced", path: destination });
+    expect(send).toHaveBeenCalledWith("open_local", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: second.id }) }));
+  });
+
+  it("restores the logical snapshot binding when replacing a local owner", async () => {
+    const first = await save(fixture("First")), second = await save(fixture("Second"));
+    await call("open_url", { repo_id: "replaced", url: "crab://test-bucket/repo", storage_connection_id: second.id });
+    await call("close", { repo_id: "replaced" });
+    await call("open_local", { repo_id: "replaced", path: directory, storage_connection_id: first.id });
+    send.mockClear();
+    await call("open_url", { repo_id: "replaced", url: "crab://test-bucket/repo" });
+    expect(send).toHaveBeenCalledWith("open_url", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: second.id }) }));
   });
 
   it("never accepts the renderer's private credential-context field", async () => {

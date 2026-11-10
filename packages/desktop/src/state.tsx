@@ -2,7 +2,7 @@ import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer"
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import { parseRepoId } from "../electron/ssh-types";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError } from "./ipc";
+import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError, isStorageRepositoryUrl } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -182,11 +182,11 @@ export interface AppState {
   // clone / hydrate.
   logs: ProgressLine[];
   jobs: Record<string, JobState>;
-  // Repo ordering & pinning. Keyed by repo path (stable across sessions).
+  // Ordering and pinning use physical paths or stable SDK snapshot identities.
   // Repos with an explicit sortIndex are shown in that order; repos
   // without one fall back to alphabetic order.
   pinnedPaths: Set<string>;
-  repoOrder: string[]; // ordered list of repo paths
+  repoOrder: string[];
   /** All open workspaces (empty array when none are open) */
   workspaces: Workspace[];
   /** The workspace currently shown in the dashboard (by rootPath).
@@ -218,10 +218,8 @@ export interface JobState {
   updatedAt: number;
 }
 
-// Keys used to persist the recent-repos list for reopen-on-startup.
-// Only paths are persisted — repo ids are session-local because the
-// agent assigns them on `open_local`, and keeping stale ids in
-// localStorage would crater when the agent isn't aware of them.
+// Logical SDK identities persist; native_session_id never does. A URL alone
+// cannot distinguish connections to identical bucket names on different stores.
 const LS_RECENT_REPOS = "crab.recentRepos.v1";
 const LS_ACTIVE_PATH = "crab.activeRepoPath.v1";
 const LS_PINNED_REPOS = "crab.pinnedRepoPaths.v1";
@@ -234,6 +232,12 @@ interface PersistedRepo {
   path: string;
   label: string;
   openedAt: number;
+  repo_id?: string;
+}
+
+/** Identify UI state without mixing SDK connections at the same URL. */
+export function repositoryKey(repo: Pick<OpenRepo, "repo_id" | "path">): string {
+  return repo.path && !isStorageRepositoryUrl(repo.path) ? repo.path : repo.repo_id;
 }
 
 function loadPersistedRepos(): OpenRepo[] {
@@ -244,11 +248,15 @@ function loadPersistedRepos(): OpenRepo[] {
     const repos: OpenRepo[] = [];
     for (const entry of value) {
       if (!entry || typeof entry !== "object") continue;
-      const { path, label, openedAt } = entry as Record<string, unknown>;
-      if (typeof path !== "string" || !path || typeof label !== "string" || typeof openedAt !== "number" || !Number.isFinite(openedAt) || paths.has(path)) continue;
-      paths.add(path);
-      const remote = parseRepoId(path);
-      repos.push({ repo_id: `deferred-${path}`, url: remote ? path : "", is_remote: !!remote, cache_dir: "", native_session_id: null, path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
+      const { path, label, openedAt, repo_id } = entry as Record<string, unknown>;
+      if (typeof path !== "string" || !path || typeof label !== "string" || typeof openedAt !== "number" || !Number.isFinite(openedAt)) continue;
+      const snapshot = isStorageRepositoryUrl(path);
+      const id = snapshot && typeof repo_id === "string" && repo_id ? repo_id : `deferred-${path}`;
+      const key = repositoryKey({ repo_id: id, path });
+      if (paths.has(key)) continue;
+      paths.add(key);
+      const remote = snapshot || !!parseRepoId(path);
+      repos.push({ repo_id: id, url: remote ? path : "", is_remote: remote, cache_dir: "", native_session_id: null, path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
     }
     return repos;
   } catch { return []; }
@@ -256,8 +264,8 @@ function loadPersistedRepos(): OpenRepo[] {
 
 function savePersistedRepos(repos: OpenRepo[]) {
   const persisted: PersistedRepo[] = repos
-    .filter((r) => typeof r.path === "string" && r.path.length > 0)
-    .map((r) => ({ path: r.path as string, label: r.label, openedAt: r.openedAt }));
+    .filter((r): r is OpenRepo & { path: string } => typeof r.path === "string" && r.path.length > 0)
+    .map((r) => ({ path: r.path, label: r.label, openedAt: r.openedAt, ...(isStorageRepositoryUrl(r.path) ? { repo_id: r.repo_id } : {}) }));
   try {
     localStorage.setItem(LS_RECENT_REPOS, JSON.stringify(persisted));
   } catch {
@@ -306,8 +314,8 @@ function loadRepoOrder(): string[] {
  * then unpinned in user-defined order (or alphabetic if no custom order).
  */
 export function sortRepos(repos: OpenRepo[], pinnedPaths: Set<string>, repoOrder: string[]): OpenRepo[] {
-  const pinned = repos.filter((r) => r.path && pinnedPaths.has(r.path));
-  const unpinned = repos.filter((r) => !r.path || !pinnedPaths.has(r.path));
+  const pinned = repos.filter((r) => pinnedPaths.has(repositoryKey(r)));
+  const unpinned = repos.filter((r) => !pinnedPaths.has(repositoryKey(r)));
 
   // Pinned: sort alphabetically by label
   pinned.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
@@ -316,8 +324,8 @@ export function sortRepos(repos: OpenRepo[], pinnedPaths: Set<string>, repoOrder
   if (repoOrder.length > 0) {
     const orderMap = new Map(repoOrder.map((p, i) => [p, i]));
     unpinned.sort((a, b) => {
-      const ia = a.path ? (orderMap.get(a.path) ?? Infinity) : Infinity;
-      const ib = b.path ? (orderMap.get(b.path) ?? Infinity) : Infinity;
+      const ia = orderMap.get(repositoryKey(a)) ?? Infinity;
+      const ib = orderMap.get(repositoryKey(b)) ?? Infinity;
       if (ia !== ib) return ia - ib;
       // Fallback: alphabetic for repos not in the order list
       return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
@@ -366,11 +374,12 @@ export type Action =
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "add-repo": {
-      const repos = [action.repo, ...state.repos.filter(r => r.repo_id !== action.repo.repo_id && !(r.deferred && r.path === action.repo.path))];
+      const key = repositoryKey(action.repo);
+      const repos = [action.repo, ...state.repos.filter(r => r.repo_id !== action.repo.repo_id && !(r.deferred && repositoryKey(r) === key))];
       // If the new repo isn't in the order list yet, append it
       const repoOrder =
-        action.repo.path && !state.repoOrder.includes(action.repo.path)
-          ? [...state.repoOrder, action.repo.path]
+        !state.repoOrder.includes(key)
+          ? [...state.repoOrder, key]
           : state.repoOrder;
       // Deferred repos are sidebar placeholders — don't activate them
       // automatically. Activating a deferred repo causes every
@@ -631,7 +640,7 @@ function reducer(state: AppState, action: Action): AppState {
 function initialState(): AppState {
   const repos = loadPersistedRepos();
   const repoOrder = loadRepoOrder();
-  for (const repo of repos) if (repo.path && !repoOrder.includes(repo.path)) repoOrder.push(repo.path);
+  for (const repo of repos) if (!repoOrder.includes(repositoryKey(repo))) repoOrder.push(repositoryKey(repo));
   return {
     repos,
     activeRepoId: null,
@@ -734,20 +743,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.repos]);
 
-  // Persist the open-repo paths so we can reopen them on the next
-  // launch. Whenever the list changes we mirror it to localStorage;
-  // the active path is tracked separately so a re-launch can restore
-  // focus on the same repo.
+  // The active key matches the same physical path or logical SDK identity
+  // used by sidebar state; two endpoints may share the exact same URL.
   useEffect(() => {
     savePersistedRepos(state.repos);
-    const activePath =
-      state.repos.find((r) => r.repo_id === state.activeRepoId)?.path ?? null;
+    const activeRepo = state.repos.find((r) => r.repo_id === state.activeRepoId);
+    const activePath = activeRepo ? repositoryKey(activeRepo) : null;
     if (activePath) localStorage.setItem(LS_ACTIVE_PATH, activePath);
     else {
       const pendingPath = localStorage.getItem(LS_ACTIVE_PATH);
       // Startup may be waiting for host trust or a recoverable connection error.
       // Keep the selected path while its deferred entry remains available to retry.
-      if (!state.repos.some(repo => repo.deferred && repo.path === pendingPath)) localStorage.removeItem(LS_ACTIVE_PATH);
+      if (!state.repos.some(repo => repo.deferred && repositoryKey(repo) === pendingPath)) localStorage.removeItem(LS_ACTIVE_PATH);
     }
   }, [state.repos, state.activeRepoId]);
 

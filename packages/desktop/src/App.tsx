@@ -1,9 +1,9 @@
 import { HostKeyPrompts } from "./components/ssh/HostKeyPrompts";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace } from "./state";
+import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace, repositoryKey } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
 import { PtyModeProvider } from "./lib/pty-mode-context";
-import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoPath } from "./lib/session-context";
+import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoKey } from "./lib/session-context";
 import { rpc, type RepoHandle } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { RepoDetail } from "./components/RepoDetail";
@@ -156,7 +156,7 @@ function Shell() {
   // ── Session persistence: deactivate/activate on repo switch ──────
   const sessionManager = useSession();
   const wsSessionManager = useWorkspaceSession();
-  const activeRepoPath = useActiveRepoPath();
+  const activeRepoPath = useActiveRepoKey();
   const prevRepoPathRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -415,7 +415,7 @@ function Shell() {
     reopenedRef.current = true;
     if (!reopenReposOnStartup) return;
     const activePath = localStorage.getItem("crab.activeRepoPath.v1");
-    const entry = state.repos.find(repo => repo.deferred && repo.path === activePath);
+    const entry = state.repos.find(repo => repo.deferred && repositoryKey(repo) === activePath);
     if (!entry?.path) return;
     const path = entry.path;
     const { label, openedAt } = entry;
@@ -426,7 +426,7 @@ function Shell() {
       pending = true;
       if (failureToast) dismissToast(failureToast);
       try {
-        const handle = await rpc.reopen(path);
+        const handle = await rpc.reopen(path, entry);
         // A delayed startup connection must not steal focus from a repository
         // the user selected while authentication or deployment was pending.
         dispatch({ type: "add-repo", activation: "if-empty", repo: { ...handle, path, label, openedAt } });
