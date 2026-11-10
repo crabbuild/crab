@@ -344,6 +344,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const replayPromise = router.replayQueue("server");
 
     // Respond to the replayed call
+    await vi.waitFor(() => expect(channel.written).toHaveLength(1));
     simulateResponse(channel, 1, { status: "clean" });
     await replayPromise;
 

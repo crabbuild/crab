@@ -121,6 +121,7 @@ function nativeRuntime(manager: SshSessionManager) {
   const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
   let cached = false;
   const send = vi.fn(async (_profile: string, method: string, params: Record<string, unknown>): Promise<unknown> => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
+  const replay = vi.fn(async () => {});
   manager.configureAgentDeployment({
     agentDeployer: { ensureAgent: vi.fn(async () => {
       const channel = new MockClientChannel();
@@ -132,9 +133,9 @@ function nativeRuntime(manager: SshSessionManager) {
       negotiate: async () => { cached = true; return capabilities; },
       clearCache: () => { cached = false; },
     } as unknown as CapabilityNegotiator,
-    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
+    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: replay, clearQueue: vi.fn() } as unknown as RpcRouter,
   });
-  return { channels, send };
+  return { channels, send, replay };
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -371,6 +372,7 @@ describe("SshSessionManager", () => {
       const first = await manager.openRepository(profile.id, "/first");
       const second = await manager.openRepository(profile.id, "/second");
       const native = runtime.send.getMockImplementation()!;
+      runtime.replay.mockClear();
       let release!: (value: unknown) => void;
       const blocked = new Promise(resolve => { release = resolve; });
       runtime.send.mockImplementation((id, method, params) => method === "open_local" && params.repo_id === second.repo_id ? blocked : native(id, method, params));
@@ -381,6 +383,7 @@ describe("SshSessionManager", () => {
         await vi.waitFor(() => expect(ready).toBe(true));
         await expect(manager.openRepository(profile.id, "/first")).resolves.toMatchObject({ repo_id: first.repo_id });
         expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).toBeNull();
+        expect(runtime.replay).toHaveBeenCalledWith(profile.id);
       } finally {
         release({ repo_id: second.repo_id });
         await restarting;

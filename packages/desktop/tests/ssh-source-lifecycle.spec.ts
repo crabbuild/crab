@@ -5,6 +5,7 @@ import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
 import { RemoteCache } from "../electron/ssh-cache";
+import type { StorageConnections } from "../electron/storage-connections";
 
 class Channel extends EventEmitter {
   frames: Array<{ id: number; method: string; params: Record<string, unknown> }> = [];
@@ -20,22 +21,23 @@ class Channel extends EventEmitter {
   asChannel() { return this as unknown as ClientChannel; }
 }
 
-function fixture(timeout?: number) {
+function fixture(timeout?: number, storage: Pick<StorageConnections, "request" | "redactValue"> = mockStorageConnections) {
   const channels = new Map<string, Channel>();
   const statuses = new Map<string, string>();
-  const manager = { repositoryWork: () => undefined,
+  const work = new Map<string, Promise<unknown>>();
+  const manager = { repositoryWork: (repoId: string) => work.get(repoId),
     getStatus: (id: string) => statuses.get(id) ?? "connected",
     getConnection: (id: string) => ({ channels: { agent: channels.get(id)?.asChannel() } }),
     repositoryRuntime: (_id: string, repoId: string) => ({ repoId, sessionId: "current" }),
   };
-  const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, mockStorageConnections, { requestTimeoutMs: timeout });
+  const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, storage, { requestTimeoutMs: timeout });
   const attach = (profile: string) => {
     const channel = new Channel();
     channels.set(profile, channel);
     router.attachChannel(profile, channel.asChannel());
     return channel;
   };
-  return { router, attach, setStatus: (profile: string, status: string) => statuses.set(profile, status) };
+  return { router, attach, setStatus: (profile: string, status: string) => statuses.set(profile, status), setWork: (repoId: string, pending: Promise<unknown>) => work.set(repoId, pending) };
 }
 
 function observe(promise: Promise<unknown>) {
@@ -47,6 +49,146 @@ function observe(promise: Promise<unknown>) {
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe("SSH captured source ownership", () => {
+  it("queued metadata for a healthy repository bypasses blocked sibling setup and cancellation drains unsent work", async () => {
+    const { router, attach, setStatus, setWork } = fixture();
+    const slow = "ssh://one/slow", fast = "ssh://one/fast";
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    setWork(slow, opening); setStatus("one", "reconnecting");
+    const blocked = observe(router.route(slow, "git_log", { repo_id: slow, op_id: "blocked" }));
+    const healthy = observe(router.route(fast, "repo_summary", { repo_id: fast }));
+    const channel = attach("one"); setStatus("one", "connected");
+    const replay = router.replayQueue("one");
+    try {
+      await vi.waitFor(() => expect(channel.frames.some(frame => frame.params.repo_id === fast)).toBe(true));
+      const sent = channel.frames.find(frame => frame.params.repo_id === fast)!;
+      channel.reply(sent.id, { result: { healthy: true } });
+      await vi.waitFor(() => expect(healthy.value).toEqual({ healthy: true }));
+      expect(channel.frames.some(frame => frame.params.repo_id === slow)).toBe(false);
+      await expect(router.route(slow, "rpc/cancel", { repo_id: slow, op_id: "blocked" })).resolves.toEqual({ ok: true });
+      await vi.waitFor(() => expect(blocked.error).toMatchObject({ code: 1010 }));
+      await replay;
+    } finally { release(); channel.emit("end"); router.clearQueue("one"); await replay; }
+  });
+
+  it("queued repositories progress independently while reads within one repository keep their order", async () => {
+    const { router, attach, setStatus } = fixture();
+    const slow = "ssh://one/slow", fast = "ssh://one/fast";
+    setStatus("one", "reconnecting");
+    const first = observe(router.route(slow, "git_log", { repo_id: slow, op_id: "first" }));
+    const second = observe(router.route(slow, "list_refs", { repo_id: slow, op_id: "second" }));
+    const other = observe(router.route(fast, "repo_summary", { repo_id: fast }));
+    const channel = attach("one"); setStatus("one", "connected");
+    const replay = router.replayQueue("one");
+    try {
+      await vi.waitFor(() => expect(channel.frames).toHaveLength(2));
+      expect(channel.frames.some(frame => frame.params.op_id === "second")).toBe(false);
+      const sent = channel.frames.find(frame => frame.params.repo_id === fast)!;
+      channel.reply(sent.id, { result: { healthy: true } });
+      await vi.waitFor(() => expect(other.settled).toBe(true));
+      await router.route(slow, "rpc/cancel", { repo_id: slow, op_id: "second" });
+      await vi.waitFor(() => expect(second.error).toMatchObject({ code: 1010 }));
+      const initial = channel.frames.find(frame => frame.params.op_id === "first")!;
+      channel.reply(initial.id, { result: { commits: [] } });
+      await replay;
+      expect(first.value).toEqual({ commits: [] });
+    } finally { channel.emit("end"); router.clearQueue("one"); await replay; }
+  });
+
+  it("credential preparation cannot move a request onto a replacement SSH channel", async () => {
+    let release!: () => void;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const storage: Pick<StorageConnections, "request" | "redactValue"> = {
+      ...mockStorageConnections,
+      request: async (method, params, send) => { await preparation; return send(method, params); },
+    };
+    const { router, attach } = fixture(undefined, storage);
+    const old = attach("one");
+    const requested = router.sendToRemoteAgent("one", "open_local", { repo_id: "ssh://one/repo", path: "/repo" });
+    const result = observe(requested);
+    old.emit("end");
+    const replacement = attach("one");
+    release();
+    try {
+      await vi.waitFor(() => expect(result.settled).toBe(true));
+      expect(result.error).toMatchObject({ code: "SSH_CHANNEL_CLOSED" });
+      expect(replacement.frames).toHaveLength(0);
+    } finally { replacement.emit("end"); await requested.catch(() => {}); }
+  });
+
+  it("cancelled replay authentication never dispatches when preparation finishes late", async () => {
+    let release!: () => void;
+    let preparing = false;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const storage: Pick<StorageConnections, "request" | "redactValue"> = {
+      ...mockStorageConnections,
+      request: async (method, params, send) => { preparing = true; await preparation; return send(method, params); },
+    };
+    const { router, attach, setStatus } = fixture(undefined, storage);
+    const repo_id = "ssh://one/repo";
+    setStatus("one", "reconnecting");
+    const result = observe(router.route(repo_id, "git_log", { repo_id, op_id: "preparing" }));
+    const channel = attach("one"); setStatus("one", "connected");
+    const replay = router.replayQueue("one");
+    try {
+      await vi.waitFor(() => expect(preparing).toBe(true));
+      await router.route(repo_id, "rpc/cancel", { repo_id, op_id: "preparing" });
+      await replay;
+      expect(result.error).toMatchObject({ code: 1010 });
+      release();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(channel.frames).toHaveLength(0);
+    } finally { release(); channel.emit("end"); router.clearQueue("one"); await replay; }
+  });
+
+  it("a lost replay releases blocked admission without consuming the replacement channel's queue", async () => {
+    const { router, attach, setStatus, setWork } = fixture();
+    const slow = "ssh://one/slow", fast = "ssh://one/fast";
+    let release!: () => void;
+    setWork(slow, new Promise<void>(resolve => { release = resolve; }));
+    setStatus("one", "reconnecting");
+    const oldResult = observe(router.route(slow, "git_log", { repo_id: slow }));
+    const old = attach("one"); setStatus("one", "connected");
+    const firstReplay = router.replayQueue("one");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    old.emit("end"); setStatus("one", "reconnecting");
+    const newResult = observe(router.route(fast, "repo_summary", { repo_id: fast }));
+    const current = attach("one"); setStatus("one", "connected");
+    const secondReplay = router.replayQueue("one");
+    try {
+      await vi.waitFor(() => expect(oldResult.error).toMatchObject({ code: "SSH_CHANNEL_CLOSED" }));
+      await vi.waitFor(() => expect(current.frames).toHaveLength(1));
+      expect(current.frames[0].params.repo_id).toBe(fast);
+      current.reply(current.frames[0].id, { result: { healthy: true } });
+      await Promise.all([firstReplay, secondReplay]);
+      expect(newResult.value).toEqual({ healthy: true });
+      release();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(current.frames).toHaveLength(1);
+    } finally { release(); current.emit("end"); router.clearQueue("one"); await Promise.all([firstReplay, secondReplay]); }
+  });
+
+  it("replay bounds native concurrency and isolates a failed response from waiting siblings", async () => {
+    const { router, attach, setStatus } = fixture();
+    setStatus("one", "reconnecting");
+    const repositories = Array.from({ length: 6 }, (_, index) => `ssh://one/repo-${index}`);
+    const results = repositories.map((repo_id, index) => observe(router.route(repo_id, "repo_summary", { repo_id, op_id: `read-${index}` })));
+    const channel = attach("one"); setStatus("one", "connected");
+    const replay = router.replayQueue("one");
+    try {
+      await vi.waitFor(() => expect(channel.frames).toHaveLength(4));
+      await router.route(repositories[4], "rpc/cancel", { repo_id: repositories[4], op_id: "read-4" });
+      channel.reply(channel.frames[0].id, { error: { code: 500, message: "Metadata unavailable" } });
+      await vi.waitFor(() => expect(channel.frames).toHaveLength(5));
+      expect(channel.frames[4].params.repo_id).toBe(repositories[5]);
+      for (const frame of channel.frames.slice(1)) channel.reply(frame.id, { result: { repo_id: frame.params.repo_id } });
+      await replay;
+      expect(results[0].error).toMatchObject({ code: 500 });
+      expect(results[4].error).toMatchObject({ code: 1010 });
+      for (const index of [1, 2, 3, 5]) expect(results[index].value).toEqual({ repo_id: repositories[index] });
+    } finally { channel.emit("end"); router.clearQueue("one"); await replay; }
+  });
+
   it("validates the expected native identity at the wire boundary and strips it from native params", async () => {
     const { router, attach } = fixture();
     const channel = attach("one");
@@ -183,7 +325,7 @@ describe("SSH captured source ownership", () => {
     const rejected = expect(second).rejects.toThrow(action === "cancel" ? "Queued operation cancelled" : "Connection lost permanently");
     setStatus("one", "connected");
     const replay = router.replayQueue("one");
-    expect(channel.frames).toHaveLength(1);
+    await vi.waitFor(() => expect(channel.frames).toHaveLength(1));
     if (action === "cancel") await router.route(repo_id, "rpc/cancel", { repo_id, op_id: "unsent" });
     else router.clearQueue("one");
     await rejected;
@@ -226,8 +368,7 @@ describe("SSH captured source ownership", () => {
     expect(channel.frames).toHaveLength(4);
     channel.reply(channel.frames[3].id, { result: 3 });
     channel.reply(channel.frames[0].id, { result: 0 });
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
-    expect(channel.frames).toHaveLength(6);
+    await vi.waitFor(() => expect(channel.frames).toHaveLength(6));
     for (const i of [5, 4, 2, 1]) channel.reply(channel.frames[i].id, { result: i });
     expect(await result).toEqual(Array.from({ length: 6 }, (_, result) => ({ result })));
   });

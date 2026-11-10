@@ -20,7 +20,9 @@ interface ChannelOwner {
   channel: ClientChannel;
   parts: Buffer[];
   bytes: number;
-  closed: boolean;
+  closed: Promise<void>;
+  finish: () => void;
+  failure?: Error;
   draining?: Error;
 }
 interface PendingRequest {
@@ -35,10 +37,14 @@ interface PendingRequest {
   cancelRequested?: boolean;
 }
 interface QueuedCall {
+  repoId: string;
   method: string;
   params: unknown;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
+  stopped: Promise<void>;
+  cancel: (error: Error) => void;
+  failure?: Error;
 }
 interface JsonRpcResponse {
   jsonrpc: "2.0";
@@ -47,6 +53,7 @@ interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 type BatchReply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
+const MAX_CONCURRENT_CALLS = 4;
 
 // These methods own repository setup or bounded content work. Cancellation
 // completes after native cleanup; the metadata timer must not discard its reply.
@@ -72,8 +79,8 @@ export class RpcRouter extends EventEmitter {
   private transports = new Map<string, RepoTransport>();
   private channels = new Map<string, ChannelOwner>();
   private pending = new Map<number, PendingRequest>();
-  private queues = new Map<string, QueuedCall[]>();
-  private replays = new Map<string, Promise<void>>();
+  private queues = new Map<string, Set<QueuedCall>>();
+  private replays = new Map<string, { owner: ChannelOwner; work: Promise<void> }>();
   private nextId = 1;
   private bandwidthCounters = new Map<string, BandwidthStats>();
   private remoteCache: RemoteCache | null = null;
@@ -109,7 +116,7 @@ export class RpcRouter extends EventEmitter {
         const pending = this.sessionManager.repositoryWork(repoId);
         if (pending) await pending;
       }
-      return this.routeToRemote(profileId, method, params);
+      return this.routeToRemote(profileId, repoId, method, params);
     }
     return this.localAgent.request(method, params);
   }
@@ -119,7 +126,7 @@ export class RpcRouter extends EventEmitter {
     const results: BatchReply[] = new Array(calls.length);
     let next = 0;
     // Workspace polling must not spawn a Git child for every repository at once.
-    await Promise.all(Array.from({ length: Math.min(4, calls.length) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_CALLS, calls.length) }, async () => {
       while (next < calls.length) {
         const index = next++;
         const call = calls[index];
@@ -142,11 +149,13 @@ export class RpcRouter extends EventEmitter {
     const previous = this.channels.get(profileId);
     if (previous?.channel === channel) return;
     if (previous) this.failChannel(previous, Object.assign(new Error("Remote agent channel replaced"), { code: "SSH_CHANNEL_REPLACED" }));
-    const owner: ChannelOwner = { profileId, channel, parts: [], bytes: 0, closed: false };
+    let finish!: () => void;
+    const closed = new Promise<void>(resolve => { finish = resolve; });
+    const owner: ChannelOwner = { profileId, channel, parts: [], bytes: 0, closed, finish };
     this.channels.set(profileId, owner);
     if (!this.bandwidthCounters.has(profileId)) this.resetBandwidth(profileId);
     const onData = (data: Buffer) => {
-      if (this.channels.get(profileId) !== owner || owner.closed) return;
+      if (this.channels.get(profileId) !== owner || owner.failure) return;
       this.bandwidthCounters.get(profileId)!.bytesIn += data.length;
       this.handleChannelData(owner, data);
     };
@@ -166,8 +175,8 @@ export class RpcRouter extends EventEmitter {
   }
 
   private failChannel(owner: ChannelOwner, error: Error): void {
-    if (owner.closed) return;
-    owner.closed = true;
+    if (owner.failure) return;
+    owner.failure = error;
     owner.parts = []; owner.bytes = 0;
     if (this.channels.get(owner.profileId) === owner) this.channels.delete(owner.profileId);
     for (const [id, request] of this.pending) {
@@ -176,44 +185,85 @@ export class RpcRouter extends EventEmitter {
       this.pending.delete(id);
       request.reject(error);
     }
+    owner.finish();
     // EOF lets the native agent cancel and join reads, then close its SDK/DBs.
     owner.channel.end();
   }
 
   replayQueue(profileId: string): Promise<void> {
     const active = this.replays.get(profileId);
-    if (active) return active;
+    if (active) return this.channels.get(profileId) === active.owner ? active.work : active.work.then(() => this.replayQueue(profileId));
     const queue = this.queues.get(profileId);
-    if (!queue?.length) return Promise.resolve();
-    const work = (async () => {
-      // Unsent calls remain cancellable while another replay is in flight.
-      while (queue.length) {
-        const call = queue.shift()!;
-        try { call.resolve(await this.sendToRemoteAgent(profileId, call.method, call.params)); }
-        catch (error) { call.reject(error instanceof Error ? error : new Error(String(error))); }
+    if (!queue?.size) return Promise.resolve();
+    const owner = this.channels.get(profileId);
+    if (!owner) {
+      const error = new Error(`No agent channel for profile: ${profileId}`);
+      for (const call of queue) call.cancel(error);
+      queue.clear(); this.queues.delete(profileId);
+      return Promise.resolve();
+    }
+    const entry = { owner, work: Promise.resolve().then(async () => {
+      const running = new Set<Promise<void>>();
+      while (queue.size && !owner.failure) {
+        const repositories = new Map<string, QueuedCall[]>();
+        for (const call of queue) {
+          const calls = repositories.get(call.repoId) ?? [];
+          calls.push(call); repositories.set(call.repoId, calls);
+        }
+        await Promise.all([...repositories.values()].map(async calls => {
+          for (const call of calls) {
+            try {
+              const opening = this.sessionManager.repositoryWork(call.repoId);
+              if (opening) await Promise.race([opening, call.stopped, owner.closed]);
+              while (!call.failure && !owner.failure && running.size >= MAX_CONCURRENT_CALLS) {
+                await Promise.race([...running, call.stopped, owner.closed]);
+              }
+              if (call.failure) throw call.failure;
+              if (owner.failure) throw owner.failure;
+              // Keep admission in the same queue through authentication. A
+              // cancelled read must never be sent when credentials arrive late.
+              const operation = (async () => {
+                const prepared = this.storageConnections.request(call.method, call.params, (method, params) => {
+                  if (call.failure) return Promise.reject(call.failure);
+                  queue.delete(call);
+                  return this.sendPreparedToRemoteAgent(owner, method, params);
+                }, profileId);
+                const result = await Promise.race([prepared, call.stopped, owner.closed]);
+                if (call.failure) throw call.failure;
+                if (owner.failure) throw owner.failure;
+                call.resolve(result);
+              })();
+              const settled = operation.then(() => {}, () => {});
+              running.add(settled);
+              try { await operation; } finally { running.delete(settled); }
+            } catch (error) { call.reject(error instanceof Error ? error : new Error(String(error))); }
+            finally { queue.delete(call); }
+          }
+        }));
       }
-    })().finally(() => {
-      if (this.queues.get(profileId) === queue) this.queues.delete(profileId);
-      this.replays.delete(profileId);
-    });
-    this.replays.set(profileId, work);
-    return work;
+    }).finally(() => {
+      if (!queue.size && this.queues.get(profileId) === queue) this.queues.delete(profileId);
+      if (this.replays.get(profileId) === entry) this.replays.delete(profileId);
+    }) };
+    this.replays.set(profileId, entry);
+    return entry.work;
   }
   clearQueue(profileId: string): void {
-    for (const call of this.queues.get(profileId)?.splice(0) ?? []) call.reject(new Error("Connection lost permanently"));
+    for (const call of this.queues.get(profileId) ?? []) call.cancel(new Error("Connection lost permanently"));
+    this.queues.get(profileId)?.clear();
     this.queues.delete(profileId);
   }
   getBandwidth(profileId: string): BandwidthStats { return this.bandwidthCounters.get(profileId) ?? { bytesIn: 0, bytesOut: 0 }; }
   resetBandwidth(profileId: string): void { this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 }); }
 
-  private async routeToRemote(profileId: string, method: string, params: unknown): Promise<unknown> {
+  private async routeToRemote(profileId: string, repoId: string, method: string, params: unknown): Promise<unknown> {
     const status = this.sessionManager.getStatus(profileId);
     if (method === "rpc/cancel" && params && typeof params === "object" && "op_id" in params) {
       const queue = this.queues.get(profileId);
-      const index = queue?.findIndex(call => call.params && typeof call.params === "object" && "op_id" in call.params && call.params.op_id === params.op_id) ?? -1;
-      if (queue && index >= 0) {
-        const [call] = queue.splice(index, 1);
-        call.reject(Object.assign(new Error("Queued operation cancelled"), { code: 1010, data: { kind: "op_cancelled" } }));
+      const call = queue && [...queue].find(call => call.repoId === repoId && call.params && typeof call.params === "object" && "op_id" in call.params && call.params.op_id === params.op_id);
+      if (queue && call) {
+        queue.delete(call);
+        call.cancel(Object.assign(new Error("Queued operation cancelled"), { code: 1010, data: { kind: "op_cancelled" } }));
         return { ok: true };
       }
     }
@@ -221,34 +271,52 @@ export class RpcRouter extends EventEmitter {
       // Only explicitly cacheable metadata can be replayed. Captured sources,
       // cancellation signals and unknown mutations belong to one agent session.
       if (!isCacheableReadMethod(method)) throw Object.assign(new Error("Connection lost: live operations are unavailable during reconnection"), { code: "SSH_RECONNECTING" });
-      const repoId = extractRepoId(params);
       const cached = repoId ? this.remoteCache?.getCached(`${repoId}:${method}`) : null;
       if (cached) {
         const data = cached.data;
         return { ...(data !== null && typeof data === "object" && !Array.isArray(data) ? data : { data }), __stale: true };
       }
       let queue = this.queues.get(profileId);
-      if (!queue) { queue = []; this.queues.set(profileId, queue); }
-      if (queue.length >= this.maxQueuedCalls) queue.shift()?.reject(new Error("Call dropped: reconnection queue overflow"));
-      return new Promise((resolve, reject) => queue.push({ method, params, resolve, reject }));
+      if (!queue) { queue = new Set(); this.queues.set(profileId, queue); }
+      if (queue.size >= this.maxQueuedCalls) {
+        const oldest = queue.values().next().value;
+        if (oldest) { queue.delete(oldest); oldest.cancel(new Error("Call dropped: reconnection queue overflow")); }
+      }
+      return new Promise((resolve, reject) => {
+        let stop!: () => void;
+        const stopped = new Promise<void>(done => { stop = done; });
+        const call: QueuedCall = { repoId, method, params, resolve, reject, stopped, cancel: error => {
+          call.failure = error; stop(); reject(error);
+        } };
+        queue.add(call);
+      });
     }
     if (status !== "connected") throw new Error(`SSH connection not available (status: ${status})`);
     return this.sendToRemoteAgent(profileId, method, params);
   }
 
-  sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
-    return this.storageConnections.request(method, params, (name, payload) => this.sendPreparedToRemoteAgent(profileId, name, payload), profileId);
+  async sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+    const owner = this.channelOwner(profileId);
+    return this.storageConnections.request(method, params, (name, payload) => this.sendPreparedToRemoteAgent(owner, name, payload), profileId);
   }
 
   /** Drain a native owner without forgetting its desired credential binding. */
-  retireRepository(profileId: string, repoId: string): Promise<unknown> {
-    return this.sendPreparedToRemoteAgent(profileId, "close", { repo_id: repoId });
+  async retireRepository(profileId: string, repoId: string): Promise<unknown> {
+    return this.sendPreparedToRemoteAgent(this.channelOwner(profileId), "close", { repo_id: repoId });
   }
 
-  private sendPreparedToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+  private channelOwner(profileId: string): ChannelOwner {
     const connection = this.sessionManager.getConnection(profileId);
     const owner = this.channels.get(profileId);
-    if (!owner || owner.closed || owner.channel !== connection?.channels.agent) return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
+    if (!owner || owner.channel !== connection?.channels.agent) throw new Error(`No agent channel for profile: ${profileId}`);
+    return owner;
+  }
+
+  private sendPreparedToRemoteAgent(owner: ChannelOwner, method: string, params: unknown): Promise<unknown> {
+    if (owner.failure) return Promise.reject(owner.failure);
+    const profileId = owner.profileId;
+    const connection = this.sessionManager.getConnection(profileId);
+    if (this.channels.get(profileId) !== owner || owner.channel !== connection?.channels.agent) return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
     const owned = OWNED_METHODS.has(method);
     // Release must finish even if the initiating view/profile deadline expires.
     const timeout = method === "file_close" || method === "close" ? undefined
@@ -267,7 +335,8 @@ export class RpcRouter extends EventEmitter {
   }
 
   private send(owner: ChannelOwner, method: string, params: unknown, timeoutMs: number | undefined): Promise<unknown> {
-    if (owner.closed || owner.draining) return Promise.reject(owner.draining ?? new Error("Remote agent channel closed"));
+    const failure = owner.failure ?? owner.draining;
+    if (failure) return Promise.reject(failure);
     const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
     const operation = method !== "rpc/cancel" && typeof fields?.op_id === "string"
       ? { op_id: fields.op_id, ...(typeof fields.repo_id === "string" ? { repo_id: fields.repo_id } : {}) } : undefined;
@@ -289,7 +358,7 @@ export class RpcRouter extends EventEmitter {
         // Signalling is not completion. Keep the original request until its
         // native terminal reply, preserving integrity errors and raced success.
         void this.send(owner, "rpc/cancel", operation, timeoutMs).catch(error => {
-          if (owner.closed || owner.draining) return;
+          if (owner.failure || owner.draining) return;
           owner.draining = error instanceof Error ? error : new Error(String(error));
           for (const pending of this.pending.values()) if (pending.owner === owner) clearTimeout(pending.timer);
           owner.channel.end();
@@ -306,7 +375,7 @@ export class RpcRouter extends EventEmitter {
 
   private handleChannelData(owner: ChannelOwner, data: Buffer): void {
     let start = 0;
-    while (start < data.length && !owner.closed) {
+    while (start < data.length && !owner.failure) {
       const end = data.indexOf(10, start);
       const part = data.subarray(start, end < 0 ? data.length : end);
       owner.parts.push(part); owner.bytes += part.length;

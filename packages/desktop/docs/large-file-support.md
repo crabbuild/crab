@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings without native startup have bounded proof below. Routed cacheable metadata joins repository admission. Remaining: independent queued metadata replay, UI state recovery and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings without native startup have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status and staging patches refresh by native epoch. Remaining: other UI state recovery, live removal during admitted opening and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -53,12 +53,15 @@ implied by a working read/materialization smoke.
    repository replacement ownership. Two-store cloud reads, cold restart,
    failed selection, removal/reselection and stale captures have packaged
    S3-compatible macOS proof. Broaden provider/profile and platform qualification.
-   Use the existing session identity to refresh dashboard/cached metadata and notebook reads,
-   preserve pending editor saves and restore media playback deliberately.
-   Dashboard effects currently depend on repository ID/deferred state, so a
-   same-ID retry can retain a previous loading error. Queued reconnect metadata
-   still waits for all replay outcomes; release it through the target repository
-   owner rather than introducing a component retry queue. Direct SDK opening
+   Use the existing session identity to refresh Dashboard, Datasets, cached metrics,
+   selected Changes diffs and notebook reads; preserve pending editor saves and
+   restore media playback deliberately. Dashboard effects and metric caches
+   currently depend on logical repository identity, so a same-ID retry can retain
+   a previous loading error or stale data. Datasets has the same epoch gap and
+   its listing lacks late-result suppression. Changes status and staging patches
+   now suppress obsolete replies without remounting the commit composer. Keep
+   these refreshes at their existing read owner; add no component retry queue.
+   Direct SDK opening
    cancellation has real blocked-storage proof; qualify other providers and
    cancellation through actual jump hosts.
    Removal during an admitted open has focused lifecycle proof; live blocked
@@ -87,6 +90,45 @@ its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
 
 ## Storage identity checkpoint
+
+### Independent queued metadata recovery
+
+Native process readiness and each repository's admission are separate owners.
+Deployment registers repository openings before announcing readiness and joins
+opening/replay completion on teardown. The router replays cacheable metadata in
+repository order, with independent progress across repositories and at most four
+active calls. Waiting for a repository does not occupy a dispatch slot. A failed
+call does not reject a healthy sibling waiting for a slot.
+
+The queued entry remains cancellable through credential preparation. Cancelling
+unsent work settles it locally and prevents late authentication from dispatching
+it. Each request captures its channel before async authentication; replacement
+or loss settles old work rather than moving it onto a new native owner. Captured
+content and mutations retain their existing live-session behavior.
+
+Changes status and the staging patch pair refresh when the native epoch changes.
+Generation checks reject obsolete replies while keeping the component's pending
+draft and selection state. Status list updates do not invalidate an explicit
+staging patch refresh; only a newer patch request, owner change or unmount does.
+Selected diff/editor content and sibling badge refreshes still need qualification.
+
+`ssh-metadata-replay-ui.spec.ts` qualifies a packaged macOS arm64 reconnect with
+two real Git repositories. One repository's config is held on a FIFO while the
+healthy sibling's previously queued metadata completes, Changes shows a new file
+and retains its commit draft, and a 4 MiB Safetensors preview opens. An unsent
+queued read cancels with code 1010 and never reaches the wire. Restoring the
+blocked config releases its queued metadata exactly once and its file tree opens.
+Content and the unrelated index remain byte-identical. This closes independent
+queued metadata replay and that bounded Changes recovery case; it does not close
+the remaining P0 views, lifecycle races or full acceptance matrix.
+
+Current proof: 489 TypeScript cases across 23 routing/lifecycle suites, plus 50
+adjacent cache/provider/capability cases; project and strict spec types pass.
+Sixteen packaged cases pass, including the real two-store SSH/local/SDK identity
+and cold-restart regressions. All 905 renderer/Electron assets match the fresh
+build. This TypeScript slice reuses the qualified native pair: all 1,680 Rust/Cargo
+inputs remain byte-identical to its producer. Cross-platform/provider CI remains
+required; ESLint has no configuration and is not reported as passing.
 
 ### Device settings during native failure
 
@@ -118,6 +160,12 @@ active repository, and the obsolete outage notice disappears after repair.
 This closes those native-binary failure cases. An unlocked OS keyring remains
 required for credential persistence; cross-platform qualification and the
 remaining recovery, workflow, transfer and inspection scopes stay open.
+
+Device metadata still awaits `localAgent` in `main.ts`. Blocked shell-environment
+resolution or a log-directory failure before actor construction can therefore
+prevent repair. Finish that P0 boundary by dispatching through the existing vault
+before waiting for native construction, retaining its identity-change owner;
+do not introduce another credential store or authentication path.
 
 ### Reader identity replacement
 
@@ -185,7 +233,7 @@ the logical binding repairable. Serialized identity changes prevent an old close
 from revoking a replacement. Explicit Retry joins failed-open cleanup before
 starting a fresh attempt. Cacheable metadata joins the target repository's open
 or rebind promise; process readiness alone does not imply repository readiness.
-Reconnect queue release still waits for all replay outcomes and remains a P0 gap.
+Independent reconnect queue release is qualified in the checkpoint above.
 
 The packaged macOS arm64 proof uses real SSH trust/deployment and two isolated
 S3-compatible stores with invalid ambient credentials. GUI save/test/select,

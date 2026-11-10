@@ -898,13 +898,13 @@ export class SshSessionManager extends EventEmitter {
       if (!current() || connection.channels.agent !== channel) throw new Error("SSH deployment superseded");
       // Process readiness is independent of repository recovery. The deployment
       // owner still joins every replay on disconnect; each open owns its result.
+      const openings = [...this.repositories.get(profile.id)?.values() ?? []].map(repository => this.openRepositorySession(connection, repository.path, sessionId));
       this.setStatus(profile.id, "connected");
       this.emit("ssh:agent-capabilities", { profileId: profile.id, capabilities });
       markReady(sessionId);
       // A repository failure belongs to that repository. Keep the negotiated
       // runtime alive so other repositories and an explicit retry can use it.
-      await Promise.allSettled([...this.repositories.get(profile.id)?.values() ?? []].map(repository => this.openRepositorySession(connection, repository.path, sessionId)));
-      await rpcRouter.replayQueue(profile.id);
+      await Promise.all([Promise.allSettled(openings), rpcRouter.replayQueue(profile.id)]);
       signal.throwIfAborted();
       if (!current() || connection.channels.agent !== channel) throw new Error("SSH deployment superseded");
     } catch (error) {

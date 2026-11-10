@@ -19,7 +19,7 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
   const commands = new Set<ChildProcessWithoutNullStreams>();
   const failures: Error[] = [];
   let uploadedBytes = 0, openFiles = 0, connectionAttempts = 0, accepting = true;
-  const requests: Array<{ method: string; repo_id?: string; path?: string; storage_connection_id?: string }> = [];
+  const requests: Array<{ method: string; repo_id?: string; path?: string; storage_connection_id?: string; op_id?: string }> = [];
   const inside = (name: string) => {
     const resolved = name === "." ? home : path.resolve(name);
     if (resolved !== home && !resolved.startsWith(home + path.sep)) throw Object.assign(new Error("Outside SSH fixture"), { code: "EACCES" });
@@ -49,9 +49,9 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
           let newline: number;
           while ((newline = incoming.indexOf(10)) >= 0) {
             const line = incoming.subarray(0, newline); incoming = incoming.subarray(newline + 1);
-            const value = JSON.parse(line.toString("utf8")) as { method: string; params?: { repo_id?: string; path?: string; __storage_auth?: { id?: string } } };
+            const value = JSON.parse(line.toString("utf8")) as { method: string; params?: { repo_id?: string; path?: string; op_id?: string; __storage_auth?: { id?: string } } };
             const identity = value.params?.__storage_auth?.id;
-            requests.push({ method: value.method, repo_id: value.params?.repo_id, path: value.params?.path, ...(identity ? { storage_connection_id: identity } : {}) });
+            requests.push({ method: value.method, repo_id: value.params?.repo_id, path: value.params?.path, ...(identity ? { storage_connection_id: identity } : {}), ...(value.params?.op_id ? { op_id: value.params.op_id } : {}) });
           }
         });
         stream.pipe(child.stdin);
@@ -134,6 +134,7 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
     get uploadedBytes() { return uploadedBytes; }, get openFiles() { return openFiles; },
     get connectionAttempts() { return connectionAttempts; },
     setAccepting(value: boolean) { accepting = value; },
+    dropConnections() { connections.forEach(connection => connection.end()); },
     async close() {
       connections.forEach(connection => connection.end());
       await Promise.all([...commands].map(child => { const exited = once(child, "close"); child.stdin.end(); return exited; }));

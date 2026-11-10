@@ -208,6 +208,7 @@ describe("RpcRouter — graceful degradation during reconnection", () => {
     router.attachChannel("gpu-server", channel.asChannel());
 
     const replayPromise = router.replayQueue("gpu-server");
+    await vi.waitFor(() => expect(channel.written).toHaveLength(1));
     const response = JSON.stringify({ jsonrpc: "2.0", id: 1, result: "?? new.txt" }) + "\n";
     channel.emit("data", Buffer.from(response));
     await replayPromise;

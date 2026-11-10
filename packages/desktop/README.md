@@ -273,8 +273,10 @@ tests and packaged storage qualification.
   actually used by each operation, without inferred minimum versions.
 - SSH repository browsing uses SFTP for directory navigation and the native
   agent for repository operations, bounded previews and materialization. Opened
-  repository identities are restored before queued metadata requests replay on
-  reconnect. Live content requests belong to the interrupted session and fail.
+  repository identities gate their own queued metadata on reconnect. A blocked
+  sibling does not hold healthy reads; replay preserves order within each
+  repository and admits at most four calls concurrently. Live content requests
+  belong to the interrupted session and fail.
 - SSH progress reaches Activity only while its native request owns the job and
   repository. Cancellation waits for the terminal result; unopened SSH identities
   cannot fall through to local file operations. Editing controls are disabled

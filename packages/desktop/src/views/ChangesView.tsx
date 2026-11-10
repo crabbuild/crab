@@ -213,21 +213,28 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   // Track whether we've completed the initial load. Subsequent
   // refreshes update entries in-place without flashing a spinner.
   const hasLoadedRef = useRef(false);
+  const statusRequest = useRef(0);
+  const patchRequest = useRef(0);
 
   const refreshStatus = useCallback(() => {
+    const request = ++statusRequest.current;
     if (!hasLoadedRef.current) setLoading(true);
     setError(null);
     rpc
       .gitStatus(repo.repo_id)
       .then((r) => {
+        if (request !== statusRequest.current) return;
         setEntries(r.entries);
         hasLoadedRef.current = true;
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [repo.repo_id]);
+      .catch((e: Error) => { if (request === statusRequest.current) setError(e.message); })
+      .finally(() => { if (request === statusRequest.current) setLoading(false); });
+  }, [repo.repo_id, repo.native_session_id]);
 
-  useEffect(refreshStatus, [refreshStatus]);
+  useEffect(() => {
+    refreshStatus();
+    return () => { statusRequest.current++; };
+  }, [refreshStatus]);
 
   // File watcher: auto-refresh status when files change on disk.
   // The watcher lifecycle is managed by RepoDetail via
@@ -238,14 +245,17 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   // index-vs-HEAD) in parallel. Used for tri-state derivation —
   // pathless calls so one round-trip pair covers every file.
   const refreshPatchPair = useCallback(async () => {
+    const request = ++patchRequest.current;
     try {
       const [wt, cached] = await Promise.all([
         rpc.gitDiffIndexPatch(repo.repo_id, {}),
         rpc.gitDiffCachedPatch(repo.repo_id, {}),
       ]);
+      if (request !== patchRequest.current) return;
       setWorkTreePatch(wt.patch ?? "");
       setCachedPatch(cached.patch ?? "");
     } catch {
+      if (request !== patchRequest.current) return;
       // Partial failure means the checkboxes render `empty` for
       // everything — not great, but the rest of the view stays
       // usable. A follow-up toast on the specific action that
@@ -253,7 +263,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       setWorkTreePatch("");
       setCachedPatch("");
     }
-  }, [repo.repo_id]);
+  }, [repo.repo_id, repo.native_session_id]);
+
+  // Invalidate owner changes and unmount separately from entries: a status
+  // update can belong to an explicit staging refresh of this patch pair.
+  useEffect(() => () => { patchRequest.current++; }, [refreshPatchPair]);
 
   // Re-derive the patch pair whenever the status list changes.
   // Skip if a staging operation already refreshed the pair explicitly
@@ -262,9 +276,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   useEffect(() => {
     if (skipPatchPairEffectRef.current) {
       skipPatchPairEffectRef.current = false;
-      return;
-    }
-    void refreshPatchPair();
+    } else void refreshPatchPair();
   }, [refreshPatchPair, entries]);
 
   const statusByPath = useMemo(() => {
