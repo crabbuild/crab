@@ -598,7 +598,7 @@ function Shell() {
             <RepoDetail
               key={active.repo_id}
               repo={active}
-              navEntry={nav.current}
+              restoreEntry={nav.restoreEntry}
               onNavigate={handleNavigate}
               activityDrawerOpen={drawerOpen}
               onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}

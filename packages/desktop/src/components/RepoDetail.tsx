@@ -42,7 +42,7 @@ import { NavEntry } from "../hooks/useNavHistory";
 
 interface RepoDetailProps {
   repo: OpenRepo;
-  navEntry?: NavEntry;
+  restoreEntry?: NavEntry;
   onNavigate?: (entry: NavEntry) => void;
   /** Whether the activity drawer is open. */
   activityDrawerOpen?: boolean;
@@ -59,7 +59,7 @@ interface RepoDetailProps {
  * render editor tabs (path+rev) and diff tabs (path+base/head) side
  * by side. That mirrors VS Code's mixed "editor group" behaviour.
  */
-export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
+export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
   const sessionManager = useSession();
 
   const [rev, setRev] = useState<string | null>(null);
@@ -204,16 +204,16 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
     return () => window.removeEventListener("crab:show-repository-overview", showOverview);
   }, [setActiveView]);
 
-  // The initial view belongs to this repo's session. Only later history
-  // changes may replace it; the shell can still hold the departing repo's entry.
-  const previousNavEntryRef = useRef(navEntry);
+  // The initial view belongs to this repo's session. Only later restore
+  // commands may replace it; the shell can still hold the departing repo's entry.
+  const previousRestoreRef = useRef(restoreEntry);
   useEffect(() => {
-    if (navEntry === previousNavEntryRef.current) return;
-    previousNavEntryRef.current = navEntry;
-    if (!navEntry) return;
-    if (isSidebarView(navEntry.view)) setActiveView(navEntry.view);
-    if (navEntry.commit !== undefined) setSelectedCommit(navEntry.commit ?? null);
-  }, [navEntry]);
+    if (restoreEntry === previousRestoreRef.current) return;
+    previousRestoreRef.current = restoreEntry;
+    if (!restoreEntry) return;
+    if (isSidebarView(restoreEntry.view)) setActiveView(restoreEntry.view);
+    if (restoreEntry.commit !== undefined) setSelectedCommit(restoreEntry.commit ?? null);
+  }, [restoreEntry]);
 
   useEffect(() => {
     const handler = (event: Event) => {
