@@ -17,6 +17,7 @@ import { ToastManager } from "./components/ToastManager";
 import { WorkspaceThemeEffect } from "./components/WorkspaceThemeEffect";
 import { Welcome } from "./components/Welcome";
 import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
+import { SshView } from "./views/SshView";
 import { TerminalKeepAlive, TerminalKeepAliveHandle } from "./components/TerminalKeepAlive";
 import { useTabBarShortcuts } from "./components/workspace/TabBar";
 import { FuzzySwitcher } from "./components/workspace/FuzzySwitcher";
@@ -577,10 +578,12 @@ function Shell() {
               activityDrawerOpen={drawerOpen}
               onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
             />
+          ) : nav.current?.view === "ssh" ? (
+            <SshView />
           ) : state.workspaces.length > 0 ? (
             <WorkspaceDashboardView workspace={getActiveWorkspace(state)!} />
           ) : (
-            <EmptyState />
+            <EmptyState onConnectSsh={() => handleNavigate({ view: "ssh" })} />
           )}
           {/* Share the rail width with WorkspaceShell; keep one host mounted
               across page and repository changes so PTYs are never recreated. */}
