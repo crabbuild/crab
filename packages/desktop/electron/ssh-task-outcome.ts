@@ -7,4 +7,3 @@ export function confirmRemoteTaskOperation(value: unknown, operation: "apply" | 
   const detail = typeof receipt.cleanup_error === "string" ? `: ${receipt.cleanup_error}` : ". Inspect the remote worktree and task branch before cleanup.";
   return `Task ${result}; remote cleanup needs attention${detail}`;
 }
-
