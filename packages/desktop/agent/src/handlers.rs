@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::repository::{BrowseSession, BrowserEntry, EntryKind, FileMetadata};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 use tracing::info;
 
 use crate::{
@@ -22,11 +22,14 @@ use crate::{
     rpc::Request, shellout,
 };
 
+mod lifecycle;
+
 /// Shared state across dispatch tasks. Holds the map of open
 /// repositories keyed by a desktop-assigned id.
 #[derive(Clone)]
 pub struct State {
     repos: Arc<RwLock<HashMap<String, OpenRepo>>>,
+    lifecycle: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Channel to the background indexer. `None` when the indexer is
     /// disabled or hasn't been spawned yet.
     indexer_tx: Arc<RwLock<Option<mpsc::Sender<indexer::IndexerCommand>>>>,
@@ -51,6 +54,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             repos: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle: Arc::default(),
             indexer_tx: Arc::new(RwLock::new(None)),
             cancel_registry: CancelRegistry::new(),
             watch_sets: Arc::new(RwLock::new(HashMap::new())),
@@ -87,6 +91,17 @@ impl State {
             .write()
             .await
             .insert(id, OpenRepo { handle, work_dir });
+    }
+
+    async fn repository_lifecycle(&self, id: &str) -> OwnedMutexGuard<()> {
+        let owner = {
+            let mut owners = self.lifecycle.lock().await;
+            owners.retain(|_, owner| Arc::strong_count(owner) > 1);
+            owners.entry(id.to_owned()).or_default().clone()
+        };
+        // Replacement and release share admission. Dropping an initialized
+        // session into the map must never overwrite an owner still closing.
+        owner.lock_owned().await
     }
 
     async fn remove(&self, id: &str) -> Result<()> {
@@ -178,9 +193,9 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "managed_create_repository" => {
             crate::managed_service::create_repository(decode(&method, params)?).await
         },
-        "open_local" => open_local(state, decode(&method, params)?).await,
-        "open_url" => open_url(state, decode(&method, params)?).await,
-        "close" => close(state, decode(&method, params)?).await,
+        "open_local" => lifecycle::open_local(state, decode(&method, params)?).await,
+        "open_url" => lifecycle::open_url(state, decode(&method, params)?).await,
+        "close" => lifecycle::close(state, decode(&method, params)?).await,
         "auth_status" => auth_status(state, decode(&method, params)?).await,
         "list" => list(state, decode(&method, params)?, out).await,
         "list_refs" => list_refs(state, decode(&method, params)?).await,
@@ -821,52 +836,6 @@ where
 
 // ---------------- SDK-backed handlers ----------------
 
-#[derive(Debug, Deserialize)]
-struct OpenLocalParams {
-    repo_id: String,
-    path: PathBuf,
-}
-
-async fn open_local(state: &State, p: OpenLocalParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    let repo = BrowseSession::open_local(&p.path).await?;
-    let url = repo.url.clone();
-    let cache_dir = "";
-    let work_dir = repo
-        .work_dir
-        .clone()
-        .ok_or_else(|| AgentError::Other("local repository has no working directory".into()))?;
-    state
-        .insert(p.repo_id.clone(), repo, Some(work_dir.clone()))
-        .await;
-
-    // Ensure the .crab/desktop/ on-disk layout exists with all
-    // expected files at Git's worktree root, even when opened from a subdirectory.
-    ensure_desktop_layout(&work_dir).await;
-
-    // Crash-resume: check for any in-flight ops so the renderer can
-    // show a resume banner immediately without a second RPC.
-    let active_op = find_active_op(&work_dir);
-
-    // Forge provider detection: manual override or auto-detect from
-    // remote URL. Runs async (may probe self-hosted instances).
-    // Also persists provider/owner/name to settings.json so that
-    // subsequent forge RPCs (list_prs, create_pr, etc.) can read them.
-    let detected_forge = crate::forge::detect::detect_and_persist(&work_dir).await;
-    let forge_provider = detected_forge.as_ref().map(|f| f.provider);
-
-    info!(repo_id = %p.repo_id, path = %p.path.display(), forge = ?forge_provider, "opened local repo");
-    Ok(json!({
-        "repo_id": p.repo_id,
-        "url": url,
-        "is_remote": false,
-        "cache_dir": cache_dir,
-        "work_dir": work_dir,
-        "active_op": active_op,
-        "forge_provider": forge_provider,
-    }))
-}
-
 /// Check the ops directory for any InProgress or Paused operation.
 /// Returns a JSON value with the op details, or `null` if none found.
 fn find_active_op(work_dir: &std::path::Path) -> Value {
@@ -946,28 +915,6 @@ async fn ensure_desktop_layout(work_dir: &std::path::Path) {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenUrlParams {
-    repo_id: String,
-    url: String,
-}
-
-async fn open_url(state: &State, p: OpenUrlParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    let repo = BrowseSession::open_url(&p.url).await?;
-    let url = repo.url.clone();
-    let is_remote = repo.work_dir.is_none();
-    let cache_dir = "";
-    state.insert(p.repo_id.clone(), repo, None).await;
-    info!(repo_id = %p.repo_id, url = %p.url, "opened url repo");
-    Ok(json!({
-        "repo_id": p.repo_id,
-        "url": url,
-        "is_remote": is_remote,
-        "cache_dir": cache_dir,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
 struct RepoIdParams {
     repo_id: String,
 }
@@ -986,11 +933,6 @@ struct ListRefsParams {
     /// upper bound — callers that want all refs simply omit this.
     #[serde(default)]
     max: Option<usize>,
-}
-
-async fn close(state: &State, p: RepoIdParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    Ok(json!({ "closed": p.repo_id }))
 }
 
 async fn auth_status(state: &State, p: RepoIdParams) -> Result<Value> {
@@ -2544,8 +2486,8 @@ async fn cancellable_read<T>(
     let mut cancelled = false;
     let result = tokio::select! {
         biased;
-        result = &mut work => result,
         _ = &mut signal => { scope.cancel(); cancelled = true; work.await },
+        result = &mut work => result,
     };
     state.cancel_registry.unregister(&id).await;
     // Keep terminal failures after draining: an abort cannot hide integrity or
@@ -5631,13 +5573,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_repository_open_does_not_replace_the_current_session() {
+        let (_first_directory, first) = git_init_repo();
+        let (_second_directory, second) = git_init_repo();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&first, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state
+            .insert("retained".into(), repo, Some(first.clone()))
+            .await;
+        drop(state.cancel_registry.register("opening".into()).await);
+        state.cancel_registry.cancel("opening").await;
+        let request = serde_json::from_value(json!({
+            "jsonrpc": "2.0", "id": "open", "method": "open_local",
+            "params": { "repo_id": "retained", "path": second, "op_id": "opening" }
+        }))
+        .unwrap();
+        let result = handle(
+            &state,
+            request,
+            Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
+        )
+        .await;
+        let retained = state.get_work_dir("retained").await.unwrap();
+        state.shutdown().await.unwrap();
+        assert!(matches!(result, Err(AgentError::OpCancelled { .. })) && retained == first);
+    }
+
+    #[tokio::test]
     async fn complete_reads_enforce_limits_against_the_working_source() {
         let (_directory, root) = git_init_repo();
         std::fs::write(root.join("file.txt"), b"ok").unwrap();
         assert!(sh(&root, &["add", "file.txt"]).status.success());
         std::fs::write(root.join("file.txt"), vec![b'x'; 65536]).unwrap();
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
         for text in [true, false] {
             let params = serde_json::from_value(
@@ -5664,7 +5637,9 @@ mod tests {
         let (_directory, root) = git_init_repo();
         std::fs::write(root.join("file.txt"), b"captured").unwrap();
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root.clone())).await;
         let opened = file_open(
             &state,
@@ -5719,7 +5694,9 @@ mod tests {
         std::fs::write(&outside, b"outside").unwrap();
         std::os::unix::fs::symlink(outside, root.join("link.txt")).unwrap();
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
         for text in [true, false] {
             let params =
@@ -5740,7 +5717,9 @@ mod tests {
         let (_directory, root) = git_init_repo();
         std::fs::write(root.join("file.txt"), b"content").unwrap();
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
         for failure in [false, true] {
             let (entered, source) = tokio::sync::oneshot::channel();
@@ -5806,7 +5785,9 @@ mod tests {
         let _ = sh(&root, &["config", "commit.gpgsign", "true"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5831,7 +5812,9 @@ mod tests {
         let (_td, root) = git_init_repo();
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5859,7 +5842,9 @@ mod tests {
         let _ = sh(&root, &["config", "gpg.format", "ssh"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5887,7 +5872,9 @@ mod tests {
         let _ = sh(&root, &["branch", "feature"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let result = list_refs(
@@ -5961,7 +5948,9 @@ mod tests {
         let _ = sh(&root, &["commit", "-m", "local change"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let result = list_refs(
@@ -6152,14 +6141,18 @@ mod tests {
         let state = State::new();
 
         // Open the main repo.
-        let main_repo = BrowseSession::open_local(&root).await.unwrap();
+        let main_repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state
             .insert("main".into(), main_repo, Some(root.clone()))
             .await;
 
         // Open the worktree as a separate repo context (simulates
         // the renderer calling rpc.openLocal(worktree_path)).
-        let wt_repo = BrowseSession::open_local(&wt_path).await.unwrap();
+        let wt_repo = BrowseSession::open_local(&wt_path, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state
             .insert("wt-feature".into(), wt_repo, Some(wt_path.clone()))
             .await;

@@ -16,6 +16,7 @@ use crate::{AgentError, Result};
 mod content;
 mod files;
 mod native;
+pub(crate) use content::command::output as git_output;
 pub(crate) use content::diff;
 pub(crate) use content::{FileSource, MAX_COMPLETE_BYTES, ReadScope};
 
@@ -84,15 +85,10 @@ impl BrowseSession {
         ReadScope::new(self.readers.read_token())
     }
 
-    pub async fn open_local(path: &Path) -> Result<Self> {
-        let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
+    pub(crate) async fn open_local(path: &Path, scope: &ReadScope) -> Result<Self> {
+        let root = content::command::run(path, &["rev-parse", "--show-toplevel"], scope).await?;
         let root = PathBuf::from(String::from_utf8(root)?.trim());
-        let origin = crate::shellout::git_command()
-            .args(["remote", "get-url", "origin"])
-            .current_dir(&root)
-            .kill_on_drop(true)
-            .output()
-            .await?;
+        let origin = git_output(&root, &["remote", "get-url", "origin"], scope).await?;
         let url = if origin.status.success() {
             String::from_utf8(origin.stdout)?.trim().to_owned()
         } else {
@@ -107,7 +103,8 @@ impl BrowseSession {
         })
     }
 
-    pub async fn open_url(url: &str) -> Result<Self> {
+    pub(crate) async fn open_url(url: &str, scope: &ReadScope) -> Result<Self> {
+        scope.check()?;
         let cache = token_cache_directory()?;
         let managed = crab_sdk::managed::Options::new(&cache)?;
         let content_root = crab_cache::default_cache_root().join("desktop-content");
@@ -179,14 +176,20 @@ impl BrowseSession {
             RepositoryLocator::new(&prefix)?
         };
         let client = builder.build()?;
-        let repository = match client.open(OpenOptions::remote(locator)).await {
+        let repository = match client
+            .open(OpenOptions::remote(locator))
+            .with_options(scope.options())
+            .await
+        {
             Ok(repository) => repository,
             Err(error) => {
-                let close = client.close().await;
-                if let Err(cleanup) = close {
-                    tracing::error!(%cleanup, "SDK cleanup failed after open");
-                }
-                return Err(error.into());
+                return match client.close().await {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(AgentError::Cleanup {
+                        operation: Box::new(error.into()),
+                        cleanup: Box::new(cleanup.into()),
+                    }),
+                };
             }
         };
         Ok(Self {
@@ -610,7 +613,9 @@ mod tests {
         tokio::fs::write(root.join("file.txt"), b"edited\n")
             .await
             .unwrap();
-        let session = BrowseSession::open_local(root).await.unwrap();
+        let session = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         let result = async {
             assert_eq!(text(&session, "file.txt", None).await.unwrap(), "edited\n");
             assert_eq!(

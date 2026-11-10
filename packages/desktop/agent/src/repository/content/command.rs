@@ -12,7 +12,11 @@ use super::*;
 
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 
-pub(super) async fn run(root: &Path, args: &[&str], scope: &ReadScope) -> Result<Vec<u8>> {
+pub(in crate::repository) async fn run(
+    root: &Path,
+    args: &[&str],
+    scope: &ReadScope,
+) -> Result<Vec<u8>> {
     let output = output(root, args, scope).await?;
     if !output.status.success() {
         return Err(AgentError::Cli {
@@ -23,7 +27,7 @@ pub(super) async fn run(root: &Path, args: &[&str], scope: &ReadScope) -> Result
     Ok(output.stdout)
 }
 
-pub(super) async fn output(
+pub(crate) async fn output(
     root: &Path,
     args: &[&str],
     scope: &ReadScope,
@@ -156,7 +160,7 @@ fn communicate<'a>(
     loop {
         scope.check()?;
         if Instant::now() >= deadline {
-            return Err(AgentError::Other("Git comparison timed out".into()));
+            return Err(AgentError::Other("Git read timed out".into()));
         }
         if status.is_none() && child.has_exited()? {
             status = Some(child.stop()?);
@@ -204,9 +208,7 @@ fn capture(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
         .take(MAX_PATCH_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_PATCH_BYTES {
-        return Err(std::io::Error::other(
-            "Git comparison output exceeds 8 MiB; narrow the comparison",
-        ));
+        return Err(std::io::Error::other("Git read output exceeds 8 MiB"));
     }
     Ok(bytes)
 }

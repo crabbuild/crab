@@ -46,10 +46,10 @@ interface JsonRpcResponse {
 }
 type BatchReply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
 
-// These methods own bounded content work and acknowledge cancellation only
-// after their readers drain. The generic 30-second metadata timer must not
-// discard a multi-GiB verification or materialization halfway through it.
-const CONTENT_METHODS = new Set([
+// These methods own repository setup or bounded content work. Cancellation
+// completes after native cleanup; the metadata timer must not discard its reply.
+const OWNED_METHODS = new Set([
+  "open_local", "open_url",
   "file_open", "file_diff", "file_chunks", "file_materialize", "read_range", "read_text", "read_bytes",
   "preview_parquet", "preview_safetensors", "preview_npy", "preview_npz", "preview_zip",
   "preview_notebook_meta", "preview_torch_checkpoint",
@@ -76,7 +76,7 @@ export class RpcRouter extends EventEmitter {
   private bandwidthCounters = new Map<string, BandwidthStats>();
   private remoteCache: RemoteCache | null = null;
   private readonly requestTimeoutMs: number;
-  private readonly contentTimeoutMs?: number;
+  private readonly ownerTimeoutMs?: number;
   private readonly maxQueuedCalls: number;
 
   constructor(
@@ -86,7 +86,7 @@ export class RpcRouter extends EventEmitter {
   ) {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.contentTimeoutMs = options.requestTimeoutMs;
+    this.ownerTimeoutMs = options.requestTimeoutMs;
     this.maxQueuedCalls = options.maxQueuedCalls ?? 50;
   }
 
@@ -228,12 +228,12 @@ export class RpcRouter extends EventEmitter {
     const connection = this.sessionManager.getConnection(profileId);
     const owner = this.channels.get(profileId);
     if (!owner || owner.closed || owner.channel !== connection?.channels.agent) return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
-    const content = CONTENT_METHODS.has(method);
+    const owned = OWNED_METHODS.has(method);
     // Release must finish even if the initiating view/profile deadline expires.
     const timeout = method === "file_close" || method === "close" ? undefined
-      : connection.profile?.operationTimeoutMs ?? (content ? this.contentTimeoutMs : this.requestTimeoutMs);
+      : connection.profile?.operationTimeoutMs ?? (owned ? this.ownerTimeoutMs : this.requestTimeoutMs);
     const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
-    const enriched = content && fields && typeof fields.op_id !== "string" ? { ...fields, op_id: randomUUID() } : params;
+    const enriched = owned && fields && typeof fields.op_id !== "string" ? { ...fields, op_id: randomUUID() } : params;
     return this.send(owner, method, enriched, timeout);
   }
 

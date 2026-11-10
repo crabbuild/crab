@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, chmodSync, lstatSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
@@ -15,6 +16,7 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
   const crab = path.join(resources, "agent/crab");
   const localAgent = path.join(resources, "agent/crab-desktop-agent");
   let agentMode: number | undefined;
+  let blockedConfig: FileHandle | undefined;
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-ssh-reopen-"));
   const profile = path.join(root, "profile");
   writeFileSync(path.join(root, "gitconfig"), "");
@@ -88,7 +90,7 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
     if (!localNativeAvailable) expect(await page.evaluate(async () => {
       try { await window.crab!.rpc("ping", {}); return false; } catch { return true; }
     })).toBe(true);
-    const saved = await page.evaluate(value => window.crab!.ssh.saveProfile(value), { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: first, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: false, autoReconnect: false });
+    const saved = await page.evaluate(value => window.crab!.ssh.saveProfile(value), { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: first, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: false, autoReconnect: false, operationTimeoutMs: 12_000 });
     const firstId = `ssh://${saved.id}${first}`, secondId = `ssh://${saved.id}${second}`;
     await page.screenshot({ path: test.info().outputPath("ssh-empty-home.png") });
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
@@ -138,6 +140,45 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
     await page.screenshot({ path: test.info().outputPath("ssh-failed-sibling-restored.png") });
     await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "first-project", exact: true }).click();
     await showLogicalFile(page);
+    if (localNativeAvailable) {
+      [...fixture.commands][0].stdin.end();
+      await expect.poll(() => fixture.commands.size).toBe(0);
+      const config = path.join(second, ".git/config");
+      renameSync(config, `${config}.saved`); execFileSync("mkfifo", [config]);
+      blockedConfig = await open(config, "r+");
+      await page.getByRole("button", { name: "Retry reopening repository", exact: true }).click();
+      await showLogicalFile(page);
+      const commandPid = [...fixture.commands][0].pid;
+      const rows = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line));
+      const descendants = new Set([commandPid]);
+      for (let size = -1; size !== descendants.size;) {
+        size = descendants.size;
+        for (const row of rows) if (row && descendants.has(Number(row[2]))) descendants.add(Number(row[1]));
+      }
+      const owned = rows.filter(row => row && descendants.has(Number(row[1])));
+      writeFileSync(test.info().outputPath("ssh-blocked-process-tree.json"), JSON.stringify(owned));
+      const child = owned.find(row => row && row[3].includes("git --literal-pathspecs rev-parse"));
+      if (!child) throw new Error("Healthy repository did not recover while its sibling's Git read was blocked");
+      const pid = Number(child[1]);
+      await page.screenshot({ path: test.info().outputPath("ssh-healthy-sibling-during-blocked-open.png") });
+      await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "second-project", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Retry reopening repository", exact: true }).locator("..")).toContainText(/timeout/i, { timeout: 20_000 });
+      expect(() => process.kill(pid, 0)).toThrow();
+      await blockedConfig.close(); blockedConfig = undefined;
+      rmSync(config); renameSync(`${config}.saved`, config);
+      const runtime = [...fixture.commands][0];
+      await page.getByRole("button", { name: "Retry reopening repository", exact: true }).click();
+      const row = page.locator('[role="treeitem"][data-item-path="recovered.txt"]');
+      if (!await row.isVisible()) {
+        const navigation = page.getByRole("navigation", { name: "Primary", exact: true });
+        await navigation.getByRole("button", { name: "SSH Connections", exact: true }).click();
+        await navigation.getByRole("button", { name: "Files", exact: true }).click();
+      }
+      await expect(row).toBeVisible();
+      expect([...fixture.commands]).toEqual([runtime]);
+      await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "first-project", exact: true }).click();
+      await showLogicalFile(page);
+    }
     await close();
 
     fixture.setAccepting(false);
@@ -177,8 +218,9 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
     await showLogicalFile(page);
     expect(fixture.connectionAttempts).toBe(beforeDisabled + 1);
     expect(fixture.uploadedBytes).toBe(uploaded);
-    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ localNativeAvailable, openedSshFromEmptyStart: true, failedSiblingDidNotDisableHealthyRepository: true, healthySiblingMaterializedExactly: true, indexPointerPreserved: true, inactiveSiblingFailureVisible: true, failedSiblingRetryReusedNativeAgent: true, retryReloadedFileTree: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
+    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ localNativeAvailable, slowSiblingQualified: localNativeAvailable, openedSshFromEmptyStart: true, failedSiblingDidNotDisableHealthyRepository: true, healthySiblingMaterializedExactly: true, indexPointerPreserved: true, inactiveSiblingFailureVisible: true, failedSiblingRetryReusedNativeAgent: true, retryReloadedFileTree: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
   } finally {
+    await blockedConfig?.close();
     if (agentMode !== undefined) chmodSync(localAgent, agentMode);
     if (application) {
       const page = application.windows()[0];

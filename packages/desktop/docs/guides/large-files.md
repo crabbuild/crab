@@ -138,7 +138,10 @@ repository directory or access, then use Retry. Other recovered repositories
 on the same connection remain usable. A successful retry reloads the file tree
 and captures fresh file details without replacing the SSH connection.
 SSH repository access also remains available when the desktop's local native
-services cannot start.
+services cannot start. A slow repository reopen does not hold healthy
+repositories on that connection. If a configured operation deadline expires,
+the app waits for native cancellation and cleanup before reporting the failure.
+Read-only format previews reload when their repository services recover.
 
 **Hydrate to disk** is available when the repository supports verified
 single-file materialization. It is independent of the Crab bulk hydration

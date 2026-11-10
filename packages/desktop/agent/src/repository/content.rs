@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use super::*;
 
-mod command;
+pub(super) mod command;
 pub(crate) mod diff;
 mod materialize;
 use materialize::WorkingPointer;
@@ -27,6 +27,12 @@ pub(crate) struct ReadScope {
     id: String,
     failure: Arc<std::sync::OnceLock<Arc<AgentError>>>,
     cancelled_read: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for ReadScope {
+    fn default() -> Self {
+        Self::new(tokio_util::sync::CancellationToken::new())
+    }
 }
 
 impl ReadScope {
@@ -66,7 +72,7 @@ impl ReadScope {
         }
     }
 
-    fn options(&self) -> Options {
+    pub(super) fn options(&self) -> Options {
         Options::default().with_cancellation(self.sdk.clone())
     }
 

@@ -10,7 +10,9 @@ async fn repository() -> (tempfile::TempDir, BrowseSession) {
     ] {
         super::super::super::git(root, &args).await.unwrap();
     }
-    let repo = BrowseSession::open_local(root).await.unwrap();
+    let repo = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+        .await
+        .unwrap();
     (directory, repo)
 }
 

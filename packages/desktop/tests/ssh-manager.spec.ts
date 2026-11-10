@@ -315,6 +315,30 @@ describe("SshSessionManager", () => {
       } finally { await manager.disconnect(profile.id); }
     });
 
+    it("a slow repository replay does not hold agent readiness or its healthy sibling", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: (value: unknown) => void;
+      const blocked = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation((id, method, params) => method === "open_local" && params.repo_id === second.repo_id ? blocked : native(id, method, params));
+      runtime.channels[0].emit("close", 0);
+      let ready = false;
+      const restarting = manager.ensureAgent(profile.id).then(() => { ready = true; });
+      try {
+        await vi.waitFor(() => expect(ready).toBe(true));
+        await expect(manager.openRepository(profile.id, "/first")).resolves.toMatchObject({ repo_id: first.repo_id });
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).toBeNull();
+      } finally {
+        release({ repo_id: second.repo_id });
+        await restarting;
+        await manager.disconnect(profile.id);
+      }
+    });
+
     it("forgetting a repository during replay closes the late native owner without restoring it", async () => {
       const profile = makeProfile();
       const runtime = nativeRuntime(manager);
@@ -333,8 +357,33 @@ describe("SshSessionManager", () => {
         release({ repo_id: handle.repo_id });
         await restarting;
         expect(manager.repositoryRuntimes(profile.id)).toEqual([]);
-        expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: handle.repo_id });
+        await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: handle.repo_id }));
       } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("late replay cleanup cannot revoke a replacement native session", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const repository = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: (value: unknown) => void;
+      const blocked = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => blocked);
+      runtime.channels[0].emit("close", 0);
+      await manager.ensureAgent(profile.id);
+      runtime.channels[1].emit("close", 0);
+      runtime.send.mockImplementation(native);
+      try {
+        await manager.ensureAgent(profile.id);
+        const replacement = await manager.openRepository(profile.id, "/first");
+        release({ repo_id: repository.repo_id });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(manager.agentSession(profile.id)).toBe(replacement.native_session_id);
+      } finally {
+        release({ repo_id: repository.repo_id });
+        await manager.disconnect(profile.id);
+      }
     });
 
     it("disconnect sends native EOF before joining an in-flight repository replay", async () => {

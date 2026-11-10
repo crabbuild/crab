@@ -88,6 +88,38 @@ describe("SSH captured source ownership", () => {
     expect(result.value).toEqual({ bytes_b64: "YWJj" });
   });
 
+  it.each(["open_local", "open_url"])("%s retains its owner beyond the metadata timeout", async method => {
+    vi.useFakeTimers();
+    const { router, attach } = fixture();
+    const channel = attach("one");
+    const repo_id = "ssh://one/repo";
+    const result = observe(router.sendToRemoteAgent("one", method, { repo_id, path: "/repo", url: "s3://bucket/repo" }));
+    await vi.advanceTimersByTimeAsync(31_000);
+    const beforeReply = result.settled;
+    channel.reply(channel.frames[0].id, { result: { repo_id } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(beforeReply).toBe(false);
+    expect(result.value).toEqual({ repo_id });
+    expect(channel.frames[0].params.op_id).toEqual(expect.any(String));
+  });
+
+  it.each(["open_local", "open_url"])("%s deadline signals cancellation and awaits its terminal open", async method => {
+    vi.useFakeTimers();
+    const { router, attach } = fixture(20);
+    const channel = attach("one");
+    const repo_id = "ssh://one/repo";
+    const result = observe(router.sendToRemoteAgent("one", method, { repo_id, path: "/repo", url: "s3://bucket/repo" }));
+    await vi.advanceTimersByTimeAsync(21);
+    const signalled = channel.frames.find(frame => frame.method === "rpc/cancel");
+    const beforeReply = result.settled;
+    if (signalled) channel.reply(signalled.id, { result: { ok: true } });
+    channel.reply(channel.frames[0].id, { error: { code: 1010, message: "Opening cancelled" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signalled?.params).toMatchObject({ repo_id, op_id: channel.frames[0].params.op_id });
+    expect(beforeReply).toBe(false);
+    expect(result.error).toMatchObject({ code: "SSH_RPC_TIMEOUT" });
+  });
+
   it("preserves UTF-8 when every wire byte arrives separately", async () => {
     const { router, attach } = fixture();
     const channel = attach("one");

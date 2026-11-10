@@ -115,6 +115,13 @@ pub enum AgentError {
     #[error(transparent)]
     Shared(Arc<AgentError>),
 
+    #[error("{operation}; cleanup failed: {cleanup}")]
+    Cleanup {
+        #[source]
+        operation: Box<AgentError>,
+        cleanup: Box<AgentError>,
+    },
+
     #[error("{context}: {source}")]
     Preview {
         context: String,

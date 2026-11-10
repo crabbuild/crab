@@ -45,7 +45,9 @@ async fn safetensors_preview_reads_multi_gib_metadata_without_materializing_payl
         .unwrap()
         .set_len(header.len() as u64 + 3 * 1024 * 1024 * 1024)
         .unwrap();
-    let repo = BrowseSession::open_local(root).await.unwrap();
+    let repo = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+        .await
+        .unwrap();
     let source = FileSource::capture(&repo, "weights.safetensors", None, repo.read_scope())
         .await
         .unwrap();
@@ -84,7 +86,9 @@ async fn safetensors_preview_honors_committed_revision_after_working_file_change
     let mut working = safetensors_bytes("working", 2);
     working.extend([1, 2]);
     std::fs::write(&path, working).unwrap();
-    let repo = BrowseSession::open_local(root).await.unwrap();
+    let repo = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+        .await
+        .unwrap();
     for (rev, expected) in [(Some("HEAD"), "committed"), (None, "working")] {
         let source = FileSource::capture(&repo, "weights.safetensors", rev, repo.read_scope())
             .await
@@ -118,7 +122,9 @@ async fn parquet_preview_reads_schema_and_requested_sample_through_captured_sour
     let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
-    let repo = BrowseSession::open_local(root).await.unwrap();
+    let repo = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+        .await
+        .unwrap();
     let source = FileSource::capture(&repo, "data.parquet", None, repo.read_scope())
         .await
         .unwrap();

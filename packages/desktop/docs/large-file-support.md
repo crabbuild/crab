@@ -3,7 +3,9 @@
 The interface may expose fewer navigation destinations; the capabilities remain
 complete. Completion requires a user action, a real native/storage side effect,
 and an accurate visible result. Compilation and mocked tests alone do not prove
-completion. This record tracks implementation and qualification separately.
+completion. This record tracks implementation and qualification separately. The acceptance
+matrix and remaining priorities below are the current scope; checkpoint sections
+record historical evidence rather than separate work queues.
 
 ## Acceptance matrix
 
@@ -16,7 +18,7 @@ completion. This record tracks implementation and qualification separately.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local native restart/capture replacement and failed SSH sibling isolation have packaged proof. Complete RPC parity, slow lifecycle RPC ownership, identity replacement, real multi-hop cancellation and other targets/providers remain open. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local native restart/capture replacement and failed SSH sibling isolation have packaged proof. Slow local/SSH opens now retain native ownership and isolate sibling readiness. Complete RPC parity, direct-URL cancellation qualification, identity replacement, real multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
@@ -27,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local restart recaptures readers and materializes exact Crab/LFS bytes. Failed SSH replay is isolated; Retry restores failed/inactive views without replacing the agent. SSH preview/materialization and saved restore also pass with local native services unavailable from startup. Remaining: slow lifecycle RPC ownership, storage-identity replacement capture revocation, editor-buffer/media-playback recovery and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local restart recaptures readers and materializes exact Crab/LFS bytes. Failed SSH replay is isolated; Retry restores failed/inactive views without replacing the agent. SSH preview/materialization and saved restore also pass with local native services unavailable from startup. Slow SSH replay no longer holds healthy repositories; deadlines await native cleanup and read-only previews recapture on recovery. Remaining: storage-identity replacement, queued metadata/UI state recovery, direct-URL cancellation qualification and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -42,14 +44,18 @@ implied by a working read/materialization smoke.
 
 ### Next bounded slices
 
-1. Finish recovery parity before extending transfer features. Slow SSH opens
-   still delay bootstrap readiness, and metadata RPC timeouts can discard a
-   pending lifecycle reply before its native work finishes. These opens need
-   owner-aware cancellation and terminal acknowledgement. Storage rebind/reopen
-   must revoke captures at the same repository owner;
-   a previous credential context must never survive an identity replacement.
-   Qualify pending editor saves and media playback across native loss, and
-   cancellation through actual jump hosts.
+1. Finish recovery parity before extending transfer features. Storage
+   rebind/reopen must revoke captures at the repository owner; a previous
+   credential context must never survive identity replacement. Use the existing
+   session identity to refresh dashboard/cached metadata and notebook reads,
+   preserve pending editor saves and restore media playback deliberately.
+   Dashboard effects currently depend on repository ID/deferred state, so a
+   same-ID retry can retain a previous loading error. Queued reconnect metadata
+   still waits for all replay outcomes; release it through the target repository
+   owner rather than introducing a component retry queue. Qualify direct-URL SDK
+   cancellation with real storage, removal during an admitted open and
+   cancellation through actual jump hosts. Local/SSH Git opening, independent
+   readiness and read-only preview recapture have the bounded proof below.
 2. Complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
    lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
@@ -83,6 +89,74 @@ failure identified the configured cross-linker missing from the native runner;
 the desktop build now selects `cc` unless Cargo's caller explicitly chooses a
 linker. The Linux arm64 producer passed on the earlier published head; fresh
 cross-platform qualification for subsequent recovery changes remains required.
+
+## Repository-open ownership checkpoint
+
+The native `handlers/lifecycle.rs` module owns local/URL replacement and close
+under one per-repository admission lock. Opening subscribes to cancellation
+before removing an existing owner. Prepared sessions remain owned until commit
+or awaited close; cleanup failures remain terminal failures, including when the
+original operation was cancelled. Local discovery and forge Git reads reuse the
+existing joined process owner. URL opening passes cancellation into the SDK and
+always awaits client close on failed setup; real provider cancellation proof is
+still required.
+
+SSH setup exposes negotiated process readiness independently of repository
+replay. Its existing deployment owner still joins replay and queued metadata on
+disconnect. Manual opens join their repository's replay outcome. Late cleanup
+checks channel/session ownership before invalidating a replacement process.
+`open_local` and `open_url` use the router's existing owned-operation deadline:
+signal cancellation, retain the original reply, then report its terminal result.
+The old 30-second metadata timeout cannot orphan an opening session.
+
+Read-only format previews share a native-session boundary in `EditorPane`.
+Native loss unmounts old requests; a recovered repository mounts fresh previews.
+The live SSH fixture reproduced a retained safetensors error before this fix.
+Editable views, notebook kernel/output state and media retain their existing
+owners and require their separately listed recovery proof.
+
+Evidence map:
+
+| Surface | Caller / owner / callee | Proof and limit |
+| --- | --- | --- |
+| Native opening | Local `Agent.request` or SSH open → lifecycle admission → `BrowseSession` → joined Git child / SDK request options | Pre-cancelled real Git open retains the original session; cancelled setup with failed cleanup remains a failure. Direct-URL storage cancellation is wired, not yet live-qualified. |
+| SSH readiness | `ensureAgent` → deployment readiness plus retained replay completion → per-repository open | A blocked sibling cannot hold healthy readiness; old replay cleanup cannot revoke the next session. Disconnect still sends EOF before joining. |
+| Preview recovery | Repository runtime event → `EditorPane` session boundary → existing captured preview RPC | Packaged safetensors preview recovers while a sibling is blocked. Dashboard queries, editor buffers, notebook execution and media playback remain explicit follow-up surfaces. |
+| Previous behavior | `origin/crab-v2` opening handlers and router | Opens replaced state without cancellation ownership; the router discarded replies after its metadata timeout. This branch also previously awaited every replay before exposing readiness. |
+
+The implementation consolidates lifecycle ownership rather than adding another
+reconstruction path, retry queue, credential store or navigation destination.
+
+Qualification on the rebuilt unsigned macOS arm64 package:
+
+- 192 focused TypeScript cases across nine transport/provider/connection files;
+  20 native repository tests plus the cleanup-error regression. Six additional
+  dependency/large-payload fixture cases remain ignored in the filtered run and are not counted
+  as passing. Project types, focused smoke/spec types, renderer/Electron builds,
+  Cargo formatting and diff checks pass.
+- Six packaged cases pass on the same final package: slow/failed SSH sibling
+  recovery and saved restore (40.2 s); SSH startup with local native services
+  deliberately unavailable (22.9 s); native restart, blocked-open cancellation,
+  shutdown while opening and SSH materialization/progress/cancellation (28.7 s).
+  The blocked Git child is reaped before the FIFO fixture is released. The
+  healthy sibling displays its logical preview while that child is still alive;
+  the failed sibling retries on the same native process after access returns.
+- Exact Crab/LFS bytes, unchanged index pointers, revoked old file/media readers
+  and 512 MiB transfer cancellation/temp cleanup repeat successfully. All 903
+  packaged renderer/Electron assets match the final build; both native binaries
+  and the POSIX SSH archive are rebuilt and hash-checked. Archive round-trip
+  handshake reports 194 methods and successful EOF shutdown.
+- Evidence: external `repository-open-qualification.json`,
+  `repository-open-ssh-ui-proof-final/`, `repository-open-no-local-ui-proof/`
+  and `repository-open-regression-ui-proof/`. The peer application is restored
+  after every smoke. Cross-platform/provider CI remains a release gate; the
+  desktop lint script still has no ESLint configuration.
+
+This slice adds 108 net production lines. They provide one native setup/release
+owner, preserve cleanup errors, split process readiness from retained replay
+completion, and add one shared read-only preview session boundary. The old
+opening handlers are removed; no SDK public API or dependency snapshot changes
+are needed.
 
 ## Ownership
 
@@ -1100,8 +1174,7 @@ acceptance matrix above remains the completion boundary.
 - The same synced package repeats local SIGKILL/Crab/LFS capture recovery and
   the SSH Activity/progress/512 MiB cancellation/native-retry regression smokes
   successfully in 24.9 seconds. Evidence: `ssh-isolation-regression-ui-proof/`.
-- This closes the saved-repository slice, not the acceptance matrix. Local
-  native restart/captured-file recovery and separate single-file/bulk hydration
-  gates are the next P0 work. Real multi-hop cancellation, complete remote file
-  mutations, provider identity, durable transfers and the P1 lifecycle,
-  inspection and storage rows still require implementation or proof.
+- This checkpoint closed the saved-repository slice, not the acceptance matrix.
+  The current remaining-priorities section supersedes its earlier work order;
+  subsequent recovery and single-file capability evidence does not qualify the
+  complete bulk lifecycle, provider matrix or durable transfer behavior.

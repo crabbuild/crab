@@ -524,14 +524,21 @@ function PreviewBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: Editor
 
   if (kind === "pointer") return <FileInspector repo={repo} path={tab.path} rev={tab.rev} />;
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
-  if (kind === "image") return <ImageView {...common} entryKind={tab.entry.kind} />;
+  if (kind === "text" || kind === "binary" || kind === "html") return <TextBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
   if (kind === "video" || kind === "audio") return <MediaView {...common} kind={kind} />;
-  if (kind === "markdown") {
-    if (canEdit) {
-      return <MarkdownEditorBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
-    }
-    return <MarkdownView {...common} />;
-  }
+  if (kind === "notebook") return <NotebookView {...common} />;
+  if (kind === "markdown" && canEdit) return <MarkdownEditorBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
+  // Read-only previews must recapture after native replacement. Editors,
+  // notebook kernels and media retain their existing lifecycle owners.
+  if (!repo.native_session_id) return <div role="status" className="p-4 text-xs text-gx-muted">Waiting for repository services…</div>;
+  return <NativePreview key={repo.native_session_id} {...common} kind={kind} entryKind={tab.entry.kind} />;
+}
+
+type NativePreviewKind = Exclude<PreviewKind, "pointer" | "card-editor" | "text" | "binary" | "html" | "video" | "audio" | "notebook">;
+
+function NativePreview({ kind, entryKind, ...common }: { kind: NativePreviewKind; entryKind: DirEntry["kind"]; repoId: string; path: string; rev: string | null }) {
+  if (kind === "image") return <ImageView {...common} entryKind={entryKind} />;
+  if (kind === "markdown") return <MarkdownView {...common} />;
   if (kind === "json") return <JsonView {...common} />;
   if (kind === "jsonl") return <JsonView {...common} jsonl />;
   if (kind === "csv") return <CsvView {...common} sep="," />;
@@ -542,7 +549,6 @@ function PreviewBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: Editor
   if (kind === "npy") return <NumpyView kind="npy" {...common} />;
   if (kind === "npz") return <NumpyView kind="npz" {...common} />;
   if (kind === "zip") return <ZipView {...common} />;
-  if (kind === "notebook") return <NotebookView {...common} />;
   if (kind === "pdf") return <PdfView {...common} />;
   if (kind === "geojson") return <GeoJsonView {...common} />;
   if (kind === "sqlite") return <SqliteView {...common} />;
@@ -551,7 +557,8 @@ function PreviewBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: Editor
   if (kind === "protobuf") return <ProtobufView {...common} />;
   if (kind === "model3d") return <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-gx-muted">Loading 3D viewer…</div>}><Model3dView {...common} /></Suspense>;
   if (kind === "torch-checkpoint") return <TorchCheckpointView {...common} />;
-  return <TextBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
+  const remaining: never = kind;
+  return remaining;
 }
 
 function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {

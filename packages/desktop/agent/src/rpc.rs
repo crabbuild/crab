@@ -214,6 +214,7 @@ impl From<crate::AgentError> for RpcError {
             | E::Workflow(_)
             | E::Yaml(_)
             | E::Shared(_)
+            | E::Cleanup { .. }
             | E::Preview { .. }
             | E::Other(_) => (1000, None),
         };
@@ -222,5 +223,24 @@ impl From<crate::AgentError> for RpcError {
             message: err.to_string(),
             data,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentError;
+
+    #[test]
+    fn cancelled_setup_with_failed_cleanup_remains_a_terminal_failure() {
+        let error = AgentError::Cleanup {
+            operation: Box::new(AgentError::OpCancelled {
+                op_id: "opening".into(),
+            }),
+            cleanup: Box::new(AgentError::Io(std::io::Error::other("close failed"))),
+        };
+        let cancelled = error.is_cancelled();
+        let response = RpcError::from(error);
+        assert!(!cancelled && response.code == 1000 && response.message.contains("close failed"));
     }
 }
