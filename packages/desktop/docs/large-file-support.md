@@ -27,7 +27,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local restart recaptures readers and materializes exact Crab/LFS bytes. A failed SSH replay no longer disables a healthy sibling; failed/inactive views receive their own error and Retry restores their file tree without replacing the agent. Remaining: slow lifecycle RPC ownership, storage-identity replacement capture revocation, local-startup-failure/SSH independence, editor-buffer/media-playback recovery and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local restart recaptures readers and materializes exact Crab/LFS bytes. Failed SSH replay is isolated; Retry restores failed/inactive views without replacing the agent. SSH preview/materialization and saved restore also pass with local native services unavailable from startup. Remaining: slow lifecycle RPC ownership, storage-identity replacement capture revocation, editor-buffer/media-playback recovery and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -48,9 +48,8 @@ implied by a working read/materialization smoke.
    owner-aware cancellation and terminal acknowledgement. Storage rebind/reopen
    must revoke captures at the same repository owner;
    a previous credential context must never survive an identity replacement.
-   Qualify an unavailable local sidecar with working SSH reads, pending editor
-   saves and media playback across native loss, and cancellation through actual
-   jump hosts.
+   Qualify pending editor saves and media playback across native loss, and
+   cancellation through actual jump hosts.
 2. Complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
    lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
@@ -1091,6 +1090,16 @@ acceptance matrix above remains the completion boundary.
   outcomes, and metadata timeouts can discard a pending native open reply.
   Storage identity replacement, pending editor/media recovery, multi-hop
   cancellation and the full acceptance matrix remain unqualified.
+- Startup-independence qualification also passes in 27.5 seconds. A separate
+  case temporarily removes access to this task's packaged local agent and
+  verifies local `ping` fails. With that failure present across every launch,
+  real SSH trust/deployment, logical preview, exact sibling materialization,
+  per-repository recovery, saved restart/retry and manual access still pass.
+  The SSH archive remains intact; the local executable's original permissions
+  are restored in cleanup. Evidence: `ssh-local-unavailable-ui-proof/`.
+- The same synced package repeats local SIGKILL/Crab/LFS capture recovery and
+  the SSH Activity/progress/512 MiB cancellation/native-retry regression smokes
+  successfully in 24.9 seconds. Evidence: `ssh-isolation-regression-ui-proof/`.
 - This closes the saved-repository slice, not the acceptance matrix. Local
   native restart/captured-file recovery and separate single-file/bulk hydration
   gates are the next P0 work. Real multi-hop cancellation, complete remote file

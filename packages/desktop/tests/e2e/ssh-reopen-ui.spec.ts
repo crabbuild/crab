@@ -1,18 +1,20 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, chmodSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
 import { packagedExecutable } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
-test("saved SSH repositories survive restart, failed restore and deferred selection", async () => {
+for (const localNativeAvailable of [true, false]) test(`saved SSH repositories survive restart, failed restore and deferred selection (${localNativeAvailable ? "local services available" : "local services unavailable"})`, async () => {
   test.skip(process.platform === "win32", "The remote-host fixture executes POSIX native binaries");
   test.setTimeout(180_000);
   const executablePath = packagedExecutable();
   const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
   const crab = path.join(resources, "agent/crab");
+  const localAgent = path.join(resources, "agent/crab-desktop-agent");
+  let agentMode: number | undefined;
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-ssh-reopen-"));
   const profile = path.join(root, "profile");
   writeFileSync(path.join(root, "gitconfig"), "");
@@ -74,9 +76,18 @@ test("saved SSH repositories survive restart, failed restore and deferred select
     expect(git(first, ["show", `:${file}`])).toEqual(pointer);
   }
   try {
+    if (!localNativeAvailable) {
+      const mode = lstatSync(localAgent);
+      if (!mode.isFile()) throw new Error("Native startup fault fixture requires a regular packaged executable");
+      agentMode = mode.mode & 0o777;
+      chmodSync(localAgent, 0);
+    }
     let page = await launch();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    if (!localNativeAvailable) expect(await page.evaluate(async () => {
+      try { await window.crab!.rpc("ping", {}); return false; } catch { return true; }
+    })).toBe(true);
     const saved = await page.evaluate(value => window.crab!.ssh.saveProfile(value), { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: first, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: false, autoReconnect: false });
     const firstId = `ssh://${saved.id}${first}`, secondId = `ssh://${saved.id}${second}`;
     await page.screenshot({ path: test.info().outputPath("ssh-empty-home.png") });
@@ -166,8 +177,9 @@ test("saved SSH repositories survive restart, failed restore and deferred select
     await showLogicalFile(page);
     expect(fixture.connectionAttempts).toBe(beforeDisabled + 1);
     expect(fixture.uploadedBytes).toBe(uploaded);
-    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ openedSshFromEmptyStart: true, failedSiblingDidNotDisableHealthyRepository: true, healthySiblingMaterializedExactly: true, indexPointerPreserved: true, inactiveSiblingFailureVisible: true, failedSiblingRetryReusedNativeAgent: true, retryReloadedFileTree: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
+    writeFileSync(test.info().outputPath("ssh-reopen-proof.json"), JSON.stringify({ localNativeAvailable, openedSshFromEmptyStart: true, failedSiblingDidNotDisableHealthyRepository: true, healthySiblingMaterializedExactly: true, indexPointerPreserved: true, inactiveSiblingFailureVisible: true, failedSiblingRetryReusedNativeAgent: true, retryReloadedFileTree: true, failedRestorePreservedEntries: true, failedRestorePreservedSelection: true, retryRestoredLogicalPreview: true, deferredRepositoryReusedConnection: true, restartReusedArchive: true, disabledAutoReopenKeptManualAccess: true, pointerUnchanged: true, connectionAttempts: fixture.connectionAttempts, uploadedBytes: uploaded }, null, 2));
   } finally {
+    if (agentMode !== undefined) chmodSync(localAgent, agentMode);
     if (application) {
       const page = application.windows()[0];
       if (page) {

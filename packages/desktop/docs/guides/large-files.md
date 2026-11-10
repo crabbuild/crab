@@ -137,6 +137,8 @@ shows the recovery error and **Retry reopening repository**. Restore the
 repository directory or access, then use Retry. Other recovered repositories
 on the same connection remain usable. A successful retry reloads the file tree
 and captures fresh file details without replacing the SSH connection.
+SSH repository access also remains available when the desktop's local native
+services cannot start.
 
 **Hydrate to disk** is available when the repository supports verified
 single-file materialization. It is independent of the Crab bulk hydration
