@@ -967,24 +967,8 @@ fn prepare_visibility_delta(
     check_cancelled(cancel)?;
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
-    let rewritten_old_refs = edits
-        .iter()
-        .filter(|edit| edit.new_oid().is_some() && !fast_forward_refs.contains(edit.ref_name()))
-        .filter_map(|edit| {
-            edit.expected_old()
-                .map(|oid| (edit.ref_name().to_owned(), oid.to_owned()))
-        })
-        .collect();
-    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut shared = shared_visibility::prepare_replacements(
-        git_dir,
-        edits,
-        fast_forward_refs,
-        &available_old_tips,
-        cancel,
-    )?;
+    let mut shared =
+        shared_visibility::prepare_replacements(git_dir, edits, fast_forward_refs, cancel)?;
     let mut visibility = BTreeMap::new();
     for edit in edits {
         check_cancelled(cancel)?;
@@ -1016,7 +1000,7 @@ fn prepare_visibility_delta(
                 Vec::new(),
             )
         } else if let Some(old_oid) = edit.expected_old()
-            && (fast_forward_refs.contains(edit.ref_name()) || available_old_tips.contains(old_oid))
+            && fast_forward_refs.contains(edit.ref_name())
         {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,
@@ -1025,28 +1009,16 @@ fn prepare_visibility_delta(
                 maximum,
             )?
             .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
-            // Ancestry is already proven by the ref-update decision; old history is
-            // therefore still reachable, so walking `old - new` only repeats that proof.
-            let removed = if fast_forward_refs.contains(edit.ref_name()) {
-                Vec::new()
-            } else {
-                super::push::enumerate_visibility_difference(
-                    git_dir,
-                    old_oid,
-                    Some(new_oid),
-                    maximum.saturating_sub(added.len()),
-                )?
-                .ok_or_else(|| visibility_limit_error(edit.ref_name()))?
-            };
             crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
                 Some(old_oid.to_owned()),
                 new_oid.to_owned(),
                 added,
-                removed,
+                Vec::new(),
             )
         } else {
-            // Rewrites may lack the old tip locally. A complete replacement
-            // closure revokes its visibility without fetching discarded history.
+            // Git's negative revision ranges can include shared trees and blobs.
+            // Only proven fast-forwards may reuse the old closure; subtracting
+            // such a range on a rewrite can revoke still-reachable objects.
             let objects =
                 super::push::enumerate_visibility_difference(git_dir, new_oid, None, maximum)?
                     .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
