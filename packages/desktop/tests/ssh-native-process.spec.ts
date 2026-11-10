@@ -49,6 +49,13 @@ function fixture() {
 }
 
 describe("SSH native process ownership", () => {
+  it("does not reuse a captured factory on a replacement channel", () => {
+    const { router, owner } = fixture();
+    const factory = remoteAgentProcessFactory(router, "server");
+    void owner.closed.catch(() => {});
+    router.attachChannel("server", new Channel() as unknown as ClientChannel);
+    expect(() => factory("git", ["status"], { cwd: "/workspace" })).toThrow("SSH channel changed");
+  });
   it("chunks stdin without changing bytes or transmitting local environment", async () => {
     const { channel, owner } = fixture();
     const bytes = Buffer.from("雪🙂\u0000".repeat(10_000));

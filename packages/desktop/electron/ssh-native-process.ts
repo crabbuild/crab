@@ -171,7 +171,10 @@ class RemoteNativeProcess extends EventEmitter {
 
 /** Uses the workspace owner's task UUID for disposable tasks, including shared conversations. */
 export function remoteAgentProcessFactory(router: RpcRouter, profileId: string, taskId?: string): AgentProcessFactory {
+  const channel = router.remoteChannelOwner(profileId);
+  if (!channel) throw new Error("Native process requires an attached SSH agent");
   return (binary, args, options): OwnedAgentProcess => {
+    if (router.remoteChannelOwner(profileId) !== channel) throw new Error("Native process SSH channel changed");
     const process = new RemoteNativeProcess(router, profileId, binary, args, options.cwd, taskId);
     return { process, closed: process.closed };
   };

@@ -109,3 +109,37 @@ export const spawnLocalAgent: AgentProcessFactory = (binary, args, options) => {
   const owner = new LocalAgentProcess(child, child.pid);
   return { process: owner, closed: owner.closed };
 };
+
+export class AgentProcessClosureError extends Error {
+  constructor(cause: unknown) { super("Command process closure is unconfirmed", { cause }); }
+}
+
+/** Captures an argument-only command, retaining its owner through failure or timeout. */
+export async function runAgentCommand(factory: AgentProcessFactory, binary: string, args: string[], cwd: string): Promise<{ stdout: string }> {
+  const owner = factory(binary, args, { cwd });
+  const output: Buffer[][] = [[], []];
+  const sizes = [0, 0];
+  let failure: Error | undefined;
+  let exitCode: number | null = null;
+  const stop = (error: Error) => { failure ??= error; owner.process.kill("SIGTERM"); };
+  owner.process.on("error", (error: Error) => stop(error));
+  owner.process.once("close", (code: number | null) => { exitCode = code; });
+  for (const [index, stream] of [owner.process.stdout, owner.process.stderr].entries()) stream?.on("data", (bytes: Buffer) => {
+    sizes[index] += bytes.length;
+    if (sizes[index] <= (index === 0 ? 50 * 1024 * 1024 : 1024 * 1024)) output[index].push(bytes);
+    else stop(new Error("Workspace command exceeded its output limit"));
+  });
+  // These commands send no stdin payload. An EOF racing process exit cannot
+  // make delivery uncertain; physical closure remains the completion boundary.
+  owner.process.stdin?.on("error", () => {});
+  owner.process.stdin?.end();
+  const timer = setTimeout(() => stop(new Error("Workspace command timed out")), 30_000);
+  try {
+    try { await owner.closed; } catch (error: unknown) { throw new AgentProcessClosureError(error); }
+    const stdout = Buffer.concat(output[0]).toString("utf8");
+    const stderr = Buffer.concat(output[1]).toString("utf8");
+    if (failure) throw failure;
+    if (exitCode !== 0) throw Object.assign(new Error(`${binary} exited with code ${exitCode}: ${stderr}`), { code: exitCode, stderr });
+    return { stdout };
+  } finally { clearTimeout(timer); }
+}

@@ -20,7 +20,6 @@ import { registerChatIpc } from "./orchestrator-chat";
 import { registerDiffIpc } from "./orchestrator-diff";
 import { detectAgents, getCachedAgents, prewarmAgents, type AgentEvent, type AgentInputResponse } from "./orchestrator-adapters";
 import { fetchGitHubIssues, fetchLinearIssues } from "./orchestrator-issues";
-import { CheckpointManager } from "./orchestrator-checkpoints";
 import { CostTracker, TokenUsage } from "./orchestrator-cost";
 import { agentRegistry } from "./orchestrator-registry";
 import { loadAgentConfig, saveAgentConfig } from "./orchestrator-settings";
@@ -109,10 +108,6 @@ export function registerOrchestratorIpc(
       }
     },
   );
-
-  // ─── Checkpoint Manager ─────────────────────────────────────────────────
-
-  const checkpointManager = new CheckpointManager();
 
   // ─── Template Manager ─────────────────────────────────────────────────────
 
@@ -832,7 +827,7 @@ export function registerOrchestratorIpc(
         if (!task) {
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
-        const checkpoints = await checkpointManager.listCheckpoints(task);
+        const checkpoints = await orchestrator.checkpointManager(task).listCheckpoints(task);
         if (checkpoints.length === 0) {
           return { success: true, latest: null };
         }
@@ -914,8 +909,8 @@ export function registerOrchestratorIpc(
         if (!task) {
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
-        const checkpoints = await checkpointManager.listCheckpoints(task);
-        const backups = await checkpointManager.listRestoreBackups(task);
+        const checkpoints = await orchestrator.checkpointManager(task).listCheckpoints(task);
+        const backups = await orchestrator.checkpointManager(task).listRestoreBackups(task);
         return { success: true, checkpoints, backups };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

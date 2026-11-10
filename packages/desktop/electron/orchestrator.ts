@@ -31,6 +31,7 @@ import { agentRegistry } from "./orchestrator-registry";
 import { loadAgentConfig, migrateSettings } from "./orchestrator-settings";
 import { buildAgentModelFlags } from "./orchestrator-steering";
 import { CheckpointManager } from "./orchestrator-checkpoints";
+import { remoteAgentProcessFactory } from "./ssh-native-process";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
 import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
@@ -251,25 +252,6 @@ const DEFAULT_PERSIST_PATH = path.join(
 );
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_MAX_CONCURRENT = 3;
-const POST_TURN_GIT_TIMEOUT_MS = 10_000;
-
-async function execPostTurnGit(
-  args: string[],
-  cwd: string,
-  options: { env?: NodeJS.ProcessEnv } = {},
-): Promise<{ stdout: string; stderr: string }> {
-  return execFile("git", args, {
-    cwd,
-    timeout: POST_TURN_GIT_TIMEOUT_MS,
-    killSignal: "SIGTERM",
-    env: {
-      ...process.env,
-      GIT_OPTIONAL_LOCKS: "0",
-      ...options.env,
-    },
-  });
-}
-
 function buildTaskAgentArgs(agentType: AgentType, task: Task, configuredArgs?: string[]): string[] {
   return [...(configuredArgs ?? []), ...(["codex", "claude-code"].includes(agentType) ? [] : buildAgentModelFlags(agentType, task))];
 }
@@ -433,7 +415,7 @@ export class Orchestrator extends EventEmitter {
     };
 
     if (worktreeMode === "primary") {
-      task.baseRef = await this.checkpoints.captureBase(task);
+      task.baseRef = await this.checkpointManager(task).captureBase(task);
     }
 
     this.tasks.set(id, task);
@@ -524,6 +506,7 @@ export class Orchestrator extends EventEmitter {
       remoteProfileId: remoteInfo.profileId,
     };
 
+    if (worktreeMode !== "auto") task.baseRef = await this.checkpointManager(task).captureBase(task);
     this.tasks.set(id, task);
     await this.persistTasks();
     this.emit("orchestrator:task-status", { taskId: id, status: task.status });
@@ -596,14 +579,24 @@ export class Orchestrator extends EventEmitter {
     return this.rpcRouter;
   }
 
+  /** Binds checkpoint I/O to the saved workspace and current SSH channel. */
+  checkpointManager(task: Task): CheckpointManager {
+    if (!task.isRemote) return this.checkpoints;
+    if (!this.rpcRouter || !task.remoteProfileId) throw new Error("Remote checkpoints require a connected remote agent");
+    // Capture both factories once: reconnect cannot splice one snapshot across
+    // channels, and repository refs remain accessible after worktree removal.
+    const workspace = remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId, this.ownedWorkspaceTask(task)?.id);
+    const repository = remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId);
+    return new CheckpointManager((saved, cwd) => cwd === saved.worktreePath ? workspace : repository);
+  }
+
   /**
    * Starts a task: spawns the agent adapter in the worktree, wires
    * event listeners, sets up timeout, and updates status to "running".
    * If the max concurrent limit is reached, queues the task instead.
    *
-   * For remote tasks (task.isRemote === true), sends a `task_spawn`
-   * RPC to the remote agent instead of spawning a local process.
-   * Events stream back as JSON-RPC notifications over the SSH channel.
+   * Remote tasks use the same native adapters over an owned SSH transport.
+   * Provider events and input receipts share the local task pipeline.
    *
    * @param skipCheckpoint — When true, skip checkpoint creation (caller
    *   already created one, e.g. `iterate()`).
@@ -728,13 +721,6 @@ export class Orchestrator extends EventEmitter {
     this.emit("orchestrator:task-status", { taskId, status: task.status });
     this.setupTimeout(taskId);
 
-    // Reserve the slot before remote setup or local shutdown can yield.
-    if (task.isRemote) {
-      startup.dispatched = true;
-      await this.startRemoteTask(task, startup.prompt);
-      return;
-    }
-
     if (task.status !== "running") throw new Error("Task startup was cancelled");
     this.assertWorkspaceAvailable(task);
     startup.dispatched = true;
@@ -745,12 +731,12 @@ export class Orchestrator extends EventEmitter {
     // Capture a rollback baseline before constructing any provider owner.
     // Continuing after a Git failure would misrepresent recoverable changes.
     this.migrateWorkspaceMetadata(task);
-    task.baseRef = await this.checkpoints.pinBase(task);
+    task.baseRef = await this.checkpointManager(task).pinBase(task);
     if (!skipCheckpoint) {
       const turnNumber = task.turnNumber ?? 0;
       const checkpoint = turnNumber === 0
-        ? await this.checkpoints.createLightweightCheckpoint(task, turnNumber)
-        : await this.checkpoints.createCheckpoint(task, turnNumber);
+        ? await this.checkpointManager(task).createLightweightCheckpoint(task, turnNumber)
+        : await this.checkpointManager(task).createCheckpoint(task, turnNumber);
       this.emit("orchestrator:checkpoint-created", { taskId, turnNumber, ...checkpoint });
     }
     if (task.status !== "running") throw new Error("Task startup was cancelled");
@@ -759,7 +745,10 @@ export class Orchestrator extends EventEmitter {
 
     // Load per-agent configuration (binary path, extra args, env vars)
     // from settings so users can configure each agent independently.
-    const agentConfig = loadAgentConfig(task.agentType);
+    if (task.isRemote && !["codex", "claude-code"].includes(task.agentType)) throw new Error("Remote conversations require Codex or Claude Code");
+    const agentConfig: ReturnType<typeof loadAgentConfig> = task.isRemote ? {} : loadAgentConfig(task.agentType);
+    const processFactory = task.isRemote
+      ? remoteAgentProcessFactory(this.rpcRouter!, task.remoteProfileId!, this.ownedWorkspaceTask(task)?.id) : undefined;
     // Requested settings belong to this startup until native acknowledgement.
     // A shallow view also supplies custom agents' model flags without changing
     // the saved task when startup rejects a later control.
@@ -770,7 +759,7 @@ export class Orchestrator extends EventEmitter {
       agentConfig.binaryPath,
       undefined,
       buildTaskAgentArgs(task.agentType, configuredTask, agentConfig.extraArgs),
-      { env: agentConfig.env, optOutNotifications: agentConfig.optOutNotifications },
+      { env: agentConfig.env, optOutNotifications: agentConfig.optOutNotifications, processFactory },
     );
 
     await this.persistTasks();
@@ -901,141 +890,6 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Starts a remote task by sending a `task_spawn` RPC to the remote
-   * agent. The remote agent spawns the agent CLI (claude/codex) in the
-   * remote worktree and streams events back as JSON-RPC notifications.
-   *
-   * Before spawning, runs the workspace setup script on the remote
-   * machine (e.g., `pip install`, `conda activate`, GPU setup). If the
-   * setup script fails, the task is marked as failed and not started.
-   *
-   * The orchestrator treats remote events identically to local events —
-   * the renderer doesn't know the difference.
-   */
-  private async startRemoteTask(task: Task, prompt: string): Promise<void> {
-    if (!this.rpcRouter) {
-      throw new Error(
-        "Cannot start remote task: SSH router not configured. " +
-        "Ensure SSH remote connections are enabled.",
-      );
-    }
-
-    if (!task.remoteProfileId) {
-      throw new Error(
-        `Cannot start remote task "${task.id}": missing remoteProfileId.`,
-      );
-    }
-
-    // Run setup script on the remote machine before spawning the agent.
-    // If the setup script fails, the task is marked as failed.
-    if (task.status !== "running") throw new Error("Task startup was cancelled");
-    if (this.remoteScriptRunner) {
-      const setupResult = await this.runRemoteSetupScript(task);
-      if (task.status !== "running") throw new Error("Task startup was cancelled");
-      if (setupResult && !setupResult.success) {
-        task.status = "failed";
-        task.completedAt = Date.now();
-        await this.persistTasks();
-        this.emit("orchestrator:task-status", { taskId: task.id, status: task.status });
-        this.emit("orchestrator:event", {
-          taskId: task.id,
-          event: {
-            type: "error",
-            timestamp: Date.now(),
-            error: `Setup script failed (exit code ${setupResult.exitCode}): ${setupResult.error ?? setupResult.output}`,
-          } satisfies AgentEvent,
-        });
-        throw new Error(
-          `Remote setup script failed (exit code ${setupResult.exitCode}): ${setupResult.error ?? "see output"}`,
-        );
-      }
-    }
-
-    if (task.status !== "running") throw new Error("Task startup was cancelled");
-    await this.persistTasks();
-    if (task.status !== "running") throw new Error("Task startup was cancelled");
-    // launchTask owns the running transition and timeout before remote setup.
-    // Publishing them again duplicates renderer transitions and resets its budget.
-
-    // Send the task_spawn RPC to the remote agent. The remote agent
-    // spawns the CLI and streams events back as notifications.
-    try {
-      await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_spawn", {
-        task_id: task.id,
-        prompt,
-        agent_type: task.agentType,
-        model: task.model,
-        reasoning_level: task.reasoningLevel,
-        worktree_path: task.worktreePath,
-      });
-    } catch (err) {
-      this.clearTimeout(task.id);
-      task.status = "failed";
-      task.completedAt = Date.now();
-      await this.persistTasks();
-      this.emit("orchestrator:task-status", { taskId: task.id, status: task.status });
-
-      const message = err instanceof Error ? err.message : String(err);
-      this.emit("orchestrator:event", {
-        taskId: task.id,
-        event: {
-          type: "error",
-          timestamp: Date.now(),
-          error: `Remote task spawn failed: ${message}`,
-        } satisfies AgentEvent,
-      });
-      throw new Error(`Failed to spawn remote task: ${message}`);
-    }
-  }
-
-  /**
-   * Runs the workspace setup script on the remote machine for a task.
-   * Loads the script configuration from the remote repo's
-   * `crab-orchestrator.json` file, then executes it via the
-   * `task_run_script` RPC.
-   *
-   * Returns null if no setup script is configured, or the script result.
-   */
-  private async runRemoteSetupScript(task: Task): Promise<RemoteScriptResult | null> {
-    if (!this.rpcRouter || !this.remoteScriptRunner || !task.remoteProfileId) {
-      return null;
-    }
-
-    // Load scripts config from the remote repo.
-    const remoteInfo = parseRepoId(task.repoPath);
-    if (!remoteInfo) return null;
-
-    const defaultScripts = { setupScript: "", runScript: "", archiveScript: "" };
-    const scripts = await loadRemoteScripts(
-      this.rpcRouter,
-      task.remoteProfileId,
-      task.repoPath,
-      remoteInfo.remotePath,
-      defaultScripts,
-    );
-
-    if (!scripts.setupScript.trim()) {
-      return null;
-    }
-
-    // Build environment variables for the script.
-    const env = buildRemoteWorkspaceEnv(
-      task.worktreePath,
-      task.branch,
-      remoteInfo.remotePath,
-      task.id,
-    );
-
-    return this.remoteScriptRunner.runSetupScript(
-      task.id,
-      task.remoteProfileId,
-      task.worktreePath,
-      scripts.setupScript,
-      env,
-    );
-  }
-
-  /**
    * Runs the workspace archive script on the remote machine for a task.
    * Called when a task is applied or discarded to allow cleanup.
    */
@@ -1084,100 +938,9 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Handles a JSON-RPC notification from the remote agent for a running
-   * task. Maps remote event notifications to the orchestrator's event
-   * system so the renderer sees them identically to local task events.
-   *
-   * Expected notification methods:
-   * - `task_event`: an agent event (progress, tool use, text, etc.)
-   * - `task_completed`: the remote agent CLI exited successfully
-   * - `task_failed`: the remote agent CLI exited with an error
-   *
-   * Call this from the RPC router's notification listener.
-   */
-  async handleRemoteTaskNotification(notification: {
-    profileId: string;
-    method: string;
-    params: unknown;
-  }): Promise<void> {
-    const params = notification.params as Record<string, unknown> | undefined;
-    if (!params) return;
-
-    const taskId = params.task_id as string | undefined;
-    if (!taskId) return;
-
-    const task = this.tasks.get(taskId);
-    if (!task || !task.isRemote) return;
-
-    switch (notification.method) {
-      case "task_event": {
-        // Forward the event to the renderer via the existing event system.
-        const event = params.event as AgentEvent | undefined;
-        if (event) {
-          // Ensure timestamp is present.
-          if (!event.timestamp) {
-            event.timestamp = Date.now();
-          }
-          task.events.push(event);
-          this.emit("orchestrator:event", { taskId, event });
-        }
-        break;
-      }
-
-      case "task_completed": {
-        this.clearTimeout(taskId);
-        const exitCode = typeof params.exit_code === "number" ? params.exit_code : 0;
-        task.exitCode = exitCode;
-        task.completedAt = Date.now();
-        task.status = exitCode === 0 ? "reviewing" : "failed";
-        await this.persistTasks();
-        this.emit("orchestrator:task-status", { taskId, status: task.status });
-
-        // Start any queued tasks now that a slot is free.
-        this.processQueue();
-        break;
-      }
-
-      case "task_failed": {
-        this.clearTimeout(taskId);
-        const errorMsg = typeof params.error === "string" ? params.error : "Remote task failed";
-        task.exitCode = typeof params.exit_code === "number" ? params.exit_code : 1;
-        task.completedAt = Date.now();
-        task.status = "failed";
-
-        task.events.push({
-          type: "error",
-          timestamp: Date.now(),
-          error: errorMsg,
-        });
-        this.emit("orchestrator:event", {
-          taskId,
-          event: { type: "error", timestamp: Date.now(), error: errorMsg },
-        });
-
-        await this.persistTasks();
-        this.emit("orchestrator:task-status", { taskId, status: task.status });
-
-        // Start any queued tasks now that a slot is free.
-        this.processQueue();
-        break;
-      }
-
-      case "task_script_output": {
-        // Forward script output notifications to the remote script runner
-        // which emits events for the UI to display.
-        if (this.remoteScriptRunner) {
-          this.remoteScriptRunner.handleScriptNotification(notification);
-        }
-        break;
-      }
-    }
-  }
-
-  /**
    * Cancels a running task: sends SIGTERM to the agent process,
    * updates status to "stopped", preserves worktree for inspection.
-   * For remote tasks, sends a `task_cancel` RPC to the remote agent.
+   * Waits for the native owner on either workspace host.
    */
   async cancelTask(taskId: string): Promise<void> {
     const existing = this.cancellations.get(taskId);
@@ -1213,26 +976,15 @@ export class Orchestrator extends EventEmitter {
 
     this.closingTasks.add(taskId);
     try {
-      if (task.isRemote && task.remoteProfileId && this.rpcRouter) {
-        // Send cancel RPC to the remote agent (best-effort).
-        try {
-          await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_cancel", {
-            task_id: taskId,
-          });
-        } catch {
-          // Best-effort — the remote may already be stopped.
-        }
-      } else {
-        const adapter = this.adapters.get(taskId);
-        if (adapter) {
-          await adapter.cancel();
-          if (this.adapters.get(taskId) === adapter) this.adapters.delete(taskId);
-        }
-        await Promise.all(preparation);
-        await this.closeGoalReaders(taskId);
-        await this.goalControls.get(taskId)?.promise.catch(() => {});
-        await this.pauseStoppedGoal(task);
+      const adapter = this.adapters.get(taskId);
+      if (adapter) {
+        await adapter.cancel();
+        if (this.adapters.get(taskId) === adapter) this.adapters.delete(taskId);
       }
+      await Promise.all(preparation);
+      await this.closeGoalReaders(taskId);
+      await this.goalControls.get(taskId)?.promise.catch(() => {});
+      await this.pauseStoppedGoal(task);
     } finally {
       this.closingTasks.delete(taskId);
       await this.persistTasks();
@@ -1243,7 +995,7 @@ export class Orchestrator extends EventEmitter {
 
   /**
    * Sends feedback to a task and re-spawns the agent for iteration.
-   * For remote tasks, sends a `task_iterate` RPC to the remote agent
+   * Follow-ups reuse the live native connection or resume its saved session
    * which re-spawns the agent CLI in the same worktree with the
    * feedback as additional context.
    */
@@ -1342,14 +1094,13 @@ export class Orchestrator extends EventEmitter {
     if (task.status === "archived" || task.status === "applied") throw new Error("Reopen this conversation before sending a message.");
     const previous = { status: task.status, completedAt: task.completedAt, exitCode: task.exitCode };
     const wasRunning = this.hasActiveTurn(task);
-    if (kind === "review" && (task.isRemote || !["codex", "claude-code"].includes(task.agentType))) throw new Error("Review requires a local Codex or Claude Code conversation");
+    if (kind === "review" && !["codex", "claude-code"].includes(task.agentType)) throw new Error("Review requires a Codex or Claude Code conversation");
     if (kind === "review" && ["running", "iterating"].includes(task.status)) throw new Error("Wait for the current turn to finish before starting a review");
     if (kind === "goal" && (task.isRemote || task.agentType !== "codex" || !intent.goal)) throw new Error("Goal activation requires a local Codex conversation");
     const model = options?.model !== undefined && (options.model ?? undefined) !== task.model ? options.model : undefined;
     const mode = options?.mode !== undefined && (options.mode === "plan") !== Boolean(task.planFirst) ? options.mode : undefined;
     const reasoningLevel = options?.reasoningLevel !== undefined && (options.reasoningLevel ?? undefined) !== task.reasoningLevel ? options.reasoningLevel : undefined;
     const changesSettings = model !== undefined || mode !== undefined || reasoningLevel !== undefined;
-    if (changesSettings && task.isRemote) throw new Error("Agent settings cannot be changed for remote chats");
     if (changesSettings && (task.status === "running" || task.status === "iterating")) {
       throw new Error("Wait for the current turn to complete before changing agent settings");
     }
@@ -1383,13 +1134,13 @@ export class Orchestrator extends EventEmitter {
         await this.prepareWorkspace(task, signal);
         signal.throwIfAborted();
         this.assertWorkspaceAvailable(task);
-        if (!task.isRemote) {
-          // Capture and pin before dispatch; publish only after acceptance.
-          // SSH snapshots belong to the remote owner, never to local Git.
-          sha = await this.checkpoints.snapshotHead(task);
+        {
+          // Capture and pin on the workspace host before native dispatch.
+          // Publish only after provider acceptance.
+          sha = await this.checkpointManager(task).snapshotHead(task);
           signal.throwIfAborted();
           this.assertWorkspaceAvailable(task);
-          await this.checkpoints.holdCheckpoint(task, turnNumber, sha);
+          await this.checkpointManager(task).holdCheckpoint(task, turnNumber, sha);
         }
       } catch (error: unknown) {
         // Failed preparation owns no native input. Retain its exact text for
@@ -1415,14 +1166,6 @@ export class Orchestrator extends EventEmitter {
       // write. A crash from here means unconfirmed delivery, never a resend.
       await this.persistTasks();
       signal.throwIfAborted();
-
-      // Remote tasks: send task_iterate RPC to the remote agent which
-      // re-spawns the agent CLI in the same worktree with feedback.
-      if (task.isRemote) {
-        await this.iterateRemoteTask(task, feedback);
-        accepted = true;
-        return;
-      }
 
       // Live adapter path: if the adapter is still running and exposes
       // iterate(), send the follow-up directly over the existing connection.
@@ -1495,10 +1238,10 @@ export class Orchestrator extends EventEmitter {
           // its intent for explicit Retry instead of replaying an older prompt.
           const queued = input.phase === "queued";
           if (queued) {
-            if (!task.isRemote) await this.checkpoints.releaseCheckpoint(task, input.turnNumber);
+            if (input.sha) await this.checkpointManager(task).releaseCheckpoint(task, input.turnNumber);
             input.phase = "unsent";
             input.previousUnsent = undefined;
-            if (!task.isRemote && !this.adapters.has(taskId)) {
+            if (!this.adapters.has(taskId)) {
               task.status = "interrupted";
               task.completedAt = Date.now();
               task.exitCode = 1;
@@ -1513,9 +1256,9 @@ export class Orchestrator extends EventEmitter {
       }
       if (input.phase !== "prepared" && !input.outcome) throw new Error("Unsupported pending input phase");
       input.outcome ??= "unconfirmed";
-      // SSH owns remote liveness; an existing local adapter keeps its slot.
+      // An existing native adapter keeps its slot on either workspace host.
       // Only records restored without a process can be marked interrupted.
-      if (!task.isRemote && !this.adapters.has(taskId) && ["running", "iterating", "queued"].includes(task.status)) {
+      if (!this.adapters.has(taskId) && ["running", "iterating", "queued"].includes(task.status)) {
         task.status = "interrupted";
         task.completedAt = Date.now();
         task.exitCode = 1;
@@ -1574,7 +1317,7 @@ export class Orchestrator extends EventEmitter {
     // any later failure is idempotent and uses the original pinned snapshot.
     await this.persistTasks();
     if (input.sha && input.outcome !== "rejected") {
-      const { ref } = await this.checkpoints.recordCheckpoint(task, input.turnNumber, input.sha);
+      const { ref } = await this.checkpointManager(task).recordCheckpoint(task, input.turnNumber, input.sha);
       this.emit("orchestrator:checkpoint-created", { taskId: task.id, turnNumber: input.turnNumber, sha: input.sha, ref });
     }
   }
@@ -1582,7 +1325,7 @@ export class Orchestrator extends EventEmitter {
   private async clearTaskInput(task: Task): Promise<void> {
     const input = task.pendingInput;
     if (!input) return;
-    if (input.sha) await this.checkpoints.releaseCheckpoint(task, input.turnNumber);
+    if (input.sha) await this.checkpointManager(task).releaseCheckpoint(task, input.turnNumber);
     task.pendingInput = input.outcome === "rejected" && input.previousUnsent
       ? { ...input.previousUnsent, phase: "unsent", turnNumber: (task.turnNumber ?? 0) + 1 } : undefined;
     try { await this.persistTasks(); } catch (error: unknown) { task.pendingInput = input; throw error; }
@@ -1590,62 +1333,6 @@ export class Orchestrator extends EventEmitter {
 
   private reportInputRecoveryError(task: Task, error: unknown): void {
     this.emit("orchestrator:error", { taskId: task.id, message: `Input bookkeeping is incomplete: ${error instanceof Error ? error.message : String(error)}` });
-  }
-
-  /**
-   * Sends a `task_iterate` RPC to the remote agent, which re-spawns
-   * the agent CLI in the same remote worktree with the feedback as
-   * additional context. Events stream back the same way as the initial
-   * spawn (via `task_event` / `task_completed` / `task_failed` notifications).
-   */
-  private async iterateRemoteTask(task: Task, feedback: string): Promise<void> {
-    if (!this.rpcRouter) {
-      throw new Error(
-        "Cannot iterate remote task: SSH router not configured. " +
-        "Ensure SSH remote connections are enabled.",
-      );
-    }
-
-    if (!task.remoteProfileId) {
-      throw new Error(
-        `Cannot iterate remote task "${task.id}": missing remoteProfileId.`,
-      );
-    }
-
-    // Transition to running — the remote agent is re-spawning the CLI.
-    task.status = "running";
-    task.startedAt = Date.now();
-    await this.persistTasks();
-    this.emit("orchestrator:task-status", { taskId: task.id, status: task.status });
-
-    // Set up timeout (same as initial spawn).
-    this.setupTimeout(task.id);
-
-    try {
-      await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_iterate", {
-        task_id: task.id,
-        feedback,
-        agent_type: task.agentType,
-        worktree_path: task.worktreePath,
-      });
-    } catch (err) {
-      this.clearTimeout(task.id);
-      task.status = "failed";
-      task.completedAt = Date.now();
-      await this.persistTasks();
-      this.emit("orchestrator:task-status", { taskId: task.id, status: task.status });
-
-      const message = err instanceof Error ? err.message : String(err);
-      this.emit("orchestrator:event", {
-        taskId: task.id,
-        event: {
-          type: "error",
-          timestamp: Date.now(),
-          error: `Remote task iteration failed: ${message}`,
-        } satisfies AgentEvent,
-      });
-      throw new Error(`Failed to iterate remote task: ${message}`);
-    }
   }
 
   /**
@@ -1698,7 +1385,7 @@ export class Orchestrator extends EventEmitter {
       if (!file) throw new Error("This file no longer has changes. Reload changes before reverting it.");
       oldPath = file.status === "renamed" ? file.oldPath : undefined;
     };
-    return this.editFiles(taskId, task => this.checkpoints.revertFile(task, filePath, oldPath), validate);
+    return this.editFiles(taskId, task => this.checkpointManager(task).revertFile(task, filePath, oldPath), validate);
   }
 
   /** Restores a conversation's files while retaining its history and native identity. */
@@ -1708,11 +1395,11 @@ export class Orchestrator extends EventEmitter {
       if (!owner || owner.status === "discarded") throw new Error("Full file restoration requires a Crab-owned worktree");
       // Validate before cancelling providers, then recheck under writer closure.
       // Keep preflight inside the operation owner so quit drains it too.
-      await this.checkpoints.snapshotSha(task, sourceRef);
+      await this.checkpointManager(task).snapshotSha(task, sourceRef);
       this.migrateWorkspaceMetadata(task);
       if (readTaskMetadata(owner.worktreePath)?.taskId !== owner.id) throw new Error("This directory no longer belongs to the saved workspace. Start a new chat for it.");
     };
-    return this.editFiles(taskId, task => this.checkpoints.restoreFiles(task, sourceRef), validate);
+    return this.editFiles(taskId, task => this.checkpointManager(task).restoreFiles(task, sourceRef), validate);
   }
 
   private async editFiles(taskId: string, change: (task: Task) => Promise<void>, validate?: (task: Task) => Promise<void>): Promise<void> {
@@ -1755,6 +1442,7 @@ export class Orchestrator extends EventEmitter {
       if (task.isRemote) {
         if (files) throw new Error("Selective apply requires a local workspace");
         if (!task.remoteProfileId || !this.rpcRouter) throw new Error("Remote apply requires a connected remote agent");
+        await this.closeWorkspaceConversations(task);
         if (this.ownsTaskWorktree(task)) {
           try {
             const result = await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_apply", {
@@ -1813,7 +1501,7 @@ export class Orchestrator extends EventEmitter {
       this.emit("orchestrator:submission", { taskId, id: input.id, content: input.content, state: "rejected" } satisfies TaskSubmission);
       return;
     }
-    const skipCheckpoint = task.isRemote || await this.checkpoints.hasCheckpoint(task, task.turnNumber ?? 0);
+    const skipCheckpoint = await this.checkpointManager(task).hasCheckpoint(task, task.turnNumber ?? 0);
     task.status = "created";
     task.completedAt = undefined;
     task.exitCode = undefined;
@@ -1945,16 +1633,16 @@ export class Orchestrator extends EventEmitter {
           cleanupWarning = await removeWorktree(task);
           this.workspaceScripts.release(task);
         }
-        // Failed removal must leave recovery refs intact. Once the workspace
-        // is gone, ref cleanup failures are retained work, not a failed discard.
-        try {
-          const keepBase = [...this.tasks.values()].some(candidate => candidate.id !== task.id && candidate.status !== "discarded"
-            && candidate.repoPath === task.repoPath && candidate.baseRef === task.baseRef);
-          await this.checkpoints.cleanup(task, keepBase);
-        } catch (error: unknown) {
-          const warning = `Conversation discarded; snapshot cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
-          cleanupWarning = cleanupWarning ? `${cleanupWarning}\n${warning}` : warning;
-        }
+      }
+      // Failed removal must leave recovery refs intact. Once the workspace
+      // is gone, ref cleanup failures are retained work, not a failed discard.
+      try {
+        const keepBase = [...this.tasks.values()].some(candidate => candidate.id !== task.id && candidate.status !== "discarded"
+          && candidate.repoPath === task.repoPath && candidate.baseRef === task.baseRef);
+        await this.checkpointManager(task).cleanup(task, keepBase);
+      } catch (error: unknown) {
+        const warning = `Conversation discarded; snapshot cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
+        cleanupWarning = cleanupWarning ? `${cleanupWarning}\n${warning}` : warning;
       }
 
       task.status = "discarded";
@@ -2631,10 +2319,10 @@ export class Orchestrator extends EventEmitter {
   }
 
   private hasActiveTurn(task: Task): boolean {
-    // Coordinator rows and persisted local status do not own provider work.
-    // Remote liveness remains authoritative at the SSH boundary.
+    // Coordinator rows and persisted status do not own provider work.
+    // Native adapters retain both local and SSH process ownership.
     const owned = this.adapters.has(task.id);
-    return task.status === "running" && Boolean(task.isRemote || owned) || owned && task.goal?.status === "active";
+    return owned && (task.status === "running" || task.goal?.status === "active");
   }
 
   private async admitTask(task: Task, signal?: AbortSignal): Promise<() => void> {
@@ -2773,34 +2461,16 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async commitTurnSnapshot(task: Task, taskId: string): Promise<void> {
-    if (!task.worktreePath || !fs.existsSync(task.worktreePath)) return;
+    if (!task.worktreePath || !task.isRemote && !fs.existsSync(task.worktreePath)) return;
     if (!this.ownsTaskWorktree(task)) return;
     // Child conversations share files, not turn boundaries. Committing while
     // another chat is working would stage that chat's unfinished edits.
-    if ([...this.tasks.values()].some(candidate => candidate.id !== taskId && candidate.worktreePath === task.worktreePath
+    if ([...this.tasks.values()].some(candidate => candidate.id !== taskId && candidate.worktreePath === task.worktreePath && candidate.remoteProfileId === task.remoteProfileId
       && ["running", "iterating"].includes(candidate.status))) return;
 
     const turnNum = task.pendingInput?.turnNumber ?? task.turnNumber ?? 0;
-    await execPostTurnGit(["add", "-A"], task.worktreePath);
-
-    try {
-      await execPostTurnGit(["diff", "--cached", "--quiet"], task.worktreePath);
-      return;
-    } catch (err) {
-      // Exit code 1 means there are staged changes. Timeout or other git
-      // failures are handled by the outer best-effort caller.
-      if ((err as { code?: unknown }).code !== 1) throw err;
-    }
-
-    const commitMsg = `agent checkpoint: turn ${turnNum}`;
-    await execPostTurnGit(["commit", "-m", commitMsg, "--allow-empty-message"], task.worktreePath, {
-      env: {
-        GIT_AUTHOR_NAME: "crab-agent",
-        GIT_AUTHOR_EMAIL: "agent@crab.local",
-        GIT_COMMITTER_NAME: "crab-agent",
-        GIT_COMMITTER_EMAIL: "agent@crab.local",
-      },
-    });
+    const committed = await this.checkpointManager(task).commitTurn(task, turnNum);
+    if (!committed) return;
     this.emit("orchestrator:turn-committed", { taskId, turnNumber: turnNum });
   }
 
@@ -2893,9 +2563,9 @@ export class Orchestrator extends EventEmitter {
           sidebarGroup: rest.sidebarGroup,
         };
         recovered = this.recoverCompletedRunningTask(task) || recovered;
-        // A restarted owner has no bound local provider connection. Queued
-        // initial starts and SSH liveness keep their own recovery contracts.
-        if (!task.isRemote && (task.workspaceSetup === "running" && ["created", "queued", "running", "iterating"].includes(task.status) || ["codex", "claude-code"].includes(task.agentType) && ["running", "iterating"].includes(task.status))) {
+        // A restarted owner has no bound native connection on either host.
+        // Preserve initial queued starts; interrupted work requires explicit Retry.
+        if (task.workspaceSetup === "running" && ["created", "queued", "running", "iterating"].includes(task.status) || ["codex", "claude-code"].includes(task.agentType) && ["running", "iterating"].includes(task.status)) {
           task.status = "interrupted";
           task.completedAt = Date.now();
           task.exitCode = 1;
@@ -3171,7 +2841,7 @@ export class Orchestrator extends EventEmitter {
     try { return await pending; } finally { this.workspaceOperations.delete(pending); }
   }
 
-  /** Stops local providers and drains their writes without resending queued work. */
+  /** Stops native providers on both hosts without resending queued work. */
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     // Set the admission barrier before cancellation can synchronously release
@@ -3183,10 +2853,10 @@ export class Orchestrator extends EventEmitter {
   private async shutdownAttempt(): Promise<void> {
     const scripts = this.workspaceScripts.shutdown();
     const setupJobs = [...this.workspaceSetups.values()].map(job => job.promise.catch(error => { if (!(error instanceof WorkspaceScriptCancelledError)) throw error; }));
-    const local = [...this.tasks.values()].filter(task => !task.isRemote && task.agentType !== "workflow");
+    const conversations = [...this.tasks.values()].filter(task => task.agentType !== "workflow");
     const startups = [...this.startups.values()].map(startup => startup.promise.catch(() => {}));
     const submissions = [...this.pendingSubmissions.values()].flatMap(pending => [...pending].map(input => input.settled));
-    const active = new Set(local.filter(task => {
+    const active = new Set(conversations.filter(task => {
       const startup = this.startups.get(task.id);
       return this.hasActiveTurn(task) || this.pendingSubmissions.has(task.id)
         || Boolean(startup && (startup.dispatched || task.pendingInput || startup.kind === "goal"));
@@ -3196,7 +2866,7 @@ export class Orchestrator extends EventEmitter {
       this.cancelPendingSubmissions(task.id);
       this.admissionQueue.get(task.id)?.reject(new Error("Agent service is shutting down"));
     }
-    const closing = local.map(async task => {
+    const closing = conversations.map(async task => {
       if (this.cancellations.has(task.id) || active.has(task)) await this.cancelTask(task.id);
       else {
         await this.closeGoalReaders(task.id);

@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 vi.mock("../electron/orchestrator-adapters", () => ({ getExpandedEnv: () => ({ PATH: "/usr/bin" }) }));
 import { spawn } from "node:child_process";
-import { spawnLocalAgent } from "../electron/agent-process";
+import { AgentProcessClosureError, runAgentCommand, spawnLocalAgent } from "../electron/agent-process";
 
 describe.skipIf(process.platform === "win32")("local native process closure", () => {
   const missing = () => Object.assign(new Error("No such process"), { code: "ESRCH" });
@@ -56,5 +56,45 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
     await vi.advanceTimersByTimeAsync(10_000);
     await failure;
     expect(closed).not.toHaveBeenCalled();
+  });
+});
+
+describe("owned workspace command capture", () => {
+  const fixture = () => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
+    let resolve!: () => void; let reject!: (reason: unknown) => void;
+    const closed = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+    const factory = vi.fn(() => ({ process: child, closed }));
+    return { child, factory, reject, finish: () => { child.emit("close", 0); resolve(); } };
+  };
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("preserves split UTF-8 output through the physical closure receipt", async () => {
+    const { child, factory, finish } = fixture();
+    const captured = runAgentCommand(factory, "git", ["show", "HEAD"], "/workspace");
+    const bytes = Buffer.from("雪🙂");
+    child.stdout.write(bytes.subarray(0, 4)); child.stdout.write(bytes.subarray(4));
+    finish();
+    expect(await captured).toEqual({ stdout: "雪🙂" });
+  });
+
+  it.each(["timeout", "output"])("retains the writer after %s until closure is confirmed", async reason => {
+    vi.useFakeTimers();
+    const { child, factory, finish } = fixture();
+    const captured = runAgentCommand(factory, "git", [], "/workspace");
+    let settled = false; void captured.then(() => { settled = true; }, () => { settled = true; });
+    if (reason === "timeout") await vi.advanceTimersByTimeAsync(30_000);
+    else child.stderr.write(Buffer.alloc(1024 * 1024 + 1));
+    expect({ settled, signals: child.kill.mock.calls }).toEqual({ settled: false, signals: [["SIGTERM"]] });
+    finish();
+    await expect(captured).rejects.toThrow(reason === "timeout" ? "timed out" : "output limit");
+  });
+
+  it("distinguishes unknown physical closure from a failed completed command", async () => {
+    const { factory, reject } = fixture();
+    const captured = runAgentCommand(factory, "git", [], "/workspace");
+    const failure = expect(captured).rejects.toBeInstanceOf(AgentProcessClosureError);
+    reject(new Error("SSH owner retired"));
+    await failure;
   });
 });

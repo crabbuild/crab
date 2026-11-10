@@ -104,14 +104,12 @@ let workspacePoller: StatusPoller | null = null;
 let _rpcRouter: RpcRouter | null = null;
 let _sshSessionManager: SshSessionManager | null = null;
 
-// Orchestrator instance — exposed at module level so the SSH subsystem
-// can wire the RPC router's notification stream to it.
+// The shared orchestrator receives its SSH router after subsystem startup.
 import type { Orchestrator } from "./orchestrator";
 let orchestrator: Orchestrator | null = null;
 
 /**
- * Returns the orchestrator instance. Used by the SSH subsystem to wire
- * the RPC router's notification stream via bridgeRemoteActivityFeed().
+ * Returns the shared local/remote task owner.
  * Returns null if called before registerIpc() completes.
  */
 export function getOrchestrator(): Orchestrator | null {
@@ -1841,6 +1839,7 @@ app.whenReady().then(async () => {
       },
     });
     _rpcRouter = rpcRouter;
+    orchestrator?.setRpcRouter(rpcRouter);
     const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
     const runtimeAppPath = app.getAppPath(); const runtimeVersion = app.getVersion();
     const runtimeCache = path.join(app.getPath("userData"), "remote-runtimes");
@@ -2260,18 +2259,7 @@ app.whenReady().then(async () => {
     });
   }
 
-  // ── SSH Remote Activity Bridge ──────────────────────────────────
-  // When the SSH subsystem creates an RPC router, call
-  // bridgeRemoteActivityFeed(router, orchestrator) to connect the
-  // remote agent's notification stream to the orchestrator. This
-  // ensures remote task events (task_event, task_completed,
-  // task_failed) flow through the same pipeline as local tasks and
-  // display identically in the Task Panel.
-  //
-  // The bridge is wired lazily: the SSH subsystem calls
-  // bridgeRemoteActivityFeed() when a connection is established and
-  // the router is ready. The orchestrator instance is available via
-  // the module-level `orchestrator` variable set by registerIpc().
+
 });
 
 app.on("window-all-closed", () => {

@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { Orchestrator, Task } from "../electron/orchestrator";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -163,9 +164,15 @@ describe("Remote Apply/Discard", () => {
       timeoutMs: 60_000,
       rpcRouter: mockRouter as any,
     });
+    // Ref storage is qualified over real SSH separately; this fixture owns
+    // mutation receipts without inventing a native process transport.
+    const checkpoints = new CheckpointManager();
+    vi.spyOn(checkpoints, "cleanup").mockResolvedValue();
+    vi.spyOn(orchestrator, "checkpointManager").mockReturnValue(checkpoints);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     cleanupPath(persistPath);
   });
 

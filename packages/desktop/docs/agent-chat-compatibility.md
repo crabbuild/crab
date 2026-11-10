@@ -1375,6 +1375,43 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   Normal native interruption has writer proof; forced provider death, escaped
   descendants, packaged crash recovery and Windows job ownership remain gates.
 
+- The main orchestrator now runs remote Codex and Claude conversations through
+  the same native adapters, approvals, input receipts, journal and turn pipeline.
+  Electron startup supplies the SSH router. Initial turns, warm follow-ups and
+  cold session resume no longer call unsupported task-spawn/iterate/cancel RPCs;
+  the old task-event bridge and its mock-only lifecycle tests were removed.
+  Local binary paths, extra arguments and credential configuration stay local.
+  The server inherits its process environment; snapshot Git receives only its
+  private-index path and product-owned author assignments.
+  Checkpoint refs share one policy across hosts. Remote capture copies the real
+  index on the server, retains staged ignored additions and writes through a
+  private index. Each operation captures its channel; replacement cannot move
+  later commands or cleanup onto another owner. Bounded command capture awaits
+  physical closure after timeout/output failure. Unknown closure retains the
+  private index, and simultaneous snapshot/cleanup failures retain both errors.
+  Post-turn Git commits execute on the workspace host. Remote Apply now awaits
+  native closure; Discard cleans refs only after confirmed workspace removal.
+  Parent workspace UUIDs, admission, settings controls, failed closure and
+  snapshot refusal have scoped proof. All 395 scoped checks pass, including
+  two resource-failure cases, as do 27 actual local workspace cases.
+  Three real SSH cases exercise the built sidecar with existing CLI logins:
+  private-index capture/publication/ref-lock refusal, and both providers' initial,
+  warm and cold turns. They preserve native session IDs, publish checkpoints
+  0/1/2, retain visible accepted input and exclude client-only configuration from
+  native spawn requests. Codex Apply merges the expected remote file; Claude
+  Discard removes the workspace and its refs after closure. Production/fixture
+  types and Electron build pass. CI adds the inference-free checkpoint case.
+  The [811924de411 process-owner gate](https://github.com/crabbuild/crab/actions/runs/42801653371)
+  passes on Linux and macOS ARM64/Intel; full jobs and this new head remain pending.
+  Evidence: `remote-native-scoped-final.json`, `remote-checkpoint-resources.json`,
+  `remote-native-local-workspaces.json`, `remote-native-task-live-final.json`,
+  `remote-native-checkpoint-live-final.json` and matching type/build logs.
+  This is macOS loopback qualification. Remote availability/catalogs and server
+  PATH discovery, scripts, goals, file restore/Revert, historical comparisons,
+  durable endpoint/Apply-target recovery and packaged/cross-OS behavior remain
+  release gates. The unused auxiliary remote facade is outside the production
+  main-orchestrator path and still needs retirement of its unsupported calls.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1410,12 +1447,14 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   shutdown integration; local process-group proof does not establish that.
 - Resolve historical cost files lacking provider session/model baselines before
   claiming accurate resumed accounting for pre-fix histories.
-- Resolve remote-agent availability. Electron sends `task_spawn`/`task_iterate`,
-  but the Rust sidecar dispatcher has no implementations. The new owned stdio
-  factory has real native-provider SSH proof; it still needs shared task
-  lifecycle integration. Remote comparison now has compiled-sidecar,
-  RPC, and task-view proof over stdio; physical SSH deployment and remote
-  baseline ownership still need qualification. Session ownership, capability
+- Qualify pending checkpoint-command cancellation through direct Stop, channel
+  loss and backend death, including retained private-index recovery.
+- Complete remote-agent availability/catalogs, server PATH discovery, scripts,
+  goals, file restore/Revert and historical comparisons. The main native task
+  pipeline now has real SSH initial/follow-up/cold-resume and Apply/Discard proof.
+  Remote comparison has compiled-sidecar, RPC and task-view proof over stdio;
+  deployment and complete baseline/endpoint ownership still need qualification.
+  Session ownership, capability
   negotiation and actual queued-read replay now have real SSH/browser proof.
   Production deployment now uses exact-release CLI/sidecar assets and immutable
   remote installs, with real native bootstrap proof. Cross-platform CI, Linux
@@ -1429,14 +1468,13 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   live form failure/retry proof. Do not claim production SSH readiness from the
   owned loopback fixture. Remote file editing/status consumers and their sidecar
   parameter/result contracts, remaining remote Apply/Discard recovery/target
-  safety, native task dispatch,
-  and Git-filter descendant cleanup remain open.
+  safety, and Git-filter descendant cleanup remain open.
 - Finish live watch/command-control checks and the lifecycle/owner contract for
   extended controls that can execute or write outside ordinary chat submission.
 - Run appropriate scoped verification, build changed JavaScript bundles, inspect
   the final diff and non-test size, and record broad/packaged CI evidence or the
-  exact remaining qualification gaps. A draft PR has been requested for the
-  accumulated fixes, with continued release-gap work. No merge or release
+  exact remaining qualification gaps. [PR #670](https://github.com/crabbuild/crab/pull/670)
+  is open against `crab-v2`, with continued release-gap work. No merge or release
   publication has been requested.
 
 Run live checks only in an owned scratch directory:
