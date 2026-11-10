@@ -134,6 +134,10 @@ By default, `crab mount` returns immediately after the mount is established.
 NFS runs in a `crab-nfs-mount` helper process. FUSE runs inside the coordinator
 process in the background.
 
+The NFS helper writes to its own log file, whose path the launcher prints.
+On Windows, the helper does not inherit the launcher's standard-stream handles.
+Scripted callers receive EOF when the launcher exits while the mount stays active.
+
 ```bash
 crab mount --repo crab://bucket/repo --mountpoint /mnt/view
 # Returns immediately — mount is active in the background

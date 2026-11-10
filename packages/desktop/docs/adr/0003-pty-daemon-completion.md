@@ -197,15 +197,10 @@ mode.
   path.join(__dirname, "daemon"))` instead of the hardcoded paths. The
   resolver also checks the `CRAB_DAEMON_ENTRY` environment variable for
   support debugging.
-- `electron-builder.yml` gains an `extraResources` entry:
-  ```yaml
-  extraResources:
-    - from: dist-electron/daemon
-      to: daemon
-  ```
-  This places `daemon-main.cjs` and its sibling `.cjs` files at
-  `Crab.app/Contents/Resources/daemon/` on macOS (equivalent paths on Linux
-  and Windows).
+- `electron-builder.yml` includes `dist-electron/daemon` in ASAR. The resolver
+  uses `<resourcesPath>/app.asar/dist-electron/daemon/daemon-main.cjs` on every
+  platform. Native dependencies remain unpacked; loading JavaScript through
+  ASAR keeps node-pty's helper path translation correct.
 - `scripts/rename-to-cjs.mjs` gains a build-time check that fails the build
   if `dist-electron/daemon/daemon-main.cjs` is missing, catching packaging
   regressions before they reach CI.

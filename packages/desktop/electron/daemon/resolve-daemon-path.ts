@@ -3,7 +3,7 @@
  * based on whether we're in development or production (packaged) mode.
  *
  * In development, the daemon script lives under `dist-electron/daemon/`.
- * In packaged builds, it's placed under `resources/daemon/`.
+ * In packaged builds, it is loaded through `app.asar/dist-electron/daemon/`.
  *
  * An env var override (`CRAB_DAEMON_ENTRY`) is supported for testing
  * and custom deployments.
@@ -61,7 +61,7 @@ export interface ResolvedDaemonPath {
 const DAEMON_ENTRY_FILENAME = "daemon-main.cjs";
 
 /** Subdirectory under resources/ in packaged builds. */
-const RESOURCES_DAEMON_DIR = "app.asar.unpacked/dist-electron/daemon";
+const RESOURCES_DAEMON_DIR = "app.asar/dist-electron/daemon";
 
 // ---------------------------------------------------------------------------
 // Resolution
@@ -72,7 +72,7 @@ const RESOURCES_DAEMON_DIR = "app.asar.unpacked/dist-electron/daemon";
  *
  * Resolution order:
  * 1. `CRAB_DAEMON_ENTRY` env var (if set and file exists)
- * 2. Production: `<resourcesPath>/app.asar.unpacked/dist-electron/daemon/daemon-main.cjs`
+ * 2. Production: `<resourcesPath>/app.asar/dist-electron/daemon/daemon-main.cjs`
  * 3. Development: `<electronDistDir>/daemon-main.cjs`
  *    (the daemon/ subdirectory of dist-electron)
  *
@@ -98,7 +98,8 @@ export function resolveDaemonPath(opts: ResolveDaemonPathOptions): ResolvedDaemo
         path.join(electronDistDir, DAEMON_ENTRY_FILENAME),
       ]
     : [
-        // Prod: unpacked script beside its native Node dependencies
+        // Load JavaScript through ASAR so node-pty translates its native helper
+        // path once. Loading from app.asar.unpacked expands that path twice.
         path.join(resourcesPath, RESOURCES_DAEMON_DIR, DAEMON_ENTRY_FILENAME),
       ];
 

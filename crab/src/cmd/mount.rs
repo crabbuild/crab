@@ -1601,6 +1601,8 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
             // group would turn Ctrl-C plus forwarding into a forced second exit.
             command.process_group(0);
         }
+        #[cfg(windows)]
+        disable_stdio_inheritance()?;
         let mut child = command.spawn().map_err(CrabError::Io)?;
         let pid = child.id();
         let started_at = std::time::Instant::now();
@@ -1659,6 +1661,36 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
         startup
     });
     task.await.map_err(crate::vfs::error::VfsError::ReadTask)?
+}
+
+#[cfg(all(feature = "nfs", windows))]
+fn disable_stdio_inheritance() -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+
+    // Rust duplicates the explicitly selected child stdio, but also inherits
+    // other inheritable handles. Leaking the launcher's original pipes keeps
+    // callers waiting for EOF for the entire lifetime of the mount.
+    for handle in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if handle.is_null() || handle as isize == -1 {
+            continue;
+        }
+        // SAFETY: these are borrowed live standard handles. Only inheritance
+        // changes; the handles remain open and usable by the launcher.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "nfs")]
