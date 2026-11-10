@@ -160,7 +160,7 @@ export function generateFriendlyName(existing: Set<string>): string {
 
 function metadataPath(worktreePath: string): string {
   // Relative gitdir pointers use the physical checkout, including symlinked paths.
-  const workspace = fs.realpathSync(worktreePath);
+  const workspace = fs.realpathSync.native(worktreePath);
   const gitPath = path.join(workspace, ".git");
   if (fs.statSync(gitPath).isDirectory()) return path.join(gitPath, METADATA_FILE);
   const pointer = fs.readFileSync(gitPath, "utf-8").trim();
@@ -356,7 +356,7 @@ export async function restoreWorktree(repoPath: string, taskId: string, branch: 
     suffix.unshift(path.basename(ancestor));
     ancestor = parent;
   }
-  const previous = path.join(fs.realpathSync(ancestor), ...suffix);
+  const previous = path.join(fs.realpathSync.native(ancestor), ...suffix);
   const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoPath });
   const registered = stdout.split("\0\0").some(record => {
     const fields = record.split("\0");
@@ -386,14 +386,15 @@ export async function assertWorkspace(task: { repoPath: string; worktreePath: st
   ]);
   // Git walks parents after a checkout loses its .git pointer. A saved path
   // must retain its own root and private index before it can authorize writes.
-  if (root !== fs.realpathSync(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
+  // Native resolution also expands Windows short names to match Git paths.
+  if (root !== fs.realpathSync.native(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
   if (common !== repository) throw new Error("Workspace belongs to a different Git repository");
-  if (root !== fs.realpathSync(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
+  if (root !== fs.realpathSync.native(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
 }
 
 async function gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir" | "--absolute-git-dir"): Promise<string> {
   const { stdout } = await execFile("git", ["rev-parse", option], { cwd });
-  return fs.realpathSync(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
+  return fs.realpathSync.native(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
 }
 
 /** Removes a verified disposable workspace; returns warnings for retained branch cleanup. */

@@ -159,7 +159,13 @@ describe("orchestrator-worktree", () => {
       const worktreePath = await createWorktree(repoDir, "control-metadata", "main");
       if (relative) {
         const { stdout } = await execFile("git", ["rev-parse", "--absolute-git-dir"], { cwd: worktreePath });
-        fs.writeFileSync(path.join(worktreePath, ".git"), `gitdir: ${path.relative(fs.realpathSync(worktreePath), stdout.trim())}\n`);
+        // Git hides this file on Windows, where opening a hidden file with
+        // the truncating 'w' flag fails. Keep its attributes and rewrite in place.
+        const pointer = fs.openSync(path.join(worktreePath, ".git"), "r+");
+        try {
+          fs.ftruncateSync(pointer);
+          fs.writeFileSync(pointer, `gitdir: ${path.relative(fs.realpathSync.native(worktreePath), stdout.trim())}\n`);
+        } finally { fs.closeSync(pointer); }
       }
       const metadata = readTaskMetadata(worktreePath)!;
       writeTaskMetadata(worktreePath, { ...metadata, status: "stopped" });
@@ -290,21 +296,22 @@ describe("orchestrator-worktree", () => {
       fs.writeFileSync(path.join(original, "saved.txt"), "saved work");
       await execFile("git", ["add", "saved.txt"], { cwd: original });
       await execFile("git", ["commit", "-m", "Saved work"], { cwd: original });
-      const registeredPath = fs.realpathSync(original);
+      const registeredPath = fs.realpathSync.native(original);
       const unrelated = await createWorktree(repoDir, "unrelated-workspace", "main");
-      const unrelatedPath = fs.realpathSync(unrelated);
+      const unrelatedPath = fs.realpathSync.native(unrelated);
       fs.rmSync(unrelated, { recursive: true, force: true });
       fs.rmSync(original, { recursive: true, force: true });
       const restored = await restoreWorktree(repoDir, "missing-workspace", branch, original);
       const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoDir });
-      expect({ file: fs.readFileSync(path.join(restored, "saved.txt"), "utf8"), originalRegistered: stdout.split("\0").includes(`worktree ${registeredPath}`),
-        unrelatedRegistered: stdout.split("\0").includes(`worktree ${unrelatedPath}`) }).toEqual({ file: "saved work", originalRegistered: false, unrelatedRegistered: true });
+      const registered = stdout.split("\0").filter(field => field.startsWith("worktree ")).map(field => path.normalize(field.slice("worktree ".length)));
+      expect({ file: fs.readFileSync(path.join(restored, "saved.txt"), "utf8"), originalRegistered: registered.includes(path.normalize(registeredPath)),
+        unrelatedRegistered: registered.includes(path.normalize(unrelatedPath)) }).toEqual({ file: "saved work", originalRegistered: false, unrelatedRegistered: true });
     });
 
     it.each(["locked", "live"])("preserves a %s worktree registration instead of forcing saved-branch restoration", async state => {
       const original = await createWorktree(repoDir, "protected-workspace", "main");
       const branch = readTaskMetadata(original)!.originalBranch;
-      const registeredPath = fs.realpathSync(original);
+      const registeredPath = fs.realpathSync.native(original);
       if (state === "locked") {
         await execFile("git", ["worktree", "lock", original], { cwd: repoDir });
         fs.rmSync(original, { recursive: true, force: true });
@@ -312,7 +319,8 @@ describe("orchestrator-worktree", () => {
       const previous = state === "locked" ? original : path.join(repoDir, ".crab/worktrees/other");
       await expect(restoreWorktree(repoDir, "protected-workspace", branch, previous)).rejects.toThrow();
       const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoDir });
-      expect(stdout.split("\0").includes(`worktree ${registeredPath}`)).toBe(true);
+      const registered = stdout.split("\0").filter(field => field.startsWith("worktree ")).map(field => path.normalize(field.slice("worktree ".length)));
+      expect(registered.includes(path.normalize(registeredPath))).toBe(true);
     });
 
     it("checks out the saved branch and its work without creating a replacement branch", async () => {

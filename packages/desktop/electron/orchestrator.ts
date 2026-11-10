@@ -2994,7 +2994,9 @@ export class Orchestrator extends EventEmitter {
     // receives cancellation. Fence new internal jobs after their producers close.
     this.checkpointClosing = true;
     const commands = await Promise.allSettled([this.waitCheckpointJobs()]);
-    await this.persistTasks();
+    // The task store belongs to this service. Release its WAL and native
+    // handles after accepted writers settle, including failed quit attempts.
+    try { await this.persistTasks(); } finally { this.taskDb.close(); }
     const errors = [...results, ...snapshots, ...commands].filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Agent shutdown failed");
   }

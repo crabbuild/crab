@@ -2096,3 +2096,62 @@ reports 62 failures across seven files. Those failures remain release blockers;
 this endpoint batch does not claim cross-platform completion. Captured Git
 Apply-target identity, explicit old-task recovery and the remaining lifecycle
 and workflow gates above are still open. The PR remains unmerged.
+
+## Windows ownership and fixture candidate (2026-11-10)
+
+The preceding Windows broad-suite failure separates into two production
+ownership defects and platform-specific fixture setup. Orchestrator shutdown
+drains writers and persists tasks but never closes its task database. Three
+new regressions leave real SQLite WAL/shared-memory files open after success,
+writer failure and final-save failure. Shutdown now closes that owned store
+after settling accepted operations, even when the final save fails. The goals
+fixture also shuts down its complete service before removing its owned HOME.
+
+The synchronous JavaScript realpath implementation preserves Windows short
+names, whereas Git reports expanded paths. Workspace root/index validation and
+missing-workspace restoration now use Node's native realpath implementation
+consistently, including metadata-pointer resolution. Async diff/hunk path
+resolution already uses the native binding; it requires no second path or
+case-folding rule. Existing wrong-root, foreign-repository and shared-index
+rejections remain covered. Worktree registration fixtures compare native paths
+with separator normalization and rewrite Git's hidden pointer through an open
+read/write descriptor. Node documents that truncating hidden Windows files
+with the w flag fails with EPERM.
+
+The daemon resolver unit fixtures explicitly disable ASAR interpretation while
+they model logical package paths as ordinary directories, restoring the prior
+process flag afterward. Actual ASAR loading remains covered by packaged smoke.
+The terminal lifecycle fixture explicitly waits for Electron's GUI executable
+in Windows cmd so the shell cannot compete with its foreground child for input.
+No product fallback, signal change, dependency, override or lockfile change is
+introduced by these fixture corrections.
+
+All 361 touched-family cases and the real two-server endpoint test pass on
+macOS; production types and the Electron build pass. The semantic fixture type
+probe passes; its default unused-symbol check records four pre-existing
+diagnostics in the three older fixture modules. Those symbols and repository
+compiler settings are unchanged. Evidence: `task-db-shutdown-before.json`,
+`task-db-shutdown-after.json`, `windows-owner-family.json`,
+`windows-owner-ssh-live.json`, `windows-owner-fixture-types.log` and
+`windows-owner-fixture-semantic-types.log`. Actual Windows execution of this
+candidate remains assigned to CI; local macOS proof does not close that gate.
+
+The rebuilt unsigned macOS package also passes all five enabled combined smoke
+cases with zero unexpected or flaky results. Storage is skipped without an
+isolated bucket; all three owned daemons are confirmed gone. Evidence:
+`windows-owner-packaged.json` and `windows-owner-packaged-home.json`.
+
+Dependency contracts: [Node native realpath and Windows file flags](https://nodejs.org/docs/latest-v22.x/api/fs.html),
+[libuv Windows path resolution](https://github.com/libuv/libuv/blob/v1.51.0/src/win/fs.c),
+[SQLite connection closure](https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/docs/api.md#close---this),
+[Electron ASAR controls](https://www.electronjs.org/docs/latest/tutorial/asar-archives#treating-an-asar-archive-as-a-normal-file),
+and [Windows start/wait behavior](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/start).
+
+The next Apply-target probe also demonstrates a real mutation through the
+built sidecar: create a task on intended, switch the repository to other, then
+Apply with the task's returned baseline SHA. The sidecar reports target other,
+merges the file there, leaves intended unchanged and removes the task worktree.
+The owned process exits cleanly. Evidence: `apply-target-native-before.json`.
+This remains unfixed. Local default creation captures its branch, but local
+Apply still infers a missing target and selective Apply swallows checkout
+failure; both siblings need qualification before choosing a canonical fix.

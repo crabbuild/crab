@@ -106,7 +106,7 @@ describe("native goal task ownership", () => {
   });
 
   afterEach(async () => {
-    await Promise.allSettled(orchestrator.getAllTasks().map(task => orchestrator.cancelTask(task.id)));
+    await orchestrator.shutdown();
     vi.unstubAllEnvs();
     await rm(cwd, { recursive: true, force: true });
   });

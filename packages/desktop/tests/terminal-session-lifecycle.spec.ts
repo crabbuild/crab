@@ -52,7 +52,10 @@ it("keeps an interactive foreground process when the app disconnects and reconne
     // owns its shell home so foreground-process survival is deterministic.
     const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
     expect(spawned.resolvedSessionType).toBe("daemon");
-    await bridge.handleWrite(spawned.id, `${JSON.stringify(process.execPath)} agent.cjs\r`);
+    // Electron's GUI executable otherwise returns cmd's prompt immediately,
+    // leaving two processes competing for this fixture's terminal input.
+    const command = process.platform === "win32" ? `start "" /b /wait "${process.execPath}" agent.cjs` : `${JSON.stringify(process.execPath)} agent.cjs`;
+    await bridge.handleWrite(spawned.id, `${command}\r`);
     await vi.waitFor(() => expect(output).toMatch(/agent-ready:(\d+)/), { timeout: 5000 });
     const agentPid = Number(/agent-ready:(\d+)/.exec(output)![1]);
     await expect(client.request("prepare-upgrade", { successorPath: path.resolve(__dirname, "../dist-electron/daemon/daemon-main.cjs") }))

@@ -1291,6 +1291,22 @@ describe("Orchestrator", () => {
   });
 
   describe("shutdown", () => {
+    it.each(["none", "writer", "persistence"])("releases task database files after %s failure", async failure => {
+      const task = await orchestrator.createTask("Persisted owner", "codex", "/tmp/repo");
+      const scripts = vi.spyOn(WorkspaceScripts.prototype, "shutdown");
+      const save = vi.spyOn(OrchestratorTaskDatabase.prototype, "replaceTasks");
+      if (failure === "writer") scripts.mockRejectedValueOnce(new Error("Writer closure unconfirmed"));
+      if (failure === "persistence") save.mockImplementationOnce(() => { throw new Error("Owned persistence failure"); });
+      try {
+        if (failure === "none") await orchestrator.shutdown();
+        else await expect(orchestrator.shutdown()).rejects.toThrow(failure === "writer" ? "shutdown failed" : "persistence failure");
+        const journals = ["-wal", "-shm"].filter(suffix => fs.existsSync(persistPath + suffix));
+        const saved = new OrchestratorTaskDatabase(persistPath);
+        try { expect({ journals, status: saved.loadTasks().find(row => row.id === task.id)?.status }).toEqual({ journals: [], status: "created" }); }
+        finally { saved.close(); }
+      } finally { scripts.mockRestore(); save.mockRestore(); }
+    });
+
     it("does not resurrect an undispatched job already stopped before quit", async () => {
       orchestrator = new Orchestrator({ persistPath, maxConcurrent: 1, timeoutMs: 5000 });
       const blocker = await orchestrator.createTask("Blocker", "codex", "/tmp/repo");
