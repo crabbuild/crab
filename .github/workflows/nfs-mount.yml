@@ -1,103 +1,90 @@
-name: NFS Windows startup diagnostics
+name: Windows Git path diagnostics
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: null
 permissions:
   contents: read
 concurrency:
   group: nfs-windows-diagnostic-${{ github.ref }}
   cancel-in-progress: false
-env:
-  CARGO_TERM_COLOR: always
 jobs:
-  windows:
-    name: Windows NFS startup diagnostics
+  windows-path:
     runs-on: windows-2022
-    timeout-minutes: 60
-    env:
-      CRAB_NFS_SMOKE_RUN_ID: mount-nfs-windows-${{ github.run_id }}-${{ github.run_attempt }}
-      CRAB_NFS_SMOKE_DRIVE: "Z:"
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: nfs-windows-smoke
-          workspaces: . -> target
-      - name: Enable Windows Client for NFS
-        shell: pwsh
-        run: |
-          if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
-            Install-WindowsFeature -Name NFS-Client -IncludeManagementTools
-          } else {
-            Enable-WindowsOptionalFeature `
-              -Online `
-              -FeatureName ServicesForNFS-ClientOnly `
-              -All `
-              -NoRestart
-          }
-          Get-Command "$env:WINDIR\System32\mount.exe" -ErrorAction Stop
-          Get-Command "$env:WINDIR\System32\umount.exe" -ErrorAction Stop
-      - name: Run native Windows NFS smoke
+      - name: Probe native Git with canonical Windows paths
         shell: pwsh
         working-directory: crab
-        env:
-          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         run: |
-          $logs = Join-Path (Join-Path $env:CRAB_NFS_SMOKE_ROOT $env:CRAB_NFS_SMOKE_RUN_ID) "logs"
-          $privateRoot = Join-Path ([System.IO.Path]::GetTempPath()) "crab-nfs-windows-private-$env:CRAB_NFS_SMOKE_RUN_ID"
-          $helperLogs = Join-Path $privateRoot "home\.crab\mounts\logs"
-          New-Item -ItemType Directory -Force -Path $logs | Out-Null
-          $ready = Join-Path $logs "helper-log-collector.ready"
-          $collector = Start-Job -ArgumentList $helperLogs, $logs, $ready -ScriptBlock {
-              param($SourceLogs, $EvidenceLogs, $ReadyPath)
-              $utf8 = [System.Text.UTF8Encoding]::new($false)
-              $previous = @{}
-              [System.IO.File]::WriteAllText($ReadyPath, "ready", $utf8)
-              while ($true) {
-                  if ([System.IO.Directory]::Exists($SourceLogs)) {
-                      foreach ($file in [System.IO.Directory]::GetFiles($SourceLogs, "*.log")) {
-                          try {
-                              $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-                              $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
-                              $reader = [System.IO.StreamReader]::new($stream)
-                              try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
-                              $safe = [regex]::Replace($text, '(tcp:[^\s"]*\?token=)[^\s"&]+', '$1<redacted>')
-                              if ($previous[$file] -ne $safe) {
-                                  $name = "helper-startup-" + [System.IO.Path]::GetFileName($file)
-                                  [System.IO.File]::WriteAllText((Join-Path $EvidenceLogs $name), $safe, $utf8)
-                                  $previous[$file] = $safe
-                              }
-                          } catch {
-                              # The smoke owns deletion; a disappearing log does not change its result.
-                          }
-                      }
-                  }
-                  [System.Threading.Thread]::Sleep(10)
-              }
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $env:RUNNER_TEMP "crab-windows-git-path-probe"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $source = Join-Path $root "source"
+          git init -b main $source
+          if ($LASTEXITCODE -ne 0) { throw "Git init failed" }
+          git -C $source -c user.name=PathProbe -c user.email=probe@example.invalid commit --allow-empty -m seed
+          if ($LASTEXITCODE -ne 0) { throw "Git fixture commit failed" }
+          $gitDir = Join-Path $source ".git"
+          $code = @'
+          use std::io;
+          use std::path::{Path, PathBuf};
+          use std::process::Command;
+
+          fn report(label: &str, command: &mut Command) -> io::Result<()> {
+              let output = command.output()?;
+              println!("case={label} status={}", output.status);
+              println!("stdout={}", String::from_utf8_lossy(&output.stdout).trim());
+              println!("stderr={}", String::from_utf8_lossy(&output.stderr).trim());
+              Ok(())
           }
-          try {
-              for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $ready); $attempt++) {
-                  Start-Sleep -Milliseconds 50
-              }
-              if (-not (Test-Path -LiteralPath $ready)) { throw "Helper log collector did not start" }
-              ./scripts/run-mount-nfs-windows-smoke.ps1
-              if ($LASTEXITCODE -ne 0) { throw "Native NFS smoke exited with $LASTEXITCODE" }
-          } finally {
-              Stop-Job -Job $collector -ErrorAction SilentlyContinue
-              Receive-Job -Job $collector -ErrorAction Continue | Out-Host
-              Remove-Job -Job $collector -ErrorAction SilentlyContinue
+
+          fn revision(command: &mut Command) -> &mut Command {
+              command.args(["rev-parse", "--verify", "--end-of-options", "refs/heads/main^{commit}"])
+                  .env_remove("GIT_WORK_TREE").env_remove("GIT_COMMON_DIR")
+                  .stdin(std::process::Stdio::null())
           }
-        timeout-minutes: 45
-      - name: Upload Windows NFS smoke evidence
+
+          fn main() -> io::Result<()> {
+              let input = std::env::args_os().nth(1).ok_or_else(|| io::Error::other("missing fixture Git directory"))?;
+              let ordinary = PathBuf::from(input);
+              let canonical = ordinary.canonicalize()?;
+              println!("ordinary={} canonical={}", ordinary.display(), canonical.display());
+              println!("head={}", std::fs::read_to_string(canonical.join("HEAD"))?.trim());
+              println!("branch={}", std::fs::read_to_string(canonical.join("refs/heads/main"))?.trim());
+              for (label, path) in [("ordinary-env", ordinary.as_path()), ("canonical-env", canonical.as_path())] {
+                  let mut command = Command::new("git");
+                  revision(&mut command).env("GIT_DIR", path);
+                  report(label, &mut command)?;
+              }
+              let mut argument = Command::new("git");
+              argument.arg("--git-dir").arg(&canonical).env_remove("GIT_DIR");
+              revision(&mut argument);
+              report("canonical-argument", &mut argument)?;
+              let mut current = Command::new("git");
+              current.current_dir(&canonical).env("GIT_DIR", Path::new("."));
+              revision(&mut current);
+              report("canonical-current-dir", &mut current)?;
+              Ok(())
+          }
+          '@
+          $program = Join-Path $root "path-probe.rs"
+          [System.IO.File]::WriteAllText($program, $code)
+          $binary = Join-Path $root "path-probe.exe"
+          rustc --edition=2024 $program -o $binary
+          if ($LASTEXITCODE -ne 0) { throw "Path probe compile failed" }
+          git --version | Tee-Object -FilePath (Join-Path $root "git-version.txt")
+          & $binary $gitDir 2>&1 | Tee-Object -FilePath (Join-Path $root "results.log")
+          if ($LASTEXITCODE -ne 0) { throw "Path probe failed" }
+      - name: Retain path diagnostic
         if: always()
         uses: actions/upload-artifact@v4
-        env:
-          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         with:
-          name: nfs-smoke-windows-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
-          if-no-files-found: warn
+          name: windows-git-path-${{ github.run_id }}
+          path: |-
+            ${{ runner.temp }}/crab-windows-git-path-probe/*.log
+            ${{ runner.temp }}/crab-windows-git-path-probe/*.txt
+            ${{ runner.temp }}/crab-windows-git-path-probe/*.rs
           retention-days: 14
