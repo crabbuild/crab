@@ -16,6 +16,7 @@ import {
   loadAgentConfig,
   migrateSettings,
   readSettings,
+  saveAgentConfig,
   writeSettings,
 } from "../electron/orchestrator-settings";
 
@@ -45,6 +46,26 @@ afterEach(() => {
 describe("orchestrator-settings", () => {
   it("loadAgentConfig returns empty object when no settings file exists", () => {
     expect(loadAgentConfig("claude-code")).toEqual({});
+  });
+
+  it.each(["__proto__", "constructor", "toString"])("loads no inherited config for %s", (agentType) => {
+    expect(loadAgentConfig(agentType)).toEqual({});
+  });
+
+  it.each(["__proto__", "constructor", "toString"])("persists the literal agent identifier %s", (agentType) => {
+    const config = { binaryPath: "/custom/agent", enabled: false };
+    saveAgentConfig(agentType, config);
+
+    expect(loadAgentConfig(agentType)).toEqual(config);
+  });
+
+  it("saving agent configuration preserves preferences and other agents", () => {
+    writeSettings({ theme: "dark", orchestratorAgentConfigs: { codex: { enabled: true } } });
+    saveAgentConfig("custom", { enabled: false });
+
+    expect(readSettings()).toEqual({
+      theme: "dark", orchestratorAgentConfigs: { codex: { enabled: true }, custom: { enabled: false } },
+    });
   });
 
   it("Feature: multi-agent-support, Property 10: agent settings round-trip persistence", () => {

@@ -3,10 +3,9 @@
  *
  * Two responsibilities:
  *
- * 1. `loadAgentConfig(agentType)` — reads per-agent configuration
- *    (binary path override, extra CLI args, env vars) from the
- *    desktop settings store so the orchestrator can pass it to
- *    the adapter at spawn time.
+ * 1. `loadAgentConfig(agentType)` / `saveAgentConfig(agentType, config)`
+ *    share per-agent configuration (binary path override, extra CLI args,
+ *    env vars) between settings IPC and adapter startup.
  *
  * 2. `migrateSettings()` — one-shot migration from the legacy
  *    per-agent path keys (`orchestratorClaudeCodePath`,
@@ -43,18 +42,23 @@ export interface StoredAgentConfig {
 }
 
 /**
- * Reads the settings file. Returns an empty object if the file is
- * missing or unreadable — callers should default gracefully.
+ * Read settings with literal per-agent keys and an empty agent map when missing or unreadable.
  */
-export function readSettings(): Record<string, unknown> {
+export function readSettings(): Record<string, unknown> & {
+  orchestratorAgentConfigs: Record<string, unknown>;
+} {
+  let settings: Record<string, unknown> = {};
   try {
     const p = settingsPath();
-    if (!fs.existsSync(p)) return {};
-    const raw = fs.readFileSync(p, "utf-8");
-    return JSON.parse(raw) as Record<string, unknown>;
+    if (fs.existsSync(p)) settings = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, unknown>;
   } catch {
-    return {};
+    // Optional saved configuration must not prevent agent startup.
   }
+  // Manifest identifiers are literal dictionary keys. An inherited prototype
+  // can turn an assignment into a prototype change that JSON never persists.
+  const configs = Object.create(null) as Record<string, unknown>;
+  Object.assign(configs, settings.orchestratorAgentConfigs);
+  return { ...settings, orchestratorAgentConfigs: configs };
 }
 
 /** Writes the settings file, creating the parent directory if needed. */
@@ -70,8 +74,14 @@ export function writeSettings(settings: Record<string, unknown>): void {
  */
 export function loadAgentConfig(agentType: string): StoredAgentConfig {
   const settings = readSettings();
-  const configs = (settings.orchestratorAgentConfigs ?? {}) as Record<string, StoredAgentConfig>;
-  return configs[agentType] ?? {};
+  return (settings.orchestratorAgentConfigs[agentType] ?? {}) as StoredAgentConfig;
+}
+
+/** Persist one agent's configuration while retaining unrelated settings. */
+export function saveAgentConfig(agentType: string, config: unknown): void {
+  const settings = readSettings();
+  settings.orchestratorAgentConfigs[agentType] = config;
+  writeSettings(settings);
 }
 
 /**
@@ -87,7 +97,7 @@ export function migrateSettings(): void {
     return; // already migrated
   }
 
-  const configs = (settings.orchestratorAgentConfigs ?? {}) as Record<string, StoredAgentConfig>;
+  const configs = settings.orchestratorAgentConfigs as Record<string, StoredAgentConfig>;
   let touched = false;
 
   const claudePath = settings.orchestratorClaudeCodePath as string | undefined;

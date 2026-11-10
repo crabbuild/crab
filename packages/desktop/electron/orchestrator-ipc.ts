@@ -22,6 +22,7 @@ import { fetchGitHubIssues, fetchLinearIssues } from "./orchestrator-issues";
 import { CheckpointManager } from "./orchestrator-checkpoints";
 import { CostTracker, TokenUsage } from "./orchestrator-cost";
 import { agentRegistry } from "./orchestrator-registry";
+import { loadAgentConfig, saveAgentConfig } from "./orchestrator-settings";
 import {
   loadScripts,
   buildWorkspaceEnv,
@@ -750,7 +751,6 @@ export function registerOrchestratorIpc(
 
         // Spawn the same agent CLI that ran the task in one-shot mode
         // to perform the review. This avoids needing a separate AI provider.
-        const { loadAgentConfig } = await import("./orchestrator-settings.js");
         const { getExpandedEnv } = await import("./orchestrator-adapters.js");
         const { execFile: execFileCb } = await import("node:child_process");
         const { promisify } = await import("node:util");
@@ -928,15 +928,8 @@ export function registerOrchestratorIpc(
 
   ipcMain.handle("orchestrator:get-agent-config", async (_event, { agentType }: { agentType: string }) => {
     try {
-      const settingsPath = path.join(os.homedir(), ".crab", "desktop", "settings.json");
-      let settings: Record<string, unknown> = {};
-      try {
-        if (fs.existsSync(settingsPath)) {
-          settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-        }
-      } catch { /* ignore */ }
-      const configs = (settings.orchestratorAgentConfigs ?? {}) as Record<string, unknown>;
-      return { success: true, config: configs[agentType] ?? {} };
+      const config = loadAgentConfig(agentType);
+      return { success: true, config };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message };
@@ -945,18 +938,7 @@ export function registerOrchestratorIpc(
 
   ipcMain.handle("orchestrator:set-agent-config", async (_event, { agentType, config }: { agentType: string; config: unknown }) => {
     try {
-      const settingsPath = path.join(os.homedir(), ".crab", "desktop", "settings.json");
-      let settings: Record<string, unknown> = {};
-      try {
-        if (fs.existsSync(settingsPath)) {
-          settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-        }
-      } catch { /* ignore */ }
-      const configs = (settings.orchestratorAgentConfigs ?? {}) as Record<string, unknown>;
-      configs[agentType] = config;
-      settings.orchestratorAgentConfigs = configs;
-      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
+      saveAgentConfig(agentType, config);
       return { success: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
