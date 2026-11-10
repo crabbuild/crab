@@ -2,9 +2,9 @@ name: Workflow native execution
 
 on:
   push:
-    branches: ["main"]
+    branches: [main, crab-v2]
   pull_request:
-    branches: ["main"]
+    branches: [main, crab-v2]
   workflow_dispatch:
 
 permissions:

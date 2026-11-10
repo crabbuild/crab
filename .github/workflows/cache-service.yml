@@ -4,7 +4,7 @@ name: Cache Service Tests
 # touch cache service source, client code, or deployment configs.
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/cache-service.yml"
       - "crates/crab-cache/**"

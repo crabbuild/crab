@@ -2,7 +2,7 @@ name: S3 gateway
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
   pull_request:
     paths:
       - ".dockerignore"
