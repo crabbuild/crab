@@ -81,11 +81,16 @@ export function Sidebar({ onCollapse }: Props) {
     const frame = requestAnimationFrame(() => { restoringScroll.current = false; });
     return () => cancelAnimationFrame(frame);
   }, [scrollKey, query, state.workspaces, state.repos]);
-  useEffect(() => {
-    const saveScroll = () => localStorage.setItem(scrollKey, String(scrollPosition.current));
+  useLayoutEffect(() => {
+    const saveScroll = () => {
+      // Quit can precede queued scroll events. The mounted, unfiltered list
+      // owns the visible offset; filtering keeps its prior unfiltered position.
+      if (!query.trim() && scrollRef.current) scrollPosition.current = scrollRef.current.scrollTop;
+      localStorage.setItem(scrollKey, String(scrollPosition.current));
+    };
     window.addEventListener("beforeunload", saveScroll);
     return () => window.removeEventListener("beforeunload", saveScroll);
-  }, [scrollKey]);
+  }, [scrollKey, query]);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneTargetWorkspace, setCloneTargetWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -1794,6 +1794,40 @@ identity and confirmed disappearance. Evidence: `full-packaged-current.json`
 and `full-packaged-home.json`. Sidebar persistence and new-head cross-platform
 qualification remain required; the combined suite is not reported as passing.
 
+### Sidebar quit persistence correction
+
+The combined packaged failure exposed a separate save boundary. A controlled
+real-package probe scrolls the mounted list and dispatches quit before its
+queued scroll event runs: the visible position is 651, but the persisted
+workspace position is 0. The packaged regression reproduces that mismatch
+before the source correction. Earlier diagnostic runs that restored normally
+do not disprove this scheduling window.
+
+Quit now captures the mounted, unfiltered list's visible offset directly and
+updates the tracked position before persisting. Filtering retains the prior
+unfiltered position. The listener follows filter/key commits through
+`useLayoutEffect`, whose [React contract](https://react.dev/reference/react/useLayoutEffect)
+installs the committed effect before repaint. No timer, assertion threshold
+or restart timeout changes. Key-change/unmount persistence still uses the
+tracked previous-list offset; its pending-scroll boundary needs separate
+qualification rather than assuming this quit proof covers it.
+
+The rebuilt unsigned package passes the complete sidebar case, including
+immediate quit flush, actual restart restoration and filtered quit preserving
+the unfiltered position. Production/fixture types, renderer build and directory
+packaging pass. Evidence: `sidebar-scroll-flush-before.json`,
+`sidebar-regression-before.json`, `sidebar-regression-final.json`, and
+`sidebar-flush-package-hashes.json`. The owned daemon is stopped with matching
+birth time and confirmed disappearance. One interim extended check used a
+locator from its closed pre-restart window; that fixture mistake is corrected
+without changing assertions. The combined packaged rerun passes all five
+enabled cases: updater, workflow output, repository/chat/terminal, profile
+isolation and sidebar persistence. Storage is skipped without an isolated
+bucket. All three owned daemons close with matched identity and confirmed
+disappearance. Evidence: `full-packaged-after.json` and
+`full-packaged-after-home.json`. This does not qualify storage, Windows or
+other release gates.
+
 ## Electron runtime release gate (2026-11-10)
 
 `package.json` selects Electron `^33.2.0`; the lockfile and installed package

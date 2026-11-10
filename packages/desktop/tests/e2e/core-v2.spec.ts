@@ -515,6 +515,16 @@ test("workspace sidebar filters, pins, remembers recents and restores collapse a
     const repositoryList = page.getByLabel("Repository list", { exact: true });
     await expect.poll(() => repositoryList.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
     const position = await repositoryList.evaluate(element => element.scrollTop);
+    const flushed = await page.evaluate(async () => {
+      await new Promise(requestAnimationFrame);
+      const list = document.querySelector<HTMLElement>('[aria-label="Repository list"]')!;
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+      list.scrollTop = list.scrollHeight;
+      window.dispatchEvent(new Event("beforeunload"));
+      return { visible: list.scrollTop, saved: Object.entries(localStorage).filter(([key]) => key.startsWith("crab.repoSidebarScroll.")).map(([, value]) => Number(value)) };
+    });
+    expect(flushed.saved).toContain(flushed.visible);
     await page.screenshot({ path: test.info().outputPath("workspace-sidebar-compact.png") });
     await application.close();
     application = await launch();
@@ -522,6 +532,13 @@ test("workspace sidebar filters, pins, remembers recents and restores collapse a
     await page.setViewportSize({ width: 880, height: 560 });
     await expect(region().getByRole("button", { name: "Pin repo-30", exact: true })).toBeAttached({ timeout: 15_000 });
     await expect.poll(() => page.getByLabel("Repository list", { exact: true }).evaluate(element => element.scrollTop)).toBeGreaterThan(position - 50);
+    await page.getByRole("textbox", { name: "Filter repositories", exact: true }).fill("repo-25");
+    await expect(region().getByRole("button", { name: "Pin repo-30", exact: true })).toHaveCount(0);
+    const filteredPositions = await page.evaluate(() => {
+      window.dispatchEvent(new Event("beforeunload"));
+      return Object.entries(localStorage).filter(([key]) => key.startsWith("crab.repoSidebarScroll.")).map(([, value]) => Number(value));
+    });
+    expect(filteredPositions).toContain(flushed.visible);
   } finally {
     await application.close();
     rmSync(root, { recursive: true, force: true });
