@@ -34,8 +34,14 @@ if (target === root || target.startsWith(`${root}${path.sep}`)) {
 // Match the release CLI feature set without requiring a FUSE driver at app startup.
 const features = ["simd-accel", "tier", "replication-s3-control-plane", "replication-gcs-control-plane", "replication-azure-control-plane", "coordinator-dynamodb", "coordinator-spanner", "coordinator-cosmosdb", "watch", "nfs", "gix-pathmatch"];
 const args = ["build", "--release", "--locked", "--no-default-features", "-p", "crab", "--bin", "crab", "--bin", "crab-nfs-mount", "-p", "crab-desktop-agent", "--bin", "crab-desktop-agent", "--features", features.map(feature => `crab/${feature}`).join(",")];
+const buildEnv = { ...process.env };
+if (process.platform === "linux" && process.arch === "arm64") {
+  // This script builds natively. The repository's cross-linker name is absent
+  // on native ARM runners; preserve an explicit caller-selected Cargo linker.
+  buildEnv.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER ??= "cc";
+}
 await new Promise((resolve, reject) => {
-  const child = spawn("cargo", args, { cwd: root, stdio: "inherit" });
+  const child = spawn("cargo", args, { cwd: root, stdio: "inherit", env: buildEnv });
   child.once("error", reject);
   child.once("exit", code => code === 0 ? resolve() : reject(new Error(`Cargo exited with status ${code}`)));
 });
