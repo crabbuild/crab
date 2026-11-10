@@ -2147,11 +2147,29 @@ Dependency contracts: [Node native realpath and Windows file flags](https://node
 [Electron ASAR controls](https://www.electronjs.org/docs/latest/tutorial/asar-archives#treating-an-asar-archive-as-a-normal-file),
 and [Windows start/wait behavior](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/start).
 
-The next Apply-target probe also demonstrates a real mutation through the
-built sidecar: create a task on intended, switch the repository to other, then
-Apply with the task's returned baseline SHA. The sidecar reports target other,
-merges the file there, leaves intended unchanged and removes the task worktree.
-The owned process exits cleanly. Evidence: `apply-target-native-before.json`.
-This remains unfixed. Local default creation captures its branch, but local
-Apply still infers a missing target and selective Apply swallows checkout
-failure; both siblings need qualification before choosing a canonical fix.
+## Captured Apply destination (2026-11-10)
+
+The old sidecar merged into the current checkout after a branch switch,
+reported success and removed the task worktree. Local Apply could infer a
+missing destination, and selective Apply could proceed after checkout failed.
+Creation now records the destination separately from the baseline commit.
+Both local Apply modes and SSH Apply require that saved branch before staging
+source changes. A failed source commit stops full Apply before target mutation.
+
+Seven local regressions and three live SSH regressions cover the captured,
+missing and deleted destinations, changed source checkout and rejected commit.
+The SSH cases reload the task store before Apply, and verify both refs, source
+bytes and cleanup. A combined run passed all six enabled SSH cases; 367 scoped
+desktop tests, the targeted Rust tests, production types, the Electron build and
+five generic packaged smoke cases passed on macOS. Evidence:
+`apply-contract-local-after.json`, `apply-contract-native-siblings-final.json`
+and `apply-contract-packaged.json`. Git documents the contracts for
+[`symbolic-ref`](https://git-scm.com/docs/git-symbolic-ref) and exact
+[`show-ref --verify`](https://git-scm.com/docs/git-show-ref) lookup.
+
+Apply still has two production blockers. A concurrent checkout between the
+active-branch read and `git merge` can advance the wrong ref while reporting the
+captured destination. Closing sidecar stdin during a source commit hook can
+leave the Git writer running after the sidecar exits and releases its workspace
+lease. Evidence: `apply-branch-race-before.json` and `apply-eof-before.json`.
+The destination preflight does not establish ownership across either boundary.

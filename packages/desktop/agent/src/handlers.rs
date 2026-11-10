@@ -1721,9 +1721,11 @@ struct WorktreeCreateParams {
 /// `~/.crab/worktrees/<task_id>` and a new branch is created
 /// through the core Crab worktree contract.
 ///
-/// Returns `{ path, branch, base_ref }` where `base_ref` is the
-/// resolved SHA of the starting point.
+/// Returns the workspace, resolved baseline and the captured Apply branch.
 async fn worktree_create(work_dir: &Path, p: WorktreeCreateParams) -> Result<Value> {
+    let base_branch = crate::git_ref_merge::current_branch_ref(work_dir)
+        .await?
+        .map(|branch| branch.trim_start_matches("refs/heads/").to_owned());
     let task_id = uuid::Uuid::parse_str(&p.task_id).map_err(|source| AgentError::Managed {
         kind: "task_identity".into(),
         message: "Remote workspace creation requires a task UUID".into(),
@@ -1777,6 +1779,7 @@ async fn worktree_create(work_dir: &Path, p: WorktreeCreateParams) -> Result<Val
         "path": wt_path,
         "branch": p.branch,
         "base_ref": resolved_base,
+        "base_branch": base_branch,
     }))
 }
 
@@ -1821,9 +1824,7 @@ struct TaskApplyParams {
     task_id: String,
     /// Branch name of the task to merge.
     branch: String,
-    /// Base ref (branch name or SHA) to merge into.
-    base_ref: String,
-    /// Preferred target branch captured when the task was created.
+    /// Required Apply destination captured when the task was created.
     #[serde(default)]
     base_branch: Option<String>,
     /// Path to the task worktree (for cleanup after merge).
@@ -1834,7 +1835,7 @@ struct TaskApplyParams {
 /// branch, then remove the worktree and delete the task branch.
 ///
 /// Steps:
-/// 1. Resolve the base branch (detect current branch if base_ref is a SHA).
+/// 1. Validate the captured target before staging source changes.
 /// 2. Commit any uncommitted changes in the worktree.
 /// 3. Merge in the active worktree when the target is current; otherwise
 ///    create the merge commit and update the target ref without checkout.
@@ -1848,6 +1849,26 @@ async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
         Some(&p.branch),
     )
     .await?;
+    // The baseline describes source history, not the destination. An absent
+    // or deleted captured branch cannot authorize merging into today's checkout.
+    let target_branch = p
+        .base_branch
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: "Apply target was not recorded".into(),
+            remediation: "Recover the task's destination before applying changes".into(),
+            source: None,
+        })?;
+    let target_ref = crate::git_ref_merge::local_branch_ref(&target_branch);
+    run_git_cmd(repo_dir, &["show-ref", "--verify", "--", &target_ref])
+        .await
+        .map_err(|source| AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: "Saved Apply target is unavailable".into(),
+            remediation: "Restore its branch before applying changes".into(),
+            source: Some(Box::new(source)),
+        })?;
     let wt = workspace.root();
     // Staging or commit failure cannot merge a stale task branch and then
     // delete the workspace containing the user's uncommitted changes.
@@ -1866,11 +1887,8 @@ async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
         .await?;
     }
 
-    let target_branch =
-        resolve_merge_target(&repo_dir, p.base_branch.as_deref(), &p.base_ref).await?;
     let commit_msg = format!("Merge agent task branch '{}'", p.branch);
 
-    let target_ref = crate::git_ref_merge::local_branch_ref(&target_branch);
     let current_ref = crate::git_ref_merge::current_branch_ref(&repo_dir).await?;
 
     let mut merge_commit: Option<String> = None;
@@ -2050,60 +2068,6 @@ async fn check_agent_running_in_worktree(worktree_path: &str) -> bool {
 }
 
 // ─── Task Apply/Discard Helpers ─────────────────────────────────────
-/// Resolve the merge target branch from a base_ref.
-///
-/// If base_ref looks like a branch name (not a 40-char hex SHA), use it
-/// directly. Otherwise, detect the current branch in the main repo.
-async fn resolve_merge_target(
-    repo_dir: &Path,
-    base_branch: Option<&str>,
-    base_ref: &str,
-) -> Result<String> {
-    if let Some(branch) = base_branch.filter(|branch| !branch.trim().is_empty()) {
-        if local_branch_exists(repo_dir, branch).await {
-            return Ok(branch.to_owned());
-        }
-    }
-
-    // If it looks like a branch name (not a full SHA), use it directly.
-    let is_sha = base_ref.len() >= 7 && base_ref.chars().all(|c| c.is_ascii_hexdigit());
-
-    if !is_sha {
-        // Verify the branch exists.
-        if local_branch_exists(repo_dir, base_ref).await {
-            return Ok(base_ref.to_owned());
-        }
-    }
-
-    // Detect the current branch.
-    let current = run_git_cmd(repo_dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
-    let branch = current.trim();
-    if !branch.is_empty() && branch != "HEAD" {
-        return Ok(branch.to_owned());
-    }
-
-    // Last resort: use "main" or "master".
-    for name in &["main", "master"] {
-        if run_git_cmd(repo_dir, &["rev-parse", "--verify", name])
-            .await
-            .is_ok()
-        {
-            return Ok(name.to_string());
-        }
-    }
-
-    Err(AgentError::Other(
-        "Cannot determine target branch for merge".to_owned(),
-    ))
-}
-
-async fn local_branch_exists(repo_dir: &Path, branch: &str) -> bool {
-    let branch_ref = crate::git_ref_merge::local_branch_ref(branch);
-    run_git_cmd(repo_dir, &["show-ref", "--verify", "--quiet", &branch_ref])
-        .await
-        .is_ok()
-}
-
 /// Run a git command in the given directory and return stdout.
 async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = crate::shellout::git_command()
@@ -5913,7 +5877,6 @@ mod tests {
                 repo_id: "repo".to_owned(),
                 task_id,
                 branch: "agent/apply".to_owned(),
-                base_ref: base,
                 base_branch: Some("integration".to_owned()),
                 worktree_path: wt_path.to_string_lossy().into_owned(),
             },
@@ -6000,7 +5963,6 @@ mod tests {
                 repo_id: "owned-repo".into(),
                 task_id: task_id.to_string(),
                 branch: "agent/rejected".into(),
-                base_ref: base.clone(),
                 base_branch: Some(branch),
                 worktree_path: worktree.to_string_lossy().into_owned(),
             },

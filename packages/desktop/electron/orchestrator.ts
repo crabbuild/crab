@@ -35,7 +35,7 @@ import { remoteAgentProcessFactory } from "./ssh-native-process";
 import { AgentProcessClosureError, WorkspaceCommandCancelledError, type AgentProcessFactory } from "./agent-process";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
 import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
-import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
+import { createWorktree, currentBranch, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
 import { parseRepoId } from "./ssh-router";
 import type { RpcRouter } from "./ssh-router";
@@ -232,13 +232,6 @@ function sameWorkspace(left: Task, right: Task): boolean {
   return left.worktreePath === right.worktreePath && sameTaskHost(left, right);
 }
 
-function branchNameFromBaseRef(baseRef: string): string | undefined {
-  if (baseRef === "HEAD" || /^[0-9a-f]{7,40}$/i.test(baseRef)) {
-    return undefined;
-  }
-  return baseRef.replace(/^refs\/heads\//, "");
-}
-
 export interface OrchestratorOptions {
   /**
    * Path to the SQLite persistence database.
@@ -378,7 +371,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     let base = await this.resolveBaseRef(repoPath, baseRef ?? "HEAD");
-    let baseBranch = await this.getCurrentBranch(repoPath);
+    let baseBranch = await currentBranch(repoPath);
     let worktreeMode: TaskWorktreeMode = requestedMode;
     let worktreePath: string;
     let branch: string;
@@ -386,7 +379,7 @@ export class Orchestrator extends EventEmitter {
     if (requestedMode === "primary") {
       if (baseRef && baseRef !== "HEAD") {
         await this.checkoutBranch(repoPath, baseRef);
-        baseBranch = await this.getCurrentBranch(repoPath);
+        baseBranch = await currentBranch(repoPath);
         base = await this.resolveBaseRef(repoPath, "HEAD");
       }
       worktreePath = repoPath;
@@ -399,7 +392,7 @@ export class Orchestrator extends EventEmitter {
       if (!fs.existsSync(worktreePath)) {
         throw new Error(`Selected worktree path does not exist: ${worktreePath}`);
       }
-      branch = await this.getCurrentBranch(worktreePath)
+      branch = await currentBranch(worktreePath)
         ?? await this.resolveHeadRef(worktreePath)
         ?? path.basename(worktreePath);
     } else {
@@ -470,6 +463,7 @@ export class Orchestrator extends EventEmitter {
     const owner = router.remoteChannelOwner(remoteInfo.profileId);
     if (!owner) throw new Error("Remote task requires an attached SSH agent");
     let base = baseRef ?? "HEAD";
+    let baseBranch: string | undefined;
     const worktreeMode = options.worktreeMode ?? "auto";
     let branch = `agent/${id}`;
     let worktreePath: string;
@@ -491,16 +485,18 @@ export class Orchestrator extends EventEmitter {
           branch,
           base_ref: base,
           task_id: id,
-        }) as { path: string; branch: string; base_ref: string };
+        }) as { path: string; branch: string; base_ref: string; base_branch: string | null };
 
         if (!result || typeof result.path !== "string" || !result.path.startsWith("/")
           || typeof result.branch !== "string" || !result.branch
-          || typeof result.base_ref !== "string" || !/^[a-f0-9]{40}$/.test(result.base_ref)) {
-          throw new Error("Remote workspace creation returned an invalid path, branch or baseline");
+          || typeof result.base_ref !== "string" || !/^[a-f0-9]{40}$/.test(result.base_ref)
+          || !(result.base_branch === null || typeof result.base_branch === "string" && result.base_branch.length > 0)) {
+          throw new Error("Remote workspace creation returned an invalid path, branch, baseline or Apply target");
         }
         worktreePath = result.path;
         branch = result.branch;
         base = result.base_ref;
+        baseBranch = result.base_branch ?? undefined;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -519,7 +515,7 @@ export class Orchestrator extends EventEmitter {
       worktreePath,
       worktreeMode,
       baseRef: base,
-      baseBranch: branchNameFromBaseRef(baseRef ?? "HEAD"),
+      baseBranch,
       repoPath,
       createdAt: now,
       lastActivityAt: now,
@@ -1539,7 +1535,7 @@ export class Orchestrator extends EventEmitter {
           try {
             const result = await host.router.requestOnRemoteChannel(host.profileId, host.owner, "task_apply", {
               repo_id: task.repoPath, task_id: taskId, branch: task.branch,
-              base_ref: task.baseRef, base_branch: task.baseBranch, worktree_path: task.worktreePath,
+              base_branch: task.baseBranch, worktree_path: task.worktreePath,
             });
             cleanupWarning = confirmRemoteTaskOperation(result, "apply");
           } catch (error: unknown) {
@@ -1620,7 +1616,7 @@ export class Orchestrator extends EventEmitter {
       const ownsWorktree = this.ownsTaskWorktree(task);
       if (ownsWorktree && fs.existsSync(task.worktreePath)) {
         await this.workspaceScripts.archive(task, {});
-        const branch = await this.getCurrentBranch(task.worktreePath);
+        const branch = await currentBranch(task.worktreePath);
         if (!branch || branch === "HEAD") throw new Error("Check out a local branch before archiving this workspace");
         await this.commitTurnSnapshot(task, taskId);
         for (const conversation of conversations) conversation.branch = branch;
@@ -2850,23 +2846,9 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private async getCurrentBranch(repoPath: string): Promise<string | undefined> {
-    try {
-      const { stdout } = await execFile(
-        "git",
-        ["rev-parse", "--abbrev-ref", "HEAD"],
-        { cwd: repoPath },
-      );
-      const branch = stdout.trim();
-      return branch && branch !== "HEAD" ? branch : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
   private async checkoutBranch(repoPath: string, branch: string): Promise<void> {
-    const currentBranch = await this.getCurrentBranch(repoPath);
-    if (currentBranch === branch) return;
+    const activeBranch = await currentBranch(repoPath);
+    if (activeBranch === branch) return;
 
     try {
       await execFile("git", ["checkout", branch], { cwd: repoPath });

@@ -39,6 +39,7 @@ vi.mock("../electron/orchestrator-worktree", async importOriginal => ({
   restoreWorktree: vi.fn(async (_repoPath: string, taskId: string) => path.join(os.tmpdir(), `crab-agent-${taskId}`)),
   readTaskMetadata: vi.fn(() => undefined),
   migrateWorktreeMetadata: vi.fn(),
+  assertWorkspace: vi.fn(async () => {}),
 }));
 
 // Track mock adapter instances for assertions.
@@ -152,6 +153,11 @@ async function mockCommand(command: string, cmdArgs: string[], options?: { cwd?:
   if (heldPostTurnGitAdd && cmdArgs[0] === "add" && cmdArgs.includes("-A")) return heldPostTurnGitAdd;
   if (hangPostTurnGitAdd && cmdArgs.includes("add") && cmdArgs.includes("-A")) {
     return new Promise(() => {});
+  }
+  if (cmdArgs[0] === "symbolic-ref" && cmdArgs.at(-1) === "HEAD") {
+    const directory = path.basename(options?.cwd ?? "");
+    const branch = directory.startsWith("crab-agent-") ? `agent/${directory.slice("crab-agent-".length)}` : mockCurrentBranch;
+    return { stdout: `${branch}\n`, stderr: "" };
   }
   if (cmdArgs[0] === "checkout" && cmdArgs[1]) {
     mockCurrentBranch = cmdArgs[1];
@@ -2322,7 +2328,7 @@ describe("Orchestrator", () => {
   });
 
   describe("remote task creation", () => {
-    function remoteRouter(response: { path: string; branch: string; base_ref: string } | Error = { path: "/remote/worktree/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40) }) {
+    function remoteRouter(response: { path: string; branch: string; base_ref: string; base_branch: string | null } | Error = { path: "/remote/worktree/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40), base_branch: "main" }) {
       const owner = {};
       const endpoint = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:fixture" };
       const request = vi.fn(async (_profile: string, captured: object, _method: string, _params: unknown) => {
@@ -2333,8 +2339,29 @@ describe("Orchestrator", () => {
       const router = { remoteEndpoint: () => ({ ...endpoint }), remoteChannelOwner: () => owner, requestOnRemoteChannel: request } as unknown as RpcRouter;
       return { router, request, owner, endpoint };
     }
+
+    it.each([{ baseRef: "HEAD", captured: "integration" }, { baseRef: "feature", captured: "main" }, { baseRef: "a".repeat(40), captured: null }])(
+      "persists the host's Apply target $captured independently of starting ref $baseRef", async ({ baseRef, captured }) => {
+        const { router } = remoteRouter({ path: "/remote/worktree", branch: "agent/fixture", base_ref: "a".repeat(40), base_branch: captured });
+        orchestrator.setRpcRouter(router);
+        const task = await orchestrator.createTask("Captured target", "codex", "ssh://server/repo", baseRef);
+        await orchestrator.shutdown();
+        const reloaded = new Orchestrator({ persistPath, rpcRouter: router });
+        try { expect({ warm: task.baseBranch, cold: reloaded.getTask(task.id)?.baseBranch }).toEqual({ warm: captured ?? undefined, cold: captured ?? undefined }); }
+        finally { await reloaded.shutdown(); }
+      },
+    );
+
+    it("refuses a remote creation reply that omits its Apply target", async () => {
+      const response = { path: "/remote/worktree", branch: "agent/fixture", base_ref: "a".repeat(40), base_branch: "main" };
+      Reflect.deleteProperty(response, "base_branch");
+      orchestrator.setRpcRouter(remoteRouter(response).router);
+      try { await expect(orchestrator.createTask("Missing contract", "codex", "ssh://server/repo")).rejects.toThrow("Apply target"); }
+      finally { await orchestrator.shutdown(); }
+    });
+
     it("routes worktree creation to remote agent for ssh:// repos", async () => {
-      const { router: mockRouter, request, owner } = remoteRouter({ path: "/home/user/.crab/worktrees/swift-falcon", branch: "agent/swift-falcon", base_ref: "a".repeat(40) });
+      const { router: mockRouter, request, owner } = remoteRouter({ path: "/home/user/.crab/worktrees/swift-falcon", branch: "agent/swift-falcon", base_ref: "a".repeat(40), base_branch: "main" });
 
       const remoteOrch = new Orchestrator({
         persistPath,
@@ -2419,7 +2446,7 @@ describe("Orchestrator", () => {
     });
 
     it("persists remote task fields to disk", async () => {
-      const { router: mockRouter } = remoteRouter({ path: "/remote/worktree/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40) });
+      const { router: mockRouter } = remoteRouter({ path: "/remote/worktree/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40), base_branch: "main" });
 
       const remoteOrch = new Orchestrator({
         persistPath,
@@ -2443,7 +2470,7 @@ describe("Orchestrator", () => {
     });
 
     it("setRpcRouter allows setting the router after construction", async () => {
-      const { router: mockRouter } = remoteRouter({ path: "/remote/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40) });
+      const { router: mockRouter } = remoteRouter({ path: "/remote/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40), base_branch: "main" });
 
       // Start without a router.
       const orch = new Orchestrator({ persistPath, timeoutMs: 5000 });
@@ -2467,7 +2494,7 @@ describe("Orchestrator", () => {
     });
 
     it("emits task-status event for remote task creation", async () => {
-      const { router: mockRouter } = remoteRouter({ path: "/remote/worktree", branch: "agent/remote-fixture", base_ref: "a".repeat(40) });
+      const { router: mockRouter } = remoteRouter({ path: "/remote/worktree", branch: "agent/remote-fixture", base_ref: "a".repeat(40), base_branch: "main" });
 
       const remoteOrch = new Orchestrator({
         persistPath,

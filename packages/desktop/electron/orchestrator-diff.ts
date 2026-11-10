@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import type { BrowserWindow, IpcMain } from "electron";
 
 import type { Orchestrator, Task } from "./orchestrator";
-import { removeWorktree } from "./orchestrator-worktree";
+import { assertWorkspace, currentBranch, removeWorktree } from "./orchestrator-worktree";
 import type { RpcRouter } from "./ssh-router";
 import { decodeGitPath } from "./git-path";
 
@@ -85,18 +85,14 @@ function shortBranch(branch: string): string {
   return branch.replace(/^refs\/heads\//, "");
 }
 
-async function currentBranch(repoPath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFile(
-      "git",
-      ["symbolic-ref", "-q", "--short", "HEAD"],
-      { cwd: repoPath },
-    );
-    const branch = stdout.trim();
-    return branch || null;
-  } catch {
-    return null;
-  }
+async function applyTarget(task: Task): Promise<string> {
+  if (!task.baseBranch) throw new Error("Apply target was not recorded. Recover the task's destination before applying changes.");
+  await assertWorkspace(task);
+  if (await currentBranch(task.worktreePath) !== shortBranch(task.branch)) throw new Error("Task workspace branch changed. Recover its ownership before applying changes.");
+  const target = localBranchRef(task.baseBranch);
+  try { await execFile("git", ["show-ref", "--verify", "--", target], { cwd: task.repoPath }); }
+  catch (cause: unknown) { throw new Error("Saved Apply target is unavailable. Restore its branch before applying changes.", { cause }); }
+  return shortBranch(target);
 }
 
 async function branchIsCheckedOut(repoPath: string, branchRef: string): Promise<boolean> {
@@ -459,14 +455,9 @@ export async function computeRemoteDiff(
 // ─── Apply ───────────────────────────────────────────────────────────────────
 
 /**
- * Merges the agent branch into the base branch where the task was created.
- *
- * Before merging, ensures all changes in the worktree are committed to the
- * agent branch so nothing is lost. Then checks out the base branch in the
- * main repo and merges the agent branch into it.
- *
- * Returns an ApplyResult indicating success or conflict. If the merge fails
- * due to conflicts, the conflict file list is returned and the merge is aborted.
+ * Merges the task branch into its captured destination after committing pending source changes.
+ * Rejects changed workspace identities, missing targets and failed source commits;
+ * returns conflicts after aborting a conflicting merge.
  */
 export async function applyAll(task: Task): Promise<ApplyResult> {
   if (isPrimaryWorkspaceTask(task)) {
@@ -474,67 +465,26 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
   }
 
   const commitMessage = `Apply agent task: ${task.prompt.slice(0, 50)}`;
+  // Validate the captured destination before staging source work. A missing
+  // target cannot grant the branch checked out today ownership of this Apply.
+  const targetBranch = await applyTarget(task);
 
-  // First, ensure all worktree changes are committed to the agent branch.
-  // The agent may have left uncommitted changes.
-  try {
-    const { stdout: status } = await execFile(
-      "git",
-      ["status", "--porcelain"],
-      { cwd: task.worktreePath },
-    );
-    if (status.trim()) {
-      await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
-      await execFile(
-        "git",
-        ["commit", "-m", "Agent work (auto-committed before apply)"],
-        { cwd: task.worktreePath },
-      );
-    }
-  } catch {
-    // Best-effort — if commit fails, the merge will still pick up
-    // whatever was already committed on the branch.
-  }
-
-  // Determine which branch to merge into.
-  // Use the stored baseBranch if available, otherwise detect the current branch.
-  let targetBranch: string | undefined = task.baseBranch;
-
-  if (!targetBranch) {
-    // Fallback: detect the current branch in the main repo.
-    try {
-      const { stdout } = await execFile(
-        "git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: task.repoPath },
-      );
-      const current = stdout.trim();
-      if (current && current !== "HEAD") {
-        targetBranch = current;
-      }
-    } catch {
-      // Will proceed without explicit checkout.
-    }
+  const { stdout: status } = await execFile("git", ["status", "--porcelain"], { cwd: task.worktreePath });
+  if (status.trim()) {
+    await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
+    await execFile("git", ["commit", "-m", "Agent work (auto-committed before apply)"], { cwd: task.worktreePath });
   }
 
   const activeBranch = await currentBranch(task.repoPath);
-  if (targetBranch) {
-    const targetShort = shortBranch(targetBranch);
-    if (activeBranch !== targetShort) {
-      const refMerge = await mergeWithoutCheckout(
-        task.repoPath,
-        task.branch,
-        targetBranch,
-        commitMessage,
-      );
-      if (refMerge.kind === "merged") {
-        return { success: true };
-      }
-      if (refMerge.kind === "conflict") {
-        return { success: false, conflicts: refMerge.conflicts };
-      }
-      throw new Error(
-        `Target branch "${refMerge.targetBranch}" is checked out in another worktree; switch to that worktree to merge.`,
-      );
+  if (activeBranch !== targetBranch) {
+    const refMerge = await mergeWithoutCheckout(task.repoPath, task.branch, targetBranch, commitMessage);
+    if (refMerge.kind === "merged") {
+      return { success: true };
     }
+    if (refMerge.kind === "conflict") {
+      return { success: false, conflicts: refMerge.conflicts };
+    }
+    throw new Error(`Target branch "${refMerge.targetBranch}" is checked out in another worktree; switch to that worktree to merge.`);
   }
 
   try {
@@ -601,19 +551,9 @@ export async function cherryPickFiles(
   if (isPrimaryWorkspaceTask(task)) return;
   if (files.length === 0) return;
 
-  // Ensure we're on the correct branch before applying files.
-  const targetBranch: string | undefined = task.baseBranch;
-  if (targetBranch) {
-    try {
-      const { stdout: currentBranch } = await execFile(
-        "git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: task.repoPath },
-      );
-      if (currentBranch.trim() !== targetBranch) {
-        await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
-      }
-    } catch {
-      // Proceed anyway — let the checkout/add fail with a clear error.
-    }
+  const targetBranch = await applyTarget(task);
+  if (await currentBranch(task.repoPath) !== targetBranch) {
+    await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
   }
 
   // Checkout each file from the agent branch.

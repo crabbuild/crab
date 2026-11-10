@@ -69,6 +69,17 @@ const BRANCH_PREFIX = "agent/";
 const METADATA_FILE = "crab-desktop-task.json";
 const DEFAULT_RETENTION_DAYS = 7;
 
+/** Reads the checked-out branch; detached HEAD has no branch, while Git failures reject. */
+export async function currentBranch(repoPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFile("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repoPath });
+    return stdout.trim() || undefined;
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return undefined;
+    throw error;
+  }
+}
+
 interface CrabEnvelope<T> {
   data?: T;
   error?: unknown;

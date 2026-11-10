@@ -15,6 +15,7 @@ import * as path from "node:path";
 
 import {
   createWorktree,
+  currentBranch,
   restoreWorktree,
   removeWorktree,
   listWorktrees,
@@ -80,6 +81,20 @@ describe("orchestrator-worktree", () => {
 
   afterEach(() => {
     cleanupRepo(repoDir);
+  });
+
+  describe("currentBranch", () => {
+    it("distinguishes detached HEAD from a checked-out branch", async () => {
+      const attached = await currentBranch(repoDir);
+      await execFile("git", ["checkout", "--detach"], { cwd: repoDir });
+      expect({ attached, detached: await currentBranch(repoDir) }).toEqual({ attached: "main", detached: undefined });
+    });
+
+    it("preserves repository errors instead of assigning a missing branch", async () => {
+      const unrelated = fs.mkdtempSync(path.join(os.tmpdir(), "crab-no-git-"));
+      try { await expect(currentBranch(unrelated)).rejects.toMatchObject({ code: 128 }); }
+      finally { fs.rmSync(unrelated, { recursive: true, force: true }); }
+    });
   });
 
   describe("generateFriendlyName", () => {

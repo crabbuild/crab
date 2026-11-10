@@ -44,7 +44,7 @@ describe("remote tasks through the shared native pipeline", () => {
       if (owner !== channelOwner) throw new Error("Remote channel changed");
       return method === "worktree_create" ? router.route() : router.sendToRemoteAgent(profile, method);
     }),
-    route: vi.fn(async () => ({ path: "/server/worktree", branch: "agent/fixture", base_ref: sha })),
+    route: vi.fn(async () => ({ path: "/server/worktree", branch: "agent/fixture", base_ref: sha, base_branch: "main" })),
     sendToRemoteAgent: vi.fn(async (_profile: string, method: string) => method === "task_apply" ? { applied: true } : { discarded: true }),
   };
 

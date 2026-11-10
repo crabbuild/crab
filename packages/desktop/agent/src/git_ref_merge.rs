@@ -30,13 +30,16 @@ pub(crate) fn local_branch_ref(branch: &str) -> String {
 
 pub(crate) async fn current_branch_ref(work_dir: &Path) -> Result<Option<String>> {
     let output = git_output(work_dir, &["symbolic-ref", "-q", "HEAD"]).await?;
-    if output.status == 0 {
-        let branch = output.stdout.trim();
-        if !branch.is_empty() {
-            return Ok(Some(branch.to_owned()));
-        }
+    if output.status == 1 {
+        return Ok(None);
     }
-    Ok(None)
+    if output.status != 0 {
+        return Err(AgentError::Cli {
+            status: output.status,
+            stderr: output.combined_output(),
+        });
+    }
+    Ok(Some(output.stdout.trim().to_owned()))
 }
 
 pub(crate) async fn merge_commit_without_checkout(
@@ -233,4 +236,16 @@ async fn git_output(work_dir: &Path, args: &[&str]) -> Result<GitOutput> {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn current_branch_preserves_repository_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = current_branch_ref(directory.path()).await.unwrap_err();
+        assert!(matches!(error, AgentError::Cli { status: 128, .. }));
+    }
 }

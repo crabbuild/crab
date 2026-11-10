@@ -123,10 +123,12 @@ The existing core `crab worktree add` contract creates the checkout and branch.
 Failure releases only an empty reservation; a partially created checkout remains
 available for recovery. Missing HOME or invalid refs fail without a fallback.
 
-Both Electron creation callers retain the returned commit SHA and branch. The
-original branch selection remains the Apply target; a moving branch or HEAD
-cannot change the saved comparison baseline. Existing saved paths stay opaque
-and are not relocated or read through a compatibility path.
+`worktree_create` returns the task branch, the resolved `base_ref` commit and
+the repository's `base_branch` at creation (`null` for detached HEAD). Electron
+persists the branch as the Apply destination and the commit as the comparison
+baseline. Apply rejects an absent or deleted destination before staging source
+changes. Existing saved paths stay opaque and are not relocated or read through
+a compatibility path.
 
 ## Disposable task workspace ownership
 

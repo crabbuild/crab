@@ -15,6 +15,7 @@ import { EventEmitter } from "node:events";
 import { Orchestrator, Task } from "../electron/orchestrator";
 import { RpcRouter } from "../electron/ssh-router";
 import { CheckpointManager } from "../electron/orchestrator-checkpoints";
+import * as diff from "../electron/orchestrator-diff";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     branch: `agent/${id.slice(0, 8)}`,
     worktreePath: `/home/user/worktrees/agent-${id.slice(0, 8)}`,
     baseRef: "abc123def456",
+    baseBranch: "main",
     repoPath: "ssh://gpu-server/home/user/repos/ml-project",
     createdAt: Date.now(),
     events: [],
@@ -210,7 +212,7 @@ describe("Remote Apply/Discard", () => {
           repo_id: task.repoPath,
           task_id: task.id,
           branch: task.branch,
-          base_ref: task.baseRef,
+          base_branch: task.baseBranch,
           worktree_path: task.worktreePath,
         },
       });
@@ -260,11 +262,13 @@ describe("Remote Apply/Discard", () => {
     });
 
     it("does not send RPC for local tasks", async () => {
+      const apply = vi.spyOn(diff, "applyAll").mockResolvedValue({ success: true });
       const task = injectLocalTask(orchestrator);
 
       await orchestrator.applyTask(task.id);
 
       expect(mockRouter.calls).toHaveLength(0);
+      expect(apply).toHaveBeenCalledWith(task);
       expect(task.status).toBe("applied");
     });
   });

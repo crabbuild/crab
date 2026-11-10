@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
@@ -24,7 +25,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-deleted", "apply-target-detached", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -87,8 +88,36 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
+      if (mode === "apply-target-detached") await run("git", ["checkout", "--detach"], { cwd: repo });
       task = await orchestrator.createTask("Use a built-in file writing or patch tool to create remote-proof.txt containing exactly remote-one followed by a newline. Do not use shell commands, external services or subagents. Reply Done.", mode === "claude-code" ? mode : "codex", mode === "checkpoint-stop-local" ? repo : repoId);
-      if (mode === "checkpoints") {
+      if (mode.startsWith("apply-target")) {
+        await orchestrator.shutdown();
+        orchestrator = new Orchestrator({ persistPath, rpcRouter: router });
+        task = orchestrator.getTask(task.id)!;
+        const head = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout;
+        const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
+        const originalIndex = await readFile(path.resolve(task.worktreePath, index));
+        await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
+        await run("git", ["checkout", "-b", "other"], { cwd: repo });
+        if (mode === "apply-target-deleted") await run("git", ["branch", "-D", "main"], { cwd: repo });
+        if (mode === "apply-target") {
+          await orchestrator.applyTask(task.id);
+          expect({ captured: task.baseBranch, active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
+            target: (await run("git", ["show", "main:apply-target.txt"], { cwd: repo })).stdout,
+            activeFiles: (await run("git", ["ls-tree", "--name-only", "HEAD", "apply-target.txt"], { cwd: repo })).stdout.trim(),
+            status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: "other", target: "captured target bytes\n", activeFiles: "", status: "applied", worktree: false });
+        } else {
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target/i);
+          // Apply drains a created conversation before backend validation;
+          // failure retains its stopped owner and untouched workspace for recovery.
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            source: (await run("git", ["rev-parse", "HEAD"], { cwd: task.worktreePath })).stdout,
+            bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), index: await readFile(path.resolve(task.worktreePath, index)),
+            captured: task.baseBranch, status: task.status }).toEqual({ head, source: head, bytes: "captured target bytes\n", index: originalIndex,
+            captured: mode === "apply-target-deleted" ? "main" : undefined, status: "stopped" });
+          await orchestrator.discardTask(task.id);
+        }
+      } else if (mode === "checkpoints") {
         const saved = task;
         const factory = remoteAgentProcessFactory(router, "fixture");
         const checkpoints = new CheckpointManager(() => factory);
@@ -227,12 +256,12 @@ wait "$child"
       if (mode === "codex") {
         await orchestrator.applyTask(task.id);
         expect({ status: task.status, file: await readFile(path.join(repo, "remote-proof.txt"), "utf8") }).toEqual({ status: "applied", file: "remote-three\n" });
-      } else {
+      } else if (!mode.startsWith("apply-target")) {
         await orchestrator.discardTask(task.id);
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local") expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode === "apply-target") expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

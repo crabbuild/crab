@@ -110,6 +110,7 @@ function createMockTask(
     branch: `agent/${taskId}`,
     worktreePath,
     baseRef,
+    baseBranch: "main",
     repoPath,
     createdAt: Date.now(),
     events: [],
@@ -581,6 +582,63 @@ rename to new-name.ts
           await execFile("git", ["branch", "-D", `agent/${taskId}`], { cwd: repoDir });
         } catch { /* already cleaned */ }
       }
+    });
+  });
+
+  describe("captured Apply contract", () => {
+    it.each(["all", "selected"].flatMap(operation => ["missing", "deleted"].map(target => ({ operation, target }))))(
+      "refuses $operation Apply with a $target destination before changing either checkout", async ({ operation, target }) => {
+        const baseRef = await getHead(repoDir);
+        const taskId = `captured-target-${operation}-${target}`;
+        const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+        try {
+          await makeAgentChanges(worktreePath);
+          fs.writeFileSync(path.join(worktreePath, "pending.txt"), "retained pending work\n");
+          const sourceHead = await getHead(worktreePath);
+          await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+          if (target === "deleted") await execFile("git", ["branch", "-D", "main"], { cwd: repoDir });
+          const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: target === "deleted" ? "main" : undefined };
+          const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"]);
+          await expect(apply).rejects.toThrow();
+          expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8"),
+            applied: fs.existsSync(path.join(repoDir, "src/new-feature.ts")) }).toEqual({ target: baseRef, source: sourceHead, pending: "retained pending work\n", applied: false });
+        } finally { cleanup(worktreePath); }
+      },
+    );
+
+    it.each(["all", "selected"])("refuses %s Apply after the source checkout changes branch", async operation => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `changed-source-${operation}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        await execFile("git", ["checkout", "-b", "user-work"], { cwd: worktreePath });
+        fs.writeFileSync(path.join(worktreePath, "pending.txt"), "user branch work\n");
+        const sourceHead = await getHead(worktreePath);
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"]);
+        await expect(apply).rejects.toThrow(/branch/i);
+        expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8") })
+          .toEqual({ target: baseRef, source: sourceHead, pending: "user branch work\n" });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.skipIf(process.platform === "win32")("retains the target and pending work when its source commit hook rejects Apply", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = "rejected-source-commit";
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      const hook = path.join(repoDir, ".git/hooks/pre-commit");
+      try {
+        await makeAgentChanges(worktreePath);
+        const sourceHead = await getHead(worktreePath);
+        fs.writeFileSync(path.join(worktreePath, "src/new-feature.ts"), "pending task content\n");
+        fs.mkdirSync(path.dirname(hook), { recursive: true });
+        fs.writeFileSync(hook, "#!/bin/sh\nprintf 'fixture commit rejected\\n' >&2\nexit 1\n", { mode: 0o755 });
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        await expect(applyAll(task)).rejects.toThrow(/fixture commit rejected/);
+        expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "src/new-feature.ts"), "utf8") })
+          .toEqual({ target: baseRef, source: sourceHead, pending: "pending task content\n" });
+      } finally { fs.rmSync(hook, { force: true }); cleanup(worktreePath); }
     });
   });
 
