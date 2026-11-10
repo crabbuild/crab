@@ -272,7 +272,9 @@ export class LocalProvider extends BaseProvider {
   // ── Capabilities ───────────────────────────────────────────────
 
   async capabilities(repoId: string): Promise<CapabilitySet> {
-    if (!this.agent.hasRepository(repoId)) return noCapabilities();
+    // Direct SDK snapshots have no physical workspace for Node filesystem or
+    // CLI mutation services, even while their native readers remain available.
+    if (!this.agent.hasWorktree(repoId)) return noCapabilities();
     const available = this.agent.repositorySession(repoId) !== null;
     const caps = available ? fullCapabilities() : noCapabilities();
     // Node filesystem services survive sidecar exit, so editor buffers can

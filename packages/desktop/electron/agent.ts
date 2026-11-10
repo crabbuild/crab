@@ -4,9 +4,10 @@ import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { app, dialog } from "electron";
-import type { StorageConnections } from "./storage-connections";
+import { storageBindingKey, type StorageConnections } from "./storage-connections";
 import { parseAgentCapabilities, type AgentCapabilities } from "./ssh-types";
 import type { RepositoryRuntime } from "./repo-capabilities";
+import { nativeSessionLost } from "./repo-capabilities";
 
 interface RpcSuccess { jsonrpc: "2.0"; id: number | string | null; result: unknown }
 interface RpcError { jsonrpc: "2.0"; id: number | string | null; error: { code: number; message: string; data?: unknown } }
@@ -119,7 +120,7 @@ export class Agent extends EventEmitter {
     return run && !run.failure && !run.stopping ? this.repositories.get(repoId)?.sessionId ?? null : null;
   }
 
-  hasRepository(repoId: string): boolean { return this.repositories.has(repoId); }
+  hasWorktree(repoId: string): boolean { return this.repositories.get(repoId)?.method === "open_local"; }
 
   private async prepare(run: Runtime): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -137,24 +138,15 @@ export class Agent extends EventEmitter {
   }
 
   private async restoreRepositories(run: Runtime): Promise<void> {
-    await Promise.allSettled([...this.repositories].map(([repoId, repository]) => this.serialize(repoId, async () => {
-      if (this.repositories.get(repoId) !== repository) return;
+    await Promise.allSettled([...this.repositories].map(async ([repoId, repository]) => {
       try {
-        const result = this.storageConnections
-          ? await this.storageConnections.reopen(repoId, (method, params) => this.sendRequest(run, method, params))
-          : await this.sendRequest(run, repository.method, repository.params);
-        opened(result, repoId); this.assertCurrent(run);
-        if (this.repositories.get(repoId) !== repository) return;
-        repository.sessionId = `${run.id}:${this.nextRepositorySession++}`; repository.error = undefined;
-        this.publishRuntime(repoId, repository);
+        const opening = () => this.repositories.get(repoId) === repository ? repository : undefined;
+        await this.openRepository(run, repoId, opening);
       } catch (error) {
-        if (this.runtime !== run || run.failure || this.repositories.get(repoId) !== repository) return;
-        repository.error = error instanceof Error ? error : new Error(String(error));
-        repository.sessionId = null;
-        this.publishRuntime(repoId, repository);
-        this.emit("notification", "repo/reopen_failed", { repo_id: repoId, message: repository.error.message });
+        if (this.runtime !== run || run.failure) return;
+        this.emit("notification", "repo/reopen_failed", { repo_id: repoId, message: error instanceof Error ? error.message : String(error) });
       }
-    })));
+    }));
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
@@ -170,40 +162,101 @@ export class Agent extends EventEmitter {
     await run.ready;
     this.assertCurrent(run);
     if (repoId && payload && (method === "open_local" || method === "open_url")) {
-      return this.serialize(repoId, async () => {
-        const previous = this.repositories.get(repoId);
-        // Native open removes the old repository before it may fail. Revoke
-        // captures before replacement, even when the process stays alive.
-        if (previous) { previous.sessionId = null; previous.error = undefined; this.publishRuntime(repoId, previous); }
-        try {
-          const result = opened(await this.dispatch(run, method, params), repoId);
-          this.assertCurrent(run);
-          const saved = { ...payload }; delete saved.__storage_auth;
-          const repository: OpenRepository = { method, params: saved, sessionId: `${run.id}:${this.nextRepositorySession++}` };
-          this.repositories.set(repoId, repository);
-          this.publishRuntime(repoId, repository);
-          return { ...result, native_session_id: repository.sessionId };
-        } catch (error) {
-          if (previous && this.runtime === run && !run.failure && this.repositories.get(repoId) === previous) {
-            previous.error = error instanceof Error ? error : new Error(String(error));
-            this.publishRuntime(repoId, previous);
-          }
-          throw error;
-        }
-      });
+      const opening = (): Pick<OpenRepository, "method" | "params"> => ({ method, params: payload });
+      const result = await this.openRepository(run, repoId, opening);
+      if (this.storageConnections && Object.hasOwn(payload, "storage_connection_id")) {
+        const key = storageBindingKey(repoId, method === "open_local" ? String(payload.path) : undefined);
+        // Release this opening's admission before replacing aliases of the
+        // same worktree; reciprocal opens must never wait on each other's lock.
+        await this.storageIdentityChanged(run, [key], "changed", repoId);
+      }
+      const repository = this.repositories.get(repoId);
+      if (!repository || !result || repository.method !== method || repository.params.path !== payload.path || repository.params.url !== payload.url) throw new Error("Repository opening was superseded or closed.");
+      return { ...result, native_session_id: repository.sessionId, native_error: repository.error?.message };
     }
     if (method === "close" && repoId) return this.serialize(repoId, async () => {
       this.repositories.delete(repoId);
       return this.dispatch(run, method, params);
     });
-    if (repoId && method !== "rpc/cancel") {
+    if (repoId && method !== "rpc/cancel" && !method.startsWith("storage_connections_")) {
       // Cancellation must bypass repository setup; waiting for the operation
-      // being cancelled would deadlock its control request.
+      // being cancelled would deadlock its control request. Storage settings
+      // must also remain usable to repair a failed or removed binding.
       await this.repositoryWork.get(repoId);
       const failure = this.repositories.get(repoId)?.error;
       if (failure) throw failure;
     }
     return this.dispatch(run, method, params);
+  }
+
+  private openRepository(run: Runtime, repoId: string, prepare: () => Pick<OpenRepository, "method" | "params"> | undefined): Promise<Record<string, unknown> | undefined> {
+    return this.serialize(repoId, async () => {
+      const opening = prepare();
+      if (!opening) return;
+      const { method, params } = opening;
+      const previous = this.repositories.get(repoId);
+      const saved = { ...params }; delete saved.__storage_auth; delete saved.storage_connection_id;
+      const repository: OpenRepository = { method, params: saved, sessionId: null };
+      this.repositories.set(repoId, repository);
+      // All open paths revoke captures before credential preparation. A failed
+      // vault lookup must not leave an old native owner usable under a new binding.
+      this.publishRuntime(repoId, repository);
+      try {
+        const result = opened(await this.dispatch(run, method, params), repoId);
+        this.assertCurrent(run);
+        if (this.repositories.get(repoId) !== repository) return result;
+        repository.sessionId = `${run.id}:${this.nextRepositorySession++}`;
+        this.publishRuntime(repoId, repository);
+        return result;
+      } catch (error) {
+        let failure = error;
+        if (this.runtime === run && !run.failure && !run.stopping) {
+          try { await this.sendRequest(run, "close", { repo_id: repoId }); }
+          catch (cleanup) { failure = new AggregateError([error, cleanup], "Repository opening and native cleanup failed"); }
+        }
+        if (this.runtime === run && !run.failure && this.repositories.get(repoId) === repository) {
+          if (previous) {
+            previous.sessionId = null; previous.error = this.publicError(failure);
+            this.repositories.set(repoId, previous);
+            this.publishRuntime(repoId, previous);
+          } else this.repositories.delete(repoId);
+        }
+        throw this.publicError(failure);
+      }
+    });
+  }
+
+  private async storageIdentityChanged(run: Runtime, keys: string[], state: "changed" | "removed", openedRepoId?: string): Promise<void> {
+    // Include admitted opens, not only published repositories. Resolve their
+    // binding after admission drains so removal cannot miss a late SDK owner.
+    if (!keys.length) return;
+    const affected = (repository: OpenRepository, repoId: string) => keys.includes(storageBindingKey(repoId, repository.method === "open_local" ? String(repository.params.path) : undefined));
+    const repositories = [...this.repositories].filter(([repoId, repository]) => repoId !== openedRepoId && affected(repository, repoId)).map(([repoId]) => repoId);
+    const outcomes = await Promise.allSettled([...repositories].map(repoId => {
+      const opening = () => {
+        const repository = this.repositories.get(repoId);
+        return repository && affected(repository, repoId) ? repository : undefined;
+      };
+      if (state === "changed") return this.openRepository(run, repoId, opening);
+      return this.serialize(repoId, async () => {
+        const repository = opening();
+        if (!repository) return;
+        repository.sessionId = null;
+        repository.error = new Error("This repository's saved connection was removed. Select another connection in Storage settings.");
+        this.publishRuntime(repoId, repository);
+        // Keep the desired repository/binding for selection and retry. Only its
+        // native owner is retired; this is not a user-requested logical close.
+        try { await this.sendRequest(run, "close", { repo_id: repoId }); }
+        catch (cleanup) {
+          repository.error = this.publicError(new AggregateError([repository.error, cleanup], "Storage identity removed but native cleanup failed"));
+          this.publishRuntime(repoId, repository);
+          throw repository.error;
+        }
+      });
+    }));
+    const failures = outcomes.flatMap(outcome => outcome.status === "rejected" ? [outcome.reason] : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Storage identity changed but some repositories could not recover");
   }
 
   private serialize<T>(repoId: string, operation: () => Promise<T>): Promise<T> {
@@ -217,7 +270,7 @@ export class Agent extends EventEmitter {
 
   private dispatch(run: Runtime, method: string, params: unknown): Promise<unknown> {
     return this.storageConnections
-      ? this.storageConnections.request(method, params, (name, payload) => this.sendRequest(run, name, payload))
+      ? this.storageConnections.request(method, params, (name, payload) => this.sendRequest(run, name, payload), (repositories, state) => this.storageIdentityChanged(run, repositories, state))
       : this.sendRequest(run, method, params);
   }
 
@@ -226,8 +279,22 @@ export class Agent extends EventEmitter {
     if (this.runtime !== run || run.stopping) throw new Error("Native agent session is no longer available");
   }
 
+  private publicError(error: unknown): Error {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    return this.storageConnections?.redactError(failure) ?? failure;
+  }
+
   private async sendRequest(run: Runtime, method: string, params: unknown): Promise<unknown> {
     this.assertCurrent(run);
+    const payload = fields(params);
+    if (payload && Object.hasOwn(payload, "native_session_id")) {
+      const { native_session_id: expected, ...nativeParams } = payload;
+      if (!expected || this.repositorySession(String(payload.repo_id)) !== expected) {
+        if (method === "file_close") return { closed: payload.file_id };
+        throw nativeSessionLost();
+      }
+      params = nativeParams;
+    }
     const id = String(this.nextId++);
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve, reject) => {

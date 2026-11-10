@@ -19,6 +19,11 @@ export interface RepositoryRuntime {
   error?: string;
 }
 
+/** Report a retained source whose native repository session was replaced. */
+export function nativeSessionLost(): Error & { code: string } {
+  return Object.assign(new Error("The file reader's native session ended. Reopen the file."), { code: "NATIVE_SESSION_LOST" });
+}
+
 /** Capabilities for a local repository with native services available. */
 export function fullCapabilities(): CapabilitySet {
   return {

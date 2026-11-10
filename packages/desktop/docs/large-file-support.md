@@ -18,7 +18,7 @@ record historical evidence rather than separate work queues.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local native restart/capture replacement and failed SSH sibling isolation have packaged proof. Slow local/SSH opens now retain native ownership and isolate sibling readiness. Complete RPC parity, direct-URL cancellation qualification, identity replacement, real multi-hop cancellation and other targets/providers remain open. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local and direct-SDK identity replacement/removal, stale file/media rejection, failed selection repair and cold encrypted local bindings now have real two-store packaged proof. Complete RPC parity, direct-URL bookmark/restore and cancellation, real multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local restart recaptures readers and materializes exact Crab/LFS bytes. Failed SSH replay is isolated; Retry restores failed/inactive views without replacing the agent. SSH preview/materialization and saved restore also pass with local native services unavailable from startup. Slow SSH replay no longer holds healthy repositories; deadlines await native cleanup and read-only previews recapture on recovery. Remaining: storage-identity replacement, queued metadata/UI state recovery, direct-URL cancellation qualification and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. `Agent` owns local/SDK identity replacement; the encrypted vault owns credentials and bindings. | Packaged local/SSH recovery and local/direct-SDK storage replacement have bounded proof below. Remaining: stable URL bookmarks/bindings, Settings without native startup, queued metadata/UI state recovery, direct-URL cancellation qualification and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -44,17 +44,21 @@ implied by a working read/materialization smoke.
 
 ### Next bounded slices
 
-1. Finish recovery parity before extending transfer features. Storage
-   rebind/reopen must revoke captures at the repository owner; a previous
-   credential context must never survive identity replacement. Use the existing
+1. Finish recovery parity before extending transfer features. Local/direct-SDK
+   storage rebind, profile replacement and removal now revoke captures through
+   the repository owner. Persist direct URL identity independently of ephemeral
+   repository IDs and restore URLs through `open_url`; startup currently calls
+   `rpc.reopen(path)` without the remote handle, and logical close deletes the
+   URL binding. Keep Settings usable when native startup itself fails. Use the existing
    session identity to refresh dashboard/cached metadata and notebook reads,
    preserve pending editor saves and restore media playback deliberately.
    Dashboard effects currently depend on repository ID/deferred state, so a
    same-ID retry can retain a previous loading error. Queued reconnect metadata
    still waits for all replay outcomes; release it through the target repository
    owner rather than introducing a component retry queue. Qualify direct-URL SDK
-   cancellation with real storage, removal during an admitted open and
-   cancellation through actual jump hosts. Local/SSH Git opening, independent
+   cancellation with real storage and cancellation through actual jump hosts.
+   Removal during an admitted open has focused lifecycle proof; live blocked
+   storage proof remains required. Local/SSH Git opening, independent
    readiness and read-only preview recapture have the bounded proof below.
 2. Complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
@@ -77,6 +81,53 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Storage identity checkpoint
+
+Settings can edit a saved connection without closing repositories manually.
+Secret fields start empty and require complete replacement credentials. The
+vault persists the selected identity before reconnection; `Agent` then retires
+the old native session and reopens every affected local/SDK context through its
+existing per-repository admission owner. Removal awaits native close and retains
+the logical repository for repair. Failed selections remain visible and never
+silently reuse the old or ambient identity. Settings requests bypass a failed
+repository's read guard, so another connection can be selected.
+
+Native pointer capture snapshots task-local storage authentication in
+`agent/src/repository/native.rs`; it does not inherit a credential selected only
+at local repository open. `StorageConnections` now supplies the saved binding to
+file, preview and complete-read captures, including a cold encrypted vault.
+Expected native identity is checked again at the local/SSH wire boundary after
+any queued repository replacement. Old file close becomes a no-op; old reads
+fail with `NATIVE_SESSION_LOST`. Direct SDK snapshots advertise no physical
+workspace mutations. Existing editable local workspaces retain Node filesystem
+ownership.
+
+The prior vault implementation reopened SDK repositories directly, left local
+native readers alive on bind/removal and rejected profile edits while remote
+repositories were open. Moving lifecycle work to `Agent` deletes that second
+reopen path. Credential encryption/selection stays in the vault; native SDK and
+read actors retain their existing close/cancellation contracts. Active CLI
+publishers still finish under their captured credentials; changing transfer
+identity or durable cancellation policy is a separate deliverable.
+
+Packaged macOS arm64 proof uses two isolated RustFS 1.0.3 stores with different
+content at the same logical URL, read-only proxies and invalid ambient AWS
+credentials. GUI actions test/save/select/edit/forget connections, preview and
+hydrate LFS, reject old file/media readers after failed selection, display exact
+replacement-store bytes and recover by selecting another profile. A separate
+app restart reads a never-browsed LFS object through the encrypted local binding,
+checks its full SHA-256 and leaves its working pointer intact. Both transports
+record reads and zero writes. This proves local cold bindings, not automatic
+direct-URL bookmark restoration.
+
+Focused owner/router/vault tests pass (187 cases in eight files); renderer and
+Electron typechecks, focused strict spec types and unsigned packaging pass.
+`tests/e2e/storage-identity.spec.ts` contains both real-store proofs;
+`scripts/qualify-v2.py` supplies their owned services to the existing smoke suite.
+Native restart and pending-open cancellation/close packaged regressions pass.
+Cross-platform/provider qualification remains pending. The desktop ESLint task
+still lacks an ESLint configuration; no lint-pass claim follows from typechecks.
 
 Operation-routing checkpoint: 187 focused tests across ten provider/router/connection
 files pass, following four reproduced operation-boundary failures. The packaged

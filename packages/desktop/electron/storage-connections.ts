@@ -6,6 +6,7 @@ import type { StorageConnection, StorageConnectionInfo } from "./storage-connect
 
 type Encryption = Pick<SafeStorage, "isEncryptionAvailable" | "encryptString" | "decryptString" | "getSelectedStorageBackend">;
 type Send = (method: string, params: unknown) => Promise<unknown>;
+type IdentityChanged = (keys: string[], state: "changed" | "removed") => Promise<void>;
 interface Vault { connections: StorageConnection[]; bindings: Record<string, string> }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -13,6 +14,11 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+
+/** Persist worktree bindings by path and isolate URL snapshot identities. */
+export function storageBindingKey(repoId: string, localPath?: string): string {
+  return localPath === undefined ? repoId : path.resolve(localPath);
+}
 
 function connection(value: unknown): StorageConnection {
   if (!record(value) || !record(value.credentials)) throw new Error("Enter storage credentials.");
@@ -64,7 +70,7 @@ export class StorageConnections {
   private mutations: Promise<unknown> = Promise.resolve();
   private cached: Vault | undefined;
   private inFlight = new Set<StorageConnection>();
-  private sessions = new Map<string, { key: string; url: string; remote: boolean }>();
+  private sessions = new Map<string, { key: string; remote: boolean }>();
 
   constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform) {}
 
@@ -137,20 +143,18 @@ export class StorageConnections {
     return value;
   }
 
-  async reopen(repoId: string, nativeSend: Send): Promise<unknown> {
-    const session = this.sessions.get(repoId);
-    if (!session) throw new Error("Repository storage session is no longer available");
-    // Bindings outlive a native process. Resolve the current selection instead
-    // of replaying credentials or an explicit profile saved by an older open.
-    const selected = this.cached?.bindings[session.key];
-    return this.request(session.remote ? "open_url" : "open_local", {
-      repo_id: repoId,
-      ...(session.remote ? { url: session.url } : { path: session.key }),
-      ...(selected ? { storage_connection_id: selected } : {}),
-    }, nativeSend);
+  redactError(error: Error): Error {
+    const detail = error as Error & { code?: number; data?: unknown };
+    return Object.assign(new Error(this.redactText(error.message)), {
+      code: detail.code, data: this.redactValue(detail.data),
+    });
   }
 
-  async request(method: string, params: unknown, nativeSend: Send): Promise<unknown> {
+  async request(method: string, params: unknown, nativeSend: Send, identityChanged: IdentityChanged): Promise<unknown> {
+    const changed: IdentityChanged = async (repositories, state) => {
+      try { await identityChanged(repositories, state); }
+      catch (error) { throw error instanceof Error ? this.redactError(error) : error; }
+    };
     const send: Send = async (name, payload) => {
       const repoId = record(payload) ? text(payload.repo_id) : "";
       const binding = this.cached?.bindings[this.sessions.get(repoId)?.key ?? repoId];
@@ -163,14 +167,9 @@ export class StorageConnections {
       if (active) this.inFlight.add(active);
       try { return await nativeSend(name, payload); }
       catch (error) {
-        if (!(error instanceof Error)) throw error;
         // Provider failures can contain signed URLs. Strip credential material
         // at the public IPC boundary, including errors from already-open SDKs.
-        const detail = error as Error & { code?: number; data?: unknown };
-        throw Object.assign(new Error(this.redactText(error.message)), {
-          code: detail.code,
-          data: this.redactValue(detail.data),
-        });
+        throw error instanceof Error ? this.redactError(error) : error;
       } finally { if (active) this.inFlight.delete(active); }
     };
     const payload = record(params) ? { ...params } : {};
@@ -184,28 +183,31 @@ export class StorageConnections {
     }
     if (method === "storage_connections_save") {
       const next = connection(payload.connection);
-      return this.mutate(vault => {
-        if (vault.connections.some(item => item.id === next.id) && [...this.sessions.values()].some(session => session.remote && vault.bindings[session.key] === next.id)) {
-          throw new Error("Close remote repositories using this connection before replacing its credentials.");
-        }
-        vault.connections = [...vault.connections.filter(item => item.id !== next.id), next];
+      let retired: StorageConnection | undefined;
+      try {
+        const repositories = await this.mutate(vault => {
+          retired = vault.connections.find(item => item.id === next.id);
+          if (retired) this.inFlight.add(retired);
+          vault.connections = [...vault.connections.filter(item => item.id !== next.id), next];
+          return Object.keys(vault.bindings).filter(key => vault.bindings[key] === next.id);
+        });
+        await changed(repositories, "changed");
         return info(next);
-      });
+      } finally { if (retired) this.inFlight.delete(retired); }
     }
     if (method === "storage_connections_remove") {
       const id = text(payload.id);
-      const forgotten = (await this.read()).connections.find(item => item.id === id);
-      if (forgotten) this.inFlight.add(forgotten);
+      let forgotten: StorageConnection | undefined;
       try {
         const bound = await this.mutate(vault => {
+          forgotten = vault.connections.find(item => item.id === id);
+          if (forgotten) this.inFlight.add(forgotten);
           vault.connections = vault.connections.filter(item => item.id !== id);
           // Retain bindings so an existing repo cannot silently switch identity
           // to ambient credentials after its saved connection is forgotten.
           return Object.keys(vault.bindings).filter(key => vault.bindings[key] === id);
         });
-        for (const [repo_id, session] of this.sessions) {
-          if (session.remote && bound.includes(session.key)) await send("close", { repo_id }).catch(() => {});
-        }
+        await changed(bound, "removed");
         return { ok: true };
       } finally { if (forgotten) this.inFlight.delete(forgotten); }
     }
@@ -214,17 +216,16 @@ export class StorageConnections {
       const session = this.sessions.get(repo);
       if (!session) throw new Error("Open a repository on this device before selecting its storage connection.");
       if (!id && !(await this.read()).bindings[session.key]) return { ok: true };
-      const selected = await this.mutate(vault => {
+      const repositories = await this.mutate(vault => {
         const selected = vault.connections.find(item => item.id === id);
         if (id && !selected) throw new Error("Storage connection was not found.");
         if (id) vault.bindings[session.key] = id; else delete vault.bindings[session.key];
-        return selected;
+        return [session.key];
       });
-      // Persist the requested identity before reconnecting. A failed reconnect
-      // must never leave a repository silently using the previous identity.
-      if (session.remote) {
-        await send("open_url", { repo_id: repo, url: session.url, ...(selected ? { __storage_auth: selected } : {}) });
-      }
+      // Persist before replacing native owners, including on failed reconnect.
+      // Release vault admission before Agent's repository admission: opening
+      // may itself persist a binding, so holding both would invert lock order.
+      await changed(repositories, "changed");
       return { ok: true };
     }
     if (method === "storage_connections_test") {
@@ -238,8 +239,10 @@ export class StorageConnections {
     const session = this.sessions.get(repoId);
     const key = session?.key || (typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd));
     const explicit = Object.hasOwn(payload, "storage_connection_id");
-    const needsAuth = explicit || (method === "open_local" && !!this.cached?.bindings[key]) || method.startsWith("crab_") || method.startsWith("workflow_") ||
-      ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method);
+    const control = ["close", "file_close", "rpc/cancel"].includes(method);
+    const capture = method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
+    const needsAuth = !control && (explicit || !!this.cached?.bindings[key] || capture || (method === "open_local" && this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
+      ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method));
     // Local browsing and app startup do not depend on an unlocked cloud keyring.
     const vault = needsAuth ? await this.read() : undefined;
     const id = explicit ? text(payload.storage_connection_id) : vault?.bindings[key];
@@ -248,26 +251,37 @@ export class StorageConnections {
     if (id) {
       selected = vault?.connections.find(item => item.id === id);
       if (!selected) throw new Error("This repository's saved connection was removed. Select another connection in Storage settings.");
-      payload.__storage_auth = selected;
     }
     // Record explicit identity before opening or cloning. If encrypted storage
     // cannot be written, do not create a cloud session or an unbound checkout.
     if (explicit && (method === "open_local" || method === "open_url")) {
-      const openingKey = method === "open_url" ? repoId : path.resolve(text(payload.path));
-      if (id || vault?.bindings[openingKey]) {
-        await this.mutate(vault => { if (id) vault.bindings[openingKey] = id; else delete vault.bindings[openingKey]; });
+      const openingKey = storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined);
+      if (id || vault?.bindings[openingKey] || this.available()) {
+        selected = await this.mutate(vault => {
+          const current = id ? vault.connections.find(item => item.id === id) : undefined;
+          if (id && !current) throw new Error("This repository's saved connection was removed. Select another connection in Storage settings.");
+          if (id) vault.bindings[openingKey] = id; else delete vault.bindings[openingKey];
+          return current;
+        });
       }
     }
     if (method === "clone" && selected && typeof payload.dest === "string") {
       const dest = path.resolve(payload.dest);
-      await this.mutate(vault => { vault.bindings[dest] = selected.id; });
+      const selectedId = selected.id;
+      selected = await this.mutate(vault => {
+        const current = vault.connections.find(item => item.id === selectedId);
+        if (!current) throw new Error("This repository's saved connection was removed. Select another connection in Storage settings.");
+        vault.bindings[dest] = selectedId;
+        return current;
+      });
     }
+    if (selected) payload.__storage_auth = selected;
     const result = await send(method, payload);
     if ((method === "open_local" || method === "open_url") && record(result) && typeof result.repo_id === "string") {
       const repo_id = result.repo_id;
       const remote = method === "open_url";
-      const sessionKey = remote ? repo_id : path.resolve(text(payload.path));
-      this.sessions.set(repo_id, { key: sessionKey, url: text(payload.url) || text(result.url), remote });
+      const sessionKey = storageBindingKey(repo_id, remote ? undefined : text(payload.path));
+      this.sessions.set(repo_id, { key: sessionKey, remote });
     }
     if (method === "close" && session) {
       this.sessions.delete(repoId);

@@ -25,6 +25,7 @@ function fixture(timeout?: number) {
   const manager = {
     getStatus: (id: string) => statuses.get(id) ?? "connected",
     getConnection: (id: string) => ({ channels: { agent: channels.get(id)?.asChannel() } }),
+    repositoryRuntime: (_id: string, repoId: string) => ({ repoId, sessionId: "current" }),
   };
   const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, { requestTimeoutMs: timeout });
   const attach = (profile: string) => {
@@ -45,6 +46,18 @@ function observe(promise: Promise<unknown>) {
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe("SSH captured source ownership", () => {
+  it("validates the expected native identity at the wire boundary and strips it from native params", async () => {
+    const { router, attach } = fixture();
+    const channel = attach("one");
+    const params = { repo_id: "ssh://one/repo", file_id: "captured", offset: 0, length: 1 };
+    await expect(router.sendToRemoteAgent("one", "read_range", { ...params, native_session_id: "old" })).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+    await expect(router.sendToRemoteAgent("one", "file_close", { ...params, native_session_id: "old" })).resolves.toEqual({ closed: "captured" });
+    expect(channel.frames).toHaveLength(0);
+    const read = router.sendToRemoteAgent("one", "read_range", { ...params, native_session_id: "current" });
+    expect(channel.frames[0].params).not.toHaveProperty("native_session_id");
+    channel.reply(channel.frames[0].id, { result: { bytes_b64: "YQ==" } });
+    await expect(read).resolves.toEqual({ bytes_b64: "YQ==" });
+  });
   it("does not freshen stale metadata when a reconnect prefetch uses cache fallback", async () => {
     vi.useFakeTimers();
     const { router, setStatus } = fixture();

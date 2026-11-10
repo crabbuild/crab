@@ -5,7 +5,7 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
-import { noCapabilities } from "./repo-capabilities";
+import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
 import type { CapabilitiesChangedEvent } from "./repo-provider";
 import { rpcReply } from "./rpc-transport";
 import { MediaResources } from "./media";
@@ -400,14 +400,16 @@ function registerIpc(skillManager: SkillManager) {
       if (provider) {
         const payload = params as Record<string, unknown>;
         if (Object.hasOwn(payload, "native_session_id")) {
-          const { native_session_id: expected, ...nativeParams } = payload;
+          const expected = payload.native_session_id;
           if (!expected || provider.nativeSession(repoId) !== expected) {
             // A revoked session drains under its original owner. Cleanup must
             // never send an old file identity into a replacement process.
             if (method === "file_close") return { closed: payload.file_id };
-            throw Object.assign(new Error("The file reader's native session ended. Reopen the file."), { code: "NATIVE_SESSION_LOST" });
+            throw nativeSessionLost();
           }
-          return provider.request(method, nativeParams);
+          // Keep the expected identity until the owner admits the wire request;
+          // a repository replacement may be queued after this initial check.
+          return provider.request(method, payload);
         }
         return provider.request(method, payload);
       }

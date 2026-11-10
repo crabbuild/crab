@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { StorageConnections } from "../electron/storage-connections";
+import type { StorageConnectionInfo, StorageConnectionInput } from "../electron/storage-connection-types";
 
 interface Frame { id: string; method: string; params: Record<string, unknown> }
 
@@ -78,11 +83,167 @@ import { LocalProvider } from "../electron/local-provider";
 
 describe("native agent process ownership", () => {
   let agent: Agent;
+  let vaultDirectory: string | undefined;
   beforeEach(() => { children.length = 0; configure = () => {}; agent = new Agent("fixture"); });
   afterEach(async () => {
     const stopped = agent.shutdown();
     for (const child of children) { if (!child.ended) child.exit(0, null); child.close(); }
     await stopped;
+    if (vaultDirectory) { await rm(vaultDirectory, { recursive: true, force: true }); vaultDirectory = undefined; }
+  });
+
+  async function storageAgent() {
+    vaultDirectory = await mkdtemp(path.join(tmpdir(), "crab-agent-storage-"));
+    // This fixture exercises lifecycle routing; vault encryption has its own
+    // authenticated-encryption tests in storage-connections.spec.ts.
+    const encryption = {
+      isEncryptionAvailable: () => true, getSelectedStorageBackend: () => "gnome_libsecret" as const,
+      encryptString: (value: string) => Buffer.from(value), decryptString: (value: Buffer) => value.toString(),
+    };
+    const vault = path.join(vaultDirectory, "connections.enc");
+    const store = new StorageConnections(vault, encryption, "darwin");
+    agent = new Agent("fixture", process.env, [], store);
+    await agent.start();
+    const profile = (name: string): StorageConnectionInput => ({ name, provider: "s3", bucket: "fixture-bucket", region: "fixture-region", endpoint: `https://${name}.invalid`, credentials: { provider: "s3", access_key_id: `fixture-${name}`, secret_access_key: `fixture-secret-${name}` } });
+    const first = await agent.request("storage_connections_save", { connection: profile("first") }) as StorageConnectionInfo;
+    const second = await agent.request("storage_connections_save", { connection: profile("second") }) as StorageConnectionInfo;
+    return { first, second, profile, vault, encryption };
+  }
+
+  it.each(["open_local", "open_url"] as const)("%s storage rebinding revokes the old epoch and publishes the replacement", async method => {
+    const { first, second } = await storageAgent();
+    const params = method === "open_local" ? { path: "/one" } : { url: "crab://fixture-bucket/one" };
+    await agent.request(method, { repo_id: "one", ...params, storage_connection_id: first.id });
+    const previous = agent.repositorySession("one");
+    children[0].holdOpen = "one";
+    const changed = agent.request("storage_connections_bind", { repo_id: "one", id: second.id });
+    void changed.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(children[0].frames.filter(frame => frame.method === method)).toHaveLength(2));
+      expect(agent.repositorySession("one")).toBeNull();
+      children[0].holdOpen = undefined;
+      children[0].answer(children[0].frames.filter(frame => frame.method === method)[1]);
+      await changed;
+      expect(agent.repositorySession("one")).not.toBe(previous);
+      await agent.request("file_open", { repo_id: "one", path: "weights.bin" });
+      expect(children[0].frames.at(-1)?.params.__storage_auth).toMatchObject({ id: second.id });
+    } finally { children[0].holdOpen = undefined; }
+  });
+
+  it.each(["open_local", "open_url"] as const)("%s forgetting its connection closes the native owner and blocks captured reads", async method => {
+    const { first } = await storageAgent();
+    await agent.request(method, { repo_id: "one", path: "/one", url: "crab://fixture-bucket/one", storage_connection_id: first.id });
+    await agent.request("storage_connections_remove", { id: first.id });
+    expect(agent.repositorySession("one")).toBeNull();
+    expect(children[0].repositories.has("one")).toBe(false);
+    await expect(agent.request("read_text", { repo_id: "one", path: "weights.bin" })).rejects.toThrow(/removed/i);
+    await expect(agent.request("storage_connections_list", { repo_id: "one" })).resolves.toBeDefined();
+    const status = await agent.request("storage_connections_list", { repo_id: "one" }) as { connections: StorageConnectionInfo[] };
+    const replacement = status.connections[0];
+    await agent.request("storage_connections_bind", { repo_id: "one", id: replacement.id });
+    expect(agent.repositorySession("one")).toEqual(expect.any(String));
+  });
+
+  it("a saved profile replacement reopens every bound repository under a new epoch", async () => {
+    const { first, profile } = await storageAgent();
+    for (const repo_id of ["one", "two"]) await agent.request("open_url", { repo_id, url: "crab://fixture-bucket/one", storage_connection_id: first.id });
+    const previous = [agent.repositorySession("one"), agent.repositorySession("two")];
+    await agent.request("storage_connections_save", { connection: { ...profile("replacement"), id: first.id } });
+    expect([agent.repositorySession("one"), agent.repositorySession("two")]).toEqual(previous.map(() => expect.any(String)));
+    expect([agent.repositorySession("one"), agent.repositorySession("two")]).not.toEqual(previous);
+  });
+
+  it("a cold vault restores local capture credentials before any cloud reader opens", async () => {
+    const { first, vault, encryption } = await storageAgent();
+    await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
+    await agent.shutdown();
+    agent = new Agent("fixture", process.env, [], new StorageConnections(vault, encryption, "darwin"));
+    await agent.start();
+    await agent.request("open_local", { repo_id: "restored", path: "/one" });
+    await agent.request("file_open", { repo_id: "restored", path: "weights.bin" });
+    expect(children[1].frames.at(-1)?.params.__storage_auth).toMatchObject({ id: first.id });
+  });
+
+  it("a captured read queued behind identity replacement cannot enter the replacement native owner", async () => {
+    const { first, second } = await storageAgent();
+    const initial = await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id }) as { native_session_id: string };
+    children[0].holdOpen = "one";
+    const changed = agent.request("storage_connections_bind", { repo_id: "one", id: second.id });
+    void changed.catch(() => {});
+    await vi.waitFor(() => expect(children[0].frames.filter(frame => frame.method === "open_local")).toHaveLength(2));
+    const stale = agent.request("read_range", { repo_id: "one", file_id: "old-reader", native_session_id: initial.native_session_id, offset: 0, length: 1 });
+    void stale.catch(() => {});
+    children[0].holdOpen = undefined;
+    children[0].answer(children[0].frames.filter(frame => frame.method === "open_local")[1]);
+    await changed;
+    await expect(stale).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+    expect(children[0].frames.some(frame => frame.method === "read_range")).toBe(false);
+  });
+
+  it("forgetting credentials joins an admitted first open before retiring its late native owner", async () => {
+    const { first } = await storageAgent();
+    children[0].holdOpen = "late";
+    const opening = agent.request("open_url", { repo_id: "late", url: "crab://fixture-bucket/late", storage_connection_id: first.id });
+    void opening.catch(() => {});
+    await vi.waitFor(() => expect(children[0].frames.some(frame => frame.method === "open_url")).toBe(true));
+    let removed = false;
+    const removal = agent.request("storage_connections_remove", { id: first.id }).then(() => { removed = true; });
+    void removal.catch(() => {});
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(removed).toBe(false);
+    children[0].holdOpen = undefined;
+    children[0].answer(children[0].frames.find(frame => frame.method === "open_url")!);
+    await Promise.all([opening, removal]);
+    expect(agent.repositorySession("late")).toBeNull();
+    expect(children[0].repositories.has("late")).toBe(false);
+  });
+
+  it("a profile removed during open preparation cannot be restored by stale credential preparation", async () => {
+    const { first } = await storageAgent();
+    const outcomes = await Promise.allSettled([
+      agent.request("storage_connections_remove", { id: first.id }),
+      agent.request("open_local", { repo_id: "late", path: "/late", storage_connection_id: first.id }),
+    ]);
+    expect(outcomes.map(outcome => outcome.status)).toEqual(["fulfilled", "rejected"]);
+    expect(children[0].frames.some(frame => frame.method === "open_local")).toBe(false);
+  });
+
+  it("sidecar restart uses the current binding after an identity change", async () => {
+    const { first, second } = await storageAgent();
+    await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
+    await agent.request("storage_connections_bind", { repo_id: "one", id: second.id });
+    children[0].kill("SIGKILL");
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await agent.start();
+    expect(children[1].frames.find(frame => frame.method === "open_local")?.params.__storage_auth).toMatchObject({ id: second.id });
+  });
+
+  it("opening a worktree with an explicit identity also replaces its other open contexts", async () => {
+    const { first, second } = await storageAgent();
+    await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
+    const previous = agent.repositorySession("one");
+    await agent.request("open_local", { repo_id: "alias", path: "/one", storage_connection_id: second.id });
+    expect(agent.repositorySession("one")).not.toBe(previous);
+    await agent.request("file_open", { repo_id: "one", path: "weights.bin" });
+    expect(children[0].frames.at(-1)?.params.__storage_auth).toMatchObject({ id: second.id });
+  });
+
+  it("changing one connection does not wait for an unrelated pending repository open", async () => {
+    const { first, second, profile } = await storageAgent();
+    await agent.request("open_url", { repo_id: "one", url: "crab://fixture-bucket/one", storage_connection_id: first.id });
+    children[0].holdOpen = "blocked";
+    const blocked = agent.request("open_url", { repo_id: "blocked", url: "crab://fixture-bucket/two", storage_connection_id: second.id });
+    void blocked.catch(() => {});
+    await vi.waitFor(() => expect(children[0].frames.some(frame => frame.method === "open_url" && frame.params.repo_id === "blocked")).toBe(true));
+    let updated = false;
+    const saving = agent.request("storage_connections_save", { connection: { ...profile("replacement"), id: first.id } }).then(() => { updated = true; });
+    void saving.catch(() => {});
+    try { await vi.waitFor(() => expect(updated).toBe(true)); }
+    finally {
+      children[0].holdOpen = undefined;
+      children[0].answer(children[0].frames.find(frame => frame.method === "open_url" && frame.params.repo_id === "blocked")!);
+      await Promise.all([saving, blocked]);
+    }
   });
 
   it("concurrent starts join one process", async () => {
@@ -214,6 +375,16 @@ describe("native agent process ownership", () => {
       await agent.start();
       await agent.request("open_local", { repo_id: "one", path: "/one" });
       expect(await provider.capabilities("one")).toMatchObject({ canHydrate: true, canMaterialize: false });
+    } finally { provider.dispose(); }
+  });
+
+  it("SDK URL snapshots keep native reading identity without advertising physical-worktree mutations", async () => {
+    const provider = new LocalProvider(agent);
+    try {
+      await agent.start();
+      await agent.request("open_url", { repo_id: "remote", url: "crab://fixture-bucket/one" });
+      expect(provider.nativeSession("remote")).toEqual(expect.any(String));
+      expect(await provider.capabilities("remote")).toMatchObject({ canEdit: false, canWatch: false, canMaterialize: false, canHydrate: false, canExec: false, canTrash: false });
     } finally { provider.dispose(); }
   });
 

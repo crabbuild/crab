@@ -5,6 +5,7 @@ import { TextDecoder } from "node:util";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "./ssh-manager";
 import type { RemoteCache } from "./ssh-cache";
+import { nativeSessionLost } from "./repo-capabilities";
 
 export interface RepoTransport { type: "local" | "remote"; profileId?: string }
 export interface RpcRouterOptions {
@@ -232,7 +233,15 @@ export class RpcRouter extends EventEmitter {
     // Release must finish even if the initiating view/profile deadline expires.
     const timeout = method === "file_close" || method === "close" ? undefined
       : connection.profile?.operationTimeoutMs ?? (owned ? this.ownerTimeoutMs : this.requestTimeoutMs);
-    const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+    let fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+    if (fields && Object.hasOwn(fields, "native_session_id")) {
+      const { native_session_id: expected, ...nativeParams } = fields;
+      if (!expected || this.sessionManager.repositoryRuntime(profileId, String(fields.repo_id)).sessionId !== expected) {
+        if (method === "file_close") return Promise.resolve({ closed: fields.file_id });
+        return Promise.reject(nativeSessionLost());
+      }
+      params = nativeParams; fields = nativeParams;
+    }
     const enriched = owned && fields && typeof fields.op_id !== "string" ? { ...fields, op_id: randomUUID() } : params;
     return this.send(owner, method, enriched, timeout);
   }

@@ -2419,17 +2419,18 @@ export const rpc = {
   storageConfigVerify: (repo_id: string, remote?: string) => call<StorageVerifyResult>("storage_config_verify", { repo_id, remote }),
 
   storageConnections: (repo_id?: string) => call<StorageConnectionStatus>("storage_connections_list", { repo_id }),
-  storageConnectionSave: (connection: StorageConnectionInput) => call<StorageConnectionInfo>("storage_connections_save", { connection }),
+  storageConnectionSave: async (connection: StorageConnectionInput) => {
+    try { return await call<StorageConnectionInfo>("storage_connections_save", { connection }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed")); }
+  },
   storageConnectionRemove: async (id: string) => {
-    const result = await call<{ ok: boolean }>("storage_connections_remove", { id });
-    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed"));
-    return result;
+    try { return await call<{ ok: boolean }>("storage_connections_remove", { id }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed")); }
   },
   storageConnectionTest: (connection: StorageConnectionInput | string) => call<StorageVerifyResult>("storage_connections_test", typeof connection === "string" ? { id: connection } : { connection }),
   storageConnectionBind: async (repo_id: string, id: string | null) => {
-    const result = await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id });
-    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } }));
-    return result;
+    try { return await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } })); }
   },
 
   storageSummary: (repo_id: string) => call<StorageSummary>("storage_summary", { repo_id }),
