@@ -6001,12 +6001,15 @@ mod tests {
         let nested = root.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let state = State::new();
-        let opened = open_local(
+        let opened = handle(
             &state,
-            OpenLocalParams {
-                repo_id: "local-root".into(),
-                path: nested.clone(),
+            Request {
+                jsonrpc: Some("2.0".into()),
+                id: Some(json!(1)),
+                method: "open_local".into(),
+                params: json!({ "repo_id": "local-root", "path": nested }),
             },
+            Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
         )
         .await;
         state.shutdown().await.unwrap();

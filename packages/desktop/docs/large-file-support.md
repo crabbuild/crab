@@ -167,6 +167,13 @@ exposed SDK deferred opening on Overview, which requested local-only statistics;
 SDK sources now default to Files. Editable buffer/tab reconstruction and cached
 dashboard/dataset state still require their own recovery proof.
 
+The rebase onto `crab-v2` at `e60de177853` retains the terminal lifecycle APIs
+and Git-root initialization contract. The root-initialization regression now
+uses the RPC dispatcher, while the lifecycle module keeps its private request
+types. Rebased checks pass: 244 focused TypeScript cases in 18 files and 26
+native repository/root/layout/cleanup cases. Six fixture-dependent native cases
+remain ignored and are not counted as passing.
+
 Operation-routing checkpoint: 187 focused tests across ten provider/router/connection
 files pass, following four reproduced operation-boundary failures. The packaged
 SSH smoke covers exact 4 MiB hydration, Activity progress, cancellation of a
