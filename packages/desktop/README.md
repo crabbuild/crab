@@ -16,6 +16,8 @@ History, Branches, Worktrees, and Pull Requests (when a forge is detected),
 in that order. Branches and Worktrees each have their own sidebar and selection.
 Settings stays at the bottom. Click the repository name in the title bar for
 its Overview; the adjacent arrow switches workspace repositories.
+Forge discovery probes Git network remotes; local paths, file URLs, and
+object-store remotes open without forge network requests.
 
 Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
 Terminal opens as a full page from its rail entry or the title-bar control.

@@ -183,3 +183,13 @@ jobs:
           if-no-files-found: error
       - name: Broad desktop regression suite
         run: npm test -- --maxWorkers 2 --minWorkers 1
+      - name: Retain packaged app failure context
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crab-desktop-failure-${{ runner.os }}-${{ runner.arch }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            packages/desktop/test-results/**/error-context.md
+            packages/desktop/test-results/**/*.png

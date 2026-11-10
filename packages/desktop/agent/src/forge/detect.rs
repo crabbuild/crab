@@ -113,18 +113,26 @@ pub async fn detect_from_url(remote_url: &str) -> DetectedProvider {
 /// - `ssh://git@github.com/owner/repo.git`
 /// - `github.com:owner/repo` (SCP-like without user)
 fn extract_host(url: &str) -> Option<String> {
-    // Try standard URL parsing first (handles https://, ssh://, git://).
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(host) = parsed.host_str() {
-            return Some(host.to_lowercase());
+    // Windows drive and UNC prefixes name local Git sources. Treating a drive
+    // as an SSH host makes repository open wait for unrelated network probes.
+    if matches!(
+        Path::new(url).components().next(),
+        Some(std::path::Component::Prefix(_))
+    ) {
+        return None;
+    }
+    if url.contains("://") {
+        let parsed = url::Url::parse(url).ok()?;
+        if !matches!(parsed.scheme(), "https" | "http" | "ssh" | "git") {
+            return None;
         }
+        return parsed.host_str().map(str::to_lowercase);
     }
 
     // Handle SCP-like syntax: [user@]host:path
-    if let Some(colon_pos) = url.find(':') {
+    if let Some((before_colon, path)) = url.split_once(':') {
         // Make sure it's not a scheme (no slashes before the colon).
-        let before_colon = &url[..colon_pos];
-        if !before_colon.contains('/') {
+        if !before_colon.contains('/') && !path.starts_with(':') {
             // Strip optional user@ prefix.
             let host_part = if let Some(at_pos) = before_colon.rfind('@') {
                 &before_colon[at_pos + 1..]
@@ -436,6 +444,52 @@ mod tests {
     #[test]
     fn extract_host_empty_returns_none() {
         assert_eq!(extract_host(""), None);
+    }
+
+    #[test]
+    fn local_and_object_store_remotes_have_no_forge_host() {
+        for remote in [
+            "/tmp/seed",
+            "../seed",
+            "./seed:backup",
+            "file:///tmp/seed",
+            "file://server/share/seed",
+            "crab://bucket/repository",
+            "s3://bucket/repository",
+            "gs://bucket/repository",
+            "az://account/container/repository",
+            "helper::repository",
+        ] {
+            assert_eq!(extract_host(remote), None, "{remote}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_remotes_have_no_forge_host() {
+        for remote in [
+            "C:/fixtures/seed",
+            r"C:\fixtures\seed",
+            "D:seed",
+            r"\\server\share\seed",
+            r"\\?\C:\fixtures\seed",
+            r"\\?\UNC\server\share\seed",
+        ] {
+            assert_eq!(extract_host(remote), None, "{remote}");
+        }
+    }
+
+    #[test]
+    fn network_remotes_preserve_forge_hosts() {
+        for remote in [
+            "https://git.example.com/team/repository",
+            "ssh://git@git.example.com:2222/team/repository",
+            "git://git.example.com/team/repository",
+            "git@git.example.com:team/repository",
+            "git.example.com:team/repository",
+        ] {
+            assert_eq!(extract_host(remote).as_deref(), Some("git.example.com"));
+        }
     }
 
     #[test]
