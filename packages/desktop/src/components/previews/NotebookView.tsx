@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, Component, type Reac
 import { Streamdown } from "streamdown";
 import { ChevronDown, ChevronRight, Code2, FileText, Loader2, Pause, Play, Power, RefreshCw, Terminal, Zap } from "lucide-react";
 import { rpc } from "../../ipc";
+import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
 
 // Use a simple pre-formatted code block instead of Monaco to avoid
 // TDZ/initialization crashes when rendering many cells.
@@ -13,6 +14,7 @@ interface Props {
   repoId: string;
   path: string;
   rev: string | null;
+  nativeSessionId: string | null;
 }
 
 // Jupyter IPC — access directly via window.crab to avoid any
@@ -56,24 +58,10 @@ interface Ipynb {
   nbformat_minor?: number;
 }
 
-export function NotebookView({ repoId, path, rev }: Props) {
+export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setText(null);
-    setErr(null);
-    rpc
-      .readText(repoId, path, { rev: rev ?? undefined, max_bytes: 20 * 1024 * 1024 })
-      .then((r) => {
-        if (cancelled) return;
-        if (r.truncated) setErr(r.reason ?? "notebook too large");
-        else setText(r.text ?? "");
-      })
-      .catch((e: Error) => { if (!cancelled) setErr(e.message); });
-    return () => { cancelled = true; };
-  }, [repoId, path, rev]);
+  const [retry, setRetry] = useState(0);
 
   const nb = useMemo<Ipynb | string>(() => {
     if (text == null) return "";
@@ -90,6 +78,25 @@ export function NotebookView({ repoId, path, rev }: Props) {
   const [cellOutputs, setCellOutputs] = useState<Map<number, IpynbOutput[]>>(new Map());
   const [runningCell, setRunningCell] = useState<number | null>(null);
   const msgToCellRef = useRef<Map<string, number>>(new Map());
+  const documentText = useRef<string | null>(null);
+
+  useEffect(() => {
+    const abort = new AbortController();
+    setText(null); setErr(null);
+    if (!nativeSessionId) return;
+    void rpc.readText(repoId, path, { rev: rev ?? undefined, max_bytes: 20 * 1024 * 1024, native_session_id: nativeSessionId, signal: abort.signal }).then(result => {
+      if (abort.signal.aborted) return;
+      if (result.truncated || result.text === null) { setErr(result.reason ?? "The notebook was not read completely."); return; }
+      if (documentText.current !== result.text) {
+        // Kernel variables survive native repair; outputs belong to the
+        // document that ran them and cannot attach to replacement cells.
+        msgToCellRef.current.clear(); setCellOutputs(new Map()); setRunningCell(null);
+      }
+      documentText.current = result.text;
+      setText(result.text);
+    }).catch((error: Error) => { if (!abort.signal.aborted) setErr(error.message); });
+    return () => { abort.abort(); };
+  }, [repoId, path, rev, nativeSessionId, retry]);
 
   useEffect(() => {
     jupyterIpc.listKernels().then(setKernelSpecs).catch(() => {});
@@ -151,7 +158,8 @@ export function NotebookView({ repoId, path, rev }: Props) {
   }, [kernelId]);
 
   // ---- Early returns (AFTER all hooks) ----
-  if (err) return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;
+  if (!nativeSessionId) return <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>;
+  if (err) return <div className="m-4 space-y-3 text-xs"><p role="alert" className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-gx-error">{err}</p><button type="button" className="btn" onClick={() => setRetry(retry + 1)}>Retry notebook</button></div>;
   if (text == null) return <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Reading notebook…</div>;
   if (typeof nb === "string") return <div className="m-4 rounded border border-gx-warn/40 bg-gx-warn/10 p-3 text-xs text-gx-warn">Could not parse notebook JSON: {nb}</div>;
 
@@ -420,10 +428,10 @@ function OutputView({ output }: { output: IpynbOutput }) {
       {png && <img src={`data:image/png;base64,${png}`} alt="output" className="max-w-full rounded" />}
       {jpeg && !png && <img src={`data:image/jpeg;base64,${jpeg}`} alt="output" className="max-w-full rounded" />}
       {svg && !png && !jpeg && (
-        <div className="max-w-full overflow-auto" dangerouslySetInnerHTML={{ __html: svg }} />
+        <NotebookRichOutput kind="SVG" content={svg} />
       )}
       {html && !png && !jpeg && !svg && (
-        <div className="max-w-full overflow-auto text-[13px]" dangerouslySetInnerHTML={{ __html: html }} />
+        <NotebookRichOutput kind="HTML" content={html} />
       )}
       {latex && !html && !png && !svg && (
         <div className="font-mono text-[12px] text-gx-text">{latex}</div>
@@ -433,6 +441,14 @@ function OutputView({ output }: { output: IpynbOutput }) {
       )}
     </div>
   );
+}
+
+function NotebookRichOutput({ kind, content }: { kind: "HTML" | "SVG"; content: string }) {
+  const theme = useEffectiveTheme();
+  // Saved/live markup is data, not code for the privileged renderer. Keep
+  // script and same-origin exemptions absent so it cannot reach window.crab.
+  const source = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'"><meta name="color-scheme" content="${theme}"><style>:root{color-scheme:${theme}}body{margin:0;color:CanvasText;background:Canvas;font:13px/1.5 system-ui;overflow-wrap:anywhere}img,svg{max-width:100%}svg{fill:currentColor}table{border-collapse:collapse}th,td{padding:.25rem .5rem;text-align:start}</style></head><body>${content}</body></html>`;
+  return <iframe title={`Notebook ${kind} output`} sandbox="" referrerPolicy="no-referrer" srcDoc={source} className="h-48 min-h-24 w-full resize-y rounded border-0 bg-gx-bg-sub" />;
 }
 
 function joinData(d: string | string[] | undefined): string | null {

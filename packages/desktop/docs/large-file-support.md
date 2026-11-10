@@ -13,7 +13,7 @@ record historical evidence rather than separate work queues.
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, and audio/video playback-state recovery have bounded macOS proof below. Live kernel/output state, decoded parser budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local repository-switch watcher stalls and physical read/save caller-session handoff now have packaged proof below. Remaining: notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader repeatability/profile qualification. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local watcher stalls, physical caller-session handoff, notebook document recapture and audio/video playback state now have bounded packaged proof. Remaining: live kernel/output and query state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader media/profile/platform qualification. |
 | P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit now drains admitted local publication and failure cleanup, with packaged proof below. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
@@ -56,8 +56,14 @@ alongside each slice.
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
-   recapture notebook documents and deliberately restore kernel/query and media
-   state. Qualify auxiliary worktree/cross-repository comparison recovery and
+   complete live kernel/output and query ownership/state. Notebook documents
+   now recapture, and audio/video restore playback through reader replacement.
+   A supported Jupyter runtime passes upstream readiness, execution and shutdown,
+   while Crab's current client times out during startup with that runtime's
+   explicit runtime directory. Fix and qualify the existing kernel boundary's
+   discovery/startup, execution completion, interrupt/restart, lifetime and
+   advertised remote-server action. Query drafts and captured-source/budget
+   semantics also remain open. Qualify auxiliary worktree/cross-repository comparison recovery and
    snapshot model isolation through their actual UI entry points. Dashboard, Datasets,
    cached metrics and shared hydration inventories have local same-ID native
    repair proof; qualify storage rebind and SSH reconnect. Device metadata before
@@ -97,6 +103,54 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Notebook and media recovery checkpoint
+
+The prior package kept the notebook's old text after a same-ID native repair.
+Its read effect did not observe the session. The view now carries its caller's
+native identity, aborts obsolete reads, waits visibly during recovery and offers
+Retry notebook after read failure. A real permission failure and repair/retry
+are qualified. Reading replacement contents clears output/message associations
+belonging to the previous document; the separate kernel state is retained, with
+live execution qualification still open.
+
+Audio and video previously reopened at time zero with default volume, mute and
+rate. The shared media owner now retains scalar playback state for the selected
+repository/path/revision, releases the old element before React detaches its
+ref, and restores controls and a duration-clamped position when the replacement
+reader's metadata arrives. Teardown events cannot overwrite user intent. Paused
+media stays paused; playing media attempts to resume. A denied automatic play
+shows a manual Play hint without hiding the recovered controls. Both media tags
+use the same handlers and state; no extra content cache or reconstruction path
+is introduced.
+
+Saved HTML and SVG output checks also reproduced handlers executing inside the
+app document and calling the desktop bridge without running a cell. Both rich
+formats now share a sandboxed document with no script or same-origin exemptions
+and a restrictive resource policy. Embedded data images/fonts and rich markup
+remain displayable. The existing effective-theme owner supplies the frame's
+color scheme. Notebook comparisons already display escaped output text; PNG/JPEG
+outputs and standalone SVG images retain their image-element path.
+
+The bounded macOS checks cover paused/playing audio and VP9 video, denied
+automatic resume with manual recovery, detached-element release, old-reader
+revocation, unchanged index bytes, notebook permission retry and native repair,
+and static HTML/SVG output in dark/light themes with no handler execution or
+parent bridge access. Broader source/profile/platform recovery and live kernel,
+query, decoded-budget and malformed-document requirements remain open.
+
+Qualification passes 44 focused cases and 18 grouped packaged cases. The two
+rich-output cases also pass the expanded 960 × 640 layout checks; screenshots
+confirm visible controls and readable output in dark and light themes. The
+additional product code owns playback state and one shared rich-output frame;
+it adds no reader, retry queue or content cache.
+
+An isolated Jupyter Client 8.6.3 / ipykernel 6.29.5 control becomes ready, executes
+code and shuts down cleanly. The byte-matched packaged Node kernel module instead
+reports Kernel startup timed out after Jupyter creates its connection file in
+the explicit runtime directory. The qualification controller then closes its
+launcher and verifies no owned kernel descendants remain. This is an actionable
+kernel-client gap, not evidence that notebook execution is complete.
 
 ## Physical file caller-session checkpoint
 

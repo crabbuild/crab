@@ -1,13 +1,13 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { AgentEvent } from "../../src/ipc";
 import { call, packagedExecutable } from "./packaged-app";
 
-for (const target of ["text preview", "Markdown editor", "pending text", "pending Markdown", "Changes file", "text diff", "LFS diff", "notebook diff"] as const) test(`${target} recaptures its selection after same-ID native repair`, async () => {
+for (const target of ["text preview", "Markdown editor", "pending text", "pending Markdown", "notebook preview", "Changes file", "text diff", "LFS diff", "notebook diff"] as const) test(`${target} recaptures its selection after same-ID native repair`, async () => {
   test.skip(process.platform === "win32", "Requires POSIX process enumeration");
   test.setTimeout(90_000);
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-selected-recovery-"));
@@ -17,10 +17,10 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
   const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
   delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
-  const file = target === "LFS diff" ? "weights.bin" : target === "notebook diff" ? "analysis.ipynb" : target.includes("Markdown") ? "note.md" : "note.txt";
+  const file = target === "LFS diff" ? "weights.bin" : target.startsWith("notebook") ? "analysis.ipynb" : target.includes("Markdown") ? "note.md" : "note.txt";
   const digest = (value: string) => createHash("sha256").update(value).digest("hex");
   const value = (marker: string) => target === "LFS diff" ? `version https://git-lfs.github.com/spec/v1\noid sha256:${digest(marker)}\nsize 4096\n`
-    : target === "notebook diff" ? JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [{ id: "selected", cell_type: "code", execution_count: null, metadata: {}, outputs: [], source: [marker] }] }) : `${marker}\n`;
+    : target.startsWith("notebook") ? JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [{ id: "selected", cell_type: "code", execution_count: null, metadata: {}, outputs: [], source: [marker] }] }) : `${marker}\n`;
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   let stderr = "";
   const pending = target.startsWith("pending");
@@ -47,9 +47,16 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     const handle = await call(page, "open_local", { repo_id: "selected-source", path: source });
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
     const navigation = page.getByRole("navigation", { name: "Primary", exact: true });
-    if (editor) {
+    if (editor || target === "notebook preview") {
       await navigation.getByRole("button", { name: "Files", exact: true }).click();
+      const mode = statSync(path.join(source, file)).mode & 0o7777;
+      if (target === "notebook preview") chmodSync(path.join(source, file), 0);
       await page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
+      if (target === "notebook preview") {
+        await expect(page.getByRole("alert")).toBeVisible();
+        chmodSync(path.join(source, file), mode);
+        await page.getByRole("button", { name: "Retry notebook", exact: true }).click();
+      }
     } else {
       await navigation.getByRole("button", { name: "Git", exact: true }).click();
       await page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Changes", exact: true }).click();
@@ -63,7 +70,7 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
         await page.getByRole("combobox", { name: "Compare file versions", exact: true }).selectOption("unstaged");
       }
     }
-    const content = editor ? page.locator(".monaco-editor .view-lines") : target === "Changes file" ? page.locator("pre")
+    const content = editor ? page.locator(".monaco-editor .view-lines") : target === "notebook preview" ? page.locator("pre code") : target === "Changes file" ? page.locator("pre")
       : target === "text diff" ? page.locator("diffs-container") : target === "LFS diff" ? page.getByTestId("large-file-diff") : page.getByRole("region", { name: "After Source", exact: true });
     await expect(content).toContainText(target === "LFS diff" ? digest("BEFORE_NATIVE_REPAIR") : "BEFORE_NATIVE_REPAIR");
     if (editor && !pending) await content.click();

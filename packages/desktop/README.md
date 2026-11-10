@@ -54,6 +54,14 @@ SSH document reads and saves retain the caller's native session. A replacement
 blocks stale saves, preserves pending input, and lets the observed new runtime
 retry the editor buffer.
 
+Notebook previews recapture after repository services recover and offer
+**Retry notebook** after a read failure. HTML/SVG outputs render in isolated
+static documents; scripts and automatic external resource loads are disabled.
+Audio/video restore position, volume, mute, playback rate and paused/playing
+intent after reader replacement. If automatic playback is denied, the recovered
+controls remain available for manual Play. Live kernel execution and SQL-query
+recovery remain tracked in the acceptance matrix below.
+
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any
 cell or long text/output page. Outputs are displayed as text; comparison does

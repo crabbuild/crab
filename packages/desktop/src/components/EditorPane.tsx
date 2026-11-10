@@ -520,7 +520,7 @@ function PreviewBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
   if (kind === "text" || kind === "binary" || kind === "html") return <TextBody repo={repo} tab={tab} />;
   if (kind === "video" || kind === "audio") return <MediaView {...common} kind={kind} />;
-  if (kind === "notebook") return <NotebookView {...common} />;
+  if (kind === "notebook") return <NotebookView {...common} nativeSessionId={repo.native_session_id} />;
   if (kind === "markdown" && (canEdit || (tab.rev === null && fileBuffers.snapshot(fileBufferKey(repo, tab.path)).content !== null))) return <TextBody repo={repo} tab={tab} markdown />;
   // Read-only previews must recapture after native replacement. Editors,
   // notebook kernels and media retain their existing lifecycle owners.

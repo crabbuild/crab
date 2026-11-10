@@ -1,0 +1,73 @@
+import { test, expect, _electron as electron } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import type {} from "../../src/ipc";
+import { call, packagedExecutable } from "./packaged-app";
+
+for (const kind of ["HTML", "SVG"] as const) test(`saved notebook ${kind} output renders without executing or reaching the app bridge`, async () => {
+  test.setTimeout(60_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-notebook-output-"));
+  const source = path.join(root, "source"); mkdirSync(source);
+  writeFileSync(path.join(root, "gitconfig"), "");
+  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+  delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+  const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
+  git(["init", "--initial-branch=main"]);
+  const marker = `VISIBLE_${kind}_OUTPUT`;
+  const script = "document.documentElement.setAttribute('data-notebook-output-script','executed');window.parent.crab.rpc('ping',{}).then(()=>window.parent.document.documentElement.setAttribute('data-notebook-output-bridge','reachable'))";
+  const image = `<img xmlns="http://www.w3.org/1999/xhtml" id="saved-output-probe" src="data:image/png;base64,invalid" onerror="${script}">`;
+  const output = kind === "HTML" ? `<table><tr><td>${marker}</td></tr></table>${image}`
+    : `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="80" onload="${script}"><text x="10" y="20">${marker}</text><foreignObject y="40" width="30" height="30">${image}</foreignObject></svg>`;
+  const file = path.join(source, "analysis.ipynb");
+  writeFileSync(file, JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [{ cell_type: "code", source: ["print('No cell has been run by Crab')"], metadata: {}, execution_count: 1, outputs: [{ output_type: "display_data", data: { [kind === "HTML" ? "text/html" : "image/svg+xml"]: output }, metadata: {} }] }] }));
+  git(["add", "."]); git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Notebook output fixture"]);
+  const index = readFileSync(path.join(source, ".git/index")), contents = readFileSync(file);
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const handle = await call(page, "open_local", { repo_id: "notebook-output", path: source });
+    await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+    await page.locator('[role="treeitem"][data-item-path="analysis.ipynb"]').click();
+    await expect(page.getByRole("button", { name: "Connect Kernel", exact: true })).toBeVisible();
+    await expect.poll(async () => (await Promise.all(page.frames().map(frame => frame.evaluate(() => (document.querySelector("#saved-output-probe") as HTMLImageElement | null)?.complete === true).catch(() => false)))).some(Boolean)).toBe(true);
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const observed = await Promise.all(page.frames().map(frame => frame.evaluate(() => ({ script: document.documentElement.getAttribute("data-notebook-output-script"), bridge: document.documentElement.getAttribute("data-notebook-output-bridge") }))));
+    writeFileSync(test.info().outputPath("notebook-output-observed.json"), JSON.stringify({ kind, observed }, null, 2));
+    expect(observed.every(frame => frame.script === null && frame.bridge === null)).toBe(true);
+    const outputFrame = page.getByTitle(`Notebook ${kind} output`, { exact: true });
+    await expect(outputFrame).toHaveAttribute("sandbox", "");
+    const frame = outputFrame.contentFrame();
+    await expect(frame.getByText(marker, { exact: true })).toBeVisible();
+    const outputBody = frame.locator("body");
+    expect(await outputBody.evaluate(() => { try { return window.parent.crab ? "reachable" : "missing"; } catch { return "blocked"; } })).toBe("blocked");
+    const dark = await outputBody.evaluate(body => ({ text: getComputedStyle(body).color, background: getComputedStyle(body).backgroundColor }));
+    await page.screenshot({ path: test.info().outputPath("isolated-notebook-output-dark.png") });
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
+    await page.getByRole("tab", { name: "User", exact: true }).click();
+    await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+    await expect(page.locator("html")).toHaveClass(/theme-light/);
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
+    await expect(frame.getByText(marker, { exact: true })).toBeVisible();
+    const lightColors = await outputBody.evaluate(body => ({ text: getComputedStyle(body).color, background: getComputedStyle(body).backgroundColor }));
+    expect(lightColors.text).not.toBe(dark.text); expect(lightColors.background).not.toBe(dark.background);
+    expect(readFileSync(file).equals(contents)).toBe(true);
+    expect(readFileSync(path.join(source, ".git/index")).equals(index)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("isolated-notebook-output-light.png") });
+    await application.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setContentSize(960, 640); });
+    await expect(frame.getByText(marker, { exact: true })).toBeVisible();
+    const bounds = await outputFrame.boundingBox(), viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    if (!bounds) throw new Error("Notebook output frame is missing from the compact layout");
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
+    await page.screenshot({ path: test.info().outputPath("isolated-notebook-output-compact.png") });
+    writeFileSync(test.info().outputPath("notebook-output-proof.json"), JSON.stringify({ kind, richOutputVisible: true, noSavedScriptExecution: true, appBridgeInaccessible: true, fileAndIndexUnchanged: true, dark, light: lightColors, compactViewport: viewport }, null, 2));
+  } finally {
+    await application?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
