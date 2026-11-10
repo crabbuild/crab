@@ -68,14 +68,20 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     await expect(content).toContainText(target === "LFS diff" ? digest("BEFORE_NATIVE_REPAIR") : "BEFORE_NATIVE_REPAIR");
     if (editor && !pending) await content.click();
     if (pending) {
-      await application.evaluate((_electron, file) => {
-        const fs = process.getBuiltinModule("fs").promises, original = fs.writeFile;
+      await application.evaluate(async (_electron, file) => {
+        const fs = process.getBuiltinModule("fs").promises, original = fs.writeFile, open = fs.open;
+        const path = process.getBuiltinModule("path"), physical = await fs.realpath(file), owned = new WeakSet<object>();
+        fs.open = async (...args: Parameters<typeof fs.open>) => {
+          const handle = await open(...args);
+          if (args[1] === "wx" && path.dirname(String(args[0])) === path.dirname(physical)) owned.add(handle);
+          return handle;
+        };
         let release!: () => void;
         const gate = new Promise<void>(resolve => { release = resolve; });
         const state = globalThis as typeof globalThis & { selectedSave: { hits: number; release: () => void } };
-        state.selectedSave = { hits: 0, release: () => { fs.writeFile = original; release(); } };
+        state.selectedSave = { hits: 0, release: () => { fs.writeFile = original; fs.open = open; release(); } };
         fs.writeFile = async (...args: Parameters<typeof fs.writeFile>) => {
-          if (String(args[0]) === file) {
+          if (String(args[0]) === file || String(args[0]) === physical || (typeof args[0] === "object" && owned.has(args[0]))) {
             const first = ++state.selectedSave.hits === 1;
             if (first) {
               await gate;

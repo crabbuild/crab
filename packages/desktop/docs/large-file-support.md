@@ -29,8 +29,9 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
+| P0 | Repository-owned workspace state | One repository-owned settings document serves theme, settings and tasks; provider-correct reads/writes and serialized read-modify-write preserve sibling keys. | Three hooks independently update `.crab/desktop/settings.json`, swallow read failures and use path-only writes. Remote routing, failed/truncated reads, concurrent edits, shared theme propagation, read-only guards and actual Settings scope application remain open. Closure requires local/native-down and real SSH UI edits with unrelated keys/index preserved, visible failures and no writes to the wrong machine. |
 | P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Remaining: repository-switch repeatability under suite load, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening and real multi-hop cancellation. |
-| P0 | Physical write integrity | One native write owner handles temporary publication and existing file modes. | Native text/binary writes now share unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eight native checks and packaged macOS SSH publication/reconnect proof pass. Local Node atomic publication, full mutation workflows and other platform/provider qualification remain open. |
+| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eight native checks, eleven local filesystem cases and packaged macOS local/SSH proof pass. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -41,9 +42,20 @@ repository operations for transfers. Files, Activity and Settings expose those
 capabilities without adding primary navigation destinations. A working read or
 materialization smoke does not imply mutation parity or durable recovery.
 
+The next data-integrity slice is repository-owned workspace state. Atomic
+publication protects a single submitted document; it does not prevent three
+independent read-modify-write callers from losing each other's keys. Keep that
+work with the existing repository/provider boundary, ahead of additional
+mutation entry points or transfer controls.
+
 ### Next bounded slices
 
-1. Finish recovery parity before extending transfer features. The shared working
+1. Consolidate repository-owned workspace settings before adding mutation paths.
+   The three document writers need provider-correct reads/writes, serialized
+   updates, failed/truncated-read protection and effective Settings scope.
+   Qualify concurrent theme/task/settings changes, local native failure and real
+   SSH edits before deleting their path-only writer.
+2. Finish recovery parity before extending transfer features. The shared working
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
@@ -57,20 +69,19 @@ materialization smoke does not imply mutation parity or durable recovery.
    broaden provider/profile coverage. Prove removal during an admitted opening
    against held real storage, and cancellation through actual jump hosts. Keep
    refreshes at their existing owner; add no component retry queue.
-2. Native publication/mode integrity has the bounded proof below. Extend atomic
-   publication to local Node saves and qualify other platforms/providers, then
-   complete one real repository round trip for each Crab/LFS profile: physical
+3. Local and native publication/mode integrity have bounded proof below. Qualify
+   other platforms/providers and complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
    lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
    working provider path; unsupported native filesystem RPCs must not masquerade
    as complete remote editing. Preserve content identities, unrelated index
    entries, executable modes and review/history source semantics.
-3. Deepen existing operation and cache owners: durable terminal state, supported
+4. Deepen existing operation and cache owners: durable terminal state, supported
    retry/resume after cold-transfer interruption, acknowledged cancellation,
    logical versus network counters, active-reader pins, budget enforcement and
    offline retention. Closing a view must not discard ownership or report a
    cancelled transfer before native cleanup finishes.
-4. Finish metadata and format bounds on the existing captured-reader path:
+5. Finish metadata and format bounds on the existing captured-reader path:
    physical/cache/available/pending bytes, decoded Parquet/query limits,
    bounded plain-text pointers and remaining format comparisons. Keep unknown
    measurements unknown and give oversized or malformed content a visible error.
@@ -83,6 +94,77 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Local file-publication and workspace-state checkpoint
+
+`LocalProvider.fsWrite` and the existing path-only local configuration writer
+now share `electron/file-write.ts`. A unique, exclusively opened sibling owns
+the prepared text; the target changes only after write, mode restoration,
+synchronization and close succeed. Failed publication removes only that owned
+temporary, and cleanup failure retains both errors. UTF-8 bytes are acknowledged
+after rename. Target access is checked without truncation; existing internal
+symlinks remain links and dangling links fail. Non-absolute targets, including
+SSH/storage URLs, fail before filesystem I/O. A repository-scoped call without
+a provider fails instead of falling through to a local write.
+
+Node owns local physical saves so they remain available while a repository's
+native reader cannot reopen. Native text/binary saves retain their own scoped
+writer for the SSH filesystem boundary. Captured materialization continues to
+own pointer validation, content verification and cancellation; a plain editor
+write must not bypass those checks. This adds no reconstruction or retry path.
+
+Three red local cases reproduced partial target destruction, premature source
+mutation and mutation of an already-open source. Eleven filesystem cases now
+pass, covering partial-write/rename/cleanup failures, exclusive-open ownership,
+UTF-8/empty acknowledgement, read-only targets, symlinks and modes. The four
+focused local/buffer/provider/native-lifecycle suites pass 73 cases; project
+and strict specification types pass.
+
+Eleven cases pass together on the unsigned macOS arm64 package. An actual
+workspace-theme action preserves another settings key and mode `0640`. An
+editor save encounters a real main-process rename failure, visibly retains the
+pending edit and leaves original bytes/mode intact with no owned temporary.
+After the repository metadata is taken offline and only the owned sidecar is
+killed, Retry saving persists exact multibyte text, clears dirty state and
+preserves mode `0751` and the index while Retry reopening repository remains
+visible. Text/Markdown tab disposal, repository switching, cancelled quit,
+denied/held writes and selected-source native repair also pass in that run.
+Existing failure adapters now follow the acquired temporary handle instead of
+assuming writes target the destination path directly; their behavioral
+assertions remain intact. The earlier suite-load timeout cause is still unknown.
+
+The Electron build and packaging pass. All 907 packaged renderer/Electron assets
+match; all 1,682 Rust/Cargo inputs match the native-publication producer, so its
+qualified CLI/agent/NFS/helper and paired Darwin SSH archive are retained. This
+slice changes no dependencies, lockfiles, inventories or API snapshots. POSIX
+modes are qualified; ACL/xattr/ownership and hardlink behavior are not. File
+synchronization does not claim power-loss durability of the directory rename.
+Cross-platform/provider proof and the complete acceptance matrix remain open.
+
+The settings caller audit found a distinct unfinished contract:
+
+- `useWorkspaceSettings`, `useWorkspaceTheme` and `useTaskList` independently
+  read the same 64 KiB-limited document, turn all read failures into an empty
+  document and ignore truncation. Concurrent updates or a failed read can erase
+  sibling keys. Local writes outlive the native reads they currently depend on.
+- Those three writers use two-argument path-only IPC, including when the repo
+  path is an SSH/storage URL. The absolute-path guard now prevents wrong-machine
+  writes, but does not supply remote settings functionality. `RemoteProvider`
+  reads still use the standalone editor's `read_text` call without its required
+  repository ID; converting only the writer is insufficient.
+- The Settings scope selector does not reach the section update handlers.
+  Workspace availability checks only for a path, not a writable physical
+  worktree. Theme consumers each load private hook state, and task/theme action
+  failures need visible retained state rather than unhandled rejections.
+
+Consolidate these into one repository-owned document with provider-correct
+bounded reads, serialized read-modify-write, shared acknowledged state and
+visible errors. Failed, truncated or malformed reads must block mutation;
+missing documents are the explicit create case. Apply scope through actual
+setting consumers, disable mutation for SDK snapshots and prove concurrent
+theme/task/settings changes, native-down local saves and SSH reconnect through
+real UI actions while preserving unrelated keys and index bytes. Remove the
+path-only writer after its three callers have a complete canonical path.
 
 ## Native file-publication checkpoint
 
@@ -115,10 +197,9 @@ content. No owned temporaries remain after acknowledgement. All 905 packaged
 renderer/Electron assets, native hashes, executable modes and the paired archive
 match the build. This checkpoint uses a new native build, not the earlier pair.
 
-Local `LocalProvider.fsWrite` still uses Node's in-place write. It never shared
-the native temporary name and does not replace the inode, so these native
-collision/mode failures do not apply to that sibling. Local atomic publication
-and complete remote create/rename/delete remain open. Captured materialization
+At this checkpoint, `LocalProvider.fsWrite` still used Node's in-place write;
+the local publication checkpoint above now supersedes that implementation.
+Complete remote create/rename/delete remains open. Captured materialization
 keeps its separate pointer checks, integrity verification and cancellation owner;
 it already uses a unique `NamedTempFile` and restores the captured target mode.
 
@@ -154,9 +235,9 @@ rejects paths outside the selected repository and incomplete acknowledgements.
 Both local and SSH acknowledgements report UTF-8 bytes. This qualifies isolated
 Files editor saves. At that checkpoint, native temporary-file collision and
 mode preservation were still open; the native publication checkpoint above now
-qualifies their bounded macOS cases. Local atomic saves, remote create/rename/
-delete and the standalone file editor still need a canonical working path and
-actual UI proof.
+qualifies their bounded macOS cases; the local checkpoint above adds atomic
+Node saves. Remote create/rename/delete and the standalone file editor still
+need a canonical working path and actual UI proof.
 
 Closing/reloading the application asks before losing unacknowledged edits. Quit
 first resolves that decision, then tears down terminal/SSH/native owners. Keep

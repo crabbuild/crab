@@ -46,12 +46,18 @@ for (const extension of ["txt", "md"]) test(`failed ${extension} edits survive t
     await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
     const editor = page.locator(".monaco-editor .view-lines");
     await expect(editor).toContainText("ORIGINAL_ON_DISK");
-    await application.evaluate((_electron, file) => {
-      const fs = process.getBuiltinModule("fs").promises, original = fs.writeFile;
+    await application.evaluate(async (_electron, file) => {
+      const fs = process.getBuiltinModule("fs").promises, original = fs.writeFile, open = fs.open;
+      const path = process.getBuiltinModule("path"), physical = await fs.realpath(file), owned = new WeakSet<object>();
+      fs.open = async (...args: Parameters<typeof fs.open>) => {
+        const handle = await open(...args);
+        if (args[1] === "wx" && path.dirname(String(args[0])) === path.dirname(physical)) owned.add(handle);
+        return handle;
+      };
       const state = globalThis as typeof globalThis & { bufferWriteFault: { restore: () => void } };
-      state.bufferWriteFault = { restore: () => { fs.writeFile = original; } };
+      state.bufferWriteFault = { restore: () => { fs.writeFile = original; fs.open = open; } };
       fs.writeFile = async (...args: Parameters<typeof fs.writeFile>) => {
-        if (String(args[0]) === file) throw Object.assign(new Error("Fixture buffer write denied"), { code: "EACCES" });
+        if (String(args[0]) === file || String(args[0]) === physical || (typeof args[0] === "object" && owned.has(args[0]))) throw Object.assign(new Error("Fixture buffer write denied"), { code: "EACCES" });
         return original(...args);
       };
     }, file);

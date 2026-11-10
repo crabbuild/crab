@@ -14,6 +14,7 @@ import { shell } from "electron";
 
 import { fullCapabilities, noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
 import { Agent } from "./agent";
+import { writeTextAtomically } from "./file-write";
 import {
   BaseProvider,
   FsCreateResult,
@@ -244,10 +245,8 @@ export class LocalProvider extends BaseProvider {
     fullPath: string,
     content: string,
   ): Promise<FsWriteResult> {
-    const dir = path.dirname(fullPath);
-    await fs.promises.mkdir(dir, { recursive: true });
-    await fs.promises.writeFile(fullPath, content, "utf8");
-    return { path: fullPath, written: Buffer.byteLength(content, "utf8") };
+    const written = await writeTextAtomically(fullPath, content);
+    return { path: fullPath, written };
   }
 
   async fsRead(

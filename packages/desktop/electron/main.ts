@@ -38,6 +38,7 @@ import { parseRepoId } from "./ssh-types";
 import { RpcRouter } from "./ssh-router";
 import { getProviderRegistry } from "./provider-registry";
 import { LocalProvider } from "./local-provider";
+import { writeTextAtomically } from "./file-write";
 import { RemoteProvider } from "./remote-provider";
 import { AgentDeployer } from "./ssh-deployer";
 import { RemoteFileBrowser } from "./ssh-file-browser";
@@ -833,7 +834,7 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
 
       // Detect whether the caller passed repoId as the first argument.
       // If thirdArg is present, the signature is (repoId, fullPath, content).
-      // Otherwise, the signature is (fullPath, content) for backward compat.
+      // Local workspace configuration currently uses (fullPath, content).
       let repoId: string | null;
       let fullPath: string;
       let content: string;
@@ -848,19 +849,16 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
         content = secondArg;
       }
 
-      // If repoId is provided, resolve the provider and delegate.
-      if (repoId) {
+      if (repoId !== null) {
         const provider = registry.resolve(repoId);
-        if (provider) {
-          return provider.fsWrite(repoId, fullPath, content);
-        }
+        if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
+        return provider.fsWrite(repoId, fullPath, content);
       }
 
-      // Fallback: local filesystem operations (existing behavior).
-      const dir = path.dirname(fullPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(fullPath, content, "utf8");
-      return { path: fullPath, written: content.length };
+      // Existing local configuration callers share the atomic writer. Their
+      // repository-aware routing is separate from filesystem publication.
+      const written = await writeTextAtomically(fullPath, content);
+      return { path: fullPath, written };
     },
   );
 
