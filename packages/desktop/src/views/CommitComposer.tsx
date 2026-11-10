@@ -337,7 +337,7 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
   }, [generator, suggesting, repo.repo_id, repo.path, repo.url]);
 
   return (
-    <div className="flex shrink-0 flex-col border-t border-gx-border bg-gx-surface px-3 py-2">
+    <div className="flex min-w-0 shrink-0 flex-col border-t border-gx-border bg-gx-surface px-3 py-2">
       {conventionalCommits ? (
         <ConventionalSubject
           value={draft.subject}
@@ -392,91 +392,94 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
           anchorRef={bodyRef as React.RefObject<HTMLElement | null>}
         />
       </div>
-      <div className="mt-1.5 flex items-center gap-3">
-        <label className="flex items-center gap-1.5 text-[11px] text-gx-muted">
-          <input
-            type="checkbox"
-            checked={draft.amend}
-            onChange={() => dispatch({ type: "toggle-amend" })}
-            className="accent-gx-accent"
-          />
-          Amend
-        </label>
-        <label
-          className="flex items-center gap-1.5 text-[11px] text-gx-muted"
-          title="Add Signed-off-by trailer"
-        >
-          <input
-            type="checkbox"
-            checked={draft.signOff}
-            onChange={() => dispatch({ type: "toggle-sign-off" })}
-            className="accent-gx-accent"
-          />
-          Sign-off
-        </label>
-        <label
-          className={clsx(
-            "flex items-center gap-1.5 text-[11px]",
-            signingAvailable ? "text-gx-muted" : "text-gx-muted/50 cursor-not-allowed",
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+          <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-gx-muted">
+            <input
+              type="checkbox"
+              checked={draft.amend}
+              onChange={() => dispatch({ type: "toggle-amend" })}
+              className="accent-gx-accent"
+            />
+            Amend
+          </label>
+          <label
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-gx-muted"
+            title="Add Signed-off-by trailer"
+          >
+            <input
+              type="checkbox"
+              checked={draft.signOff}
+              onChange={() => dispatch({ type: "toggle-sign-off" })}
+              className="accent-gx-accent"
+            />
+            Sign-off
+          </label>
+          <label
+            className={clsx(
+              "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px]",
+              signingAvailable ? "text-gx-muted" : "text-gx-muted/50 cursor-not-allowed",
+            )}
+            title={
+              signingAvailable
+                ? "GPG/SSH sign this commit (-S)"
+                : "No signing key configured (set user.signingkey in git config)"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={draft.sign}
+              disabled={!signingAvailable}
+              onChange={() => dispatch({ type: "toggle-sign" })}
+              className="accent-gx-accent"
+            />
+            Sign
+          </label>
+        </div>
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          {generator && (
+            <button
+              type="button"
+              disabled={suggesting || !hasStaged}
+              onClick={() => void handleSuggest()}
+              title="Suggest commit message with AI"
+              className={clsx(
+                "flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-xs transition",
+                suggesting || !hasStaged
+                  ? "cursor-not-allowed text-gx-muted/50"
+                  : "text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text",
+              )}
+              aria-label="Suggest commit message"
+            >
+              {suggesting ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Sparkles size={12} />
+              )}
+              Suggest
+            </button>
           )}
-          title={
-            signingAvailable
-              ? "GPG/SSH sign this commit (-S)"
-              : "No signing key configured (set user.signingkey in git config)"
-          }
-        >
-          <input
-            type="checkbox"
-            checked={draft.sign}
-            disabled={!signingAvailable}
-            onChange={() => dispatch({ type: "toggle-sign" })}
-            className="accent-gx-accent"
-          />
-          Sign
-        </label>
-        <div className="flex-1" />
-        {generator && (
           <button
             type="button"
-            disabled={suggesting || !hasStaged}
-            onClick={() => void handleSuggest()}
-            title="Suggest commit message with AI"
+            disabled={commitDisabled}
+            onClick={() => void handleCommit()}
+            title={commitTooltip}
             className={clsx(
-              "flex items-center gap-1 rounded px-2 py-1 text-xs transition",
-              suggesting || !hasStaged
-                ? "cursor-not-allowed text-gx-muted/50"
-                : "text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text",
+              "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-3 py-1 text-xs font-medium transition",
+              commitDisabled
+                ? "cursor-not-allowed bg-gx-accent/30 text-gx-muted"
+                : "bg-gx-accent text-white hover:bg-gx-accent/80",
             )}
-            aria-label="Suggest commit message"
+            aria-label="Commit staged changes"
           >
-            {suggesting ? (
+            {committing ? (
               <Loader2 size={12} className="animate-spin" />
             ) : (
-              <Sparkles size={12} />
+              <GitCommitHorizontal size={12} />
             )}
-            Suggest
+            {draft.amend ? "Amend" : "Commit"}
           </button>
-        )}
-        <button
-          type="button"
-          disabled={commitDisabled}
-          onClick={() => void handleCommit()}
-          title={commitTooltip}
-          className={clsx(
-            "flex items-center gap-1.5 rounded px-3 py-1 text-xs font-medium transition",
-            commitDisabled
-              ? "cursor-not-allowed bg-gx-accent/30 text-gx-muted"
-              : "bg-gx-accent text-white hover:bg-gx-accent/80",
-          )}
-          aria-label="Commit staged changes"
-        >
-          {committing ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <GitCommitHorizontal size={12} />
-          )}
-          {draft.amend ? "Amend" : "Commit"}
-        </button>
+        </div>
       </div>
       {/* Notebook output stripping indicator */}
       {stagedNotebooks.length > 0 && stripNotebookOutputs && (
