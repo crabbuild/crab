@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Tests for bandwidth tracking in the RPC router and connection
  * health metrics (uptime formatting, bandwidth display).
@@ -27,7 +28,7 @@ function createMockChannel() {
 
 function createMockSessionManager(status = "connected") {
   const connections = new Map<string, { channels: { agent: any } }>();
-  return {
+  return { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn((profileId: string) => connections.get(profileId)),
     setConnection: (profileId: string, channel: any) => {
@@ -53,7 +54,7 @@ describe("RpcRouter — bandwidth tracking", () => {
   beforeEach(() => {
     sessionManager = createMockSessionManager();
     localAgent = createMockLocalAgent();
-    router = new RpcRouter(sessionManager, localAgent, { requestTimeoutMs: 5000 });
+    router = new RpcRouter(sessionManager, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
 
     channel = createMockChannel();
     sessionManager.setConnection("profile-1", channel);

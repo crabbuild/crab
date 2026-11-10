@@ -28,7 +28,7 @@ import {
 } from "./repo-provider";
 import { noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
 import { parseRepoId } from "./ssh-types";
-import { type RpcRouter } from "./ssh-router";
+import { isCacheableReadMethod, type RpcRouter } from "./ssh-router";
 import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { RemoteGitManager } from "./ssh-remote-git";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
@@ -129,6 +129,10 @@ export class RemoteProvider extends BaseProvider {
       this.sessionManager.forgetRepository(parsed.profileId, repoId);
       if (!this.sessionManager.agentSession(parsed.profileId)) return {};
     } else if (method !== "rpc/cancel" && this.getConnectionStatus(parsed.profileId) === "connected") {
+      if (isCacheableReadMethod(method)) {
+        const pending = this.sessionManager.repositoryWork(repoId);
+        if (pending) await pending;
+      }
       const runtime = this.sessionManager.repositoryRuntime(parsed.profileId, repoId);
       if (!runtime.sessionId) throw new Error(runtime.error ?? "SSH repository is unavailable. Retry reopening it.");
     }

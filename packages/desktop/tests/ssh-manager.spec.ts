@@ -132,7 +132,7 @@ function nativeRuntime(manager: SshSessionManager) {
       negotiate: async () => { cached = true; return capabilities; },
       clearCache: () => { cached = false; },
     } as unknown as CapabilityNegotiator,
-    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
+    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
   });
   return { channels, send };
 }
@@ -259,7 +259,7 @@ describe("SshSessionManager", () => {
           channels.push(channel); return channel;
         }) } as unknown as AgentDeployer,
         capabilityNegotiator: { getCached: () => capabilities, negotiate: async () => capabilities, clearCache: vi.fn() } as unknown as CapabilityNegotiator,
-        rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
+        rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
       });
       await connectProfile(manager, profile);
       try {
@@ -296,6 +296,55 @@ describe("SshSessionManager", () => {
         expect(runtime.send.mock.calls.map(([, method, params]) => [method, params.repo_id])).toEqual([["open_local", second.repo_id]]);
         expect(runtime.channels).toHaveLength(2);
       } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("storage replacement revokes only the affected repository without replacing SSH", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const process = manager.agentSession(profile.id);
+      await manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBe(first.native_session_id);
+      expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).toBe(second.native_session_id);
+      expect(manager.agentSession(profile.id)).toBe(process);
+      expect(runtime.send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(3);
+      await manager.disconnect(profile.id);
+    });
+
+    it("storage removal drains native readers while retaining the repository for repair", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      await manager.storageIdentityChanged([String(first.repo_id)], "removed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id))).toMatchObject({ sessionId: null, error: expect.stringContaining("saved connection was removed") });
+      expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: first.repo_id });
+      await manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBeNull();
+      await manager.disconnect(profile.id);
+    });
+
+    it("reselection waits for the removed identity's native close before replacement", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: () => void;
+      const closing = new Promise<void>(resolve => { release = resolve; });
+      runtime.send.mockImplementation(async (id, method, params) => {
+        if (method === "close") await closing;
+        return native(id, method, params);
+      });
+      const removed = manager.storageIdentityChanged([String(first.repo_id)], "removed");
+      await vi.waitFor(() => expect(runtime.send.mock.calls.some(([, method]) => method === "close")).toBe(true));
+      const replaced = manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      try {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(runtime.send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(1);
+      } finally { release(); await Promise.all([removed, replaced]); await manager.disconnect(profile.id); }
     });
 
     it("concurrent opens join the repository's native open outcome", async () => {
@@ -379,7 +428,7 @@ describe("SshSessionManager", () => {
         const replacement = await manager.openRepository(profile.id, "/first");
         release({ repo_id: repository.repo_id });
         await new Promise<void>(resolve => setImmediate(resolve));
-        expect(manager.agentSession(profile.id)).toBe(replacement.native_session_id);
+        expect(manager.repositoryRuntime(profile.id, String(repository.repo_id)).sessionId).toBe(replacement.native_session_id);
       } finally {
         release({ repo_id: repository.repo_id });
         await manager.disconnect(profile.id);

@@ -64,7 +64,7 @@ function createMockCapabilityNegotiator() {
 }
 
 function createMockSessionManager() {
-  return withRepositoryRuntimes({
+  return withRepositoryRuntimes({ repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue("connected"),
     getConnection: vi.fn().mockReturnValue({ client: {} }),
     agentSession: vi.fn().mockReturnValue("ssh:1"),

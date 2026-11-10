@@ -11,6 +11,7 @@ import { DeployError } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { RpcRouter } from "./ssh-router";
 import type { RepositoryRuntime } from "./repo-capabilities";
+import { parseRepoId } from "./ssh-types";
 
 // ── Connection status ────────────────────────────────────────────
 
@@ -153,9 +154,11 @@ export class SshSessionManager extends EventEmitter {
   private openings = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private closing = new Map<string, Promise<void>>();
   private sftpOpen = new WeakMap<Client, Promise<SFTPWrapper>>();
-  private repositories = new Map<string, Map<string, { path: string; handle: Record<string, unknown>; sessionId: string | null; error?: string }>>();
+  private repositories = new Map<string, Map<string, { path: string; handle: Record<string, unknown>; runtimeId: string | null; sessionId: string | null; error?: string }>>();
   private repositoryOpenings = new Map<string, { sessionId: string; cancelled: boolean; promise: Promise<Record<string, unknown>> }>();
+  private storageChanges = new Map<string, Promise<void>>();
   private nextAgentSession = 1;
+  private nextRepositorySession = 1;
 
   constructor(private readonly verifyHostKey: VerifyHostKey = async () => false) {
     super();
@@ -703,11 +706,15 @@ export class SshSessionManager extends EventEmitter {
   repositoryRuntime(profileId: string, repoId: string): RepositoryRuntime {
     const sessionId = this.agentSession(profileId);
     const repository = this.repositories.get(profileId)?.get(repoId);
-    return { repoId, sessionId: sessionId && repository?.sessionId === sessionId ? sessionId : null, error: sessionId ? repository?.error : undefined };
+    return { repoId, sessionId: sessionId && repository?.runtimeId === sessionId ? repository.sessionId : null, error: sessionId ? repository?.error : undefined };
   }
 
   repositoryRuntimes(profileId: string): RepositoryRuntime[] {
     return [...this.repositories.get(profileId)?.keys() ?? []].map(repoId => this.repositoryRuntime(profileId, repoId));
+  }
+
+  repositoryWork(repoId: string): Promise<unknown> | undefined {
+    return this.storageChanges.get(repoId) ?? this.repositoryOpenings.get(repoId)?.promise;
   }
 
   private publishRepositoryRuntime(profileId: string, repoId: string): void {
@@ -740,6 +747,20 @@ export class SshSessionManager extends EventEmitter {
 
   async openRepository(profileId: string, remotePath: string): Promise<Record<string, unknown>> {
     if (!path.posix.isAbsolute(remotePath) || remotePath.includes("\0")) throw new Error("Choose an absolute remote repository path");
+    const repoId = `ssh://${profileId}${remotePath}`;
+    const changing = this.storageChanges.get(repoId);
+    if (changing) {
+      const desired = this.repositories.get(profileId)?.get(repoId);
+      await changing.catch(() => {});
+      if (desired && this.repositories.get(profileId)?.get(repoId) !== desired) throw new Error("SSH repository closed during opening");
+    }
+    const pending = this.repositoryOpenings.get(repoId);
+    if (pending && this.repositories.get(profileId)?.get(repoId)?.error) {
+      // An explicit retry owns a fresh attempt after failed-open cleanup. Joining
+      // the old result would return the same failure without trying the repair.
+      await pending.promise.catch(() => {});
+      if (pending.cancelled) throw new Error("SSH repository closed during opening");
+    }
     if (this.getStatus(profileId) !== "connected" || !this.agentCapabilities(profileId)) throw new Error("Deploy the SSH agent before opening a repository");
     const sessionId = this.agentSession(profileId);
     if (!sessionId) throw new Error("Deploy the SSH agent before opening a repository");
@@ -755,10 +776,15 @@ export class SshSessionManager extends EventEmitter {
     const existing = this.repositories.get(profileId)?.get(repoId);
     // Bootstrap already reopened tracked repositories. Opening again removes
     // the native owner and invalidates readers captured by its ready event.
-    if (existing?.sessionId === sessionId) return Promise.resolve({ ...existing.handle, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId });
+    if (existing?.runtimeId === sessionId) return Promise.resolve({ ...existing.handle, repo_id: repoId, url: repoId, is_remote: true, native_session_id: existing.sessionId });
+    let repositories = this.repositories.get(profileId);
+    if (!repositories) { repositories = new Map(); this.repositories.set(profileId, repositories); }
+    const repository: NonNullable<typeof existing> = existing ?? { path: remotePath, handle: {}, runtimeId: null, sessionId: null };
+    repositories.set(repoId, repository);
     const current = () => this.connections.get(profileId) === connection && connection.client === client && connection.agentSessionId === sessionId && !!connection.channels.agent;
     const entry = { sessionId, cancelled: false, promise: Promise.resolve().then(async () => {
-      if (existing) { existing.sessionId = null; existing.error = undefined; this.publishRepositoryRuntime(profileId, repoId); }
+      repository.runtimeId = null; repository.sessionId = null; repository.error = undefined;
+      this.publishRepositoryRuntime(profileId, repoId);
       try {
         const result = await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "open_local", { repo_id: repoId, path: remotePath });
         if (!current()) throw new Error("SSH repository open was interrupted");
@@ -767,15 +793,27 @@ export class SshSessionManager extends EventEmitter {
           await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "close", { repo_id: repoId });
           throw new Error("SSH repository closed during opening");
         }
-        let repositories = this.repositories.get(profileId);
-        if (!repositories) { repositories = new Map(); this.repositories.set(profileId, repositories); }
-        repositories.set(repoId, { path: remotePath, handle: result as Record<string, unknown>, sessionId });
+        repository.handle = result as Record<string, unknown>;
+        repository.runtimeId = sessionId;
+        // Rebinding one repository keeps the SSH process alive. Give its readers
+        // a new identity so old handles cannot reach that replacement owner.
+        repository.sessionId = `${sessionId}:repository:${this.nextRepositorySession++}`;
         this.publishRepositoryRuntime(profileId, repoId);
-        return { ...result, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
+        return { ...result, repo_id: repoId, url: repoId, is_remote: true, native_session_id: repository.sessionId };
       } catch (error) {
-        if (existing && current() && this.repositories.get(profileId)?.get(repoId) === existing) {
-          existing.error = error instanceof Error ? error.message : String(error);
+        if (current() && this.repositories.get(profileId)?.get(repoId) === repository) {
+          repository.error = error instanceof Error ? error.message : String(error);
           this.publishRepositoryRuntime(profileId, repoId);
+          // Credential preparation can fail before open_local reaches native.
+          // Drain the previous owner so its captured identity cannot survive.
+          let failure = error;
+          try { await this.agentDeps!.rpcRouter.retireRepository(profileId, repoId); }
+          catch (cleanup) { failure = new AggregateError([error, cleanup], "SSH repository opening and native cleanup failed"); }
+          if (failure !== error) {
+            repository.error = failure instanceof Error ? failure.message : String(failure);
+            this.publishRepositoryRuntime(profileId, repoId);
+          }
+          throw failure;
         }
         throw error;
       }
@@ -784,6 +822,42 @@ export class SshSessionManager extends EventEmitter {
     const finished = () => { if (this.repositoryOpenings.get(repoId) === entry) this.repositoryOpenings.delete(repoId); };
     void entry.promise.then(finished, finished);
     return entry.promise;
+  }
+
+  async storageIdentityChanged(keys: string[], state: "changed" | "removed"): Promise<void> {
+    const changes = keys.flatMap(repoId => {
+      const remote = parseRepoId(repoId);
+      if (!remote) return [];
+      // Native close and replacement share admission. A late removal must not
+      // close the new identity selected while its old reader is still draining.
+      const previous = this.storageChanges.get(repoId) ?? Promise.resolve();
+      const work = previous.catch(() => {}).then(async () => {
+        await this.repositoryOpenings.get(repoId)?.promise.catch(() => {});
+        const connection = this.connections.get(remote.profileId);
+        const repository = this.repositories.get(remote.profileId)?.get(repoId);
+        if (!connection || !repository) return;
+        repository.runtimeId = null; repository.sessionId = null;
+        repository.error = state === "removed" ? "This repository's saved connection was removed. Select another connection in Storage settings." : undefined;
+        this.publishRepositoryRuntime(remote.profileId, repoId);
+        const runtime = this.agentSession(remote.profileId);
+        if (!runtime) return;
+        if (state === "changed") { await this.openRepositorySession(connection, repository.path, runtime); return; }
+        try { await this.agentDeps!.rpcRouter.retireRepository(remote.profileId, repoId); }
+        catch (error) {
+          repository.error = error instanceof Error ? error.message : String(error);
+          this.publishRepositoryRuntime(remote.profileId, repoId);
+          throw error;
+        }
+      });
+      this.storageChanges.set(repoId, work);
+      const finished = () => { if (this.storageChanges.get(repoId) === work) this.storageChanges.delete(repoId); };
+      void work.then(finished, finished);
+      return [work];
+    });
+    const outcomes = await Promise.allSettled(changes);
+    const failures = outcomes.flatMap(outcome => outcome.status === "rejected" ? [outcome.reason] : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Storage identity changed but some SSH repositories could not recover");
   }
 
   forgetRepository(profileId: string, repoId: string): void {

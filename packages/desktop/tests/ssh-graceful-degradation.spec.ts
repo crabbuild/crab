@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Tests for graceful degradation during SSH reconnection.
  *
@@ -32,6 +33,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -63,7 +65,7 @@ class MockLocalAgent {
 function createRouterWithCache() {
   const sm = new MockSessionManager();
   const la = new MockLocalAgent();
-  const router = new RpcRouter(sm as any, la);
+  const router = new RpcRouter(sm as any, la, mockStorageConnections);
   const cache = new RemoteCache();
   router.setCache(cache);
   return { router, sessionManager: sm, localAgent: la, cache };

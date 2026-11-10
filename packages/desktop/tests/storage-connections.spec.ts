@@ -36,7 +36,7 @@ describe("built-in storage connections", () => {
   let store: StorageConnections;
   let send: Mock<[method: string, params: unknown], Promise<unknown>>;
   let changed: Mock<[keys: string[], state: "changed" | "removed"], Promise<void>>;
-  const call = (method: string, params: unknown = {}) => store.request(method, params, send, changed);
+  const call = (method: string, params: unknown = {}) => store.request(method, params, send);
   const save = (connection = fixture()) => call("storage_connections_save", { connection }) as Promise<StorageConnectionInfo>;
   const list = (repo_id?: string) => call("storage_connections_list", { repo_id }) as Promise<StorageConnectionStatus>;
 
@@ -44,7 +44,7 @@ describe("built-in storage connections", () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-storage-auth-"));
     file = path.join(directory, "connections.enc");
     crypto = encryption();
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     changed = vi.fn(async (_keys: string[], _state: "changed" | "removed"): Promise<void> => {});
     send = vi.fn(async (method: string, params: unknown): Promise<unknown> => {
       const payload = params as Record<string, unknown>;
@@ -53,6 +53,16 @@ describe("built-in storage connections", () => {
     });
   });
   afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
+
+  it("isolates storage bindings for identical remote paths on different SSH profiles", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    await call("open_local", { repo_id: "ssh://first/data/repo", path: "/data/repo", storage_connection_id: first.id });
+    await call("open_local", { repo_id: "ssh://second/data/repo", path: "/data/repo", storage_connection_id: second.id });
+    send.mockClear();
+    await call("file_open", { repo_id: "ssh://first/data/repo", path: "weights.bin" });
+    expect(send).toHaveBeenCalledWith("file_open", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: first.id }) }));
+  });
 
   it("encrypts saved credentials and returns only connection metadata", async () => {
     const saved = await save();
@@ -66,7 +76,7 @@ describe("built-in storage connections", () => {
 
   it("loads encrypted connections after an application restart", async () => {
     const saved = await save();
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     expect((await list()).connections).toEqual([saved]);
   });
 
@@ -74,7 +84,7 @@ describe("built-in storage connections", () => {
     const saved = await save();
     await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
     await call("close", { repo_id: "saved-snapshot" });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     send.mockClear();
     await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo" });
     expect(send).toHaveBeenCalledWith("open_url", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
@@ -109,7 +119,7 @@ describe("built-in storage connections", () => {
 
   it("rejects Linux's plaintext-key backend while preserving local browsing", async () => {
     crypto.getSelectedStorageBackend.mockReturnValue("basic_text");
-    store = new StorageConnections(file, crypto, "linux");
+    store = new StorageConnections(file, crypto, "linux", (keys, state) => changed(keys, state));
     await expect(save()).rejects.toThrow("keyring");
     await call("open_local", { repo_id: "local", path: directory });
     await call("list", { repo_id: "local" });
@@ -141,7 +151,7 @@ describe("built-in storage connections", () => {
     { name: "Azure SAS", provider: "azure", credentials: { provider: "azure", account: "account", sas_token: "?sp=rl&sig=fixture-signature" } },
   ] as const)("persists and tests $name using its own provider context", async provider => {
     const saved = await save({ ...fixture(), ...provider, region: "", endpoint: "" });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     await call("storage_connections_test", { id: saved.id });
     const payload = send.mock.calls.at(-1)![1] as { __storage_auth: StorageConnectionInput };
     expect(payload.__storage_auth.credentials.provider).toBe(provider.provider);
@@ -170,7 +180,7 @@ describe("built-in storage connections", () => {
     const saved = await save();
     const dest = path.join(directory, "checkout");
     await call("clone", { url: "crab://test-bucket/repo", dest, storage_connection_id: saved.id });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     await call("open_local", { repo_id: "new-renderer-id", path: dest });
     await call("crab_push_structured", { repo_id: "new-renderer-id" });
     expect(send).toHaveBeenLastCalledWith("crab_push_structured", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
@@ -296,7 +306,7 @@ describe("built-in storage connections", () => {
   it("allows cold local metadata while locked but never captures content with ambient credentials", async () => {
     const saved = await save();
     await call("open_local", { repo_id: "old", path: directory, storage_connection_id: saved.id });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     crypto.isEncryptionAvailable.mockReturnValue(false);
     await call("open_local", { repo_id: "new", path: directory });
     send.mockClear();

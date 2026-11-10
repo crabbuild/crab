@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClientChannel } from "ssh2";
@@ -22,12 +23,12 @@ class Channel extends EventEmitter {
 function fixture(timeout?: number) {
   const channels = new Map<string, Channel>();
   const statuses = new Map<string, string>();
-  const manager = {
+  const manager = { repositoryWork: () => undefined,
     getStatus: (id: string) => statuses.get(id) ?? "connected",
     getConnection: (id: string) => ({ channels: { agent: channels.get(id)?.asChannel() } }),
     repositoryRuntime: (_id: string, repoId: string) => ({ repoId, sessionId: "current" }),
   };
-  const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, { requestTimeoutMs: timeout });
+  const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, mockStorageConnections, { requestTimeoutMs: timeout });
   const attach = (profile: string) => {
     const channel = new Channel();
     channels.set(profile, channel);

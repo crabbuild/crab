@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verification tests for remote git operations over the SSH router.
  *
@@ -29,6 +30,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -62,7 +64,7 @@ class MockLocalAgent {
 function createRouter(): { router: RpcRouter; channel: MockChannel; sessionManager: MockSessionManager; localAgent: MockLocalAgent } {
   const sessionManager = new MockSessionManager() as any;
   const localAgent = new MockLocalAgent();
-  const router = new RpcRouter(sessionManager, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   const channel = new MockChannel();
 
   sessionManager.setStatus("gpu-server", "connected");

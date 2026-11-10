@@ -3,6 +3,7 @@ import { readFile, writeFile, rename, mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
 import type { SafeStorage } from "electron";
 import type { StorageConnection, StorageConnectionInfo } from "./storage-connection-types";
+import { parseRepoId } from "./ssh-types";
 
 type Encryption = Pick<SafeStorage, "isEncryptionAvailable" | "encryptString" | "decryptString" | "getSelectedStorageBackend">;
 type Send = (method: string, params: unknown) => Promise<unknown>;
@@ -15,9 +16,9 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 
-/** Persist worktree bindings by path and isolate URL snapshot identities. */
+/** Persist local worktrees by path and isolate remote/profile identities. */
 export function storageBindingKey(repoId: string, localPath?: string): string {
-  return localPath === undefined ? repoId : path.resolve(localPath);
+  return localPath === undefined || parseRepoId(repoId) ? repoId : path.resolve(localPath);
 }
 
 function connection(value: unknown): StorageConnection {
@@ -72,7 +73,7 @@ export class StorageConnections {
   private inFlight = new Set<StorageConnection>();
   private sessions = new Map<string, string>();
 
-  constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform) {}
+  constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform, private identityChanged: IdentityChanged) {}
 
   private available(): boolean {
     return this.encryption.isEncryptionAvailable() &&
@@ -136,7 +137,7 @@ export class StorageConnections {
     return redacted;
   }
 
-  private redactValue(value: unknown): unknown {
+  redactValue(value: unknown): unknown {
     if (typeof value === "string") return this.redactText(value);
     if (Array.isArray(value)) return value.map(item => this.redactValue(item));
     if (record(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [this.redactText(key), this.redactValue(item)]));
@@ -150,9 +151,9 @@ export class StorageConnections {
     });
   }
 
-  async request(method: string, params: unknown, nativeSend: Send, identityChanged: IdentityChanged): Promise<unknown> {
+  async request(method: string, params: unknown, nativeSend: Send, remoteProfileId?: string): Promise<unknown> {
     const changed: IdentityChanged = async (repositories, state) => {
-      try { await identityChanged(repositories, state); }
+      try { await this.identityChanged(repositories, state); }
       catch (error) { throw error instanceof Error ? this.redactError(error) : error; }
     };
     const send: Send = async (name, payload) => {
@@ -175,6 +176,10 @@ export class StorageConnections {
     const payload = record(params) ? { ...params } : {};
     // Renderer input never supplies the agent's private credential context.
     delete payload.__storage_auth;
+    const repoId = text(payload.repo_id);
+    if (remoteProfileId !== undefined && repoId && parseRepoId(repoId)?.profileId !== remoteProfileId) {
+      throw new Error("The repository belongs to another SSH profile");
+    }
     if (method === "storage_connections_list") {
       const vault = await this.read();
       const repoId = text(payload.repo_id);
@@ -233,23 +238,29 @@ export class StorageConnections {
         ? (await this.read()).connections.find(item => item.id === payload.id)
         : connection(payload.connection);
       if (!next) throw new Error("Storage connection was not found.");
-      return send("storage_connection_test", { __storage_auth: next });
+      return send("storage_connection_test", { repo_id: payload.repo_id, __storage_auth: next });
     }
-    const repoId = text(payload.repo_id);
     const session = this.sessions.get(repoId);
     const opening = method === "open_local" || method === "open_url";
+    if (remoteProfileId !== undefined && opening && !repoId) throw new Error("An SSH repository identity is required");
     // Replacement resolves its destination, not the previous native owner's
     // path. Other calls retain the binding captured by their logical session.
-    const key = opening ? storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined)
-      : session ?? (typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd));
+    // Legacy physical RPCs can omit repo_id. Their remote path must never
+    // select a local worktree's credentials just because the strings match.
+    const source = remoteProfileId !== undefined ? repoId || undefined
+      : typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd);
+    const key = opening ? storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined) : session ?? source;
+    // A desired repository can need credential repair before its first native
+    // open succeeds. The binding context outlives that failed native attempt.
+    if (opening && key) this.sessions.set(repoId, key);
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
     const capture = method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
-    const needsAuth = !control && (explicit || !!this.cached?.bindings[key] || capture || (method === "open_local" && this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
+    const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
       ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method));
     // Local browsing and app startup do not depend on an unlocked cloud keyring.
     const vault = needsAuth ? await this.read() : undefined;
-    const id = explicit ? text(payload.storage_connection_id) : vault?.bindings[key];
+    const id = explicit ? text(payload.storage_connection_id) : key ? vault?.bindings[key] : undefined;
     delete payload.storage_connection_id;
     let selected: StorageConnection | undefined;
     if (id) {
@@ -258,7 +269,7 @@ export class StorageConnections {
     }
     // Record explicit identity before opening or cloning. If encrypted storage
     // cannot be written, do not create a cloud session or an unbound checkout.
-    if (explicit && opening) {
+    if (explicit && opening && key) {
       if (id || vault?.bindings[key] || this.available()) {
         selected = await this.mutate(vault => {
           const current = id ? vault.connections.find(item => item.id === id) : undefined;
@@ -269,7 +280,11 @@ export class StorageConnections {
       }
     }
     if (method === "clone" && selected && typeof payload.dest === "string") {
-      const dest = path.resolve(payload.dest);
+      let dest = path.resolve(payload.dest);
+      if (remoteProfileId !== undefined) {
+        if (!path.posix.isAbsolute(payload.dest)) throw new Error("Choose an absolute remote clone destination");
+        dest = `ssh://${remoteProfileId}${path.posix.normalize(payload.dest)}`;
+      }
       const selectedId = selected.id;
       selected = await this.mutate(vault => {
         const current = vault.connections.find(item => item.id === selectedId);
@@ -280,11 +295,6 @@ export class StorageConnections {
     }
     if (selected) payload.__storage_auth = selected;
     const result = await send(method, payload);
-    if ((method === "open_local" || method === "open_url") && record(result) && typeof result.repo_id === "string") {
-      const repo_id = result.repo_id;
-      const sessionKey = storageBindingKey(repo_id, method === "open_url" ? undefined : text(payload.path));
-      this.sessions.set(repo_id, sessionKey);
-    }
     // Closing a reader is not forgetting its saved storage identity. Reopening
     // the logical snapshot must resolve the same binding after an app restart.
     if (method === "close") this.sessions.delete(repoId);

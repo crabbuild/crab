@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Integration test for the SSH Activity Bridge.
  *
@@ -79,6 +80,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -172,7 +174,7 @@ describe("SSH Activity Bridge — full pipeline integration", () => {
     sessionManager.setConnection("gpu-server", channel);
 
     const localAgent = { request: vi.fn(async () => ({})) };
-    router = new RpcRouter(sessionManager as any, localAgent);
+    router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections);
     router.attachChannel("gpu-server", channel.asChannel());
 
     orchestrator = new Orchestrator({ persistPath, timeoutMs: 60_000 });

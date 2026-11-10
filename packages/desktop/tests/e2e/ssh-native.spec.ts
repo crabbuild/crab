@@ -3,15 +3,13 @@ import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:c
 import { generateKeyPairSync, randomUUID, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Client, Server, utils, type ClientChannel } from "ssh2";
-import { extractFile } from "@electron/asar";
 import type { CapabilityNegotiator } from "../../electron/ssh-capabilities";
 import type { RpcRouter } from "../../electron/ssh-router";
 import type { SshSessionManager } from "../../electron/ssh-manager";
-import { packagedExecutable } from "./packaged-app";
+import { packagedExecutable, packagedModule, unboundStorage } from "./packaged-app";
 
 function running(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
@@ -48,13 +46,8 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
   const env: NodeJS.ProcessEnv = { ...process.env, CRAB_BIN: crab, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
   delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
-  const routerPath = path.join(root, "ssh-router.cjs");
-  writeFileSync(path.join(root, "ssh-types.cjs"), extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-types.cjs"));
-  writeFileSync(routerPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-router.cjs"));
-  const capabilitiesPath = path.join(root, "ssh-capabilities.cjs");
-  writeFileSync(capabilitiesPath, extractFile(path.join(resources, "app.asar"), "dist-electron/ssh-capabilities.cjs"));
-  const { CapabilityNegotiator: PackagedNegotiator } = createRequire(__filename)(capabilitiesPath) as { CapabilityNegotiator: typeof CapabilityNegotiator };
-  const { RpcRouter: PackagedRouter } = createRequire(__filename)(routerPath) as { RpcRouter: typeof RpcRouter };
+  const { CapabilityNegotiator: PackagedNegotiator } = packagedModule<{ CapabilityNegotiator: typeof CapabilityNegotiator }>(resources, "ssh-capabilities");
+  const { RpcRouter: PackagedRouter } = packagedModule<{ RpcRouter: typeof RpcRouter }>(resources, "ssh-router");
   const key = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "pkcs1", format: "pem" } });
   const host = utils.parseKey(key.privateKey);
   if (host instanceof Error) throw host;
@@ -123,8 +116,9 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
     const channels = new Map<string, ClientChannel>();
     const profiles = new Map<string, { operationTimeoutMs?: number }>();
     const statuses = new Map<string, string>();
-    const manager = { getStatus: (id: string) => statuses.get(id) ?? "disconnected", getConnection: (id: string) => ({ channels: { agent: channels.get(id) }, profile: profiles.get(id) }) };
-    const router = new PackagedRouter(manager as unknown as SshSessionManager, { request: async () => { throw new Error("Remote operation reached local agent"); } });
+    const manager = { repositoryWork: () => undefined, getStatus: (id: string) => statuses.get(id) ?? "disconnected", getConnection: (id: string) => ({ channels: { agent: channels.get(id) }, profile: profiles.get(id) }) };
+    const storage = unboundStorage(resources, path.join(root, "connections.enc"), async () => {});
+    const router = new PackagedRouter(manager as unknown as SshSessionManager, { request: async () => { throw new Error("Remote operation reached local agent"); } }, storage);
     const negotiator = new PackagedNegotiator(router);
     const connect = async (profile: string) => {
       const client = new Client(); clients.push(client); client.on("error", error => transportErrors.push(error));

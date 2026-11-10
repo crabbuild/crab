@@ -163,11 +163,6 @@ export class Agent extends EventEmitter {
         if (!run) throw new Error("Native agent is not running");
         await run.ready;
         return this.sendRequest(run, name, payload);
-      }, async (keys, state) => {
-        const run = this.runtime;
-        // Before negotiation, replay will resolve the current saved binding.
-        // A failed or draining process has already revoked its reader identities.
-        if (run?.capabilities && !run.failure && !run.stopping) await this.storageIdentityChanged(run, keys, state);
       });
     }
     const payload = fields(params);
@@ -188,7 +183,7 @@ export class Agent extends EventEmitter {
         const key = storageBindingKey(repoId, method === "open_local" ? String(payload.path) : undefined);
         // Release this opening's admission before replacing aliases of the
         // same worktree; reciprocal opens must never wait on each other's lock.
-        await this.storageIdentityChanged(run, [key], "changed", repoId);
+        await this.replaceStorageIdentities(run, [key], "changed", repoId);
       }
       const repository = this.repositories.get(repoId);
       if (!repository || !result || repository.method !== method || repository.params.path !== payload.path || repository.params.url !== payload.url) throw new Error("Repository opening was superseded or closed.");
@@ -245,7 +240,14 @@ export class Agent extends EventEmitter {
     });
   }
 
-  private async storageIdentityChanged(run: Runtime, keys: string[], state: "changed" | "removed", openedRepoId?: string): Promise<void> {
+  async storageIdentityChanged(keys: string[], state: "changed" | "removed"): Promise<void> {
+    const run = this.runtime;
+    // Before negotiation, replay resolves the current saved binding. A failed
+    // or draining process has already revoked its reader identities.
+    if (run?.capabilities && !run.failure && !run.stopping) await this.replaceStorageIdentities(run, keys, state);
+  }
+
+  private async replaceStorageIdentities(run: Runtime, keys: string[], state: "changed" | "removed", openedRepoId?: string): Promise<void> {
     // Include admitted opens, not only published repositories. Resolve their
     // binding after admission drains so removal cannot miss a late SDK owner.
     if (!keys.length) return;
@@ -289,7 +291,7 @@ export class Agent extends EventEmitter {
 
   private dispatch(run: Runtime, method: string, params: unknown): Promise<unknown> {
     return this.storageConnections
-      ? this.storageConnections.request(method, params, (name, payload) => this.sendRequest(run, name, payload), (repositories, state) => this.storageIdentityChanged(run, repositories, state))
+      ? this.storageConnections.request(method, params, (name, payload) => this.sendRequest(run, name, payload))
       : this.sendRequest(run, method, params);
   }
 

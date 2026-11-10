@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verification test: Remote Push Flow Panel — staging_stats RPC routing.
  *
@@ -36,6 +37,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   agentSession() { return "ssh:1"; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
@@ -91,7 +93,7 @@ function createTestSetup() {
   sessionManager.setStatus(TEST_PROFILE_ID, "connected");
   sessionManager.setConnection(TEST_PROFILE_ID, channel);
 
-  const router = new RpcRouter(sessionManager as any, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   router.attachChannel(TEST_PROFILE_ID, channel as any);
 
   const fileEditor = new MockFileEditor();

@@ -6,6 +6,7 @@ import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "./ssh-manager";
 import type { RemoteCache } from "./ssh-cache";
 import { nativeSessionLost } from "./repo-capabilities";
+import type { StorageConnections } from "./storage-connections";
 
 export interface RepoTransport { type: "local" | "remote"; profileId?: string }
 export interface RpcRouterOptions {
@@ -83,6 +84,7 @@ export class RpcRouter extends EventEmitter {
   constructor(
     private readonly sessionManager: SshSessionManager,
     private readonly localAgent: { request(method: string, params: unknown): Promise<unknown> },
+    private readonly storageConnections: Pick<StorageConnections, "request" | "redactValue">,
     options: RpcRouterOptions = {},
   ) {
     super();
@@ -97,9 +99,18 @@ export class RpcRouter extends EventEmitter {
 
   async route(repoId: string, method: string, params: unknown): Promise<unknown> {
     const parsed = parseRepoId(repoId);
-    if (parsed) return this.routeToRemote(parsed.profileId, method, params);
     const transport = this.transports.get(repoId);
-    if (transport?.type === "remote" && transport.profileId) return this.routeToRemote(transport.profileId, method, params);
+    const profileId = parsed?.profileId ?? (transport?.type === "remote" ? transport.profileId : undefined);
+    if (profileId) {
+      // Process readiness precedes repository replay. Join that repository's
+      // admission before metadata dispatch. Captures and cancellation retain
+      // their live-session contract rather than acquiring a hidden retry queue.
+      if (this.sessionManager.getStatus(profileId) === "connected" && isCacheableReadMethod(method)) {
+        const pending = this.sessionManager.repositoryWork(repoId);
+        if (pending) await pending;
+      }
+      return this.routeToRemote(profileId, method, params);
+    }
     return this.localAgent.request(method, params);
   }
 
@@ -226,6 +237,15 @@ export class RpcRouter extends EventEmitter {
   }
 
   sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+    return this.storageConnections.request(method, params, (name, payload) => this.sendPreparedToRemoteAgent(profileId, name, payload), profileId);
+  }
+
+  /** Drain a native owner without forgetting its desired credential binding. */
+  retireRepository(profileId: string, repoId: string): Promise<unknown> {
+    return this.sendPreparedToRemoteAgent(profileId, "close", { repo_id: repoId });
+  }
+
+  private sendPreparedToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
     const connection = this.sessionManager.getConnection(profileId);
     const owner = this.channels.get(profileId);
     if (!owner || owner.closed || owner.channel !== connection?.channels.agent) return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
@@ -307,8 +327,9 @@ export class RpcRouter extends EventEmitter {
     const frame: unknown = JSON.parse(line);
     if (!frame || typeof frame !== "object" || Array.isArray(frame) || !("jsonrpc" in frame) || frame.jsonrpc !== "2.0") throw new Error("Expected one JSON-RPC 2.0 frame");
     if ("method" in frame && typeof frame.method === "string" && !("id" in frame)) {
-      if (PROGRESS_METHODS.has(frame.method) && "params" in frame && frame.params && typeof frame.params === "object" && !Array.isArray(frame.params)) {
-        const params = frame.params as Record<string, unknown>;
+      const notification = this.storageConnections.redactValue("params" in frame ? frame.params : undefined);
+      if (PROGRESS_METHODS.has(frame.method) && notification && typeof notification === "object" && !Array.isArray(notification)) {
+        const params = notification as Record<string, unknown>;
         const jobId = params.job_id ?? params.op_id;
         const request = [...this.pending.values()].find(request => request.owner === owner && request.progress?.job_id === jobId);
         if (request?.progress && (params.repo_id === undefined || params.repo_id === request.progress.repo_id)) {
@@ -317,7 +338,7 @@ export class RpcRouter extends EventEmitter {
           this.emit("progress", { method: frame.method, params: { ...params, repo_id: request.progress.repo_id } });
         }
       }
-      this.emit("notification", { profileId: owner.profileId, method: frame.method, params: "params" in frame ? frame.params : undefined });
+      this.emit("notification", { profileId: owner.profileId, method: frame.method, params: notification });
       return;
     }
     if (!("id" in frame) || (typeof frame.id !== "number" && frame.id !== null)) throw new Error("Invalid response ID");

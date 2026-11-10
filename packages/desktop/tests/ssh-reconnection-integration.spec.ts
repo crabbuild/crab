@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Integration test: SSH reconnection flow end-to-end.
  *
@@ -91,6 +92,7 @@ class MockSshClient extends EventEmitter {
 // ── Mock SSH Session Manager ─────────────────────────────────────
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, any>();
 
@@ -143,7 +145,7 @@ describe("SSH Reconnection Integration", () => {
     // Initialize all subsystem modules
     sessionManager = new MockSessionManager();
     localAgent = new MockLocalAgent();
-    router = new RpcRouter(sessionManager as any, localAgent);
+    router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections);
     cache = new RemoteCache();
     router.setCache(cache);
     auditLog = new SshAuditLog(auditLogPath);

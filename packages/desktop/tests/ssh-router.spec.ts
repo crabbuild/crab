@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Unit tests for the RPC Router module.
  *
@@ -30,6 +31,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -73,7 +75,7 @@ function createRouter(
 ) {
   const sm = sessionManager ?? new MockSessionManager();
   const la = localAgent ?? new MockLocalAgent();
-  const router = new RpcRouter(sm as any, la, options);
+  const router = new RpcRouter(sm as any, la, mockStorageConnections, options);
   return { router, sessionManager: sm, localAgent: la };
 }
 
@@ -118,6 +120,27 @@ describe("parseRepoId", () => {
 });
 
 describe("RpcRouter — routing logic", () => {
+  it("metadata joins its repository's replay while control bypasses admission", async () => {
+    const sm = new MockSessionManager();
+    const channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    sm.repositoryWork = () => opening;
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const repo_id = "ssh://server/data/repo";
+    const metadata = router.route(repo_id, "git_status_porcelain", { repo_id });
+    const cancelled = router.route(repo_id, "rpc/cancel", { repo_id, op_id: "opening" });
+    expect(channel.written.map(line => JSON.parse(line).method)).toEqual(["rpc/cancel"]);
+    simulateResponse(channel, 1, { ok: true });
+    await cancelled;
+    release();
+    await vi.waitFor(() => expect(channel.written).toHaveLength(2));
+    simulateResponse(channel, 2, { entries: [] });
+    await expect(metadata).resolves.toEqual({ entries: [] });
+  });
+
   it("routes local repo IDs to the local agent", async () => {
     const { router, localAgent } = createRouter();
     localAgent.nextResult = { status: "clean" };
@@ -565,7 +588,7 @@ describe("routeRpcCall — integration helper", () => {
     const la = new MockLocalAgent();
     la.nextResult = "local";
     const sm = new MockSessionManager();
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
 
     const result = await routeRpcCall(router, la, "git_status_porcelain", { repo_id: "/local/path" });
     expect(result).toBe("local");
@@ -578,7 +601,7 @@ describe("routeRpcCall — integration helper", () => {
     sm.setStatus("remote-1", "connected");
     sm.setConnection("remote-1", channel);
 
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
     router.attachChannel("remote-1", channel.asChannel());
 
     const promise = routeRpcCall(router, la, "git_status_porcelain", { repo_id: "ssh://remote-1/repo" });
@@ -593,7 +616,7 @@ describe("routeRpcCall — integration helper", () => {
     const la = new MockLocalAgent();
     la.nextResult = "pong";
     const sm = new MockSessionManager();
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
 
     const result = await routeRpcCall(router, la, "ping", {});
     expect(result).toBe("pong");

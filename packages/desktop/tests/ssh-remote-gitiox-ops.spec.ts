@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import type { SshSessionManager } from "../electron/ssh-manager";
 /**
  * Verification tests for remote Crab operations over the SSH router.
@@ -30,6 +31,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -68,7 +70,7 @@ function createRouter(): {
 } {
   const sessionManager = new MockSessionManager() as any;
   const localAgent = new MockLocalAgent();
-  const router = new RpcRouter(sessionManager, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   const channel = new MockChannel();
 
   sessionManager.setStatus("gpu-server", "connected");
@@ -609,7 +611,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // Create a router with a short timeout for testing
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "connected");
@@ -1010,7 +1012,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // Create a router with a short timeout for testing
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "connected");
@@ -1533,7 +1535,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       // Create a router with a short timeout for testing
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "connected");
@@ -1766,7 +1768,7 @@ describe("Remote Crab Operations via RPC Router", () => {
     it("queues hydration_status during reconnection (read operation)", async () => {
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const r2 = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 5000 });
+      const r2 = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 5000 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "reconnecting");
@@ -1851,7 +1853,7 @@ describe("Remote Crab Operations via RPC Router", () => {
     it("times out hydration_status if remote agent does not respond", async () => {
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "connected");
@@ -2031,7 +2033,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       const manager = new MockSessionManager();
       manager.setStatus("gpu-server", "reconnecting");
       manager.setConnection("gpu-server", channel);
-      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent, mockStorageConnections);
       remote.attachChannel("gpu-server", channel.asChannel());
       await expect(remote.route(repoId, "crab_status", { repo_id: repoId })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
       manager.setStatus("gpu-server", "connected");
@@ -2102,7 +2104,7 @@ describe("Remote Crab Operations via RPC Router", () => {
     it("times out crab_status if remote agent does not respond", async () => {
       const sessionManager = new MockSessionManager() as any;
       const agent = new MockLocalAgent();
-      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+      const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
       const ch = new MockChannel();
 
       sessionManager.setStatus("gpu-server", "connected");
@@ -2272,7 +2274,7 @@ describe("Remote Crab Operations via RPC Router", () => {
         const manager = new MockSessionManager();
         manager.setStatus("gpu-server", "reconnecting");
         manager.setConnection("gpu-server", channel);
-        const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+        const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent, mockStorageConnections);
         remote.attachChannel("gpu-server", channel.asChannel());
         await expect(remote.route(repoId, "pointer_top", { repo_id: repoId, limit: 5 })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
         manager.setStatus("gpu-server", "connected");
@@ -2283,7 +2285,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       it("times out pointer_top if remote agent does not respond", async () => {
         const sessionManager = new MockSessionManager() as any;
         const agent = new MockLocalAgent();
-        const shortTimeoutRouter = new RpcRouter(sessionManager, agent, { requestTimeoutMs: 50 });
+        const shortTimeoutRouter = new RpcRouter(sessionManager, agent, mockStorageConnections, { requestTimeoutMs: 50 });
         const ch = new MockChannel();
 
         sessionManager.setStatus("gpu-server", "connected");
@@ -2572,7 +2574,7 @@ describe("Remote Crab Operations via RPC Router", () => {
       const manager = new MockSessionManager();
       manager.setStatus("gpu-server", "reconnecting");
       manager.setConnection("gpu-server", channel);
-      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent);
+      const remote = new RpcRouter(manager as unknown as SshSessionManager, localAgent, mockStorageConnections);
       remote.attachChannel("gpu-server", channel.asChannel());
       await expect(remote.route(repoId, "rpc/cancel", { repo_id: repoId, op_id: "old-session" })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
       manager.setStatus("gpu-server", "connected");

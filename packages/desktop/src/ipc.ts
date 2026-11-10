@@ -2432,7 +2432,7 @@ export const rpc = {
     try { return await call<{ ok: boolean }>("storage_connections_remove", { id }); }
     finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed")); }
   },
-  storageConnectionTest: (connection: StorageConnectionInput | string) => call<StorageVerifyResult>("storage_connections_test", typeof connection === "string" ? { id: connection } : { connection }),
+  storageConnectionTest: (connection: StorageConnectionInput | string, repo_id?: string) => call<StorageVerifyResult>("storage_connections_test", { ...(typeof connection === "string" ? { id: connection } : { connection }), repo_id }),
   storageConnectionBind: async (repo_id: string, id: string | null) => {
     try { return await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id }); }
     finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } })); }

@@ -346,7 +346,15 @@ function registerIpc(skillManager: SkillManager) {
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
   async function requestAgent(method: string, params: unknown): Promise<unknown> {
-    if (method.startsWith("storage_connections_")) return (await localAgent).request(method, params);
+    if (method.startsWith("storage_connections_")) {
+      const repoId = extractRepoIdFromParams(params);
+      const remote = repoId ? parseRepoId(repoId) : null;
+      if (method === "storage_connections_test" && remote) {
+        if (!_rpcRouter) throw new Error("SSH services are not initialized");
+        return _rpcRouter.sendToRemoteAgent(remote.profileId, method, params);
+      }
+      return (await localAgent).request(method, params);
+    }
     const registry = getProviderRegistry();
 
     // Handle repo open methods: register provider before returning handle.
@@ -1865,6 +1873,21 @@ app.whenReady().then(async () => {
   const sshDatabase = new SshDatabase(path.join(sshDataDirectory, "ssh-enhanced.db"));
   const db = sshDatabase.getDb();
 
+  const storageConnections = new StorageConnections(
+    path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
+    async (keys, state) => {
+      // The vault persists identity before either native owner replaces readers.
+      // Join both outcomes so one transport's failure cannot skip the other.
+      const outcomes = await Promise.allSettled([
+        agent?.storageIdentityChanged(keys, state),
+        sshSessionManager.storageIdentityChanged(keys, state),
+      ]);
+      const failures = outcomes.flatMap(outcome => outcome.status === "rejected" ? [outcome.reason] : []);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "Storage identity changed but some repositories could not recover");
+    },
+  );
+
   // Core SSH modules
   const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
   const verifyHostKey = knownHosts.authorize.bind(knownHosts);
@@ -1892,7 +1915,7 @@ app.whenReady().then(async () => {
     request: async (method: string, params: unknown) => {
       return (await localAgent).request(method, params);
     },
-  });
+  }, storageConnections);
   _rpcRouter = rpcRouter;
   const runtimeRoot = app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "resources", "native");
   const agentDeployer = new AgentDeployer(path.join(runtimeRoot, "ssh-runtimes"), app.getVersion());
@@ -2321,9 +2344,6 @@ app.whenReady().then(async () => {
     // Main-process worktrees, Git helpers and the sidecar must use the same release.
     process.env.CRAB_BIN = runtime.crab;
     process.env.PATH = `${path.dirname(runtime.crab)}${path.delimiter}${process.env.PATH ?? ""}`;
-    const storageConnections = new StorageConnections(
-      path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
-    );
     // Each application profile owns its SlateDB writer; parallel profiles must
     // not contend for the standalone sidecar's home-directory index.
     const indexerDirectory = path.join(app.getPath("userData"), "native", "indexer");

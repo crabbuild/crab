@@ -102,7 +102,7 @@ describe("native agent process ownership", () => {
       encryptString: (value: string) => Buffer.from(value), decryptString: (value: Buffer) => value.toString(),
     };
     const vault = path.join(vaultDirectory, "connections.enc");
-    const store = new StorageConnections(vault, encryption, "darwin");
+    const store = new StorageConnections(vault, encryption, "darwin", (keys, state) => agent.storageIdentityChanged(keys, state));
     agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], store);
     if (start) await agent.start();
     const profile = (name: string): StorageConnectionInput => ({ name, provider: "s3", bucket: "fixture-bucket", region: "fixture-region", endpoint: `https://${name}.invalid`, credentials: { provider: "s3", access_key_id: `fixture-${name}`, secret_access_key: `fixture-secret-${name}` } });
@@ -208,7 +208,7 @@ describe("native agent process ownership", () => {
     const { first, vault, encryption } = await storageAgent();
     await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
     await agent.shutdown();
-    agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], new StorageConnections(vault, encryption, "darwin"));
+    agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], new StorageConnections(vault, encryption, "darwin", (keys, state) => agent.storageIdentityChanged(keys, state)));
     await agent.start();
     await agent.request("open_local", { repo_id: "restored", path: "/one" });
     await agent.request("file_open", { repo_id: "restored", path: "weights.bin" });

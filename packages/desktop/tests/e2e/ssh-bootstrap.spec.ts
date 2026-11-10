@@ -1,16 +1,14 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { extractFile } from "@electron/asar";
 import type { SshSessionManager, SshProfile } from "../../electron/ssh-manager";
 import type { RpcRouter } from "../../electron/ssh-router";
 import type { AgentDeployer } from "../../electron/ssh-deployer";
 import type { CapabilityNegotiator } from "../../electron/ssh-capabilities";
-import { packagedExecutable } from "./packaged-app";
+import { packagedExecutable, packagedModule, unboundStorage } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
 test("SSH bootstrap deploys the real native pair, reads repositories and drains independent sessions", async () => {
@@ -20,27 +18,24 @@ test("SSH bootstrap deploys the real native pair, reads repositories and drains 
   const resources = process.platform === "darwin" ? path.resolve(path.dirname(executable), "../Resources") : path.join(path.dirname(executable), "resources");
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-ssh-bootstrap-"));
   const crab = path.join(resources, "agent/crab");
-  const require = createRequire(__filename);
-  const compiled = (name: string) => {
-    const file = path.resolve(__dirname, `../../dist-electron/${name}.cjs`);
-    expect(readFileSync(file)).toEqual(extractFile(path.join(resources, "app.asar"), `dist-electron/${name}.cjs`));
-    return require(file);
-  };
-  const { SshSessionManager: Manager } = compiled("ssh-manager") as { SshSessionManager: typeof SshSessionManager };
-  const { RpcRouter: Router } = compiled("ssh-router") as { RpcRouter: typeof RpcRouter };
-  const { AgentDeployer: Deployer } = compiled("ssh-deployer") as { AgentDeployer: typeof AgentDeployer };
-  const { CapabilityNegotiator: Negotiator } = compiled("ssh-capabilities") as { CapabilityNegotiator: typeof CapabilityNegotiator };
+  const { SshSessionManager: Manager } = packagedModule<{ SshSessionManager: typeof SshSessionManager }>(resources, "ssh-manager");
+  const { RpcRouter: Router } = packagedModule<{ RpcRouter: typeof RpcRouter }>(resources, "ssh-router");
+  const { AgentDeployer: Deployer } = packagedModule<{ AgentDeployer: typeof AgentDeployer }>(resources, "ssh-deployer");
+  const { CapabilityNegotiator: Negotiator } = packagedModule<{ CapabilityNegotiator: typeof CapabilityNegotiator }>(resources, "ssh-capabilities");
   writeFileSync(path.join(root, "gitconfig"), "");
   const environment: NodeJS.ProcessEnv = { ...process.env, CRAB_BIN: "/not-the-bundled-crab", CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
   delete environment.GIT_DIR; delete environment.GIT_WORK_TREE; delete environment.GIT_INDEX_FILE;
   const fixture = await sshFixture(root, environment);
   const manager = new Manager(fixture.verify);
-  const router = new Router(manager, { request: async () => { throw new Error("Remote operation reached the local agent"); } });
+  const storage = unboundStorage(resources, path.join(root, "connections.enc"), (keys, state) => manager.storageIdentityChanged(keys, state));
+  const router = new Router(manager, { request: async () => { throw new Error("Remote operation reached the local agent"); } }, storage);
   const capabilities = new Negotiator(router);
   const version = JSON.parse(readFileSync(path.join(resources, "agent/runtime.json"), "utf8")).version as string;
   manager.configureAgentDeployment({ agentDeployer: new Deployer(path.join(resources, "ssh-runtimes"), version), capabilityNegotiator: capabilities, rpcRouter: router });
   const profile = (id: string): SshProfile => ({ id, label: "Bootstrap fixture", host: "127.0.0.1", port: fixture.port, username: "fixture", authMethod: { type: "key", keyPath: fixture.keyPath }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
   const first = profile(randomUUID()), second = profile(randomUUID());
+  let stage = "setup";
+  let failure: unknown;
   try {
     const source = path.join(fixture.home, "source '🦀'"); mkdirSync(source);
     const setupEnv = { ...environment, CRAB_BIN: crab, PATH: `${path.dirname(crab)}${path.delimiter}${environment.PATH ?? ""}` };
@@ -77,11 +72,14 @@ test("SSH bootstrap deploys the real native pair, reads repositories and drains 
       expect(readFileSync(path.join(source, file))).toEqual(bytes); expect(git(["show", `:${file}`])).toEqual(pointers.get(file));
       await router.route(repo_id, "file_close", { repo_id, file_id: captured.file_id });
     }
+    stage = "first disconnect";
     await manager.disconnect(first.id);
     expect(await router.route(right.repo_id as string, "ping", {})).toMatchObject({ pong: version });
+    stage = "explicit reconnect";
     await manager.connect(first);
     expect(fixture.uploadedBytes).toBe(firstUpload);
     expect(await router.route(left.repo_id as string, "git_status_porcelain", { repo_id: left.repo_id })).toBeDefined();
+    stage = "automatic reconnect";
     first.autoReconnect = true;
     const previous = manager.getConnection(first.id)!.channels.agent;
     manager.getConnection(first.id)!.client.end();
@@ -92,12 +90,20 @@ test("SSH bootstrap deploys the real native pair, reads repositories and drains 
     expect(manager.getConnection(first.id)!.channels.agent).not.toBe(previous);
     expect(fixture.uploadedBytes).toBe(firstUpload);
     expect(await router.route(right.repo_id as string, "ping", {})).toMatchObject({ pong: version });
+    stage = "final disconnect";
     await manager.disconnect(first.id); await manager.disconnect(second.id);
     expect(fixture.commands.size).toBe(0); expect(fixture.openFiles).toBe(0);
     expect(readdirSync(path.join(fixture.home, ".crab/desktop/runtimes")).filter(name => name.startsWith(".index-") || name.startsWith(".upload-"))).toEqual([]);
     writeFileSync(test.info().outputPath("ssh-bootstrap-proof.json"), JSON.stringify({ bytesPerFile: bytes.length, formats: ["crab", "lfs"], deployedBytes: firstUpload, secondProfileUploadBytes: 0, reconnectedUploadBytes: 0, nativeSessionsDrained: true, independentProfiles: true, repositoryReopened: true, automaticReconnect: true, metadataQueueReplayed: true, installedRuntimes: readdirSync(path.join(fixture.home, ".crab/desktop/runtimes")) }, null, 2));
-  } finally {
-    await manager.disconnect(first.id); await manager.disconnect(second.id);
-    await fixture.close(); rmSync(root, { recursive: true, force: true });
+  } catch (error) { failure = error; }
+  finally {
+    const outcomes = await Promise.allSettled([manager.disconnect(first.id), manager.disconnect(second.id)]);
+    const failures: unknown[] = failure ? [failure] : [];
+    for (const outcome of outcomes) if (outcome.status === "rejected") failures.push(outcome.reason);
+    try { await fixture.close(); } catch (error) { failures.push(error); }
+    finally { rmSync(root, { recursive: true, force: true }); }
+    writeFileSync(test.info().outputPath("bootstrap-outcome.json"), JSON.stringify({ stage, failures: failures.map(error => error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error)) }, null, 2));
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "SSH bootstrap and cleanup failed");
   }
 });

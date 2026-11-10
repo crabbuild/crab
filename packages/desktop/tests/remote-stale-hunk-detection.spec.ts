@@ -63,7 +63,7 @@ function makeMockCapabilityNegotiator(supportsFileWatching = true) {
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return withRepositoryRuntimes(Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
     agentSession: vi.fn().mockReturnValue("ssh:1"),

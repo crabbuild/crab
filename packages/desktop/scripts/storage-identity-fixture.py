@@ -125,6 +125,7 @@ def prepare(target: Path, crab: Path, rustfs: Path):
     profiles = []
     payloads = []
     cold_payloads = []
+    repositories = []
     git, aws = shutil.which("git"), shutil.which("aws")
     if not git or not aws:
         raise RuntimeError("Git and AWS CLI are required for storage identity qualification")
@@ -198,14 +199,14 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             run([crab, "push", url, "main", "--json"], source)
             payloads.append({"marker": marker, "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)})
             cold_payloads.append({"marker": cold_marker, "sha256": hashlib.sha256(cold).hexdigest(), "size": len(cold)})
-            if index == 0:
-                clone = work / "local"
-                run([crab, "clone", str(source), str(clone), "--lazy"])
-                if any((clone / filename).stat().st_size >= 1024 for filename in ("weights.safetensors", "lfs.safetensors", "cold.safetensors")):
-                    raise RuntimeError("Lazy fixture unexpectedly materialized its pointers")
+            clone = directory / "local"
+            run([crab, "clone", str(source), str(clone), "--lazy"])
+            if any((clone / filename).stat().st_size >= 1024 for filename in ("weights.safetensors", "lfs.safetensors", "cold.safetensors")):
+                raise RuntimeError("Lazy fixture unexpectedly materialized its pointers")
+            repositories.append(str(clone))
         descriptor = work / "fixture.json"
         with open(descriptor, "x", opener=lambda name, flags: os.open(name, flags, 0o600)) as output:
-            json.dump({"url": url, "local": str(clone), "profiles": profiles, "payloads": payloads, "cold_payloads": cold_payloads}, output)
+            json.dump({"url": url, "repositories": repositories, "profiles": profiles, "payloads": payloads, "cold_payloads": cold_payloads}, output)
         yield descriptor
 
 
