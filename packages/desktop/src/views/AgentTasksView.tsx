@@ -4,6 +4,7 @@
  * Chat workspace and skill management, accessed through the Chat activity entry.
  */
 
+import { useAgentChat } from "../lib/use-agent-chat";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Puzzle, Users, FolderTree } from "lucide-react";
@@ -11,7 +12,8 @@ import { OpenRepo } from "../state";
 import { TaskList } from "../components/orchestrator/TaskList";
 import { OrchestratorTask } from "../components/orchestrator/TaskCard";
 import { NewTaskDialog, NewTaskData } from "../components/orchestrator/NewTaskDialog";
-import { ChatTab, ChatMessage, ToolEvent } from "../components/orchestrator/ChatTab";
+import { ChatTab } from "../components/orchestrator/ChatTab";
+import type { ChatMessage } from "../../electron/agent-chat-messages";
 import { DiffTab } from "../components/orchestrator/DiffTab";
 import { TerminalView } from "./TerminalView";
 import { SkillsView } from "./SkillsView";
@@ -69,6 +71,9 @@ function mapBackendTask(t: any): OrchestratorTask {
     id: t.id,
     title: t.title ?? (t.prompt ?? "").slice(0, 80),
     agentName: t.agentType ?? "unknown",
+    model: t.model,
+    reasoningLevel: t.reasoningLevel,
+    planFirst: t.planFirst,
     status: t.status ?? "created",
     createdAt: t.createdAt ?? Date.now(),
     completedAt: t.completedAt,
@@ -77,7 +82,6 @@ function mapBackendTask(t: any): OrchestratorTask {
     baseBranch: t.baseBranch,
     prUrl: t.prUrl,
     prNumber: t.prNumber,
-    agents: t.agents,
     worktreePath: t.worktreePath,
     worktreeMode: t.worktreeMode,
     pinnedAt: t.pinnedAt,
@@ -118,166 +122,14 @@ async function promptForSidebarValue(message: string, defaultValue?: string): Pr
   return null;
 }
 
-/** Path variants to handle macOS /private/var vs /var symlink differences. */
-function pathVariants(p: string): string[] {
-  if (!p) return [];
-  const variants = [p];
-  if (p.startsWith("/private/")) variants.push(p.slice("/private".length));
-  else if (p.startsWith("/var/") || p.startsWith("/tmp/")) variants.push("/private" + p);
-  return variants;
-}
-
-/**
- * Regex that matches crab-agent worktree directory paths on any platform.
- *
- * The worktree is always created as `os.tmpdir()/crab-agent-<taskId>/`.
- * The taskId is a UUID (hex + hyphens). Rather than hardcoding OS-specific
- * temp directory patterns, we match on the `crab-agent-<id>/` directory
- * name itself — that's the invariant across macOS, Linux, and Windows.
- *
- * Matches:
- *   /private/var/folders/ns/.../T/crab-agent-c2f4fe17-64bf-4339-8622-3d935b3c7522/src/foo.ts
- *   /tmp/crab-agent-abc123/src/foo.ts
- *   C:\Users\dev\AppData\Local\Temp\crab-agent-abc123\src\foo.ts
- *   /any/path/crab-agent-uuid/remaining/path
- *
- * `worktreePathPrefixRegex` — for path fields where the worktree prefix
- * starts at the beginning of the string. Strips everything up to and
- * including the `crab-agent-<id>/` segment.
- *
- * `worktreePathEmbeddedRegex` — for command/output strings where the
- * worktree path may appear anywhere in the string (possibly multiple times).
- */
-function worktreePathPrefixRegex(): RegExp {
-  return /^.*?[/\\]crab-agent-[0-9a-f-]+[/\\]/;
-}
-
-function worktreePathEmbeddedRegex(): RegExp {
-  return /[^\s"']*[/\\]crab-agent-[0-9a-f-]+[/\\]/g;
-}
-
-/**
- * Infers the ToolEvent type from a tool name for tool_use events.
- * This maps well-known tool names to their semantic category so the
- * activity feed and filtering work correctly for Codex events.
- */
-function inferToolEventType(toolName: string): ToolEvent["type"] {
-  const lower = toolName.toLowerCase();
-  if (lower === "bash" || lower === "terminal" || lower === "powershell" || lower.includes("command")) return "command";
-  if (lower === "write" || lower === "edit" || lower === "filedelete" || lower.includes("edit") || lower.includes("write") || lower.includes("delete")) return "file_edit";
-  if (lower === "read" || lower === "imageview" || lower === "image_view" || lower.includes("read")) return "file_read";
-  if (lower === "grep" || lower === "glob" || lower.includes("search") || lower.includes("find")) return "search";
-  if (lower.includes("web") || lower.includes("fetch")) return "web";
-  if (lower === "todowrite" || lower.includes("task") || lower.includes("plan")) return "task";
-  return "generic";
-}
-
 function shouldDeferDiffFetch(status?: string): boolean {
   return status === "running" || status === "iterating" || status === "queued";
 }
 
-/**
- * Strips worktree absolute path prefixes from known path fields in a
- * tool input object. Returns a shallow copy with cleaned paths so the
- * tool cards display relative paths instead of long absolute ones.
- *
- * Uses two strategies:
- * 1. Exact prefix match against the known worktreePath (fast path)
- * 2. Regex match against the crab-agent temp dir pattern (fallback)
- */
-function stripInputPaths(input: unknown, worktreePath: string): unknown {
-  if (!input || typeof input !== "object") return input;
-
-  const obj = input as Record<string, unknown>;
-  const pathFields = ["file_path", "path", "directory", "old_path", "new_path"];
-  const variants = worktreePath ? pathVariants(worktreePath) : [];
-
-  let changed = false;
-  const result: Record<string, unknown> = { ...obj };
-
-  for (const field of pathFields) {
-    const val = obj[field];
-    if (typeof val !== "string" || !val) continue;
-
-    // Strategy 1: exact prefix match.
-    let stripped = false;
-    for (const variant of variants) {
-      if (val.startsWith(variant + "/")) {
-        result[field] = val.slice(variant.length + 1);
-        changed = true;
-        stripped = true;
-        break;
-      }
-      if (val === variant) {
-        result[field] = "";
-        changed = true;
-        stripped = true;
-        break;
-      }
-    }
-
-    // Strategy 2: regex fallback for crab-agent temp paths.
-    if (!stripped) {
-      const cleaned = val.replace(worktreePathPrefixRegex(), "");
-      if (cleaned !== val) {
-        result[field] = cleaned;
-        changed = true;
-      }
-    }
-  }
-
-  // Also strip from command strings (Bash tool).
-  if (typeof obj.command === "string" && obj.command) {
-    let cmd = obj.command as string;
-
-    // Strategy 1: exact match.
-    for (const variant of variants) {
-      while (cmd.includes(variant + "/")) {
-        cmd = cmd.replaceAll(variant + "/", "");
-        changed = true;
-      }
-    }
-
-    // Strategy 2: regex fallback.
-    const cleanedCmd = cmd.replace(worktreePathEmbeddedRegex(), "");
-    if (cleanedCmd !== cmd) {
-      cmd = cleanedCmd;
-      changed = true;
-    }
-
-    if (changed) result.command = cmd;
-  }
-
-  return changed ? result : input;
-}
-
-/** Strips worktree temp paths from any string value (for detail/stdout fields). */
-function stripWorktreeFromString(value: string | undefined): string | undefined {
-  if (!value) return value;
-  const cleaned = value.replace(worktreePathEmbeddedRegex(), "");
-  return cleaned !== value ? cleaned : value;
-}
-
-/**
- * Merge a new agent text event into the current streaming buffer.
- * Codex sometimes replays the full assistant message after deltas have
- * already streamed. Treat that as a replacement/duplicate, not a delta.
- */
-function mergeAgentTextContent(existing: string, incoming: string): string | null {
-  const existingTrimmed = existing.trim();
-  const incomingTrimmed = incoming.trim();
-  if (!incomingTrimmed) return existing;
-  if (existingTrimmed === incomingTrimmed || existingTrimmed.endsWith(incomingTrimmed)) {
-    return null;
-  }
-  if (
-    existing.length > 0 &&
-    (incoming.startsWith(existing) ||
-      (existingTrimmed.length > 0 && incomingTrimmed.startsWith(existingTrimmed)))
-  ) {
-    return incoming;
-  }
-  return existing + incoming;
+function appendChatNote(taskId: string, content: string, kind: "text" | "error" = "text"): void {
+  window.crab.orchestrator.appendChatNote(taskId, content, kind).then(result => {
+    if (!result.success) throw new Error(result.error ?? "Could not save chat note");
+  }).catch((error: unknown) => publishToast({ kind: "error", title: "Could not save chat note", body: error instanceof Error ? error.message : String(error) }));
 }
 
 // ── Composer model catalog ─────────────────────────────────────────
@@ -285,11 +137,7 @@ function mergeAgentTextContent(existing: string, incoming: string): string | nul
 // Imported from the shared model-catalog module. Keep that file updated
 // when new models are released.
 
-import { chatInputModelsForAgent } from "../components/orchestrator/model-catalog";
-
-function modelsForAgent(agentType: string): { value: string; label: string }[] {
-  return chatInputModelsForAgent(agentType);
-}
+import { modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -391,7 +239,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   const [agentWorkflows, setAgentWorkflows] = useState<AgentWorkflowDefinition[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<AgentWorkflowRun[]>([]);
   const [workflowRunIdsByTask, setWorkflowRunIdsByTask] = useState<Record<string, Set<string>>>({});
-  const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [streamingTasks, setStreamingTasks] = useState<Set<string>>(new Set());
   // null = checking, true = at least one agent available, false = show setup.
   // Seeded optimistically from the cached agent list so we don't force the
@@ -463,9 +310,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   // Incrementing version to trigger re-renders when liveFilesRef changes.
   const [, setLiveFilesVersion] = useState(0);
 
-  // Track previous TodoWrite input per task for delta computation.
-  const prevTodoInputRef = useRef<Record<string, unknown>>({});
-
   // Track tasks that have received a `done` event in the current turn.
   // Prevents late-arriving events (e.g. item/completed after turn/completed)
   // from re-enabling the streaming spinner after it's been cleared.
@@ -480,12 +324,19 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     () => tasks.find((t) => t.id === selectedTaskId) ?? null,
     [tasks, selectedTaskId],
   );
+  const transcriptTask = selectedTask && !selectedTask.pendingCreation ? selectedTask.id : undefined;
+  const [messages, setMessages] = useAgentChat(transcriptTask);
+  const closedConversation = selectedTask ? ["archived", "applied", "discarded"].includes(selectedTask.status) : false;
+  const modelCatalog = useAgentModels(closedConversation ? undefined : selectedTask?.agentName, selectedTask?.worktreePath);
+  const selectedModel = selectedTask ? composerModel[selectedTask.id] ?? selectedTask.model : undefined;
+  const availableModels = modelOptions(modelCatalog.models, selectedModel);
+
 
   const refreshTasksFromBackend = useCallback(
     async (preferredTaskId?: string | null): Promise<OrchestratorTask[]> => {
       const taskRepoPath = repo.path ?? repo.repo_id;
       const result = await (window as any).crab?.orchestrator?.listTasks?.({ repoPath: taskRepoPath });
-      if (!result?.success || !Array.isArray(result.tasks)) return [];
+      if (!result?.success || !Array.isArray(result.tasks)) throw new Error(result?.error ?? "Could not load tasks");
 
       const mapped: OrchestratorTask[] = result.tasks.map(mapBackendTask);
       setTasks(mapped);
@@ -498,7 +349,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
           }
           if (task.status === "running" || task.status === "iterating") {
             next.add(task.id);
-          } else if (task.status === "reviewing" || task.status === "failed" || task.status === "stopped" || task.status === "planning") {
+          } else {
             next.delete(task.id);
           }
         }
@@ -621,6 +472,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   // DiffTab unmount (tab switch) and AgentTasksView unmount (view switch).
   // Keyed by task ID so each task has its own applied set.
   const LS_APPLIED_FILES = "crab.orchestrator.appliedFiles";
+  const [workspaceRevision, setWorkspaceRevision] = useState(0);
 
   const [appliedFilesByTask, setAppliedFilesByTask] = useState<Record<string, Set<string>>>(() => {
     try {
@@ -636,6 +488,13 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       return {};
     }
   });
+
+  useEffect(() => window.crab.orchestrator.onFilesChanged(({ taskIds }) => {
+    const changed = new Set(taskIds);
+    setTasks(previous => previous.map(task => changed.has(task.id) ? { ...task, lastActivityAt: Date.now() } : task));
+    setAppliedFilesByTask(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !changed.has(id))));
+    setWorkspaceRevision(value => value + 1);
+  }), []);
 
   // Persist to localStorage whenever appliedFilesByTask changes.
   useEffect(() => {
@@ -794,7 +653,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   const TOAST_WORTHY_STATUSES = new Set(["reviewing", "applied", "failed", "planning"]);
 
   useEffect(() => {
-    const handler = (_event: any, data: { taskId: string; status: string }) => {
+    const handler = (data: { taskId: string; status: OrchestratorTask["status"] }) => {
       if (!data?.taskId) return;
 
       const task = tasks.find((t) => t.id === data.taskId);
@@ -802,22 +661,15 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         refreshTasksFromBackend(selectedTaskId).catch(() => {});
       }
 
-      // Don't downgrade a task from "reviewing" (successfully completed)
-      // to "failed" — this happens when the Codex process exits after
-      // emitting a done event, and the orchestrator interprets the exit
-      // as a failure. The done event is the authoritative completion signal.
       setTasks((prev) =>
         prev.map((t) => {
           if (t.id !== data.taskId) return t;
-          if (t.status === "reviewing" && data.status === "failed") return t;
-          return { ...t, status: data.status as OrchestratorTask["status"], lastActivityAt: Date.now() };
+          return { ...t, status: data.status, lastActivityAt: Date.now() };
         }),
       );
 
-      // Mark as streaming when the agent is spawning or running — this
-      // bridges the gap between user submit and first content event so
-      // the UI shows activity immediately.
-      if (data.status === "spawning" || data.status === "running" || data.status === "iterating") {
+      if (data.status === "running" || data.status === "iterating") {
+        doneTasksRef.current.delete(data.taskId);
         if (task?.agentName === "workflow") {
           setStreamingTasks((prev) => {
             if (!prev.has(data.taskId)) return prev;
@@ -831,10 +683,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
             return new Set([...prev, data.taskId]);
           });
         }
-      }
-
-      // Clear streaming state on terminal statuses.
-      if (data.status === "reviewing" || data.status === "failed" || data.status === "stopped" || data.status === "planning") {
+      } else {
         setStreamingTasks((prev) => {
           const next = new Set(prev);
           next.delete(data.taskId);
@@ -850,7 +699,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       // Build a temporary task object with the new status to compute actions.
       const updatedTask: OrchestratorTask = {
         ...(task ?? { id: data.taskId, title, agentName: "unknown", createdAt: Date.now() }),
-        status: data.status as OrchestratorTask["status"],
+        status: data.status,
       };
 
       const actions = getSuggestedActions(updatedTask);
@@ -901,7 +750,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       });
     };
 
-    const unsubscribe = (window as any).crab?.orchestrator?.onTaskStatus?.(handler);
+    const unsubscribe = window.crab.orchestrator.onTaskStatus(handler);
     return () => { if (typeof unsubscribe === "function") unsubscribe(); };
   }, [tasks, refreshTasksFromBackend, selectedTaskId]);
 
@@ -910,7 +759,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   // here, show a brief informational toast so the user knows what happened.
 
   useEffect(() => {
-    const handler = (_event: any, data: { stoppedTaskId: string; startedTaskId: string }) => {
+    const handler = (data: { stoppedTaskId: string; startedTaskId: string }) => {
       if (!data?.stoppedTaskId) return;
 
       const stoppedTask = tasks.find((t) => t.id === data.stoppedTaskId);
@@ -923,7 +772,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       });
     };
 
-    const unsubscribe = (window as any).crab?.orchestrator?.onNonconcurrentStop?.(handler);
+    const unsubscribe = window.crab.orchestrator.onNonconcurrentStop(handler);
     return () => { if (typeof unsubscribe === "function") unsubscribe(); };
   }, [tasks]);
 
@@ -932,12 +781,12 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   // exceeded its limit), show the BudgetWarningDialog.
 
   useEffect(() => {
-    const handler = (_event: any, data: { taskId: string; cost: number; limit: number; workspaceTitle?: string }) => {
+    const handler = (data: { taskId: string; cost: number; limit: number; workspaceTitle?: string }) => {
       if (!data?.taskId) return;
       setBudgetWarning(data);
     };
 
-    const unsubscribe = (window as any).crab?.orchestrator?.onBudgetWarning?.(handler);
+    const unsubscribe = window.crab.orchestrator.onBudgetWarning(handler);
     return () => { if (typeof unsubscribe === "function") unsubscribe(); };
   }, []);
 
@@ -1000,18 +849,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     window.addEventListener("crab:create-task-from-issue", handler);
     return () => window.removeEventListener("crab:create-task-from-issue", handler);
   }, []);
-
-  // Listen for "answer-question" events from AskUserCard interactive buttons.
-  // Routes the user's answer as iteration feedback to the active task.
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { answer: string } | undefined;
-      if (!detail?.answer || !selectedTaskId) return;
-      (window as any).crab?.orchestrator?.iterate(selectedTaskId, detail.answer).catch(() => {});
-    };
-    window.addEventListener("orchestrator:answer-question", handler);
-    return () => window.removeEventListener("orchestrator:answer-question", handler);
-  }, [selectedTaskId]);
 
   // Install the deep-link click listener for GitHub issue URLs.
   useEffect(() => {
@@ -1158,475 +995,31 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     }
   }, [repo.repo_id, repo.deferred]);
 
-  // ── Chat persistence: load history when selecting a task ────────────
-  useEffect(() => {
-    if (!selectedTaskId) return;
-
-    // Always reload from the database when selecting a task. This ensures
-    // we catch up on messages that were persisted while the view was
-    // unmounted (e.g. user navigated away during streaming). Without this,
-    // the user sees a blank page when returning to an active chat.
-    (window as any).crab?.orchestrator
-      ?.loadChat?.(selectedTaskId)
-      .then((result: { success?: boolean; messages?: ChatMessage[] }) => {
-        if (result?.success && result.messages && result.messages.length > 0) {
-          setMessages((prev) => {
-            const existing = prev[selectedTaskId] ?? [];
-            // If the database has more messages than our in-memory state,
-            // replace entirely (catches up on messages persisted while
-            // the view was unmounted).
-            if (result.messages!.length > existing.length) {
-              return {
-                ...prev,
-                [selectedTaskId]: result.messages!,
-              };
-            }
-            // If in-memory has more messages (live streaming) but is
-            // missing the initial user message, prepend it. This handles
-            // tasks whose initial prompt was persisted before this view mounted.
-            if (existing.length > 0 && existing[0].role !== "user") {
-              const dbUserMsg = result.messages!.find((m) => m.role === "user");
-              if (dbUserMsg && !existing.some((m) => m.id === dbUserMsg.id)) {
-                return {
-                  ...prev,
-                  [selectedTaskId]: [dbUserMsg, ...existing],
-                };
-              }
-            }
-            return prev;
-          });
-        }
-      })
-      .catch(() => {});
-  }, [selectedTaskId]);
-
-  // ── Chat persistence: save when messages change ─────────────────────
-  // Keep a ref to the latest messages so the unmount flush can access
-  // the current state without re-running the effect on every change.
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
-  const selectedTaskIdRef = useRef(selectedTaskId);
-  selectedTaskIdRef.current = selectedTaskId;
-
-  useEffect(() => {
-    if (!selectedTaskId) return;
-    const taskMsgs = messages[selectedTaskId];
-    if (!taskMsgs || taskMsgs.length === 0) return;
-
-    // Debounce saves to avoid writing on every streaming chunk.
-    // Reduced from 2s to 500ms so messages are persisted sooner —
-    // this minimises data loss when the user navigates away mid-stream.
-    const timer = setTimeout(() => {
-      (window as any).crab?.orchestrator?.saveChat?.(selectedTaskId, taskMsgs).catch(() => {});
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [selectedTaskId, messages]);
-
-  // Flush unsaved messages immediately on unmount so they're available
-  // when the view remounts (prevents the blank page on return).
-  useEffect(() => {
-    return () => {
-      const taskId = selectedTaskIdRef.current;
-      if (!taskId) return;
-      const taskMsgs = messagesRef.current[taskId];
-      if (!taskMsgs || taskMsgs.length === 0) return;
-      (window as any).crab?.orchestrator?.saveChat?.(taskId, taskMsgs).catch(() => {});
-    };
-  }, []);
-
   // Listen for orchestrator events.
   useEffect(() => {
-    const handler = (data: { taskId: string; event: any }) => {
+    const handler = (data: { taskId: string; event: import("../../electron/orchestrator-adapters").AgentEvent }) => {
       if (!data?.taskId) return;
 
       // Convert agent events to chat messages for the Chat tab.
       const eventType = data.event?.type;
 
-      // Skip empty/system events entirely.
+      if (eventType === "configuration_changed" && data.event.configuration) {
+        const configuration = data.event.configuration as import("../../electron/orchestrator-adapters").AgentTurnOptions;
+        setTasks(previous => previous.map(task => task.id === data.taskId ? { ...task,
+          ...(configuration.model !== undefined ? { model: configuration.model ?? undefined } : {}),
+          ...(configuration.reasoningLevel !== undefined ? { reasoningLevel: configuration.reasoningLevel ?? undefined } : {}),
+          ...(configuration.mode !== undefined ? { planFirst: configuration.mode === "plan" } : {}),
+        } : task));
+        if (configuration.mode) setComposerMode(previous => ({ ...previous, [data.taskId]: configuration.mode! }));
+        return;
+      }
+
       if (!eventType || eventType === "usage") return;
-      const activityAt = data.event?.timestamp ?? Date.now();
-      setTasks((prev) =>
-        prev.map((task) => task.id === data.taskId ? { ...task, lastActivityAt: activityAt } : task),
-      );
-
-      // Sandbox approval requests → render a dedicated card with
-      // Allow / Allow once / Deny actions. We pipe the structured
-      // approval payload through the generic ToolEvent input field so
-      // the existing tool-card pipeline can render it without a special
-      // case in the dispatcher.
-      if (eventType === "approval_request" && data.event.approval) {
-        const approval = data.event.approval;
-        const toolEvent: ToolEvent = {
-          type: "generic",
-          tool: "CodexApproval",
-          summary: approval.summary,
-          input: approval,
-        };
-        setMessages((prev) => {
-          const taskMsgs = prev[data.taskId] ?? [];
-          const lastMsg = taskMsgs[taskMsgs.length - 1];
-          if (lastMsg && lastMsg.role === "agent") {
-            const updated = [...taskMsgs];
-            updated[updated.length - 1] = {
-              ...lastMsg,
-              events: [...(lastMsg.events ?? []), toolEvent],
-            };
-            return { ...prev, [data.taskId]: updated };
-          }
-          const msg: ChatMessage = {
-            id: `${data.taskId}-approval-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            role: "agent",
-            content: "",
-            timestamp: data.event.timestamp ?? Date.now(),
-            events: [toolEvent],
-          };
-          return { ...prev, [data.taskId]: [...taskMsgs, msg] };
-        });
-        return;
-      }
-
-      // Thread.started → captured by the orchestrator for resume; no UI surface.
-      if (eventType === "thread_started") return;
-
-      // Tool result events → attach output as detail to the matching tool card.
-      // Routing strategy:
-      //   1. If the event carries `itemId`, find the tool event with the same
-      //      `itemId` (most precise; survives interleaving of multiple items).
-      //   2. Otherwise, fall back to the last tool event in the last agent
-      //      message (works for adapters that don't emit item ids).
-      //
-      // For streaming items, multiple tool_results arrive (one per outputDelta).
-      // We append unless the event is marked `input.final: true`, in which
-      // case the aggregated payload replaces any partial buffer.
-      if (eventType === "tool_result") {
-        const resultOutput = data.event.output;
-        const resultItemId = (data.event as { itemId?: string }).itemId;
-        const resultInput = data.event.input as Record<string, unknown> | undefined;
-        const isFinal = !!(resultInput && resultInput.final === true);
-        if (resultOutput) {
-          const detailText = typeof resultOutput === "string"
-            ? resultOutput
-            : Array.isArray(resultOutput)
-              ? resultOutput
-                  .map((block: any) => (typeof block === "string" ? block : block?.text ?? ""))
-                  .filter(Boolean)
-                  .join("\n")
-              : JSON.stringify(resultOutput, null, 2);
-
-          // Truncate very large outputs to keep the UI responsive.
-          const MAX_DETAIL_LENGTH = 12000;
-
-          if (detailText) {
-            setMessages((prev) => {
-              const taskMsgs = prev[data.taskId] ?? [];
-
-              // Locate the target tool event. Prefer itemId match across all
-              // recent agent messages; fall back to the last event when no
-              // id is provided or no match is found.
-              let targetMsgIdx = -1;
-              let targetEventIdx = -1;
-              if (resultItemId) {
-                for (let i = taskMsgs.length - 1; i >= 0 && targetMsgIdx === -1; i--) {
-                  const msg = taskMsgs[i];
-                  if (msg.role !== "agent" || !msg.events || msg.events.length === 0) continue;
-                  for (let j = msg.events.length - 1; j >= 0; j--) {
-                    if (msg.events[j].itemId === resultItemId) {
-                      targetMsgIdx = i;
-                      targetEventIdx = j;
-                      break;
-                    }
-                  }
-                }
-              }
-              if (targetMsgIdx === -1) {
-                // Fallback: last tool event in the most recent agent message.
-                for (let i = taskMsgs.length - 1; i >= 0; i--) {
-                  const msg = taskMsgs[i];
-                  if (msg.role === "agent" && msg.events && msg.events.length > 0) {
-                    targetMsgIdx = i;
-                    targetEventIdx = msg.events.length - 1;
-                    break;
-                  }
-                }
-              }
-              if (targetMsgIdx === -1) return prev;
-
-              const msg = taskMsgs[targetMsgIdx];
-              const lastEvent = msg.events![targetEventIdx];
-
-              // Decide append vs replace:
-              //   - `isFinal` always replaces (final aggregated payload wins)
-              //   - otherwise, streaming-capable tools append; everything else
-              //     keeps the first detail and ignores subsequent ones.
-              const isStreamingTool =
-                lastEvent.tool === "Bash"
-                || lastEvent.tool === "Write"
-                || lastEvent.tool === "Edit"
-                || lastEvent.tool === "FileDelete"
-                || lastEvent.tool === "EnterPlanMode";
-
-              let newDetail: string;
-              if (isFinal) {
-                newDetail = detailText;
-              } else if (!lastEvent.detail) {
-                newDetail = detailText;
-              } else if (isStreamingTool) {
-                newDetail = lastEvent.detail + detailText;
-              } else {
-                return prev; // non-streaming, already populated
-              }
-              const truncated = newDetail.length > MAX_DETAIL_LENGTH
-                ? newDetail.slice(0, MAX_DETAIL_LENGTH) + "\n… (truncated)"
-                : newDetail;
-              const updated = [...taskMsgs];
-              const updatedEvents = [...msg.events!];
-              updatedEvents[targetEventIdx] = { ...lastEvent, detail: truncated };
-              updated[targetMsgIdx] = { ...msg, events: updatedEvents };
-              return { ...prev, [data.taskId]: updated };
-            });
-          }
-        }
-        return;
-      }
-
-      // Text output from the agent → show as agent message.
-      // Accumulate text into the last agent message if it exists and is recent (streaming).
-      if (eventType === "text") {
-        const content = data.event.content;
-        if (content) {
-          setMessages((prev) => {
-            const taskMsgs = prev[data.taskId] ?? [];
-            const lastMsg = taskMsgs[taskMsgs.length - 1];
-
-            // If the last message is a normal text message from the agent and was
-            // recent (< 2s ago), append to it (streaming accumulation).
-            if (
-              lastMsg &&
-              lastMsg.role === "agent" &&
-              (lastMsg.kind === "text" || lastMsg.kind === undefined) &&
-              Date.now() - lastMsg.timestamp < 2000
-            ) {
-              const mergedContent = mergeAgentTextContent(lastMsg.content, content);
-              if (mergedContent === null) return prev;
-              const updated = [...taskMsgs];
-              updated[updated.length - 1] = {
-                ...lastMsg,
-                content: mergedContent,
-                timestamp: Date.now(),
-              };
-              return { ...prev, [data.taskId]: updated };
-            }
-
-            // Deduplication: if the incoming text is identical to (or a subset
-            // of) a recent agent message, skip it. This handles the case where
-            // the adapter re-emits the full assistant message content after
-            // streaming has already accumulated it.
-            for (let i = taskMsgs.length - 1; i >= Math.max(0, taskMsgs.length - 5); i--) {
-              const msg = taskMsgs[i];
-              if (msg.role === "user") break;
-              if (msg.role !== "agent") continue;
-              if (msg.kind !== "text" && msg.kind !== "done" && msg.kind !== undefined) continue;
-              const msgContent = msg.content.trim();
-              const newContent = content.trim();
-              if (
-                msgContent === newContent ||
-                msgContent.endsWith(newContent) ||
-                (newContent.length > 0 && newContent.startsWith(msgContent))
-              ) {
-                return prev; // Already have this content — skip.
-              }
-              break; // Only check the most recent agent text/done message in this turn.
-            }
-
-            // Otherwise create a new message.
-            const msg: ChatMessage = {
-              id: `${data.taskId}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              role: "agent",
-              content,
-              kind: "text",
-              timestamp: data.event.timestamp ?? Date.now(),
-            };
-            return { ...prev, [data.taskId]: [...taskMsgs, msg] };
-          });
-        }
-      }
-
-      // Done event → marks a turn boundary. When content is present,
-      // deduplicate against recent agent messages to avoid showing the
-      // final streamed text twice. When content is empty (agent only
-      // did tool calls), still emit a done marker so deriveTurns can
-      // split the conversation into proper User → AI turns.
-      if (eventType === "done") {
-        setMessages((prev) => {
-          const taskMsgs = prev[data.taskId] ?? [];
-          const doneContent = (data.event.content ?? "").trim();
-
-          // When there's actual content, deduplicate against recent messages.
-          if (doneContent.length > 0) {
-            for (let i = taskMsgs.length - 1; i >= Math.max(0, taskMsgs.length - 5); i--) {
-              const msg = taskMsgs[i];
-              if (msg.role === "user") break;
-              if (msg.role !== "agent") continue;
-
-              const msgContent = msg.content.trim();
-              // Exact match → just mark the existing message as done.
-              if (msgContent === doneContent) {
-                if (msg.kind !== "done") {
-                  const updated = [...taskMsgs];
-                  updated[i] = { ...msg, kind: "done" };
-                  return { ...prev, [data.taskId]: updated };
-                }
-                return prev;
-              }
-              // The done content is a subset of an existing message → mark done.
-              if (msgContent.length > 0 && msgContent.includes(doneContent)) {
-                if (msg.kind !== "done") {
-                  const updated = [...taskMsgs];
-                  updated[i] = { ...msg, kind: "done" };
-                  return { ...prev, [data.taskId]: updated };
-                }
-                return prev;
-              }
-              // The existing message is a subset of the done content → replace.
-              if (
-                msgContent.length > 0 &&
-                (msg.kind === "text" || msg.kind === undefined) &&
-                doneContent.startsWith(msgContent)
-              ) {
-                const updated = [...taskMsgs];
-                updated[i] = { ...msg, content: data.event.content, kind: "done" };
-                return { ...prev, [data.taskId]: updated };
-              }
-              // Stop searching after the first agent text message.
-              if (msg.kind === "text" || msg.kind === undefined) break;
-            }
-          }
-
-          // No dedup match (or empty content) → append a done marker.
-          const msg: ChatMessage = {
-            id: `${data.taskId}-done-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            role: "agent",
-            content: data.event.content ?? "",
-            kind: "done",
-            timestamp: data.event.timestamp ?? Date.now(),
-          };
-          return { ...prev, [data.taskId]: [...taskMsgs, msg] };
-        });
-      }
-
-      // Tool use events → show as tool cards attached to the last agent message.
-      // Skip tool_result events — they contain raw tool_use_ids and are just
-      // the return values from tools, not user-visible actions.
-      if (eventType === "file_edit" || eventType === "command_run" || eventType === "command" || eventType === "tool_use" || eventType === "file_read" || eventType === "search" || eventType === "web" || eventType === "task" || eventType === "generic") {
-        // The adapter already strips worktree paths and provides clean tool names.
-        const toolName = data.event.tool ?? "";
-        // Skip events where the tool name looks like a raw ID (toolu_bdrk_...)
-        if (toolName.startsWith("toolu_") || toolName.startsWith("tool_")) return;
-
-        const rawPathOrCmd = data.event.path ?? data.event.command ?? "";
-        // Strip worktree prefix from the summary path/command.
-        const pathOrCmd = typeof rawPathOrCmd === "string"
-          ? rawPathOrCmd.replace(worktreePathPrefixRegex(), "")
-          : rawPathOrCmd;
-
-        // Strip worktree prefix from input paths so tool cards show relative paths.
-        const task = tasks.find((t) => t.id === data.taskId);
-        const cleanedInput = stripInputPaths(data.event.input, task?.worktreePath ?? repo.path ?? repo.repo_id);
-
-        // For TodoWrite, track previous input for delta rendering.
-        let previousInput: unknown | undefined;
-        if (toolName === "TodoWrite") {
-          previousInput = prevTodoInputRef.current[data.taskId];
-          prevTodoInputRef.current[data.taskId] = cleanedInput;
-        }
-
-        const toolEvent: ToolEvent = {
-          type: eventType === "command_run" || eventType === "command" ? "command" :
-                eventType === "file_edit" ? "file_edit" :
-                eventType === "file_read" ? "file_read" :
-                eventType === "search" ? "search" :
-                eventType === "web" ? "web" :
-                eventType === "task" ? "task" :
-                eventType === "generic" ? "generic" :
-                // For tool_use events, infer the ToolEvent type from the tool name.
-                eventType === "tool_use" ? inferToolEventType(toolName) :
-                "file_read",
-          tool: toolName,
-          summary: pathOrCmd ? `${toolName}: ${pathOrCmd}` : toolName,
-          input: cleanedInput,
-          previousInput,
-          itemId: (data.event as { itemId?: string }).itemId,
-          detail: stripWorktreeFromString(data.event.diff ?? data.event.stdout ?? undefined),
-        };
-
-        setMessages((prev) => {
-          const taskMsgs = prev[data.taskId] ?? [];
-          const lastMsg = taskMsgs[taskMsgs.length - 1];
-
-          // Streaming-update merge: if this is a Codex event with an
-          // itemId that already has a card, update that card in place
-          // instead of pushing a duplicate. Used by:
-          //   - file_edit `kind: "update"` deltas
-          //   - plan streaming (`tool: "EnterPlanMode"`, status "streaming")
-          //   - command_execution status transitions
-          if (toolEvent.itemId) {
-            for (let i = taskMsgs.length - 1; i >= Math.max(0, taskMsgs.length - 10); i--) {
-              const msg = taskMsgs[i];
-              if (msg.role !== "agent" || !msg.events) continue;
-              const eventIdx = msg.events.findIndex((e) => e.itemId === toolEvent.itemId && e.tool === toolEvent.tool);
-              if (eventIdx === -1) continue;
-              const existing = msg.events[eventIdx];
-              const incomingInput = (toolEvent.input ?? {}) as Record<string, unknown>;
-              const existingInput = (existing.input ?? {}) as Record<string, unknown>;
-              const incomingStatus = String(incomingInput.status ?? "");
-              // For plan streaming, append the plan delta to the
-              // existing buffer; for other items, merge inputs and
-              // let the latest event win on shared keys.
-              let mergedInput: Record<string, unknown>;
-              if (toolEvent.tool === "EnterPlanMode" && incomingStatus === "streaming") {
-                mergedInput = {
-                  ...existingInput,
-                  ...incomingInput,
-                  plan: String(existingInput.plan ?? "") + String(incomingInput.plan ?? ""),
-                };
-              } else {
-                mergedInput = { ...existingInput, ...incomingInput };
-              }
-              const merged: ToolEvent = {
-                ...existing,
-                ...toolEvent,
-                input: mergedInput,
-                detail: toolEvent.detail ?? existing.detail,
-              };
-              const updatedEvents = [...msg.events];
-              updatedEvents[eventIdx] = merged;
-              const updated = [...taskMsgs];
-              updated[i] = { ...msg, events: updatedEvents };
-              return { ...prev, [data.taskId]: updated };
-            }
-          }
-
-          // Attach to the last agent message if it exists.
-          if (lastMsg && lastMsg.role === "agent") {
-            const updated = [...taskMsgs];
-            updated[updated.length - 1] = {
-              ...lastMsg,
-              events: [...(lastMsg.events ?? []), toolEvent],
-            };
-            return { ...prev, [data.taskId]: updated };
-          }
-
-          // Otherwise create a new agent message with just the tool event.
-          const msg: ChatMessage = {
-            id: `${data.taskId}-tool-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            role: "agent",
-            content: "",
-            timestamp: data.event.timestamp ?? Date.now(),
-            events: [toolEvent],
-          };
-          return { ...prev, [data.taskId]: [...taskMsgs, msg] };
-        });
+      const activityAt = data.event.timestamp ?? Date.now();
+      setTasks(previous => previous.map(task => task.id === data.taskId ? { ...task, lastActivityAt: activityAt } : task));
+      if (eventType === "turn_started") {
+        doneTasksRef.current.delete(data.taskId);
+        setStreamingTasks(previous => new Set([...previous, data.taskId]));
       }
 
       // Live file tracking: only track actual edits (not reads).
@@ -1649,62 +1042,8 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         }
       }
 
-      // Thinking → show as muted agent message, accumulating consecutive
-      // thinking deltas into a single bubble. Codex emits one event per
-      // reasoning chunk; without merging, the chat fills up with dozens
-      // of separate "Thought for a moment" bubbles.
-      if (eventType === "thinking" && data.event.content) {
-        setMessages((prev) => {
-          const taskMsgs = prev[data.taskId] ?? [];
-          const lastMsg = taskMsgs[taskMsgs.length - 1];
-          // Merge into the previous thinking message when it's recent
-          // (< 2s gap) and from the agent. This matches the text-stream
-          // accumulation rule, so the user sees a single growing block.
-          if (
-            lastMsg
-            && lastMsg.role === "agent"
-            && lastMsg.kind === "thinking"
-            && Date.now() - lastMsg.timestamp < 2000
-          ) {
-            const updated = [...taskMsgs];
-            updated[updated.length - 1] = {
-              ...lastMsg,
-              content: lastMsg.content + data.event.content,
-              timestamp: Date.now(),
-            };
-            return { ...prev, [data.taskId]: updated };
-          }
-          const msg: ChatMessage = {
-            id: `${data.taskId}-think-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            role: "agent",
-            content: data.event.content,
-            kind: "thinking",
-            timestamp: data.event.timestamp ?? Date.now(),
-          };
-          return { ...prev, [data.taskId]: [...taskMsgs, msg] };
-        });
-      }
-
-      // Error → show as agent error message
-      if (eventType === "error" && data.event.error) {
-        const msg: ChatMessage = {
-          id: `${data.taskId}-err-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          role: "agent",
-          content: `❌ ${data.event.error}`,
-          kind: "error",
-          timestamp: data.event.timestamp ?? Date.now(),
-        };
-        setMessages((prev) => ({
-          ...prev,
-          [data.taskId]: [...(prev[data.taskId] ?? []), msg],
-        }));
-      }
-
       // Task completed → update status
       if (eventType === "done") {
-        setTasks((prev) =>
-          prev.map((t) => (t.id === data.taskId ? { ...t, status: "reviewing" as any, completedAt: activityAt, lastActivityAt: activityAt } : t)),
-        );
         setStreamingTasks((prev) => {
           const next = new Set(prev);
           next.delete(data.taskId);
@@ -1762,20 +1101,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         const workflow = agentWorkflows.find((candidate) => candidate.id === workflowDefinitionId);
         const workflowName = workflow?.name ?? "Workflow";
 
-        if (sourceTaskId) {
-          setMessages((prev) => ({
-            ...prev,
-            [sourceTaskId]: [
-              ...(prev[sourceTaskId] ?? []),
-              {
-                id: `workflow-start-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                role: "agent" as const,
-                content: `Starting workflow: ${workflowName}. Spawned chats will appear under this chat in the sidebar.`,
-                timestamp: Date.now(),
-              },
-            ],
-          }));
-        }
+
 
         try {
           const result = await (window as any).crab?.agentWorkflows?.startRun?.(
@@ -1819,46 +1145,14 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               next.delete(mapped.id);
               return next;
             });
-            setMessages((prev) => {
-              const existing = prev[mapped.id] ?? [];
-              if (existing.length > 0) return prev;
-              return {
-                ...prev,
-                [mapped.id]: [
-                  {
-                    id: `${mapped.id}-init`,
-                    role: "user" as const,
-                    content: prompt,
-                    timestamp: Date.now(),
-                  },
-                  {
-                    id: `${mapped.id}-started`,
-                    role: "agent" as const,
-                    content: `Started workflow: ${workflowName}. Spawned chats will appear below this workflow session.`,
-                    timestamp: Date.now(),
-                  },
-                ],
-              };
-            });
+            appendChatNote(mapped.id, `Started workflow: ${workflowName}. Spawned chats will appear below this workflow session.`);
           }
 
           publishToast({ kind: "success", title: `Started workflow: ${workflowName}` });
         } catch (err: any) {
           const message = err?.message ?? `Failed to start workflow ${workflowName}`;
           if (sourceTaskId) {
-            setMessages((prev) => ({
-              ...prev,
-              [sourceTaskId]: [
-                ...(prev[sourceTaskId] ?? []),
-                {
-                  id: `workflow-error-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                  role: "agent" as const,
-                  kind: "error" as const,
-                  content: message,
-                  timestamp: Date.now(),
-                },
-              ],
-            }));
+            appendChatNote(sourceTaskId, message, "error");
           }
           publishToast({ kind: "error", title: message });
         }
@@ -1947,6 +1241,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       // transitions out of the empty state without waiting for the IPC.
       const optimisticTask: OrchestratorTask = {
         id: optimisticId,
+        pendingCreation: true,
         title: data.prompt.slice(0, 80),
         agentName: data.agentName,
         status: "running",
@@ -2060,20 +1355,10 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   );
 
   const handleSendMessage = useCallback(
-    (text: string, extras?: { attachments?: ChatAttachment[]; agentType?: string; model?: string | null; mode?: "plan" | "instant" }) => {
+    (text: string, extras?: { attachments?: ChatAttachment[]; agentType?: string; model?: string | null; mode?: "plan" | "instant"; intelligence?: string | null }) => {
       if (!selectedTaskId) return;
       // Clear the done guard so the new turn's events can set streaming state.
       doneTasksRef.current.delete(selectedTaskId);
-      const msg: ChatMessage = {
-        id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        role: "user",
-        content: text,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => ({
-        ...prev,
-        [selectedTaskId]: [...(prev[selectedTaskId] ?? []), msg],
-      }));
       // Persist composer preferences chosen at send-time so they stick.
       if (extras?.agentType) {
         setComposerAgent((prev) => ({ ...prev, [selectedTaskId]: extras.agentType! }));
@@ -2097,14 +1382,53 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         return;
       }
 
-      // Prefix plan-mode instructions so existing agents respond with a plan.
-      const finalText = extras?.mode === "plan"
-        ? `[Plan mode] First, propose an implementation plan. List files to change, approach, and risks. Wait for approval before making changes.\n\n${text}`
-        : text;
-      (window as any).crab.orchestrator?.iterate(selectedTaskId, finalText).catch(() => {});
+      const msg: ChatMessage = {
+        id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        role: "user",
+        content: text,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => ({
+        ...prev,
+        [selectedTaskId]: [...(prev[selectedTaskId] ?? []), { ...msg, sequence: Math.max(0, ...(prev[selectedTaskId] ?? []).map(message => message.sequence ?? 0)) + 1 }],
+      }));
+      const options = {
+        ...(extras?.model !== undefined ? { model: extras.model || null } : {}),
+        ...(extras?.mode !== undefined ? { mode: extras.mode } : {}),
+        ...(extras?.intelligence !== undefined ? { reasoningLevel: extras.intelligence } : {}),
+      };
+      const failed = (error: string, uncertain: boolean, unsent = false) => {
+        setMessages(previous => ({ ...previous, [selectedTaskId]: uncertain || unsent
+          ? (previous[selectedTaskId] ?? []).map(message => message.id === msg.id ? { ...message, deliveryError: error } : message)
+          : (previous[selectedTaskId] ?? []).filter(message => message.id !== msg.id) }));
+        publishToast({ kind: "error", title: uncertain ? "Delivery unconfirmed" : "Message not sent", body: error });
+      };
+      window.crab.orchestrator.iterate(selectedTaskId, text, options, msg.id).then(result => {
+        if (!result.success) failed(result.error ?? "Could not send the message", Boolean(result.uncertain), Boolean(result.unsent));
+      }).catch((error: unknown) => {
+        // Losing Electron's response says nothing about provider acceptance.
+        // Keep the user's intent until the durable snapshot can reconcile it.
+        failed(error instanceof Error ? error.message : "Could not confirm delivery", true);
+      });
     },
     [selectedTaskId, startWorkflowInvocation],
   );
+
+  const handleTaskOperation = useCallback((operation: (id: string) => Promise<{ success: boolean; error?: string }>, taskId: string, failureTitle: string) => {
+    return operation(taskId).then(async result => {
+      if (!result.success) {
+        publishToast({ kind: "error", title: failureTitle, body: result.error });
+        return false;
+      }
+      try { await refreshTasksFromBackend(taskId); } catch (error: unknown) {
+        publishToast({ kind: "error", title: "Could not refresh task", body: error instanceof Error ? error.message : String(error) });
+      }
+      return true;
+    }).catch((error: unknown) => {
+      publishToast({ kind: "error", title: failureTitle, body: error instanceof Error ? error.message : String(error) });
+      return false;
+    });
+  }, [refreshTasksFromBackend]);
 
   const handleStop = useCallback(() => {
     if (!selectedTaskId) return;
@@ -2153,17 +1477,15 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
   const handleDiscard = useCallback(() => {
     if (!selectedTaskId) return;
-    (window as any).crab.orchestrator?.discard(selectedTaskId).then(() => {
-      setTasks((prev) => prev.filter((t) => t.id !== selectedTaskId));
-      // Clear applied files for the discarded task.
+    handleTaskOperation(window.crab.orchestrator.discard, selectedTaskId, "Could not discard task").then(success => {
+      if (!success) return;
       setAppliedFilesByTask((prev) => {
         const next = { ...prev };
         delete next[selectedTaskId];
         return next;
       });
-      setSelectedTaskId(null);
-    }).catch(() => {});
-  }, [selectedTaskId]);
+    });
+  }, [selectedTaskId, handleTaskOperation]);
 
   const handleDeleteTask = useCallback(
     (taskId: string) => {
@@ -2320,10 +1642,10 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
           orch?.createPr(taskId).catch(() => {});
           break;
         case "retry":
-          orch?.retryTask(taskId).catch(() => {});
+          handleTaskOperation(window.crab.orchestrator.retryTask, taskId, "Could not reopen task");
           break;
         case "archive":
-          orch?.archiveTask(taskId).catch(() => {});
+          handleTaskOperation(window.crab.orchestrator.archiveTask, taskId, "Could not archive task");
           break;
         case "open-pr":
           // Open PR URL in external browser if available.
@@ -2336,7 +1658,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
           break;
       }
     },
-    [prMetadata],
+    [prMetadata, handleTaskOperation],
   );
 
   // ── Render ──────────────────────────────────────────────────────────
@@ -2476,7 +1798,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   label="Files"
                 />
               )}
-              {(!tabsOverflow || activeTab === "agents") && (selectedTask.agents?.length ?? 0) > 0 && (
+              {(!tabsOverflow || activeTab === "agents") && (
                 <TabButton
                   active={activeTab === "agents"}
                   onClick={() => setActiveTab("agents")}
@@ -2490,11 +1812,10 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               <CheckpointDropdown
                 task={selectedTask}
                 selectedTurn={selectedCheckpointTurn}
-                onRevert={(turnNumber) => {
+                onRestore={() => {
                   setCheckpointSha(null);
                   setCheckpointFromSha(null);
                   setSelectedCheckpointTurn(null);
-                  publishToast({ kind: "info", title: `Reverted to turn ${turnNumber}` });
                 }}
                 onSelectTurn={(range) => {
                   if (!range) {
@@ -2549,18 +1870,20 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                         (messages[selectedTask.id] ?? []).filter((m) => m.role === "user").length - 1
                       }
                       agents={agents
-                        .filter((a) => a.available || a.type === selectedTask.agentName)
+                        .filter((a) => a.type === selectedTask.agentName)
                         .map((a) => ({ type: a.type, name: a.name, available: a.available }))}
-                      selectedAgentType={composerAgent[selectedTask.id] ?? selectedTask.agentName}
+                      selectedAgentType={selectedTask.agentName}
                       onAgentChange={(t) =>
                         setComposerAgent((prev) => ({ ...prev, [selectedTask.id]: t }))
                       }
-                      models={modelsForAgent(composerAgent[selectedTask.id] ?? selectedTask.agentName)}
-                      selectedModel={composerModel[selectedTask.id] ?? ""}
+                      models={availableModels}
+                      intelligenceLevels={availableModels.find(model => model.value === selectedModel)?.intelligenceLevels ?? []}
+                      modelDiscovery={modelCatalog}
+                      selectedModel={composerModel[selectedTask.id] ?? selectedTask.model ?? ""}
                       onModelChange={(m) =>
                         setComposerModel((prev) => ({ ...prev, [selectedTask.id]: m }))
                       }
-                      mode={composerMode[selectedTask.id] ?? "instant"}
+                      mode={composerMode[selectedTask.id] ?? (selectedTask.planFirst ? "plan" : "instant")}
                       onModeChange={(m) =>
                         setComposerMode((prev) => ({ ...prev, [selectedTask.id]: m }))
                       }
@@ -2583,13 +1906,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                         <ChatTranscript
                           taskId={selectedTask.id}
                           messages={messages[selectedTask.id] ?? []}
-                          feedback={
-                            (messages[selectedTask.id] ?? [])
-                              .filter((m) => m.role === "user")
-                              .slice(1)
-                              .map((m) => m.content)
-                          }
-                          isStreaming={streamingTasks.has(selectedTask.id)}
                           onReview={() => setActiveTab("diff")}
                           agentName={selectedTask.agentName}
                         />
@@ -2624,6 +1940,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               {activeTab === "diff" && (
                 <DiffTab
                   task={selectedTask}
+                  workspaceRevision={workspaceRevision}
                   repo={repo}
                   active={active}
                   initialActiveFile={selectedLiveFile}
@@ -2651,26 +1968,11 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   }}
                   onReviewWithAi={async () => {
                     try {
-                      publishToast({ kind: "info", title: "Running AI review…", duration: 2000 });
-                      const result = await (window as any).crab.orchestrator?.reviewWithAi(selectedTask.id);
-                      if (!result?.success || !result.reviewText) {
-                        publishToast({ kind: "error", title: result?.error ?? "Failed to generate review — no diff found" });
-                        return;
-                      }
-                      const reviewMsg: ChatMessage = {
-                        id: `review-${Date.now()}`,
-                        role: "agent",
-                        content: `🔍 **AI Code Review**\n\n${result.reviewText}`,
-                        timestamp: Date.now(),
-                      };
-                      setMessages((prev) => ({
-                        ...prev,
-                        [selectedTask.id]: [...(prev[selectedTask.id] ?? []), reviewMsg],
-                      }));
-                      publishToast({ kind: "success", title: "AI review complete — see Chat tab" });
+                      const result = await window.crab.orchestrator.startReview(selectedTask.id);
+                      if (!result.success) throw new Error(result.error ?? "Could not start review");
                       setActiveTab("chat");
-                    } catch (err: any) {
-                      publishToast({ kind: "error", title: `AI Review failed: ${err?.message ?? "unknown error"}` });
+                    } catch (error: unknown) {
+                      publishToast({ kind: "error", title: "Review failed", body: error instanceof Error ? error.message : "Could not start review" });
                     }
                   }}
                 />
@@ -2733,7 +2035,9 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               {activeTab === "agents" && (
                 <MultiAgentView
                   task={selectedTask}
-                  isStreaming={streamingTasks.has(selectedTask.id)}
+                  childTasks={tasks.filter(task => task.parentTaskId === selectedTask.id)}
+                  onOpenChat={(id) => { setSelectedTaskId(id); setActiveTab("chat"); }}
+                  onReviewChanges={() => setActiveTab("diff")}
                   daemonSessions={agentDaemonSessions.filter(
                     (s) => s.taskId === selectedTask.id,
                   )}
@@ -2776,14 +2080,14 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
               isStreaming={streamingTasks.has(selectedTask.id)}
               onStop={handleStop}
               onRetry={() => {
-                (window as any).crab.orchestrator?.retryTask(selectedTask.id).catch(() => {});
+                handleTaskOperation(window.crab.orchestrator.retryTask, selectedTask.id, "Could not reopen task");
+              }}
+              onRestore={() => {
+                handleTaskOperation(window.crab.orchestrator.restoreTask, selectedTask.id, "Could not reopen task");
               }}
               onDiscard={handleDiscard}
               onArchive={() => {
-                (window as any).crab.orchestrator?.archiveTask(selectedTask.id).catch(() => {});
-              }}
-              onUndo={() => {
-                (window as any).crab.orchestrator?.undoApply(selectedTask.id).catch(() => {});
+                handleTaskOperation(window.crab.orchestrator.archiveTask, selectedTask.id, "Could not archive task");
               }}
               onApprovePlan={() => {
                 (window as any).crab.orchestrator?.approvePlan(selectedTask.id).catch(() => {});

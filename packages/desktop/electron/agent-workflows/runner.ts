@@ -749,13 +749,10 @@ export class AgentWorkflowRunner extends EventEmitter {
     node: AgentWorkflowNode,
   ): Promise<void> {
     const prompt = this.buildAgentPrompt(run, node, nodeRun);
-    const effectivePrompt = node.planFirst
-      ? `First, propose an implementation plan. List files to change, approach, and risks. Wait for approval before making changes.\n\nTask: ${prompt}`
-      : prompt;
     const agentType = (node.agentType ?? run.definitionSnapshot.defaultAgentType ?? "codex") as AgentType;
 
     try {
-      const task = await this.orchestrator.createTask(effectivePrompt, agentType, run.repoPath, "HEAD");
+      const task = await this.orchestrator.createTask(prompt, agentType, run.repoPath, "HEAD");
       task.title = node.title;
       task.workflowRunId = run.id;
       task.workflowNodeRunId = nodeRun.id;
@@ -791,7 +788,7 @@ export class AgentWorkflowRunner extends EventEmitter {
         const latestRun = await this.runStore.get(run.id);
         if (!latestRun) return;
         const latestNodeRun = latestRun.nodeRuns.find((candidate) => candidate.id === nodeRun.id);
-        if (!latestNodeRun) return;
+        if (!latestNodeRun || latestNodeRun.status !== "running") return;
         await this.handleNodeFailure(latestRun, latestNodeRun, node, `dispatch_error: ${errorMessage(err)}`);
       });
     } catch (err: unknown) {

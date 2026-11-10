@@ -12,7 +12,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ChevronRight } from "lucide-react";
-import type { ToolEvent } from "./chat-types";
+import type { ToolEvent } from "../../../electron/agent-chat-messages";
 import { useChatUIState } from "../../lib/chat-ui-state";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -24,6 +24,7 @@ export interface ToolGroupProps {
   members: ToolEvent[];
   /** True iff every tool_use in this group has a matching tool_result. */
   complete: boolean;
+  keepExpanded?: boolean;
   /** Timestamp (ms) of the first tool_use event in the group. */
   startedAt: number;
   /** Timestamp (ms) of the last tool_result (or null if still running). */
@@ -87,6 +88,7 @@ export function ToolGroup({
   groupId,
   members,
   complete,
+  keepExpanded = false,
   startedAt,
   endedAt,
   defaultCollapsed,
@@ -98,7 +100,7 @@ export function ToolGroup({
 
   // Resolve collapsed state: store override → default
   const storeEntry = taskState?.groupCollapse[groupId];
-  const collapsed = storeEntry?.collapsed ?? defaultCollapsed;
+  const collapsed = keepExpanded ? false : storeEntry?.collapsed ?? defaultCollapsed;
 
   const running = !complete;
   const elapsedStr = useElapsedTime(startedAt, running && collapsed);

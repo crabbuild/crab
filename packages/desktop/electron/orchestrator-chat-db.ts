@@ -22,6 +22,7 @@ export interface ChatMessageRow {
   content: string;
   events: string | null; // JSON-serialized ToolEvent[]
   timestamp: number;
+  metadata?: string | null;
 }
 
 export interface SearchResult {
@@ -78,6 +79,8 @@ export class ChatDatabase {
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp
         ON messages(timestamp);
     `);
+    const columns = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === "metadata")) this.db.exec("ALTER TABLE messages ADD COLUMN metadata TEXT");
 
     // FTS5 virtual table for full-text search.
     // Check if it already exists to avoid errors on re-migration.
@@ -123,28 +126,23 @@ export class ChatDatabase {
    */
   insertMessage(msg: ChatMessageRow): void {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO messages (id, task_id, role, kind, content, events, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, task_id, role, kind, content, events, timestamp, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, content=excluded.content,
+        events=excluded.events, timestamp=excluded.timestamp, metadata=excluded.metadata
     `);
-    stmt.run(msg.id, msg.task_id, msg.role, msg.kind, msg.content, msg.events, msg.timestamp);
+    stmt.run(msg.id, msg.task_id, msg.role, msg.kind, msg.content, msg.events, msg.timestamp, msg.metadata ?? null);
   }
 
   /**
-   * Batch-inserts multiple messages in a single transaction.
-   * Uses INSERT OR REPLACE for idempotent saves.
+   * Applies changed and explicitly removed messages atomically for one task.
    */
-  saveMessages(taskId: string, messages: ChatMessageRow[]): void {
-    const deleteStmt = this.db.prepare("DELETE FROM messages WHERE task_id = ?");
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO messages (id, task_id, role, kind, content, events, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
+  updateMessages(taskId: string, messages: ChatMessageRow[], deleted: string[] = []): void {
+    if (messages.some(message => message.task_id !== taskId)) throw new Error("Chat update spans multiple tasks");
     const transaction = this.db.transaction((msgs: ChatMessageRow[]) => {
-      deleteStmt.run(taskId);
-      for (const msg of msgs) {
-        stmt.run(msg.id, taskId, msg.role, msg.kind, msg.content, msg.events, msg.timestamp);
-      }
+      const remove = this.db.prepare("DELETE FROM messages WHERE task_id = ? AND id = ?");
+      for (const id of deleted) remove.run(taskId, id);
+      for (const msg of msgs) this.insertMessage(msg);
     });
 
     transaction(messages);

@@ -15,12 +15,15 @@ import * as path from "node:path";
 
 import {
   createWorktree,
+  restoreWorktree,
   removeWorktree,
   listWorktrees,
   pruneOldWorktrees,
   validateWorktreePath,
   generateFriendlyName,
   readTaskMetadata,
+  writeTaskMetadata,
+  migrateWorktreeMetadata,
   getWorktreeName,
   Task,
 } from "../electron/orchestrator-worktree";
@@ -152,6 +155,19 @@ describe("orchestrator-worktree", () => {
   });
 
   describe("createWorktree", () => {
+    it.each([false, true])("keeps control metadata out of Git snapshots with a relative pointer: %s", async relative => {
+      const worktreePath = await createWorktree(repoDir, "control-metadata", "main");
+      if (relative) {
+        const { stdout } = await execFile("git", ["rev-parse", "--absolute-git-dir"], { cwd: worktreePath });
+        fs.writeFileSync(path.join(worktreePath, ".git"), `gitdir: ${path.relative(fs.realpathSync(worktreePath), stdout.trim())}\n`);
+      }
+      const metadata = readTaskMetadata(worktreePath)!;
+      writeTaskMetadata(worktreePath, { ...metadata, status: "stopped" });
+      await execFile("git", ["add", "-A"], { cwd: worktreePath });
+      const { stdout } = await execFile("git", ["diff", "--cached", "--name-only"], { cwd: worktreePath });
+      expect({ staged: stdout.trim(), taskId: readTaskMetadata(worktreePath)?.taskId }).toEqual({ staged: "", taskId: "control-metadata" });
+    });
+
     it("creates a worktree under .crab/worktrees/ with a friendly name", async () => {
       const taskId = `test-${Date.now()}`;
       const worktreePath = await createWorktree(repoDir, taskId, "main");
@@ -229,7 +245,115 @@ describe("orchestrator-worktree", () => {
     });
   });
 
+  describe("migrateWorktreeMetadata", () => {
+    it("moves the tagged control file without leaving it in the restored branch", async () => {
+      const taskId = "tagged-format";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const metadata = readTaskMetadata(workspace)!;
+      const { stdout: gitDir } = await execFile("git", ["rev-parse", "--absolute-git-dir"], { cwd: workspace });
+      fs.unlinkSync(path.join(gitDir.trim(), "crab-desktop-task.json"));
+      fs.writeFileSync(path.join(workspace, ".crab-task.json"), JSON.stringify(metadata));
+      await execFile("git", ["add", "-A"], { cwd: workspace });
+      await execFile("git", ["commit", "-m", "Tagged workspace format"], { cwd: workspace });
+      migrateWorktreeMetadata(taskId, workspace);
+      migrateWorktreeMetadata(taskId, workspace);
+      await execFile("git", ["add", "-A"], { cwd: workspace });
+      await execFile("git", ["commit", "-m", "Migrate control storage"], { cwd: workspace });
+      const { stdout } = await execFile("git", ["ls-files", "--", ".crab-task.json"], { cwd: workspace });
+      expect({ metadata: readTaskMetadata(workspace), tracked: stdout.trim(), oldFile: fs.existsSync(path.join(workspace, ".crab-task.json")) }).toEqual({ metadata, tracked: "", oldFile: false });
+    });
+
+    it("keeps newer administration metadata during an interrupted migration", async () => {
+      const taskId = "interrupted-migration";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const original = readTaskMetadata(workspace)!;
+      fs.writeFileSync(path.join(workspace, ".crab-task.json"), JSON.stringify(original));
+      writeTaskMetadata(workspace, { ...original, renamedTo: "agent/renamed" });
+      migrateWorktreeMetadata(taskId, workspace);
+      expect({ branch: readTaskMetadata(workspace)?.renamedTo, oldFile: fs.existsSync(path.join(workspace, ".crab-task.json")) }).toEqual({ branch: "agent/renamed", oldFile: false });
+    });
+
+    it("leaves an unrelated source file intact when current ownership is already stored", async () => {
+      const taskId = "unrelated-source";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const source = "This file belongs to the repository, not the task";
+      fs.writeFileSync(path.join(workspace, ".crab-task.json"), source);
+      migrateWorktreeMetadata(taskId, workspace);
+      expect({ source: fs.readFileSync(path.join(workspace, ".crab-task.json"), "utf8"), taskId: readTaskMetadata(workspace)?.taskId }).toEqual({ source, taskId });
+    });
+  });
+
+  describe("restoreWorktree", () => {
+    it("removes only the missing workspace's stale registration before restoring its saved branch", async () => {
+      const original = await createWorktree(repoDir, "missing-workspace", "main");
+      const branch = readTaskMetadata(original)!.originalBranch;
+      fs.writeFileSync(path.join(original, "saved.txt"), "saved work");
+      await execFile("git", ["add", "saved.txt"], { cwd: original });
+      await execFile("git", ["commit", "-m", "Saved work"], { cwd: original });
+      const registeredPath = fs.realpathSync(original);
+      const unrelated = await createWorktree(repoDir, "unrelated-workspace", "main");
+      const unrelatedPath = fs.realpathSync(unrelated);
+      fs.rmSync(unrelated, { recursive: true, force: true });
+      fs.rmSync(original, { recursive: true, force: true });
+      const restored = await restoreWorktree(repoDir, "missing-workspace", branch, original);
+      const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoDir });
+      expect({ file: fs.readFileSync(path.join(restored, "saved.txt"), "utf8"), originalRegistered: stdout.split("\0").includes(`worktree ${registeredPath}`),
+        unrelatedRegistered: stdout.split("\0").includes(`worktree ${unrelatedPath}`) }).toEqual({ file: "saved work", originalRegistered: false, unrelatedRegistered: true });
+    });
+
+    it.each(["locked", "live"])("preserves a %s worktree registration instead of forcing saved-branch restoration", async state => {
+      const original = await createWorktree(repoDir, "protected-workspace", "main");
+      const branch = readTaskMetadata(original)!.originalBranch;
+      const registeredPath = fs.realpathSync(original);
+      if (state === "locked") {
+        await execFile("git", ["worktree", "lock", original], { cwd: repoDir });
+        fs.rmSync(original, { recursive: true, force: true });
+      }
+      const previous = state === "locked" ? original : path.join(repoDir, ".crab/worktrees/other");
+      await expect(restoreWorktree(repoDir, "protected-workspace", branch, previous)).rejects.toThrow();
+      const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoDir });
+      expect(stdout.split("\0").includes(`worktree ${registeredPath}`)).toBe(true);
+    });
+
+    it("checks out the saved branch and its work without creating a replacement branch", async () => {
+      await execFile("git", ["checkout", "-b", "agent/saved"], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, "saved.txt"), "saved work");
+      await execFile("git", ["add", "saved.txt"], { cwd: repoDir });
+      await execFile("git", ["commit", "-m", "Saved work"], { cwd: repoDir });
+      await execFile("git", ["checkout", "main"], { cwd: repoDir });
+      const restored = await restoreWorktree(repoDir, "restored-task", "agent/saved", path.join(repoDir, ".crab/worktrees/removed"));
+      const { stdout } = await execFile("git", ["symbolic-ref", "--short", "HEAD"], { cwd: restored });
+      const metadata = readTaskMetadata(restored);
+      expect({ branch: stdout.trim(), content: fs.readFileSync(path.join(restored, "saved.txt"), "utf8"), taskId: metadata?.taskId, savedBranch: metadata?.originalBranch }).toEqual({ branch: "agent/saved", content: "saved work", taskId: "restored-task", savedBranch: "agent/saved" });
+    });
+
+    it("rejects a missing saved branch instead of restoring HEAD", async () => {
+      await expect(restoreWorktree(repoDir, "missing-task", "agent/missing", path.join(repoDir, ".crab/worktrees/removed"))).rejects.toThrow();
+    });
+  });
+
   describe("removeWorktree", () => {
+    it("refuses archive cleanup with unsaved work and leaves the tree and branch intact", async () => {
+      const taskId = "unsaved-archive-task";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const branch = readTaskMetadata(workspace)!.originalBranch;
+      fs.writeFileSync(path.join(workspace, "unsaved.txt"), "unsaved work");
+      await expect(removeWorktree(repoDir, taskId, { preserveBranch: true })).rejects.toThrow();
+      expect({ content: fs.readFileSync(path.join(workspace, "unsaved.txt"), "utf8"), branch: await branchExists(repoDir, branch) }).toEqual({ content: "unsaved work", branch: true });
+    });
+
+    it("preserves the committed branch for archive and restores its saved work", async () => {
+      const taskId = "archive-task";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const branch = readTaskMetadata(workspace)!.originalBranch;
+      fs.writeFileSync(path.join(workspace, "archive-proof.txt"), "preserved work");
+      await execFile("git", ["add", "-A"], { cwd: workspace });
+      await execFile("git", ["commit", "-m", "Saved archive work"], { cwd: workspace });
+      await removeWorktree(repoDir, taskId, { preserveBranch: true });
+      const restored = await restoreWorktree(repoDir, taskId, branch, workspace);
+      expect({ removed: !fs.existsSync(workspace), branch: await branchExists(repoDir, branch), content: fs.readFileSync(path.join(restored, "archive-proof.txt"), "utf8") }).toEqual({ removed: true, branch: true, content: "preserved work" });
+    });
+
     it("removes worktree directory and branch by task ID", async () => {
       const taskId = `rm-test-${Date.now()}`;
       const worktreePath = await createWorktree(repoDir, taskId, "main");

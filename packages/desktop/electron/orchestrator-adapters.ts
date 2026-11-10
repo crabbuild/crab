@@ -7,6 +7,7 @@
  * AgentEvent stream consumed by the orchestrator lifecycle manager.
  */
 
+import type { AgentElicitationInput, ElicitationResponse } from "./agent-elicitation";
 import { spawn, ChildProcess, execFile } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
@@ -171,9 +172,62 @@ export function pathVariants(p: string): string[] {
 
 // ─── AgentEvent ──────────────────────────────────────────────────────────────
 
+export interface AgentModel {
+  value: string;
+  label: string;
+  description?: string;
+  intelligenceLevels: string[];
+  defaultIntelligence?: string;
+  isDefault?: boolean;
+}
+
+/** Omission retains current settings; null restores provider defaults. */
+export interface AgentTurnOptions {
+  model?: string | null;
+  mode?: "plan" | "instant";
+  reasoningLevel?: string | null;
+}
+
+export interface AgentQuestionInput {
+  kind?: "questions";
+  requestId: string;
+  questions: Array<{
+    id: string;
+    question: string;
+    header?: string;
+    options?: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+    isSecret?: boolean;
+    allowFreeform?: boolean;
+  }>;
+  resolved?: boolean;
+  resolutionReason?: string;
+}
+
+export type AgentInputRequest = AgentQuestionInput | AgentElicitationInput;
+export type AgentInputResponse = { kind: "questions"; answers: Record<string, string[]> } | ElicitationResponse;
+
+export interface CodexGoal {
+  threadId: string;
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CodexGoalMutation {
+  objective?: string;
+  status?: CodexGoal["status"];
+  tokenBudget?: number;
+}
+
 export interface AgentEvent {
   type:
     | "text"
+    | "user_message"
     | "tool_use"
     | "tool_result"
     | "file_edit"
@@ -188,13 +242,22 @@ export interface AgentEvent {
     | "error"
     | "usage"
     | "approval_request"
+    | "input_request"
+    | "request_resolved"
     | "thread_started"
+    | "turn_started"
+    | "session_started"
+    | "configuration_changed"
+    | "goal_updated"
     | "command_output"
     | "command_exited"
     | "filesystem_change"
     | "done";
   timestamp: number;
+  goal?: CodexGoal | null;
   content?: string;
+  /** A completed text block replaces its partial stream, keyed by itemId. */
+  textMode?: "replace";
   tool?: string;
   input?: unknown;
   output?: unknown;
@@ -204,6 +267,8 @@ export interface AgentEvent {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  outcome?: "completed" | "failed" | "interrupted";
+  turnId?: string;
   error?: string;
   /** Session identifier for command/exec sessions. Set on command_output and command_exited events. */
   commandSessionId?: string;
@@ -217,11 +282,19 @@ export interface AgentEvent {
     outputTokens: number;
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
+    model?: string;
+    /** Whole-session provider totals, including subagents, scoped by model. */
+    cumulative?: { sessionId: string; costUsd: number };
   };
   /** Codex session/thread identifier (emitted on `thread.started`). The
    *  orchestrator persists this so subsequent iterations can resume the
    *  thread instead of starting a fresh one. */
   threadId?: string;
+  /** Claude Code session identity, persisted for continuation after restart. */
+  sessionId?: string;
+  configuration?: AgentTurnOptions;
+  inputRequest?: AgentInputRequest;
+  requestId?: string;
   /** Codex item identifier — present on tool_use/tool_result events that
    *  belong to a specific item (commandExecution, fileChange, mcpToolCall,
    *  etc.). Used by the renderer to route streaming output deltas to the
@@ -231,6 +304,8 @@ export interface AgentEvent {
    *  events of type "approval_request". */
   approval?: {
     requestId: string;
+    resolved?: boolean;
+    resolutionReason?: string;
     /** "command" for shell, "file" for file write outside the sandbox,
      *  "patch" for patch application escalations, or a future kind. */
     kind: "command" | "file" | "patch" | "other";
@@ -242,6 +317,7 @@ export interface AgentEvent {
      *  continue without it). When false, the agent has a documented
      *  fallback path. */
     blocking: boolean;
+    options?: Array<{ id: string; label: string }>;
   };
 }
 
@@ -249,6 +325,15 @@ export interface AgentEvent {
 
 export type EventListener = (event: AgentEvent) => void;
 export type ExitListener = (code: number) => void;
+
+/** A dispatched message may have reached the provider before its acknowledgement was lost. */
+export class AgentSubmissionUncertainError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Message delivery could not be confirmed: ${detail}`, { cause });
+    this.name = "AgentSubmissionUncertainError";
+  }
+}
 
 export abstract class AgentAdapter {
   abstract readonly name: string;
@@ -260,26 +345,32 @@ export abstract class AgentAdapter {
   /** Guards against emitting a second `done` event from the exit handler
    *  when the protocol already delivered one (turn.completed / result). */
   protected doneEmitted = false;
+  protected exitEmitted = false;
 
-  abstract spawn(prompt: string, cwd: string, env?: Record<string, string>): void;
+  abstract spawn(prompt: string, cwd: string, env?: Record<string, string>, options?: AgentTurnOptions): void | Promise<void>;
 
-  abstract sendMessage(text: string): void;
+  /** Read the installed provider's catalog without submitting a user turn. */
+  listModels?(cwd: string, env?: Record<string, string>): Promise<AgentModel[]>;
 
   /**
    * Optional: send a follow-up to a long-lived adapter without re-spawning.
    * The orchestrator calls this from `iterate()` when it detects the method
-   * is present. Implemented by CodexAppServerAdapter only.
+   * is present. Both built-in persistent adapters implement it.
    */
-  iterate?(prompt: string): void;
+  iterate?(prompt: string, options?: AgentTurnOptions): void | Promise<void>;
+
+  /** Runs a native review, opening the provider connection when needed. */
+  review?(instructions: string, cwd: string, env?: Record<string, string>, options?: AgentTurnOptions): Promise<void>;
 
   /**
    * Optional: deliver the user's approval decision live over the wire.
    * The orchestrator calls this from `recordApproval()` when present.
-   * The adapter maps Crab's vocabulary to the protocol's vocabulary.
+   * The option id must be one of the decisions offered with the request.
    */
-  respondApproval?(requestId: string, decision: "allow" | "allow_once" | "deny"): void;
+  respondApproval?(requestId: string, decision: string): boolean;
+  respondInput?(requestId: string, response: AgentInputResponse): boolean;
 
-  cancel(): void {
+  cancel(): void | Promise<void> {
     if (this.proc) {
       this.proc.kill("SIGTERM");
       this.proc = null;
@@ -310,6 +401,8 @@ export abstract class AgentAdapter {
   }
 
   protected emitExit(code: number): void {
+    if (this.exitEmitted) return;
+    this.exitEmitted = true;
     for (const listener of this.exitListeners) {
       listener(code);
     }
@@ -318,6 +411,7 @@ export abstract class AgentAdapter {
   protected setupExitHandler(): void {
     if (!this.proc) return;
     this.doneEmitted = false;
+    this.exitEmitted = false;
     this.proc.on("exit", (code) => {
       // Emit a done event so the renderer stops the spinner immediately,
       // but only if the protocol stream didn't already deliver one
@@ -346,416 +440,6 @@ export abstract class AgentAdapter {
       this.emitExit(1);
       this.proc = null;
     });
-  }
-}
-
-// ─── ClaudeCodeAdapter ───────────────────────────────────────────────────────
-
-/**
- * Adapter for Claude Code CLI.
- *
- * Spawns `claude --json --print --allowedTools Read,Write,Bash <prompt>`
- * and parses NDJSON from stdout into normalised AgentEvent objects.
- */
-export class ClaudeCodeAdapter extends AgentAdapter {
-  readonly name = "Claude Code";
-  readonly binary = "claude";
-
-  /** The working directory (worktree path) passed to spawn — used to strip absolute paths. */
-  private cwd: string = "";
-  /** Extra CLI arguments passed from per-agent config. */
-  private extraArgs: string[] = [];
-
-  constructor(extraArgs?: string[]) {
-    super();
-    this.extraArgs = extraArgs ?? [];
-  }
-
-  spawn(prompt: string, cwd: string, env?: Record<string, string>): void {
-    this.cwd = cwd;
-    this.proc = spawn(
-      this.binary,
-      [
-        "--print",
-        "--verbose",
-        "--output-format", "stream-json",
-        "--permission-mode", "bypassPermissions",
-        ...this.extraArgs,
-        prompt,
-      ],
-      {
-        cwd,
-        env: getExpandedEnv(env),
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
-
-    // Close stdin immediately to prevent the "no stdin data received" warning.
-    // Claude Code waits 3s for stdin input when piped — closing it signals
-    // that no input is coming.
-    this.proc.stdin?.end();
-
-    const rl = readline.createInterface({ input: this.proc.stdout! });
-    rl.on("line", (line) => {
-      if (!line.trim()) return;
-      try {
-        const raw = JSON.parse(line);
-        const events = this.parseClaudeEvents(raw);
-        for (const event of events) {
-          if (event.type === "text" && !event.content) continue; // skip empty text
-          this.emitEvent(event);
-        }
-
-        // If the event carries a usage field, emit a separate usage event
-        // so the cost tracker can record token consumption.
-        if (raw.usage && typeof raw.usage === "object") {
-          const usageEvent = this.extractUsageEvent(raw.usage);
-          if (usageEvent) {
-            this.emitEvent(usageEvent);
-          }
-        }
-      } catch {
-        // Malformed line — skip silently.
-      }
-    });
-
-    this.proc.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (!text) return;
-      this.emitEvent({
-        type: "error",
-        timestamp: Date.now(),
-        error: text,
-      });
-    });
-
-    this.setupExitHandler();
-  }
-
-  sendMessage(text: string): void {
-    if (this.proc?.stdin?.writable) {
-      this.proc.stdin.write(JSON.stringify({ type: "user", content: text }) + "\n");
-    }
-  }
-
-  /**
-   * Maps Claude Code's NDJSON event format to our normalised AgentEvent.
-   *
-   * Claude Code emits events with a `type` field. Known types:
-   * - assistant: text output from the model
-   * - tool_use: agent is calling a tool
-   * - tool_result: result from a tool call
-   * - thinking: model reasoning
-   * - error: an error occurred
-   * - result: final result (maps to "done")
-   */
-
-  /** Convenience wrapper: parses a single raw event and returns the first AgentEvent. */
-  parseClaudeEvent(raw: Record<string, unknown>): AgentEvent {
-    const events = this.parseClaudeEvents(raw);
-    return events[0] ?? { type: "text", timestamp: Date.now(), content: "" };
-  }
-
-  parseClaudeEvents(raw: Record<string, unknown>): AgentEvent[] {
-    const timestamp = Date.now();
-    const type = raw.type as string | undefined;
-
-    // Skip system/init events.
-    if (type === "system") {
-      return [];
-    }
-
-    // Assistant message with content blocks.
-    if (type === "assistant") {
-      const message = raw.message as Record<string, unknown> | undefined;
-      if (message) {
-        const content = message.content as Array<Record<string, unknown>> | undefined;
-        if (Array.isArray(content)) {
-          const events: AgentEvent[] = [];
-          const textParts: string[] = [];
-
-          for (const block of content) {
-            if (block.type === "text") {
-              textParts.push(String(block.text ?? ""));
-            } else if (block.type === "tool_use") {
-              // Flush text before tool event.
-              if (textParts.length > 0) {
-                events.push({ type: "text", timestamp, content: textParts.join("\n") });
-                textParts.length = 0;
-              }
-              events.push(this.parseClaudeToolUse(block, timestamp));
-            } else if (block.type === "thinking") {
-              events.push({ type: "thinking", timestamp, content: String(block.thinking ?? block.text ?? "") });
-            }
-          }
-          if (textParts.length > 0) {
-            events.push({ type: "text", timestamp, content: textParts.join("\n") });
-          }
-          return events;
-        }
-        // Fallback: try raw content/text fields.
-        const rawContent = message.content ?? message.text;
-        if (typeof rawContent === "string" && rawContent) {
-          return [{ type: "text", timestamp, content: rawContent }];
-        }
-      }
-      // Legacy format: direct content field.
-      if (raw.content || raw.message) {
-        const c = String(raw.content ?? raw.message ?? "");
-        return c ? [{ type: "text", timestamp, content: c }] : [];
-      }
-      return [];
-    }
-
-    // Tool use event (top-level).
-    if (type === "tool_use") {
-      return [this.parseClaudeToolUse(raw, timestamp)];
-    }
-
-    // Tool result event (top-level).
-    if (type === "tool_result") {
-      return [{
-        type: "tool_result",
-        timestamp,
-        tool: String(raw.tool ?? raw.name ?? raw.tool_use_id ?? ""),
-        output: raw.output ?? raw.content,
-      }];
-    }
-
-    // Tool result / user message with tool results.
-    if (type === "user") {
-      const message = raw.message as Record<string, unknown> | undefined;
-      if (message) {
-        const content = message.content as Array<Record<string, unknown>> | undefined;
-        if (Array.isArray(content)) {
-          const events: AgentEvent[] = [];
-          for (const block of content) {
-            if (block.type === "tool_result") {
-              events.push({
-                type: "tool_result",
-                timestamp,
-                tool: String(block.tool_use_id ?? ""),
-                output: block.content,
-              });
-            }
-          }
-          return events;
-        }
-      }
-      return [];
-    }
-
-    // Result event (task completed).
-    if (type === "result") {
-      const subResult = raw.subtype as string | undefined;
-      if (subResult === "error") {
-        return [{ type: "error", timestamp, error: String(raw.error ?? raw.message ?? "Task failed") }];
-      }
-      return [{ type: "done", timestamp, content: String(raw.result ?? raw.content ?? "") }];
-    }
-
-    // Thinking event.
-    if (type === "thinking") {
-      const c = String(raw.content ?? raw.thinking ?? "");
-      return c ? [{ type: "thinking", timestamp, content: c }] : [];
-    }
-
-    // Error event.
-    if (type === "error") {
-      return [{ type: "error", timestamp, error: String(raw.error ?? raw.message ?? "unknown error") }];
-    }
-
-    // Skip empty/unrecognized events silently.
-    return [];
-  }
-
-  private parseClaudeToolUse(
-    raw: Record<string, unknown>,
-    timestamp: number,
-  ): AgentEvent {
-    const tool = String(raw.tool ?? raw.name ?? "");
-    const input = raw.input as Record<string, unknown> | undefined;
-
-    // Map specific tool uses to more specific event types.
-    if (tool === "Write" || tool === "Edit" || tool === "NotebookEdit") {
-      // Strip absolute worktree path to show relative path only.
-      const rawPath = String(input?.file_path ?? input?.path ?? "");
-      const cleanPath = this.stripWorktreePath(rawPath);
-      return {
-        type: "file_edit",
-        timestamp,
-        tool,
-        path: cleanPath,
-        diff: String(input?.content ?? input?.diff ?? input?.new_string ?? ""),
-        input,
-      };
-    }
-
-    if (tool === "Read") {
-      const rawPath = String(input?.file_path ?? input?.path ?? "");
-      const cleanPath = this.stripWorktreePath(rawPath);
-      return {
-        type: "file_read",
-        timestamp,
-        tool,
-        path: cleanPath,
-        input,
-      };
-    }
-
-    if (tool === "Grep") {
-      const pattern = String(input?.pattern ?? input?.regex ?? "");
-      const rawPath = String(input?.path ?? input?.directory ?? "");
-      const cleanPath = this.stripWorktreePath(rawPath);
-      return {
-        type: "search",
-        timestamp,
-        tool,
-        path: cleanPath || pattern,
-        input,
-      };
-    }
-
-    if (tool === "Glob") {
-      const pattern = String(input?.pattern ?? input?.glob ?? "");
-      const rawPath = String(input?.path ?? "");
-      const cleanPath = this.stripWorktreePath(rawPath);
-      return {
-        type: "search",
-        timestamp,
-        tool,
-        path: cleanPath || pattern,
-        input,
-      };
-    }
-
-    if (tool === "WebFetch") {
-      const url = String(input?.url ?? "");
-      return {
-        type: "web",
-        timestamp,
-        tool,
-        path: url,
-        input,
-      };
-    }
-
-    if (tool === "Bash" || tool === "Terminal") {
-      // Strip worktree paths from the command string.
-      const rawCmd = String(input?.command ?? "");
-      const cleanCmd = this.stripWorktreePath(rawCmd);
-      return {
-        type: "command",
-        timestamp,
-        tool,
-        command: cleanCmd,
-        input,
-      };
-    }
-
-    if (tool === "TodoWrite") {
-      return {
-        type: "task",
-        timestamp,
-        tool,
-        path: String(input?.todos ? `${(input.todos as unknown[]).length} items` : ""),
-        input,
-      };
-    }
-
-    // Sub-agent tools
-    if (tool === "Task" || tool === "TaskOutput" || tool === "TaskStop") {
-      return {
-        type: "task",
-        timestamp,
-        tool,
-        path: String(input?.description ?? input?.task_id ?? ""),
-        input,
-      };
-    }
-
-    // All other tools — emit as "generic" with tool name preserved.
-    return {
-      type: "generic",
-      timestamp,
-      tool,
-      input,
-    };
-  }
-
-  /**
-   * Strips the worktree absolute path prefix from a string, leaving
-   * only the relative path. Cross-platform: uses the cwd passed to
-   * spawn() and handles path normalization.
-   *
-   * Uses `pathVariants` to cover both `/var/folders/...` and
-   * `/private/var/folders/...` forms regardless of which form the
-   * stored cwd uses.
-   */
-  private stripWorktreePath(value: string): string {
-    if (!value || !this.cwd) return value;
-
-    const variants = pathVariants(this.cwd);
-
-    // Check if the value is a pure path that starts with any variant.
-    const normalizedValue = this.normalizePath(value);
-    for (const variant of variants) {
-      if (normalizedValue.startsWith(variant + "/")) {
-        return normalizedValue.slice(variant.length + 1);
-      }
-      if (normalizedValue === variant) {
-        return "";
-      }
-    }
-
-    // Mid-string replacement: strip all occurrences of each variant + "/"
-    // from the value (e.g. command strings containing embedded paths).
-    for (const variant of variants) {
-      if (value.includes(variant + "/")) {
-        value = value.replaceAll(variant + "/", "");
-      }
-    }
-
-    return value;
-  }
-
-  /**
-   * Normalizes a path by resolving the /private symlink on macOS.
-   * On macOS, /var is a symlink to /private/var, so paths may appear
-   * with or without the /private prefix depending on how they were resolved.
-   * On other platforms, this is a no-op.
-   */
-  private normalizePath(p: string): string {
-    return normalizeMacPath(p);
-  }
-
-  /**
-   * Extracts token usage data from a Claude Code event's `usage` field
-   * and returns a normalised `AgentEvent` with type `"usage"`.
-   */
-  extractUsageEvent(usage: Record<string, unknown>): AgentEvent | null {
-    const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-    const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-    const cacheCreationInputTokens =
-      typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0;
-    const cacheReadInputTokens =
-      typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0;
-
-    // Skip if all zeros (no meaningful usage data).
-    if (inputTokens === 0 && outputTokens === 0 && cacheCreationInputTokens === 0 && cacheReadInputTokens === 0) {
-      return null;
-    }
-
-    return {
-      type: "usage",
-      timestamp: Date.now(),
-      usage: {
-        inputTokens,
-        outputTokens,
-        cacheCreationInputTokens,
-        cacheReadInputTokens,
-      },
-    };
   }
 }
 

@@ -50,6 +50,7 @@ export interface Turn {
   complete: boolean;
   /** Wall-clock duration in ms; null while running. */
   durationMs: number | null;
+  outcome?: AgentEvent["outcome"];
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -128,7 +129,7 @@ function isToolEvent(event: AgentEvent): boolean {
          event.type === "file_read" || event.type === "command" ||
          event.type === "command_run" || event.type === "search" ||
          event.type === "web" || event.type === "task" ||
-         event.type === "generic" || event.type === "approval_request";
+         event.type === "generic" || event.type === "approval_request" || event.type === "input_request";
 }
 
 /**
@@ -321,9 +322,29 @@ function buildTurn(
   turnEvents: AgentEvent[],
   feedback: string[],
 ): Turn {
+  const openingMessage = turnEvents[0]?.type === "user_message" ? turnEvents[0] : undefined;
+  if (openingMessage) turnEvents = turnEvents.slice(1);
+  const textIndices = new Map<string, number>();
+  const normalized: AgentEvent[] = [];
+  for (const event of turnEvents) {
+    if ((event.type === "text" || event.type === "thinking") && event.itemId) {
+      const key = `${event.type}:${event.itemId}`;
+      const index = textIndices.get(key);
+      if (index !== undefined) {
+        const previous = normalized[index];
+        normalized[index] = { ...previous, content: event.textMode === "replace" ? event.content : (previous.content ?? "") + (event.content ?? "") };
+        continue;
+      }
+      textIndices.set(key, normalized.length);
+    }
+    normalized.push(event);
+  }
+  turnEvents = normalized;
+
   // Determine completion first so we can pass it to deriveToolGroups
   const lastEvent = turnEvents[turnEvents.length - 1];
   const complete = lastEvent?.type === "done";
+  const outcome = complete ? lastEvent.outcome : undefined;
 
   const toolGroups = deriveToolGroups(turnEvents, complete);
 
@@ -333,9 +354,7 @@ function buildTurn(
   }
 
   // Turn 0 has no user message. Turn N (N > 0) uses feedback[N - 1].
-  const userMessage = turnIndex > 0
-    ? (feedback[turnIndex - 1] ?? null)
-    : null;
+  const userMessage = openingMessage?.content ?? (turnIndex > 0 ? feedback[turnIndex - 1] ?? null : null);
 
   // Aggregate file edit stats
   const pathSet = new Set<string>();
@@ -370,6 +389,7 @@ function buildTurn(
     totalAdded,
     totalRemoved,
     complete,
+    outcome,
     durationMs,
   };
 }

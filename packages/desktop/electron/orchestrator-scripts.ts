@@ -1,15 +1,9 @@
-/**
- * Workspace Scripts for the Crab Desktop Orchestrator.
- *
- * Handles setup/run/archive script execution, port allocation,
- * and environment variable injection for orchestrator workspaces.
- */
-
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+import { setTimeout as delay } from "node:timers/promises";
+import { readSettings } from "./orchestrator-settings";
+import type { Task } from "./orchestrator";
 
 export interface OrchestratorScripts {
   setupScript: string;
@@ -24,221 +18,245 @@ export interface ScriptResult {
   error?: string;
 }
 
-export interface WorkspaceEnv {
-  CRAB_WORKSPACE_PATH: string;
-  CRAB_WORKSPACE_BRANCH: string;
-  CRAB_ROOT_PATH: string;
-  CRAB_PORT: string;
+export type WorkspaceScriptOptions = Partial<OrchestratorScripts> & {
+  command?: string;
+  portRangeStart?: number;
+  portRangeEnd?: number;
+};
+
+export type WorkspaceScriptEvent =
+  | { type: "data"; taskId: string; kind: "setup" | "run" | "archive"; command: string; data: string }
+  | { type: "exit"; taskId: string; exitCode: number }
+  | { type: "nonconcurrent-stop"; stoppedTaskId: string; startedTaskId: string };
+
+export class WorkspaceScriptCancelledError extends Error {
+  constructor() { super("Workspace script cancelled"); }
 }
 
-interface OrchestratorJsonConfig {
-  scripts?: {
-    setup?: string;
-    run?: string;
-    archive?: string;
-  };
-  portRange?: {
-    start?: number;
-    end?: number;
-  };
-  /** When true, only one workspace run process is allowed at a time. */
-  nonconcurrentRun?: boolean;
-}
+type ScriptTask = Pick<Task, "id" | "repoPath" | "worktreePath" | "branch">;
+type Configuration = { scripts?: { setup?: string; run?: string; archive?: string }; portRange?: { start?: number; end?: number }; nonconcurrentRun?: boolean };
+type Request = { taskId: string; kind: Script["kind"]; controller: AbortController; settled: Promise<void> };
+type Workspace = { port: number; sealed: boolean; scripts: Set<Script>; requests: Set<Request>; run?: Script };
+type Script = { taskId: string; kind: "setup" | "run" | "archive"; child: ChildProcess; finished: Promise<ScriptResult>; stopping?: Promise<void>; cancelled: boolean };
 
-// ─── Port Allocation ─────────────────────────────────────────────────────────
-
-const DEFAULT_PORT_RANGE_START = 3100;
-const DEFAULT_PORT_RANGE_END = 3199;
-
-/**
- * Allocates the next available port from the configured range.
- * Returns -1 if no ports are available.
- */
-export function allocatePort(
-  usedPorts: Set<number>,
-  rangeStart = DEFAULT_PORT_RANGE_START,
-  rangeEnd = DEFAULT_PORT_RANGE_END,
-): number {
-  for (let port = rangeStart; port <= rangeEnd; port++) {
-    if (!usedPorts.has(port)) {
-      return port;
-    }
-  }
-  return -1;
-}
-
-// ─── Script Loading ──────────────────────────────────────────────────────────
-
-/**
- * Loads orchestrator scripts from `crab-orchestrator.json` at the repo root
- * if present, otherwise falls back to the provided settings values.
- */
-export function loadScripts(
-  repoPath: string,
-  settingsScripts: OrchestratorScripts,
-): OrchestratorScripts {
-  const configPath = path.join(repoPath, "crab-orchestrator.json");
-
+function configuration(task: ScriptTask, options: WorkspaceScriptOptions) {
+  const settings = readSettings();
+  let config: Configuration = {};
+  // The tagged repository config contract tolerates missing/malformed files
+  // and uses saved desktop settings for fields the repository does not set.
   try {
-    if (fs.existsSync(configPath)) {
-      const raw = fs.readFileSync(configPath, "utf-8");
-      const config: OrchestratorJsonConfig = JSON.parse(raw);
-
-      return {
-        setupScript: config.scripts?.setup ?? settingsScripts.setupScript,
-        runScript: config.scripts?.run ?? settingsScripts.runScript,
-        archiveScript: config.scripts?.archive ?? settingsScripts.archiveScript,
-      };
-    }
-  } catch {
-    // If the file is malformed, fall back to settings.
-  }
-
-  return settingsScripts;
-}
-
-/**
- * Loads the nonconcurrent run setting from `crab-orchestrator.json`.
- * When true, only one workspace run process is allowed at a time —
- * starting a run in one workspace stops the active run in another.
- * Defaults to false (concurrent mode).
- */
-export function loadNonconcurrentRun(repoPath: string): boolean {
-  const configPath = path.join(repoPath, "crab-orchestrator.json");
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const raw = fs.readFileSync(configPath, "utf-8");
-      const config: OrchestratorJsonConfig = JSON.parse(raw);
-      return config.nonconcurrentRun ?? false;
-    }
-  } catch {
-    // Fall back to default (concurrent).
-  }
-
-  return false;
-}
-
-// ─── Environment Variables ───────────────────────────────────────────────────
-
-/**
- * Builds the environment variables injected into workspace scripts.
- */
-export function buildWorkspaceEnv(
-  worktreePath: string,
-  branch: string,
-  repoPath: string,
-  port: number,
-): WorkspaceEnv {
+    const saved: unknown = JSON.parse(fs.readFileSync(path.join(task.repoPath, "crab-orchestrator.json"), "utf8"));
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) config = saved as Configuration;
+  } catch {}
+  const text = (key: string) => typeof settings[key] === "string" ? settings[key] as string : "";
+  const number = (key: string, fallback: number) => typeof settings[key] === "number" ? settings[key] as number : fallback;
   return {
-    CRAB_WORKSPACE_PATH: worktreePath,
-    CRAB_WORKSPACE_BRANCH: branch,
-    CRAB_ROOT_PATH: repoPath,
-    CRAB_PORT: String(port),
+    setup: config.scripts?.setup ?? options.setupScript ?? text("orchestratorSetupScript"),
+    run: options.command ?? config.scripts?.run ?? options.runScript ?? text("orchestratorRunScript"),
+    archive: config.scripts?.archive ?? options.archiveScript ?? text("orchestratorArchiveScript"),
+    start: options.portRangeStart ?? config.portRange?.start ?? number("orchestratorPortRangeStart", 3100),
+    end: options.portRangeEnd ?? config.portRange?.end ?? number("orchestratorPortRangeEnd", 3199),
+    nonconcurrent: config.nonconcurrentRun ?? (settings.orchestratorNonconcurrentRun === true),
   };
 }
 
-// ─── Script Execution ────────────────────────────────────────────────────────
+/** Owns local script groups and workspace ports through their actual closure. */
+export class WorkspaceScripts {
+  private workspaces = new Map<string, Workspace>();
+  private runQueue: Promise<unknown> = Promise.resolve();
+  private shutdownPromise?: Promise<void>;
 
-/**
- * Executes the setup script in the worktree directory.
- * Returns the output and exit code. Streams output via the onData callback.
- */
-export async function runSetupScript(
-  script: string,
-  worktreePath: string,
-  env: WorkspaceEnv,
-  onData?: (data: string) => void,
-): Promise<ScriptResult> {
-  if (!script.trim()) {
-    return { success: true, output: "", exitCode: 0 };
+  constructor(private readonly emit: (event: WorkspaceScriptEvent) => void) {}
+
+  async setup(task: ScriptTask, options: WorkspaceScriptOptions, signal?: AbortSignal): Promise<ScriptResult & { skipped?: boolean }> {
+    const config = configuration(task, options);
+    if (!config.setup.trim()) return { success: true, output: "", exitCode: 0, skipped: true };
+    const workspace = this.workspace(task, config);
+    return this.request(workspace, task.id, "setup", async requestSignal => {
+      requestSignal.throwIfAborted();
+      signal?.throwIfAborted();
+      const script = this.spawn(workspace, task, "setup", config.setup);
+      let abort!: () => void;
+      const stopped = new Promise<never>((_resolve, reject) => {
+        abort = () => { void this.stopScript(script).catch(error => { workspace.sealed = true; reject(error); }); };
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      try { return await Promise.race([script.finished, stopped]); }
+      finally { signal?.removeEventListener("abort", abort); }
+    });
   }
 
-  return runScript(script, worktreePath, env, onData);
-}
-
-/**
- * Executes the archive script in the worktree directory before removal.
- */
-export async function runArchiveScript(
-  script: string,
-  worktreePath: string,
-  env: WorkspaceEnv,
-  onData?: (data: string) => void,
-): Promise<ScriptResult> {
-  if (!script.trim()) {
-    return { success: true, output: "", exitCode: 0 };
+  async run(task: ScriptTask, options: WorkspaceScriptOptions): Promise<{ port: number; stoppedTaskId: string | null }> {
+    const config = configuration(task, options);
+    if (!config.run.trim()) throw new Error("No run script configured");
+    const workspace = this.workspace(task, config);
+    return this.request(workspace, task.id, "run", signal => {
+      // Serialize replacement and nonconcurrent admission across callers. A
+      // late close callback must never remove the next process's ownership.
+      const queued = this.runQueue.then(async () => {
+        signal.throwIfAborted();
+        const previous = config.nonconcurrent
+          ? [...this.workspaces.values()].flatMap(entry => entry.run && entry !== workspace ? [entry.run] : []) : [];
+        await Promise.all(previous.map(script => this.stopScript(script)));
+        if (workspace.run) await this.stopScript(workspace.run);
+        signal.throwIfAborted();
+        if (workspace.sealed || this.shutdownPromise) throw new Error("Workspace scripts are closing");
+        const script = this.spawn(workspace, task, "run", config.run);
+        workspace.run = script;
+        await new Promise<void>((resolve, reject) => { script.child.once("spawn", resolve); script.child.once("error", reject); });
+        for (const stopped of previous) this.emit({ type: "nonconcurrent-stop", stoppedTaskId: stopped.taskId, startedTaskId: task.id });
+        return { port: workspace.port, stoppedTaskId: previous.at(-1)?.taskId ?? null };
+      });
+      this.runQueue = queued.catch(() => {});
+      return queued;
+    });
   }
 
-  return runScript(script, worktreePath, env, onData);
-}
+  async archive(task: ScriptTask, options: WorkspaceScriptOptions): Promise<void> {
+    const config = configuration(task, options);
+    if (!config.archive.trim() || !fs.existsSync(task.worktreePath)) return;
+    const workspace = this.workspace(task, config);
+    const result = await this.request(workspace, task.id, "archive", signal => {
+      signal.throwIfAborted();
+      const script = this.spawn(workspace, task, "archive", config.archive);
+      return script.finished.then(result => {
+        if (script.cancelled) throw new WorkspaceScriptCancelledError();
+        return result;
+      });
+    });
+    if (!result.success) throw new Error(result.error ?? "Archive script failed");
+  }
 
-/**
- * Spawns the run script in the worktree directory.
- * Returns the child process for streaming output to the terminal.
- */
-export function spawnRunScript(
-  script: string,
-  worktreePath: string,
-  env: WorkspaceEnv,
-): ChildProcess | null {
-  if (!script.trim()) return null;
+  async close(task: ScriptTask, wholeWorkspace: boolean): Promise<void> {
+    const key = path.resolve(task.worktreePath);
+    const workspace = this.workspaces.get(key);
+    if (!workspace) return;
+    if (wholeWorkspace) workspace.sealed = true;
+    // Preparation is shared by conversations. Its orchestrator subscribers
+    // decide cancellation; closing a borrower cannot stop a peer's setup.
+    const requests = [...workspace.requests].filter(request => wholeWorkspace || request.taskId === task.id && request.kind !== "setup");
+    for (const request of requests) request.controller.abort(new WorkspaceScriptCancelledError());
+    const scripts = [...workspace.scripts].filter(script => wholeWorkspace || script.taskId === task.id && script.kind !== "setup");
+    const results = await Promise.allSettled([...scripts.map(script => this.stopScript(script)), ...requests.map(request => request.settled)]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Workspace scripts did not close");
+    if (wholeWorkspace) workspace.sealed = false;
+  }
 
-  const proc = spawn("sh", ["-c", script], {
-    cwd: worktreePath,
-    env: { ...process.env, ...env },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  release(task: ScriptTask): void {
+    const key = path.resolve(task.worktreePath);
+    const workspace = this.workspaces.get(key);
+    if (workspace && !workspace.scripts.size && !workspace.requests.size) this.workspaces.delete(key);
+  }
 
-  return proc;
-}
+  shutdown(): Promise<void> {
+    this.shutdownPromise ??= Promise.resolve().then(async () => {
+      const results = await Promise.allSettled([...this.workspaces.keys()].map(worktreePath => this.close({ id: "", worktreePath, repoPath: "", branch: "" }, true)));
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Workspace script shutdown failed");
+      this.workspaces.clear();
+    });
+    return this.shutdownPromise;
+  }
 
-// ─── Internal ────────────────────────────────────────────────────────────────
+  private workspace(task: ScriptTask, config: ReturnType<typeof configuration>): Workspace {
+    if (this.shutdownPromise) throw new WorkspaceScriptCancelledError();
+    const key = path.resolve(task.worktreePath);
+    const existing = this.workspaces.get(key);
+    if (existing?.sealed) throw new Error("Workspace scripts are closing");
+    if (existing) return existing;
+    if (!Number.isInteger(config.start) || !Number.isInteger(config.end) || config.start < 1 || config.end > 65535 || config.end < config.start) throw new Error("Invalid workspace port range");
+    const used = new Set([...this.workspaces.values()].map(workspace => workspace.port));
+    let port = config.start;
+    while (used.has(port) && port <= config.end) port++;
+    if (port > config.end) throw new Error("No workspace port available in the configured range");
+    const workspace: Workspace = { port, sealed: false, scripts: new Set(), requests: new Set() };
+    this.workspaces.set(key, workspace);
+    return workspace;
+  }
 
-async function runScript(
-  script: string,
-  cwd: string,
-  env: WorkspaceEnv,
-  onData?: (data: string) => void,
-): Promise<ScriptResult> {
-  return new Promise((resolve) => {
+  private async request<T>(workspace: Workspace, taskId: string, kind: Script["kind"], operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    let settle!: () => void;
+    const request = { taskId, kind, controller: new AbortController(), settled: new Promise<void>(resolve => { settle = resolve; }) };
+    workspace.requests.add(request);
+    try { return await operation(request.controller.signal); } finally { workspace.requests.delete(request); settle(); }
+  }
+
+  private spawn(workspace: Workspace, task: ScriptTask, kind: Script["kind"], command: string): Script {
+    const child = spawn(command, { cwd: task.worktreePath, shell: true, detached: process.platform !== "win32", windowsHide: true,
+      env: { ...process.env, CRAB_WORKSPACE_PATH: task.worktreePath, CRAB_WORKSPACE_BRANCH: task.branch, CRAB_ROOT_PATH: task.repoPath, CRAB_PORT: String(workspace.port) }, stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
-
-    const proc = spawn("sh", ["-c", script], {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      output += text;
-      onData?.(text);
-    });
-
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      output += text;
-      onData?.(text);
-    });
-
-    proc.on("error", (err) => {
-      resolve({
-        success: false,
-        output,
-        exitCode: -1,
-        error: err.message,
+    let error: Error | undefined;
+    const closed = new Promise<ScriptResult>(resolve => {
+      child.once("error", failure => { error = failure; });
+      child.once("close", code => {
+        const exitCode = code ?? -1;
+        resolve({ success: !error && exitCode === 0, output, exitCode, error: error?.message ?? (exitCode ? `Script exited with code ${exitCode}` : undefined) });
       });
     });
-
-    proc.on("close", (code) => {
-      const exitCode = code ?? 0;
-      resolve({
-        success: exitCode === 0,
-        output,
-        exitCode,
-        error: exitCode !== 0 ? `Script exited with code ${exitCode}` : undefined,
-      });
+    for (const stream of [child.stdout, child.stderr]) stream?.on("data", (chunk: Buffer) => {
+      const data = chunk.toString();
+      if (kind !== "run") output += data;
+      this.emit({ type: "data", taskId: task.id, kind, command, data });
     });
-  });
+    const finished = closed.then(async result => {
+      // The shell can close while a background descendant still writes with
+      // ignored stdio. Retain group ownership until those descendants exit too.
+      if (process.platform !== "win32" && child.pid) await this.waitForGroup(child.pid);
+      return script.cancelled ? { ...result, success: false, error: "Workspace script cancelled" } : result;
+    }).then(result => {
+      workspace.scripts.delete(script);
+      if (workspace.run === script) workspace.run = undefined;
+      return result;
+    });
+    const script: Script = { taskId: task.id, kind, child, finished, cancelled: false };
+    workspace.scripts.add(script);
+    void script.finished.then(result => { if (kind === "run") this.emit({ type: "exit", taskId: task.id, exitCode: result.exitCode }); }, error => console.error("[workspace-script] completion failed:", error));
+    return script;
+  }
+
+  private stopScript(script: Script): Promise<void> {
+    if (script.stopping) return script.stopping;
+    script.cancelled = true;
+    const stopping = (async () => {
+      const pid = script.child.pid;
+      if (!pid) { await script.finished; return; }
+      if (process.platform === "win32") {
+        await new Promise<void>((resolve, reject) => {
+          const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+          killer.once("error", reject);
+          killer.once("close", code => { if (code === 0) resolve(); else reject(new Error(`Could not terminate workspace process tree: ${code}`)); });
+        });
+        await script.finished;
+        return;
+      }
+      this.signalGroup(pid, "SIGTERM");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const escalation = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { try { this.signalGroup(pid, "SIGKILL"); } catch (error: unknown) { reject(error); } }, 2000);
+      });
+      try { await Promise.race([script.finished, escalation]); } finally { clearTimeout(timer); }
+    })();
+    script.stopping = stopping;
+    void stopping.catch(() => { if (script.stopping === stopping) script.stopping = undefined; });
+    return stopping;
+  }
+
+  private signalGroup(pid: number, signal: NodeJS.Signals): void {
+    try { process.kill(-pid, signal); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  }
+
+  private async waitForGroup(pid: number): Promise<void> {
+    while (true) {
+      try { process.kill(-pid, 0); } catch (error: unknown) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") return;
+        // Darwin can report EPERM for a group containing only exiting members.
+        // Keep ownership until ESRCH; a denied probe does not prove absence.
+        if (code !== "EPERM") throw error;
+      }
+      await delay(25);
+    }
+  }
 }

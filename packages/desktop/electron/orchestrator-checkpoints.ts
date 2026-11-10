@@ -13,6 +13,7 @@
  * tree SHAs even when the agent does not commit its changes.
  */
 
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs";
@@ -25,6 +26,11 @@ const execFile = promisify(execFileCb);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface RestoreBackup {
+  ref: string;
+  createdAt: number;
+}
+
 export interface Checkpoint {
   ref: string;
   turnNumber: number;
@@ -35,6 +41,24 @@ export interface Checkpoint {
 
 export class CheckpointManager {
   private readonly refPrefix = "refs/crab/checkpoints";
+  private readonly pendingPrefix = "refs/crab/checkpoint-intents";
+  private readonly basePrefix = "refs/crab/bases";
+  private readonly restorePrefix = "refs/crab/restore-backups";
+
+  /** Captures a pinned primary baseline; save its returned SHA as the task's base ref. */
+  async captureBase(task: Task): Promise<string> {
+    const sha = await this.snapshotHead(task);
+    const baseline = { repoPath: task.repoPath, baseRef: sha };
+    return this.pinBase(baseline);
+  }
+
+  /** Pins an existing baseline commit shared by local conversations. */
+  async pinBase(task: Pick<Task, "repoPath" | "baseRef">): Promise<string> {
+    const { stdout } = await execFile("git", ["rev-parse", "--verify", `${task.baseRef}^{commit}`], { cwd: task.repoPath });
+    const sha = stdout.trim();
+    await execFile("git", ["update-ref", `${this.basePrefix}/${sha}`, sha], { cwd: task.repoPath });
+    return sha;
+  }
 
   /**
    * Creates a checkpoint for the given task at the specified turn number.
@@ -52,28 +76,38 @@ export class CheckpointManager {
    * Returns the ref name and the snapshot commit SHA.
    */
   async createCheckpoint(task: Task, turnNumber: number): Promise<{ ref: string; sha: string }> {
-    const refName = `${this.refPrefix}/${task.id}/${turnNumber}`;
-    const { sha: snapshotSha, headSha } = await this.snapshotWorkingTree(
+    const sha = await this.snapshotWorkingTree(
       task,
       `crab-checkpoint: turn ${turnNumber}`,
     );
 
-    // Fall back to HEAD if the snapshot commit couldn't be produced
-    // (e.g. no git identity configured and we somehow skipped the env
-    // overrides below). This preserves prior behaviour rather than
-    // losing the checkpoint entirely.
-    const refSha = snapshotSha || headSha;
-    if (!refSha) {
-      throw new Error("Cannot create checkpoint: no HEAD and no snapshot commit produced");
-    }
+    return this.recordCheckpoint(task, turnNumber, sha);
+  }
 
-    await execFile(
-      "git",
-      ["update-ref", refName, refSha],
-      { cwd: task.repoPath },
-    );
+  /** Publishes a captured pre-input snapshot after provider acceptance. */
+  async recordCheckpoint(task: Task, turnNumber: number, sha: string): Promise<{ ref: string; sha: string }> {
+    const ref = `${this.refPrefix}/${task.id}/${turnNumber}`;
+    await execFile("git", ["update-ref", ref, sha], { cwd: task.repoPath });
+    return { ref, sha };
+  }
 
-    return { ref: refName, sha: refSha };
+  /** Checks whether the exact checkpoint exists, preserving repository errors. */
+  async hasCheckpoint(task: Task, turnNumber: number): Promise<boolean> {
+    const ref = `${this.refPrefix}/${task.id}/${turnNumber}`;
+    const { stdout } = await execFile("git", ["for-each-ref", "--format=%(refname)", ref], { cwd: task.repoPath });
+    if (!stdout.split("\n").includes(ref)) return false;
+    await execFile("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd: task.repoPath });
+    return true;
+  }
+
+  /** Pins a pre-input snapshot until delivery and bookkeeping are settled. */
+  async holdCheckpoint(task: Task, turnNumber: number, sha: string): Promise<void> {
+    await execFile("git", ["update-ref", `${this.pendingPrefix}/${task.id}/${turnNumber}`, sha], { cwd: task.repoPath });
+  }
+
+  /** Releases the pin after publication or a definitive input rejection. */
+  async releaseCheckpoint(task: Task, turnNumber: number): Promise<void> {
+    await execFile("git", ["update-ref", "-d", `${this.pendingPrefix}/${task.id}/${turnNumber}`], { cwd: task.repoPath });
   }
 
   /**
@@ -89,7 +123,6 @@ export class CheckpointManager {
    * full snapshot path to ensure correctness.
    */
   async createLightweightCheckpoint(task: Task, turnNumber: number): Promise<{ ref: string; sha: string }> {
-    const refName = `${this.refPrefix}/${task.id}/${turnNumber}`;
     const worktree = task.worktreePath;
 
     // Check if the worktree is clean (no staged, unstaged, or untracked changes).
@@ -98,7 +131,7 @@ export class CheckpointManager {
       // `git status --porcelain` outputs nothing when the tree is clean.
       const { stdout } = await execFile(
         "git",
-        ["status", "--porcelain"],
+        ["status", "--porcelain", "--untracked-files=all"],
         { cwd: worktree },
       );
       isClean = stdout.trim().length === 0;
@@ -129,13 +162,7 @@ export class CheckpointManager {
       return this.createCheckpoint(task, turnNumber);
     }
 
-    await execFile(
-      "git",
-      ["update-ref", refName, headSha],
-      { cwd: task.repoPath },
-    );
-
-    return { ref: refName, sha: headSha };
+    return this.recordCheckpoint(task, turnNumber, headSha);
   }
 
   /**
@@ -151,17 +178,16 @@ export class CheckpointManager {
    * for time-travel diffs against the live worktree).
    */
   async snapshotHead(task: Task): Promise<string> {
-    const { sha, headSha } = await this.snapshotWorkingTree(
+    return this.snapshotWorkingTree(
       task,
       "crab-checkpoint: live snapshot",
     );
-    return sha || headSha;
   }
 
   private async snapshotWorkingTree(
     task: Task,
     message: string,
-  ): Promise<{ sha: string; headSha: string }> {
+  ): Promise<string> {
     const worktree = task.worktreePath;
 
     // Resolve current HEAD — used as the parent of the snapshot commit.
@@ -173,8 +199,13 @@ export class CheckpointManager {
         { cwd: worktree },
       );
       headSha = stdout.trim();
-    } catch {
-      headSha = "";
+    } catch (error: unknown) {
+      // An unborn branch has no parent commit. Other HEAD failures cannot
+      // silently turn a damaged repository into a new root snapshot.
+      const { stdout: symbolic } = await execFile("git", ["symbolic-ref", "HEAD"], { cwd: worktree });
+      const ref = symbolic.trim();
+      const { stdout: refs } = await execFile("git", ["for-each-ref", "--format=%(refname)", ref], { cwd: worktree });
+      if (refs.split("\n").includes(ref)) throw error;
     }
 
     // Build a temp index that mirrors the current working tree.
@@ -183,52 +214,24 @@ export class CheckpointManager {
       `crab-ckpt-index-${task.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
 
-    let snapshotSha = "";
     try {
-      // Seed the temp index from HEAD when available, otherwise start empty.
-      if (headSha) {
-        await execFile(
-          "git",
-          ["read-tree", headSha],
-          { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
-        );
+      // The real index defines tracked files, including staged additions that
+      // now match ignore rules. Seed from it without changing its contents.
+      const { stdout: indexPath } = await execFile("git", ["rev-parse", "--git-path", "index"], { cwd: worktree });
+      try { fs.copyFileSync(path.resolve(worktree, indexPath.trim()), tmpIndex); } catch (error: unknown) {
+        // Git treats an absent index as empty, including on an unborn branch.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
 
       // Stage everything currently in the working tree (tracked + untracked).
       // `-A` picks up deletes too. Honours `.gitignore` by default, matching
       // how `git add .` behaves, so generated files we don't care about
       // (build outputs, node_modules) stay out of the snapshot.
-      try {
-        await execFile(
-          "git",
-          ["add", "-A", "--", "."],
-          { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
-        );
-      } catch {
-        // If `git add -A` fails with the temp index, try an alternative
-        // approach: use `git ls-files` + `git update-index` to build the
-        // index manually. This handles edge cases where the temp index
-        // confuses git's working tree detection.
-        try {
-          // Remove the potentially corrupted temp index and start fresh.
-          try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
-          if (headSha) {
-            await execFile(
-              "git",
-              ["read-tree", headSha],
-              { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
-            );
-          }
-          // Use --work-tree to explicitly tell git where the working tree is.
-          await execFile(
-            "git",
-            ["--work-tree", worktree, "add", "-A", "--", "."],
-            { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
-          );
-        } catch {
-          // Last resort: just use HEAD's tree as-is.
-        }
-      }
+      await execFile(
+        "git",
+        ["add", "-A", "--", "."],
+        { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
+      );
 
       // Write the index as a tree object.
       const { stdout: treeOut } = await execFile(
@@ -258,50 +261,69 @@ export class CheckpointManager {
           },
         },
       );
-      snapshotSha = commitOut.trim();
+      const sha = commitOut.trim();
+      if (!sha) throw new Error("Git did not return a checkpoint commit");
+      return sha;
     } finally {
       // Temp index lives outside the repo — remove it regardless of outcome.
       try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
     }
-
-    return { sha: snapshotSha, headSha };
   }
 
-  /**
-   * Reverts the workspace to the checkpoint at the given turn number.
-   * Resets the worktree to the checkpoint SHA, deletes all later
-   * checkpoint refs, and trims the task's event history.
-   */
-  async revertToCheckpoint(task: Task, turnNumber: number): Promise<void> {
-    const refName = `${this.refPrefix}/${task.id}/${turnNumber}`;
+  /** Validates snapshot ownership and resolves its commit. */
+  async snapshotSha(task: Task, sourceRef: string): Promise<string> {
+    const sources = [...await this.listCheckpoints(task), ...await this.listRestoreBackups(task)];
+    if (!sources.some(source => source.ref === sourceRef)) throw new Error("Snapshot does not belong to this conversation");
+    const [root, common, repository, gitDir, repositoryGitDir] = await Promise.all([
+      this.gitDirectory(task.worktreePath, "--show-toplevel"),
+      this.gitDirectory(task.worktreePath, "--git-common-dir"),
+      this.gitDirectory(task.repoPath, "--git-common-dir"),
+      this.gitDirectory(task.worktreePath, "--absolute-git-dir"),
+      this.gitDirectory(task.repoPath, "--absolute-git-dir"),
+    ]);
+    // Git searches parents when a checkout loses its .git pointer. A matching
+    // directory name alone must never authorize replacing the primary index.
+    if (root !== fs.realpathSync(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
+    if (common !== repository) throw new Error("Workspace belongs to a different Git repository");
+    if (root !== fs.realpathSync(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
+    const { stdout } = await execFile("git", ["rev-parse", "--verify", `${sourceRef}^{commit}`], { cwd: task.repoPath });
+    return stdout.trim();
+  }
 
-    const { stdout: sha } = await execFile(
-      "git",
-      ["rev-parse", refName],
-      { cwd: task.repoPath },
-    );
+  private async gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir" | "--absolute-git-dir"): Promise<string> {
+    const { stdout } = await execFile("git", ["rev-parse", option], { cwd });
+    return fs.realpathSync(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
+  }
 
-    // Reset worktree to the checkpoint commit.
-    await execFile(
-      "git",
-      ["reset", "--hard", sha.trim()],
-      { cwd: task.worktreePath },
-    );
-
-    // Delete checkpoint refs that come after this turn.
-    const laterRefs = await this.getCheckpointsAfter(task, turnNumber);
-    for (const ref of laterRefs) {
-      await execFile(
-        "git",
-        ["update-ref", "-d", ref],
-        { cwd: task.repoPath },
-      );
+  /** Restores an owned snapshot's files after its caller drains workspace writers. */
+  async restoreFiles(task: Task, sourceRef: string): Promise<void> {
+    const sha = await this.snapshotSha(task, sourceRef);
+    const { stdout: files } = await execFile("git", ["ls-tree", "-r", "--name-only", "-z", sha], { cwd: task.repoPath });
+    const { stdout: excluded } = await execFile("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"], { cwd: task.worktreePath });
+    const targets = files.split("\0").filter(Boolean);
+    // Ignored files are outside snapshot ownership. Git overwrites them during
+    // checkout, so reject file/directory collisions before changing the index.
+    for (const entry of excluded.split("\0").filter(Boolean)) {
+      const ignored = entry.replace(/\/$/, "");
+      if (targets.some(target => target === ignored || target.startsWith(`${ignored}/`) || ignored.startsWith(`${target}/`))) {
+        throw new Error(`Move ignored path "${entry}" before restoring these files`);
+      }
     }
+    const before = await this.snapshotHead(task);
+    const backup = `${this.restorePrefix}/${task.id}/${Date.now()}-${randomUUID()}`;
+    await execFile("git", ["update-ref", backup, before], { cwd: task.repoPath });
+    // Track the captured untracked files before replacing the index/tree, so
+    // later additions are removed too. HEAD and conversation history stay intact.
+    await execFile("git", ["read-tree", before], { cwd: task.worktreePath });
+    await execFile("git", ["read-tree", "--reset", "-u", sha], { cwd: task.worktreePath });
+  }
 
-    // Trim event history to only include events up to the reverted turn.
-    task.events = task.events.filter(
-      (_e, idx) => idx < turnNumber,
-    );
+  /** Lists retained file states from before each explicit restore. */
+  async listRestoreBackups(task: Task): Promise<RestoreBackup[]> {
+    const prefix = `${this.restorePrefix}/${task.id}/`;
+    const refs = await this.getRefs(task, prefix);
+    return refs.map(entry => ({ ref: entry.ref, createdAt: Number(entry.ref.slice(prefix.length).split("-")[0]) }))
+      .sort((a, b) => b.createdAt - a.createdAt);
   }
 
   /**
@@ -327,9 +349,11 @@ export class CheckpointManager {
    * Deletes all checkpoint refs for a task. Errors on individual
    * ref deletions are silently ignored (ref may already be gone).
    */
-  async cleanup(task: Task): Promise<void> {
+  async cleanup(task: Task, keepBase = false): Promise<void> {
     const prefix = `${this.refPrefix}/${task.id}/`;
-    const refs = await this.getRefs(task, prefix);
+    const refs = [...await this.getRefs(task, prefix), ...await this.getRefs(task, `${this.pendingPrefix}/${task.id}/`),
+      ...await this.getRefs(task, `${this.restorePrefix}/${task.id}/`),
+      ...(!keepBase ? await this.getRefs(task, `${this.basePrefix}/${task.baseRef}`) : [])];
 
     for (const { ref } of refs) {
       try {
@@ -344,23 +368,6 @@ export class CheckpointManager {
     }
   }
 
-  // ─── Private Helpers ─────────────────────────────────────────────────────
-
-  /**
-   * Returns all checkpoint refs after the given turn number for a task.
-   */
-  private async getCheckpointsAfter(task: Task, turnNumber: number): Promise<string[]> {
-    const prefix = `${this.refPrefix}/${task.id}/`;
-    const refs = await this.getRefs(task, prefix);
-
-    return refs
-      .filter((entry) => {
-        const turn = parseInt(entry.ref.slice(prefix.length), 10);
-        return turn > turnNumber;
-      })
-      .map((entry) => entry.ref);
-  }
-
   /**
    * Lists all refs matching a given prefix using `git for-each-ref`.
    */
@@ -368,25 +375,20 @@ export class CheckpointManager {
     task: Task,
     prefix: string,
   ): Promise<Array<{ ref: string; sha: string }>> {
-    try {
-      const { stdout } = await execFile(
-        "git",
-        ["for-each-ref", "--format=%(refname) %(objectname)", prefix],
-        { cwd: task.repoPath },
-      );
+    const { stdout } = await execFile(
+      "git",
+      ["for-each-ref", "--format=%(refname) %(objectname)", prefix],
+      { cwd: task.repoPath },
+    );
 
-      if (!stdout.trim()) return [];
+    if (!stdout.trim()) return [];
 
-      return stdout
-        .trim()
-        .split("\n")
-        .map((line) => {
-          const [ref, sha] = line.split(" ");
-          return { ref, sha };
-        });
-    } catch {
-      // No refs found or git error — return empty.
-      return [];
-    }
+    return stdout
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [ref, sha] = line.split(" ");
+        return { ref, sha };
+      });
   }
 }

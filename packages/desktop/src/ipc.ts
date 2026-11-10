@@ -1334,8 +1334,31 @@ declare global {
         onUpdateDownloaded: (listener: (info: { version: string; releaseDate: string; releaseNotes: unknown }) => void) => () => void;
         onError: (listener: (err: { message: string }) => void) => () => void;
       };
+      openUrl: (url: string) => Promise<void>;
       // Orchestrator (agent task management)
       orchestrator: {
+        getDiff: (taskId: string, checkpointSha?: string, checkpointFromSha?: string) => Promise<{ success: boolean; diff?: import("../electron/orchestrator-diff").TaskDiff; error?: string }>;
+        restoreFiles: (taskId: string, sourceRef: string) => Promise<{ success: boolean; error?: string }>;
+        listCheckpoints: (taskId: string) => Promise<{ success: boolean; checkpoints?: import("../electron/orchestrator-checkpoints").Checkpoint[]; backups?: import("../electron/orchestrator-checkpoints").RestoreBackup[]; error?: string }>;
+        onCheckpointCreated: (listener: (event: { taskId: string; turnNumber: number; ref: string; sha: string }) => void) => () => void;
+        onFilesChanged: (listener: (event: { taskIds: string[] }) => void) => () => void;
+        onTaskStatus: (listener: (payload: { taskId: string; status: import("../electron/orchestrator").TaskStatus }) => void) => () => void;
+        onNonconcurrentStop: (listener: (payload: { stoppedTaskId: string; startedTaskId: string }) => void) => () => void;
+        onBudgetWarning: (listener: (payload: { taskId: string; cost: number; limit: number; workspaceTitle?: string }) => void) => () => void;
+        retryTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+        archiveTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+        discard: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+        restoreTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+        loadChat: (taskId: string) => Promise<{ success: boolean; messages?: import("../electron/agent-chat-messages").ChatMessage[]; revision?: number; persistenceError?: string; error?: string }>;
+        appendChatNote: (taskId: string, content: string, kind?: "text" | "error") => Promise<{ success: boolean; error?: string }>;
+        onEvent: (listener: (payload: { taskId: string; event: import("../electron/orchestrator-adapters").AgentEvent }) => void) => () => void;
+        onChatUpdate: (listener: (update: import("../electron/agent-chat-messages").ChatUpdate) => void) => () => void;
+        onError: (listener: (payload: { taskId: string | null; message: string }) => void) => () => void;
+        listModels: (agentType: string, cwd: string, requestId: string) => Promise<{ success: boolean; models?: import("../electron/orchestrator-adapters").AgentModel[]; error?: string }>;
+        cancelModelDiscovery: (requestId: string) => Promise<void>;
+        iterate: (taskId: string, feedback: string, options?: import("../electron/orchestrator-adapters").AgentTurnOptions, messageId?: string) => Promise<{ success: boolean; uncertain?: boolean; unsent?: boolean; error?: string }>;
+        respondInput: (taskId: string, requestId: string, response: import("../electron/orchestrator-adapters").AgentInputResponse) => Promise<{ success: boolean; error?: string }>;
+        respondApproval: (taskId: string, payload: { requestId: string; decision: string; summary: string }) => Promise<{ success: boolean; error?: string }>;
         setTaskUIState: (taskId: string, state: PersistedChatUIState | null) => Promise<{ success: boolean; error?: string }>;
         getTaskUIState: (taskId: string) => Promise<{ success: boolean; state: PersistedChatUIState | null; error?: string }>;
         setTaskPinned: (taskId: string, pinned: boolean) => Promise<{ success: boolean; task?: unknown; error?: string }>;
@@ -1345,12 +1368,11 @@ declare global {
         setTaskSidebarGroup: (taskId: string, sidebarGroup?: string | null) => Promise<{ success: boolean; task?: unknown; error?: string }>;
         // Thread Operations (Codex app-server)
         forkThread: (taskId: string) => Promise<{ success: boolean; threadId: string; error?: string }>;
-        rollbackThread: (taskId: string, n: number) => Promise<{ success: boolean; threadId: string; error?: string }>;
         compactThread: (taskId: string) => Promise<{ success: boolean; error?: string }>;
         startReview: (taskId: string) => Promise<{ success: boolean; error?: string }>;
         setThreadName: (taskId: string, name: string) => Promise<{ success: boolean; error?: string }>;
-        setGoal: (taskId: string, goal: string) => Promise<{ success: boolean; error?: string }>;
-        getGoal: (taskId: string) => Promise<{ success: boolean; goal: string; tokenBudget?: number; error?: string }>;
+        setGoal: (taskId: string, mutation: import("../electron/orchestrator-adapters").CodexGoalMutation) => Promise<{ success: boolean; goal?: import("../electron/orchestrator-adapters").CodexGoal; error?: string }>;
+        getGoal: (taskId: string) => Promise<{ success: boolean; goal?: import("../electron/orchestrator-adapters").CodexGoal | null; error?: string }>;
         clearGoal: (taskId: string) => Promise<{ success: boolean; error?: string }>;
         updateThreadMetadata: (taskId: string, metadata: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
         shellCommand: (taskId: string, command: string, cwd?: string) => Promise<{ success: boolean; result: unknown; error?: string }>;

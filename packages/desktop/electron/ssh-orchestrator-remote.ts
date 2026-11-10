@@ -193,10 +193,13 @@ export class RemoteOrchestrator extends EventEmitter {
   async computeDiff(taskId: string): Promise<string> {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
+    const worktreePath = task.worktreePath;
+    if (!worktreePath) throw new Error("Remote task has no saved workspace path");
 
     const result = await this.router.route(task.repoId, "task_compute_diff", {
       repo_id: task.repoId,
       task_id: taskId,
+      worktree_path: worktreePath,
       branch: task.branch,
       base_ref: task.baseRef,
     }) as { diff: string };

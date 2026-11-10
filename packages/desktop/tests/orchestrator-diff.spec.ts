@@ -6,7 +6,8 @@
  * and conflict detection.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs";
@@ -19,9 +20,13 @@ import {
   cherryPickFiles,
   discard,
   parseDiffOutput,
+  registerDiffIpc,
 } from "../electron/orchestrator-diff";
 import type { Task } from "../electron/orchestrator";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
 import { createWorktree, readTaskMetadata } from "../electron/orchestrator-worktree";
+import { parsePatch } from "../src/lib/parse-patch";
+import { groupPatchByFile } from "../src/lib/file-state";
 
 const execFile = promisify(execFileCb);
 
@@ -109,7 +114,22 @@ function createMockTask(
     createdAt: Date.now(),
     events: [],
     feedback: [],
+    todos: [],
   };
+}
+
+function diffIpc(task: Task) {
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>();
+  const send = vi.fn();
+  const owner = { getTask: (id: string) => id === task.id ? task : undefined, getRpcRouter: () => undefined };
+  const window = { isDestroyed: () => false, webContents: { send } } as unknown as BrowserWindow;
+  registerDiffIpc({ handle: (channel, handler) => { handlers.set(channel, handler); } } as IpcMain, owner, () => window);
+  const read = async (payload: { checkpointSha?: string; checkpointFromSha?: string } = {}) => {
+    const handler = handlers.get("orchestrator:get-diff");
+    if (!handler) throw new Error("Diff handler was not registered");
+    return await handler({} as IpcMainInvokeEvent, { taskId: task.id, ...payload }) as { success: boolean; diff?: Awaited<ReturnType<typeof computeDiff>>; error?: string };
+  };
+  return { read, send };
 }
 
 /** Cleans up a temporary repo directory. */
@@ -147,6 +167,23 @@ describe("orchestrator-diff", () => {
   });
 
   describe("parseDiffOutput", () => {
+    it("preserves trailing filename spaces in file rows and mutation anchors", () => {
+      const raw = "diff --git a/trailing  b/trailing \nnew file mode 100644\n--- /dev/null\n+++ b/trailing \t\n@@ -0,0 +1 @@\n+content\n";
+      expect({ files: parseDiffOutput(raw, "A\ttrailing \n").map(file => file.path), anchors: parsePatch(raw).hunks.map(hunk => hunk.path), staged: Object.keys(groupPatchByFile(raw)) })
+        .toEqual({ files: ["trailing "], anchors: ["trailing "], staged: ["trailing "] });
+    });
+    it("preserves quoted UTF-8 identity in remote files, hunk anchors, and staging state", () => {
+      const raw = 'diff --git "a/\\351\\233\\252\\tfile" "b/\\351\\233\\252\\tfile"\nnew file mode 100644\n--- /dev/null\n+++ "b/\\351\\233\\252\\tfile"\n@@ -0,0 +1 @@\n+content\n';
+      const files = parseDiffOutput(raw, 'A\t"\\351\\233\\252\\tfile"\n');
+      expect({ files: files.map(file => file.path), anchors: parsePatch(raw).hunks.map(hunk => hunk.path), staged: Object.keys(groupPatchByFile(raw)) })
+        .toEqual({ files: ["雪\tfile"], anchors: ["雪\tfile"], staged: ["雪\tfile"] });
+    });
+
+    it("counts changed content that begins with patch-header characters", () => {
+      const patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n---before\n+++after\n";
+      const [file] = parseDiffOutput(patch, "M\tfile\n");
+      expect({ additions: file.additions, deletions: file.deletions }).toEqual({ additions: 1, deletions: 1 });
+    });
     it("returns empty array for empty diff", () => {
       expect(parseDiffOutput("", "")).toEqual([]);
     });
@@ -186,7 +223,152 @@ rename to new-name.ts
     });
   });
 
+  describe("registered comparison IPC", () => {
+    it("routes saved and latest-turn comparisons through the same complete reader", async () => {
+      const task = createMockTask(repoDir, "ipc", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "saved turn\n");
+      const cp = await new CheckpointManager().createCheckpoint(task, 1);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "current turn\n");
+      fs.writeFileSync(path.join(repoDir, "latest.txt"), "new bytes\n");
+      const { read } = diffIpc(task);
+      const saved = await read({ checkpointSha: cp.sha });
+      const live = await read({ checkpointSha: "HEAD", checkpointFromSha: cp.sha });
+      expect({ saved: saved.diff?.files.map(file => file.path), live: live.diff?.files.map(file => file.path).sort(), savedPatch: saved.diff?.rawDiff.includes("+saved turn"), livePatch: live.diff?.rawDiff.includes("+current turn") })
+        .toEqual({ saved: ["README.md"], live: ["README.md", "latest.txt"], savedPatch: true, livePatch: true });
+    });
+
+    it("returns a visible failure without publishing a clean diff on Git errors", async () => {
+      const task = createMockTask(repoDir, "ipc-error", "missing-baseline", repoDir);
+      const { read, send } = diffIpc(task);
+      const result = await read();
+      expect({ success: result.success, missing: result.error?.includes("missing-baseline"), notices: send.mock.calls })
+        .toEqual({ success: false, missing: true, notices: [] });
+    });
+
+    it("rejects remote saved comparisons before any local filesystem access", async () => {
+      const task = { ...createMockTask("ssh://fixture/repo", "remote", "base", "/remote/worktree"), isRemote: true };
+      expect(await diffIpc(task).read({ checkpointSha: "saved-ref" })).toEqual({ success: false, error: "Saved-file comparisons require a local workspace" });
+    });
+  });
+
   describe("computeDiff", () => {
+    it("includes mixed tracked and untracked changes without changing the real index", async () => {
+      const task = createMockTask(repoDir, "mixed", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      fs.writeFileSync(path.join(repoDir, "new.txt"), "new bytes\n");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      const diff = await computeDiff(task);
+      expect({ paths: diff.files.map(file => file.path).sort(), index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+        .toEqual({ paths: ["new.txt", "src/index.ts"], index });
+    });
+
+    it("shows no net change when staged edits were undone in the working tree", async () => {
+      const task = createMockTask(repoDir, "net-change", await getHead(repoDir), repoDir);
+      const file = path.join(repoDir, "src/index.ts");
+      const original = fs.readFileSync(file);
+      fs.writeFileSync(file, "staged change\n");
+      await execFile("git", ["add", "src/index.ts"], { cwd: repoDir });
+      fs.writeFileSync(file, original);
+      expect((await computeDiff(task)).files).toEqual([]);
+    });
+
+    it.each([false, true])("compares a captured untracked baseline with changed bytes: %s", async changed => {
+      const task = createMockTask(repoDir, "baseline", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "user.txt"), "original user bytes\n");
+      task.baseRef = await new CheckpointManager().captureBase(task);
+      if (changed) fs.writeFileSync(path.join(repoDir, "user.txt"), "changed user bytes\n");
+      const files = (await computeDiff(task)).files;
+      expect(files.map(file => ({ path: file.path, status: file.status }))).toEqual(changed ? [{ path: "user.txt", status: "modified" }] : []);
+    });
+
+    it("rejects a missing baseline instead of comparing a different state", async () => {
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      await expect(computeDiff(createMockTask(repoDir, "invalid", "refs/heads/missing-baseline", repoDir))).rejects.toThrow();
+    });
+
+    it("preserves unusual paths, empty files, binary files, and symbolic links", async () => {
+      const task = createMockTask(repoDir, "paths", await getHead(repoDir), repoDir);
+      const unusual = process.platform === "win32" ? "snow 雪 space.txt" : "line\tbreak\n雪.txt";
+      fs.writeFileSync(path.join(repoDir, unusual), "content\n");
+      fs.writeFileSync(path.join(repoDir, "empty.txt"), "");
+      fs.writeFileSync(path.join(repoDir, "binary.bin"), Buffer.from([0, 1, 2]));
+      const names = ["binary.bin", "empty.txt", unusual];
+      if (process.platform !== "win32") {
+        fs.symlinkSync("../outside-user-file", path.join(repoDir, "link"));
+        names.push("link");
+      }
+      expect((await computeDiff(task)).files.map(file => ({ path: file.path, status: file.status })).sort((a, b) => a.path.localeCompare(b.path)))
+        .toEqual(names.map(filePath => ({ path: filePath, status: "added" })).sort((a, b) => a.path.localeCompare(b.path)));
+    });
+
+    it("preserves rename identity when Git quotes the new path", async () => {
+      const task = createMockTask(repoDir, "rename", await getHead(repoDir), repoDir);
+      const renamed = process.platform === "win32" ? "renamed 雪.ts" : "renamed\t雪.ts";
+      await execFile("git", ["mv", "src/utils.ts", renamed], { cwd: repoDir });
+      expect((await computeDiff(task)).files.map(file => ({ path: file.path, oldPath: file.oldPath, status: file.status })))
+        .toEqual([{ path: renamed, oldPath: "src/utils.ts", status: "renamed" }]);
+    });
+
+    it("keeps staged additions visible after an ignore rule matches them", async () => {
+      const task = createMockTask(repoDir, "staged-ignored", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "staged.txt"), "staged bytes\n");
+      await execFile("git", ["add", "staged.txt"], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, ".gitignore"), "staged.txt\n");
+      expect((await computeDiff(task)).files.map(file => file.path).sort()).toEqual([".gitignore", "staged.txt"]);
+    });
+
+    it("reads a split index without changing staged bytes", async () => {
+      const task = createMockTask(repoDir, "split-index", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "staged\n");
+      await execFile("git", ["add", "src/index.ts"], { cwd: repoDir });
+      await execFile("git", ["update-index", "--split-index"], { cwd: repoDir });
+      const staged = (await execFile("git", ["diff", "--cached"], { cwd: repoDir })).stdout;
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      const diff = await computeDiff(task);
+      expect({ paths: diff.files.map(file => file.path), index: fs.readFileSync(path.join(repoDir, ".git/index")), staged: (await execFile("git", ["diff", "--cached"], { cwd: repoDir })).stdout })
+        .toEqual({ paths: ["src/index.ts"], index, staged });
+    });
+
+    it("compares an unborn workspace with a saved baseline without creating its index", async () => {
+      const unborn = path.join(repoDir, "unborn");
+      await execFile("git", ["init", "--initial-branch=main", unborn]);
+      const task = createMockTask(unborn, "unborn", "HEAD", unborn);
+      task.baseRef = await new CheckpointManager().captureBase(task);
+      fs.writeFileSync(path.join(unborn, "new.txt"), "new bytes\n");
+      expect({ paths: (await computeDiff(task)).files.map(file => file.path), index: fs.existsSync(path.join(unborn, ".git/index")) })
+        .toEqual({ paths: ["new.txt"], index: false });
+    });
+
+    it("surfaces required filter failures without changing the real index", async () => {
+      const task = createMockTask(repoDir, "filter", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, ".gitattributes"), "*.bin filter=fixture\n");
+      fs.writeFileSync(path.join(repoDir, "payload.bin"), "new bytes\n");
+      await execFile("git", ["config", "filter.fixture.clean", "exit 17"], { cwd: repoDir });
+      await execFile("git", ["config", "filter.fixture.required", "true"], { cwd: repoDir });
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      await expect(computeDiff(task)).rejects.toThrow();
+      expect(fs.readFileSync(path.join(repoDir, ".git/index"))).toEqual(index);
+    });
+
+    it("rejects a recreated folder that would read its parent repository", async () => {
+      const task = createMockTask(repoDir, "replaced", await getHead(repoDir), repoDir);
+      task.worktreePath = path.join(repoDir, "recreated");
+      fs.mkdirSync(task.worktreePath);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "primary change\n");
+      await expect(computeDiff(task)).rejects.toThrow("no longer matches");
+    });
+
+    it("reads saved comparisons from repository objects after the worktree is gone", async () => {
+      const task = createMockTask(repoDir, "saved", await getHead(repoDir), repoDir);
+      const snapshots = new CheckpointManager();
+      const first = await snapshots.createCheckpoint(task, 0);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "next turn\n");
+      const second = await snapshots.createCheckpoint(task, 1);
+      task.worktreePath = path.join(repoDir, "absent");
+      expect((await computeDiff(task, first.sha, second.sha)).files.map(file => file.path)).toEqual(["README.md"]);
+    });
+
     it("computes a structured diff with file list and patches", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `diff-test-${Date.now()}`;
@@ -200,7 +382,7 @@ rename to new-name.ts
 
         expect(diff.taskId).toBe(taskId);
         expect(diff.baseRef).toBe(baseRef);
-        expect(diff.headRef).toMatch(/^[0-9a-f]{40}$/);
+        expect(diff.headRef).toBe("HEAD");
         expect(diff.files.length).toBeGreaterThan(0);
         expect(diff.rawDiff).toContain("diff --git");
 

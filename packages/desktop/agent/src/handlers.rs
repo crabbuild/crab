@@ -406,8 +406,8 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             worktree_destroy(&work_dir, p).await
         }
         "task_compute_diff" => {
-            let p: TaskComputeDiffParams = decode(&method, params)?;
-            task_compute_diff(p).await
+            let p: crate::task_diff::Params = decode(&method, params)?;
+            crate::task_diff::compare(p).await
         }
         "task_apply" => {
             let p: TaskApplyParams = decode(&method, params)?;
@@ -1812,110 +1812,6 @@ async fn worktree_destroy(work_dir: &Path, p: WorktreeDestroyParams) -> Result<V
         "removed": true,
         "path": p.path,
         "branch_deleted": branch_deleted,
-    }))
-}
-
-// ─── Task Compute Diff ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct TaskComputeDiffParams {
-    #[allow(dead_code)]
-    repo_id: String,
-    /// Path to the worktree where the agent made changes.
-    worktree_path: String,
-    /// Base ref (commit SHA) to diff against.
-    base_ref: String,
-    /// Branch name of the task (used as fallback).
-    #[serde(default)]
-    branch: Option<String>,
-}
-
-/// Compute the diff for a remote orchestrator task.
-///
-/// Runs `git diff` in the task's worktree against the base ref and returns
-/// the raw unified diff text, name-status output, and HEAD ref. The Electron
-/// main process parses this into structured `DiffFile[]` for the renderer.
-///
-/// Strategy (mirrors the local `computeDiff` in orchestrator-diff.ts):
-/// 1. `git diff <base_ref>` — committed + uncommitted changes from base.
-/// 2. If empty, `git diff` — unstaged working tree changes.
-/// 3. If empty, `git diff --cached` — staged changes only.
-/// 4. If empty, stage untracked files temporarily to capture new files.
-async fn task_compute_diff(p: TaskComputeDiffParams) -> Result<Value> {
-    let cwd = PathBuf::from(&p.worktree_path);
-
-    if !cwd.exists() {
-        return Err(AgentError::Other(format!(
-            "Worktree path does not exist: {}",
-            p.worktree_path
-        )));
-    }
-
-    let mut raw_diff = String::new();
-    let mut name_status = String::new();
-
-    // Strategy 1: diff from base ref to working tree.
-    if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", &p.base_ref]).await {
-        if !diff_out.trim().is_empty() {
-            raw_diff = diff_out;
-            if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--name-status", &p.base_ref]).await {
-                name_status = ns;
-            }
-        }
-    }
-
-    // Strategy 2: unstaged working tree changes.
-    if raw_diff.trim().is_empty() {
-        if let Ok(diff_out) = run_git_cmd(&cwd, &["diff"]).await {
-            if !diff_out.trim().is_empty() {
-                raw_diff = diff_out;
-                if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--name-status"]).await {
-                    name_status = ns;
-                }
-            }
-        }
-    }
-
-    // Strategy 3: staged changes.
-    if raw_diff.trim().is_empty() {
-        if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", "--cached"]).await {
-            if !diff_out.trim().is_empty() {
-                raw_diff = diff_out;
-                if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--cached", "--name-status"]).await {
-                    name_status = ns;
-                }
-            }
-        }
-    }
-
-    // Strategy 4: check for untracked files.
-    if raw_diff.trim().is_empty() {
-        if let Ok(status_out) = run_git_cmd(&cwd, &["status", "--porcelain"]).await {
-            if !status_out.trim().is_empty() {
-                // Stage all files temporarily to get a diff.
-                let _ = run_git_cmd(&cwd, &["add", "-A"]).await;
-                if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", "--cached"]).await {
-                    raw_diff = diff_out;
-                    if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--cached", "--name-status"]).await
-                    {
-                        name_status = ns;
-                    }
-                }
-                // Unstage to leave the worktree clean.
-                let _ = run_git_cmd(&cwd, &["reset", "HEAD"]).await;
-            }
-        }
-    }
-
-    // Get the HEAD ref.
-    let head_ref = run_git_cmd(&cwd, &["rev-parse", "HEAD"])
-        .await
-        .unwrap_or_else(|_| "unknown".to_owned());
-
-    Ok(json!({
-        "diff": raw_diff,
-        "name_status": name_status,
-        "head_ref": head_ref.trim(),
     }))
 }
 

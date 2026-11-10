@@ -23,6 +23,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { CheckpointManager } from "../electron/orchestrator-checkpoints";
+import { computeDiff } from "../electron/orchestrator-diff";
 import type { Task } from "../electron/orchestrator";
 
 const execFile = promisify(execFileCb);
@@ -103,24 +104,7 @@ async function computeCheckpointDiff(
   fromSha: string,
   toSha: string,
 ): Promise<string[]> {
-  // Resolve to tree SHAs (same as the fixed getDiff handler).
-  const { stdout: fromTree } = await execFile(
-    "git", ["rev-parse", `${fromSha}^{tree}`], { cwd: repoDir },
-  );
-  const { stdout: toTree } = await execFile(
-    "git", ["rev-parse", `${toSha}^{tree}`], { cwd: repoDir },
-  );
-
-  const { stdout: nameStatus } = await execFile(
-    "git", ["diff", "--name-status", fromTree.trim(), toTree.trim()],
-    { cwd: repoDir },
-  );
-
-  if (!nameStatus.trim()) return [];
-  return nameStatus.trim().split("\n").map((line) => {
-    const parts = line.split("\t");
-    return parts[parts.length - 1]; // file path
-  });
+  return (await computeDiff(createMockTask(repoDir), fromSha, toSha)).files.map(file => file.path);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

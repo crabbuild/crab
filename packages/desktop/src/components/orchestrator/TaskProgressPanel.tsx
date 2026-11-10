@@ -22,7 +22,7 @@ import {
   ClipboardList,
   Loader2,
 } from "lucide-react";
-import type { ToolEvent } from "./chat-types";
+import type { ToolEvent } from "../../../electron/agent-chat-messages";
 
 // ── Types ───────────────────────────────────────────────────────────
 

@@ -157,6 +157,9 @@ export function registerAgentWorkflowIpc(
       if (options.sourceTaskId) {
         sourceTask = await orchestrator.attachWorkflowRunToTask(options.sourceTaskId, run.id) ?? sourceTask;
       }
+      if (payload.options?.sourceTaskId && typeof options.input?.prompt === "string") {
+        orchestrator.emit("orchestrator:chat-user", { taskId: payload.options.sourceTaskId, content: options.input.prompt });
+      }
       return { success: true, run, sourceTask };
     } catch (err: unknown) {
       return { success: false, error: errorMessage(err) };

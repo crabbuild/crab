@@ -24,7 +24,7 @@ import { StreamingCursor } from "./StreamingCursor";
 import { ToolGroup } from "./ToolGroup";
 import { resolveToolCard, CommandSessionCard, FileWatchNotificationCard } from "./tool-cards";
 import { ToolCard } from "./ToolCard";
-import type { ToolEvent } from "./chat-types";
+import type { ToolEvent } from "../../../electron/agent-chat-messages";
 import type { AgentEvent } from "../../../electron/orchestrator-adapters";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -44,7 +44,15 @@ export interface TurnProps {
  * Convert an AgentEvent to a ToolEvent for the tool card renderers.
  * The existing tool cards expect ToolEvent shape.
  */
-function agentEventToToolEvent(event: any): ToolEvent {
+function agentEventToToolEvent(event: AgentEvent): ToolEvent {
+  if (event.type === "input_request" && event.inputRequest) {
+    const request = event.inputRequest;
+    const summary = request.kind === "elicitation" ? `${request.serverName}: ${request.message}` : "Agent questions";
+    return { type: "generic", tool: "AskUserQuestion", summary, input: request, itemId: event.itemId };
+  }
+  if (event.type === "approval_request" && event.approval) {
+    return { type: "generic", tool: "CodexApproval", summary: event.approval.summary, input: event.approval, itemId: event.itemId };
+  }
   return {
     type: event.type === "command_run" || event.type === "command" ? "command" :
           event.type === "file_edit" ? "file_edit" :
@@ -59,6 +67,18 @@ function agentEventToToolEvent(event: any): ToolEvent {
     detail: event.diff ?? event.stdout ?? undefined,
     itemId: event.itemId,
   };
+}
+
+function isPendingRequest(tool: ToolEvent): boolean {
+  if (tool.tool !== "AskUserQuestion" && tool.tool !== "CodexApproval") return false;
+  const input = tool.input as { requestId?: string; resolved?: boolean } | undefined;
+  return Boolean(input?.requestId && !input.resolved);
+}
+
+function requestNeedsAttention(tool: ToolEvent): boolean {
+  const request = tool.tool === "AskUserQuestion" || tool.tool === "CodexApproval";
+  const input = tool.input as { resolutionReason?: string } | undefined;
+  return isPendingRequest(tool) || Boolean(request && input?.resolutionReason);
 }
 
 /**
@@ -112,6 +132,11 @@ interface ErrorSegment {
   content: string;
 }
 
+interface UserSegment {
+  kind: "user";
+  content: string;
+}
+
 interface CommandSessionSegment {
   kind: "command-session";
   sessionId: string;
@@ -126,7 +151,7 @@ interface FileWatchSegment {
   changeKind: string;
 }
 
-type Segment = TextSegment | ThinkingSegment | ToolGroupSegment | ErrorSegment | CommandSessionSegment | FileWatchSegment;
+type Segment = TextSegment | ThinkingSegment | ToolGroupSegment | ErrorSegment | CommandSessionSegment | FileWatchSegment | UserSegment;
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -135,8 +160,10 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
   const taskState = store.byTask.get(taskId);
   const turnCollapseEntry = taskState?.turnCollapse[turn.turnIndex];
   // While running, always expanded. Only allow collapse after turn completes.
-  const isCollapsed = turn.complete
-    ? (turnCollapseEntry != null ? turnCollapseEntry.collapsed : true)
+  const needsAttention = turn.events.some(event => event.type === "error" || requestNeedsAttention(agentEventToToolEvent(event)));
+  const canCollapse = turn.complete && turn.outcome === "completed" && !needsAttention;
+  const isCollapsed = canCollapse
+    ? (turnCollapseEntry != null ? turnCollapseEntry.collapsed : !turn.events.some(event => event.type === "user_message"))
     : false;
 
   // Build segments: interleave text blocks and tool groups in arrival order
@@ -220,6 +247,8 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
         <TurnHeader
           turn={turn}
           taskId={taskId}
+          collapsed={isCollapsed}
+          collapsible={canCollapse}
           onReview={handleReview}
         />
       )}
@@ -261,6 +290,10 @@ function renderSegment(
   taskId: string,
 ) {
   switch (segment.kind) {
+    case "user":
+      return <div key={`user-${idx}`} className="flex justify-end py-1">
+        <div className="max-w-[85%] rounded-lg border border-gx-accent/20 bg-gx-accent/10 px-3 py-2 text-sm text-gx-text">{segment.content}</div>
+      </div>;
     case "text": {
       const isLastTextSegment =
         !turn.complete &&
@@ -292,10 +325,11 @@ function renderSegment(
           key={`group-${segment.group.groupId || idx}`}
           groupId={segment.group.groupId}
           members={segment.members}
-          complete={segment.group.complete}
+          complete={segment.group.complete && !segment.members.some(isPendingRequest)}
+          keepExpanded={segment.members.some(requestNeedsAttention)}
           startedAt={segment.group.startedAt}
           endedAt={segment.group.endedAt}
-          defaultCollapsed={turn.complete}
+          defaultCollapsed={turn.outcome === "completed" && !segment.members.some(requestNeedsAttention)}
           cardRenderers={renderToolCard}
           taskId={taskId}
         />
@@ -364,12 +398,20 @@ function buildSegments(turn: TurnType): Segment[] {
   }
 
   let pendingText = "";
+  let pendingTextItem: string | undefined;
   let pendingThinking = "";
   // Track which groups we've already emitted
   const emittedGroups = new Set<ToolGroupType>();
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
+
+    if (event.type === "user_message") {
+      if (pendingText) { segments.push({ kind: "text", content: pendingText }); pendingText = ""; }
+      if (pendingThinking) { segments.push({ kind: "thinking", content: pendingThinking }); pendingThinking = ""; }
+      segments.push({ kind: "user", content: event.content ?? "" });
+      continue;
+    }
 
     // Skip tool_result, done, and usage events in the segment output
     if (event.type === "tool_result" || event.type === "done" || event.type === "usage") {
@@ -378,11 +420,16 @@ function buildSegments(turn: TurnType): Segment[] {
 
     // Text events
     if (event.type === "text" && event.content) {
+      if (pendingText && event.itemId !== pendingTextItem) {
+        segments.push({ kind: "text", content: pendingText });
+        pendingText = "";
+      }
       if (pendingThinking) {
         segments.push({ kind: "thinking", content: pendingThinking });
         pendingThinking = "";
       }
       pendingText += event.content;
+      pendingTextItem = event.itemId;
       continue;
     }
 

@@ -66,7 +66,7 @@ export interface Task {
 
 const WORKTREES_DIR = ".crab/worktrees";
 const BRANCH_PREFIX = "agent/";
-const METADATA_FILE = ".crab-task.json";
+const METADATA_FILE = "crab-desktop-task.json";
 const DEFAULT_RETENTION_DAYS = 7;
 
 interface CrabEnvelope<T> {
@@ -158,14 +158,25 @@ export function generateFriendlyName(existing: Set<string>): string {
 
 // ─── Metadata ────────────────────────────────────────────────────────────────
 
+function metadataPath(worktreePath: string): string {
+  // Relative gitdir pointers use the physical checkout, including symlinked paths.
+  const workspace = fs.realpathSync(worktreePath);
+  const gitPath = path.join(workspace, ".git");
+  if (fs.statSync(gitPath).isDirectory()) return path.join(gitPath, METADATA_FILE);
+  const pointer = fs.readFileSync(gitPath, "utf-8").trim();
+  if (!pointer.startsWith("gitdir:")) throw new Error("Workspace has an invalid Git directory pointer");
+  const gitDir = pointer.slice("gitdir:".length).trim();
+  if (!gitDir) throw new Error("Workspace has an empty Git directory pointer");
+  return path.join(path.resolve(workspace, gitDir), METADATA_FILE);
+}
+
 /**
- * Reads task metadata from a worktree's `.crab-task.json`.
+ * Reads task metadata from the worktree's private Git administration directory.
  * Returns undefined if the file is missing or unreadable.
  */
 export function readTaskMetadata(worktreePath: string): TaskMetadata | undefined {
-  const metaPath = path.join(worktreePath, METADATA_FILE);
   try {
-    const content = fs.readFileSync(metaPath, "utf-8");
+    const content = fs.readFileSync(metadataPath(worktreePath), "utf-8");
     return JSON.parse(content) as TaskMetadata;
   } catch {
     return undefined;
@@ -173,11 +184,33 @@ export function readTaskMetadata(worktreePath: string): TaskMetadata | undefined
 }
 
 /**
- * Writes task metadata to a worktree's `.crab-task.json`.
+ * Writes task metadata outside the working tree so snapshots cannot commit it.
  */
 export function writeTaskMetadata(worktreePath: string, metadata: TaskMetadata): void {
-  const metaPath = path.join(worktreePath, METADATA_FILE);
-  fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(metadataPath(worktreePath), JSON.stringify(metadata, null, 2) + "\n", "utf-8");
+}
+
+/** Moves the tagged source-file ownership format into Git administration storage. */
+export function migrateWorktreeMetadata(taskId: string, worktreePath: string): void {
+  // v2.0.0-alpha.1 stored control data in source. Migrate that shipped format
+  // once; ordinary readers only use the private Git administration directory.
+  const legacyPath = path.join(worktreePath, ".crab-task.json");
+  if (!fs.existsSync(legacyPath)) return;
+  const current = readTaskMetadata(worktreePath);
+  let legacy: TaskMetadata;
+  try { legacy = JSON.parse(fs.readFileSync(legacyPath, "utf-8")) as TaskMetadata; } catch (cause: unknown) {
+    if (current?.taskId === taskId) return;
+    throw new Error("Workspace ownership metadata could not be migrated", { cause });
+  }
+  const matches = legacy?.taskId === taskId && typeof legacy.name === "string" && typeof legacy.originalBranch === "string"
+    && typeof legacy.baseRef === "string" && typeof legacy.createdAt === "string" && typeof legacy.status === "string";
+  if (!matches) {
+    if (current?.taskId === taskId) return;
+    throw new Error("Workspace ownership metadata does not match its task");
+  }
+  if (current && current.taskId !== taskId) throw new Error("Git administration metadata belongs to another task");
+  if (!current) writeTaskMetadata(worktreePath, legacy);
+  fs.unlinkSync(legacyPath);
 }
 
 /**
@@ -307,17 +340,52 @@ export async function createWorktree(
   return worktreePath;
 }
 
+/** Recreates a task workspace on its saved local branch; a missing branch is an error. */
+export async function restoreWorktree(repoPath: string, taskId: string, branch: string, previousPath: string): Promise<string> {
+  // Restore the saved branch exactly. Creating from a base ref could silently
+  // replace archived work with HEAD or attach the task to a different branch.
+  await execFile("git", ["show-ref", "--verify", `refs/heads/${branch}`], { cwd: repoPath });
+  if (fs.existsSync(previousPath)) throw new Error("The previous workspace still exists");
+  // Git records canonical paths. Resolve the surviving ancestors too when a
+  // deleted workspace was reached through a symlink such as macOS /var.
+  let ancestor = path.resolve(previousPath);
+  const suffix: string[] = [];
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error("Cannot resolve the missing workspace path");
+    suffix.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+  const previous = path.join(fs.realpathSync(ancestor), ...suffix);
+  const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoPath });
+  const registered = stdout.split("\0\0").some(record => {
+    const fields = record.split("\0");
+    const recordedPath = fields.find(field => field.startsWith("worktree "))?.slice("worktree ".length);
+    return recordedPath !== undefined && path.normalize(recordedPath) === path.normalize(previous) && fields.includes(`branch refs/heads/${branch}`);
+  });
+  // Remove only this absent checkout's registration. Git retains locked and
+  // live-worktree safeguards; broad pruning could affect unrelated workspaces.
+  if (registered) await execCrabWorktreeJson(repoPath, ["worktree", "--json", "remove", previous]);
+  const worktreesDir = ensureWorktreesDir(repoPath);
+  const existing = await getExistingNames(repoPath);
+  const name = generateFriendlyName(existing);
+  const worktreePath = path.join(worktreesDir, name);
+  await execCrabWorktreeJson(repoPath, ["worktree", "--json", "add", worktreePath, branch]);
+  writeTaskMetadata(worktreePath, { name, taskId, createdAt: new Date().toISOString(), status: "active", baseRef: branch, originalBranch: branch });
+  return worktreePath;
+}
+
 /**
- * Removes an agent worktree and its associated branch.
+ * Removes an agent worktree, preserving its branch when archiving.
  *
- * Accepts either a friendly name or a task ID for backwards compatibility.
- * Runs `git worktree remove --force` followed by `git branch -D`.
- * Handles the case where the worktree or branch has already been removed
- * (idempotent cleanup).
+ * Accepts a repository-local name or task ID. Archive requires a clean tree
+ * and preserves its branch; discard can remove unsaved work and the branch.
+ * An already-removed workspace is a no-op; other removal failures propagate.
  */
 export async function removeWorktree(
   repoPath: string,
   nameOrTaskId: string,
+  options: { preserveBranch?: boolean } = {},
 ): Promise<void> {
   // Resolve the worktree path — try as friendly name first, then as task ID.
   const worktreePath = await resolveWorktreePath(repoPath, nameOrTaskId);
@@ -337,13 +405,14 @@ export async function removeWorktree(
     );
   }
 
-  // Remove the worktree. --force handles dirty working trees.
+  // Archive requires a saved, clean tree. Discard may intentionally remove
+  // unsaved work; archive must fail if changes appeared after its snapshot.
   try {
     await execCrabWorktreeJson(repoPath, [
       "worktree",
       "--json",
       "remove",
-      "--force",
+      ...(options.preserveBranch ? [] : ["--force"]),
       worktreePath,
     ]);
   } catch (err: unknown) {
@@ -365,6 +434,8 @@ export async function removeWorktree(
   } catch {
     // Non-fatal — prune is best-effort.
   }
+
+  if (options.preserveBranch) return;
 
   // Delete the branch.
   try {

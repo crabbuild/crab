@@ -302,18 +302,14 @@ describe("Remote Diff Computation", () => {
       );
     });
 
-    it("handles missing fields in the RPC response gracefully", async () => {
+    it("rejects an incomplete RPC response instead of inventing file identity", async () => {
       const task = injectRemoteTask(orchestrator);
 
-      // Simulate a response with missing optional fields.
       mockRouter.nextResult = {
         diff: "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1,2 @@\n hello\n+world\n",
       };
 
-      const diff = await computeRemoteDiff(task, mockRouter as any);
-
-      expect(diff.files).toHaveLength(1);
-      expect(diff.headRef).toBe("unknown");
+      await expect(computeRemoteDiff(task, mockRouter as any)).rejects.toThrow();
     });
   });
 
@@ -357,6 +353,7 @@ describe("Remote Diff Computation", () => {
       expect(diffCall!.params).toMatchObject({
         repo_id: task.repoId,
         task_id: task.id,
+        worktree_path: task.worktreePath,
         branch: task.branch,
         base_ref: task.baseRef,
       });

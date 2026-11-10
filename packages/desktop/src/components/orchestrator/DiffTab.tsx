@@ -98,6 +98,7 @@ function loadDiffRenderMode(): DiffRenderMode {
 
 interface Props {
   task: OrchestratorTask;
+  workspaceRevision?: number;
   /** The repo handle (kept for potential future use). */
   repo: any;
   /** File path to initially select (e.g., from the live file tree). */
@@ -119,11 +120,13 @@ interface Props {
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
+export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
   const [files, setFiles] = useState<DiffFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [diffError, setDiffError] = useState<string>();
+  const [diffRequest, setDiffRequest] = useState(0);
   const effective = useEffectiveTheme();
 
   // View mode: list / tree / unified (matches commit timeline page)
@@ -172,16 +175,25 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
   useEffect(() => {
     if (shouldDeferDiffFetch(task.status)) {
       setFiles([]);
+      setSelectedFiles(new Set());
       setActiveFile(null);
+      setDiffError(undefined);
       setLoading(false);
       return;
     }
 
+    let current = true;
     setLoading(true);
-    (window as any).crab.orchestrator
+    setDiffError(undefined);
+    setFiles([]);
+    setSelectedFiles(new Set());
+    setActiveFile(null);
+    window.crab.orchestrator
       .getDiff(task.id, checkpointSha || undefined, checkpointFromSha || undefined)
-      .then((result: { success?: boolean; diff?: { files: DiffFile[] }; files?: DiffFile[] }) => {
-        const diffFiles = result?.diff?.files ?? result?.files ?? [];
+      .then(result => {
+        if (!current) return;
+        if (!result.success || !result.diff) throw new Error(result.error ?? "File comparison unavailable");
+        const diffFiles = result.diff.files;
         setFiles(diffFiles);
         if (diffFiles.length > 0) {
           setActiveFile(diffFiles[0].path);
@@ -189,9 +201,10 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
           setActiveFile(null);
         }
       })
-      .catch(() => setFiles([]))
-      .finally(() => setLoading(false));
-  }, [task.id, task.status, checkpointSha, checkpointFromSha]);
+      .catch((error: unknown) => { if (current) setDiffError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [task.id, task.status, checkpointSha, checkpointFromSha, workspaceRevision, diffRequest]);
 
   // When initialActiveFile changes (e.g., user clicked in live file tree),
   // select that file in the diff view if it exists.
@@ -380,6 +393,16 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
     return (
       <div className="flex h-full items-center justify-center">
         <Loader2 size={20} className="animate-spin text-gx-muted" />
+      </div>
+    );
+  }
+
+  if (diffError) {
+    return (
+      <div role="alert" className="flex h-full flex-col items-center justify-center gap-2 p-4 text-xs">
+        <span className="font-medium text-gx-error">Could not load changes</span>
+        <span className="max-w-lg break-words text-gx-muted">{diffError}</span>
+        <button type="button" onClick={() => setDiffRequest(request => request + 1)} className="rounded border border-gx-border px-3 py-1.5 hover:bg-gx-hover">Reload changes</button>
       </div>
     );
   }

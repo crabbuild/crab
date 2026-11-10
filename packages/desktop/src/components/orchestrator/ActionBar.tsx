@@ -4,7 +4,6 @@ MessageSquare,
 Play,
 RotateCcw,
 Trash2,
-Undo2,
 X,
 } from "lucide-react";
 import { OrchestratorTask } from "./TaskCard";
@@ -16,9 +15,9 @@ interface Props {
   isStreaming: boolean;
   onStop: () => void;
   onRetry: () => void;
+  onRestore: () => void;
   onDiscard: () => void;
   onArchive: () => void;
-  onUndo: () => void;
   onApprovePlan: () => void;
   onRefinePlan: () => void;
   onRejectPlan: () => void;
@@ -63,17 +62,17 @@ export function ActionBar(props: Props) {
     return null;
   }
 
-  // Applied → Undo
+  // Applied → Reopen the conversation
   if (task.status === "applied") {
     return (
       <Bar>
-        <ActionButton label="Undo apply" icon={<Undo2 size={12} />} onClick={props.onUndo} variant="danger" />
+        <ActionButton label="Reopen task" icon={<RotateCcw size={12} />} onClick={props.onRestore} />
       </Bar>
     );
   }
 
-  // Failed / stopped → Retry + Discard
-  if (task.status === "failed" || task.status === "stopped") {
+  // Failed / stopped / interrupted → Retry + Discard
+  if (task.status === "failed" || task.status === "stopped" || task.status === "interrupted") {
     return (
       <Bar>
         <ActionButton label="Retry" icon={<Play size={12} />} onClick={props.onRetry} variant="primary" />
@@ -86,7 +85,7 @@ export function ActionBar(props: Props) {
   if (task.status === "archived") {
     return (
       <Bar>
-        <ActionButton label="Restore" icon={<RotateCcw size={12} />} onClick={props.onRetry} />
+        <ActionButton label="Restore" icon={<RotateCcw size={12} />} onClick={props.onRestore} />
       </Bar>
     );
   }

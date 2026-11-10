@@ -5,6 +5,7 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { registerAppShutdown } from "./app-shutdown";
 import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
@@ -21,7 +22,6 @@ import { registerForgeAuth } from "./forge-auth";
 import { registerOrchestratorIpc } from "./orchestrator-ipc";
 import { SkillManager } from "./skill-manager";
 import { registerSkillManagerIpc } from "./skill-manager-ipc";
-import { orchestratorReattach } from "./daemon/orchestrator-reattach";
 import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
 import { SshSessionManager } from "./ssh-manager";
@@ -87,7 +87,7 @@ const agentReady = new Promise<void>((resolve, reject) => {
 void agentReady.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
-let isShuttingDown = false;
+let shutdownAgentServices: (() => Promise<void>) | undefined;
 
 // Workspace state (managed by IPC handlers)
 let workspaceRootPath: string | null = null;
@@ -298,7 +298,9 @@ function registerIpc(skillManager: SkillManager) {
   registerKeychainHandlers(ipcMain);
 
   // Orchestrator IPC handlers (agent task lifecycle, diff, apply).
-  orchestrator = registerOrchestratorIpc(ipcMain, () => mainWindow, skillManager);
+  const agentServices = registerOrchestratorIpc(ipcMain, () => mainWindow, skillManager);
+  orchestrator = agentServices.orchestrator;
+  shutdownAgentServices = agentServices.shutdown;
 
   // Agent Workflow IPC handlers (DAG definitions, run orchestration, review gates).
   registerAgentWorkflowIpc(ipcMain, () => mainWindow, () => orchestrator);
@@ -2182,95 +2184,6 @@ app.whenReady().then(async () => {
       getSessionTypeBreakdown: () => termRouter.getSessionTypeBreakdown(),
     });
 
-    // Warm reattach disabled — causes CPU spikes when sessions have no
-    // mounted TerminalView to receive data. The on-mount reattach in
-    // TerminalView (termReattachSessions IPC) handles reconnection
-    // when the user actually opens the terminal view.
-    setTimeout(async () => {
-      // Skip warm reattach — let on-demand reattach handle it
-      console.log("[crab-desktop] Skipping warm reattach (on-demand reattach active)");
-
-      // Orchestrator reattach: reconnect agent tasks that were running when
-      // the app last quit. Runs after warm reattach so daemon sessions are
-      // already live before we try to attach to them.
-      const currentOrchestrator = getOrchestrator();
-      if (currentOrchestrator) {
-        const runningTasks = currentOrchestrator
-          .getAllTasks()
-          .filter((t) => t.status === "running" || t.status === "reviewing")
-          .map((t) => ({
-            id: t.id,
-            status: t.status as "running" | "reviewing",
-            worktreePath: t.worktreePath,
-            sessionId: undefined,
-          }));
-
-        if (runningTasks.length > 0) {
-          try {
-            await orchestratorReattach(
-              runningTasks,
-              {
-                getAgentSessions: () => daemonSubsystem!.daemonClient.getAgentSessions(),
-                createOrAttach: (sessionId, cols, rows) =>
-                  daemonSubsystem!.daemonClient.request("createOrAttach", {
-                    sessionId,
-                    cols,
-                    rows,
-                  }),
-                onReattached: (taskId, _sessionId) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    // Task is still running — no status change needed, but
-                    // emit an event so the renderer knows the session is live.
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                onSessionExited: (taskId, exitCode) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    task.status = exitCode === 0 ? "reviewing" : "failed";
-                    task.exitCode = exitCode;
-                    task.completedAt = Date.now();
-                    currentOrchestrator.persistTasks().catch((err: unknown) => {
-                      console.warn("[crab-desktop] Failed to persist tasks after session exit:", err);
-                    });
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                onSessionMissing: (taskId) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    task.status = "failed";
-                    task.completedAt = Date.now();
-                    currentOrchestrator.persistTasks().catch((err: unknown) => {
-                      console.warn("[crab-desktop] Failed to persist tasks after session missing:", err);
-                    });
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                log: (level, message) => {
-                  if (level === "error") console.error(`[orchestrator-reattach] ${message}`);
-                  else if (level === "warn") console.warn(`[orchestrator-reattach] ${message}`);
-                  else console.log(`[orchestrator-reattach] ${message}`);
-                },
-              },
-            );
-          } catch (err) {
-            console.warn("[crab-desktop] Orchestrator reattach failed:", err);
-          }
-        }
-      }
-    }, 1000);
-
     console.log("[crab-desktop] PTY daemon mode active — both bridges registered");
 
     registerTerminalSessionIpc(ipcMain, daemonSubsystem.daemonClient, daemonSubsystem.daemonBridge, termRouter);
@@ -2410,17 +2323,11 @@ app.on("before-quit", () => {
   }
 });
 
-app.on("will-quit", (e) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  e.preventDefault();
-  stopAllWatchers();
-  stopAutoUpdater();
-  Promise.all([
-    agent?.shutdown(),
-    sidecarManager.stopAll(),
-    lspManager.stopAll(),
-  ]).finally(() => {
-    app.exit(0);
-  });
-});
+registerAppShutdown(app, [
+  stopAllWatchers,
+  stopAutoUpdater,
+  () => shutdownAgentServices?.(),
+  () => agent?.shutdown(),
+  () => sidecarManager.stopAll(),
+  () => lspManager.stopAll(),
+]);

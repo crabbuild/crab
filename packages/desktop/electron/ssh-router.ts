@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "./ssh-manager";
 import type { RemoteCache } from "./ssh-cache";
@@ -27,9 +28,16 @@ export interface RpcRouterOptions {
 }
 
 interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  accept: (response: JsonRpcResponse) => void;
+  fail: (reason: Error) => void;
+}
+
+interface ChannelState {
+  channel: ClientChannel;
+  decoder: StringDecoder;
+  buffer: string;
+  pending: Map<number, PendingRequest>;
+  stop: (reason: Error) => void;
 }
 
 interface QueuedCall {
@@ -149,10 +157,9 @@ export interface BandwidthStats {
 
 export class RpcRouter extends EventEmitter {
   private transports = new Map<string, RepoTransport>();
-  private pending = new Map<number, PendingRequest>();
+  private channels = new Map<string, ChannelState>();
   private queues = new Map<string, QueuedCall[]>();
   private nextId = 1;
-  private lineBuffers = new Map<string, string>();
   /** Cumulative bandwidth counters per profile (bytes in/out since connection). */
   private bandwidthCounters = new Map<string, BandwidthStats>();
 
@@ -220,32 +227,23 @@ export class RpcRouter extends EventEmitter {
     return this.localAgent.request(method, params);
   }
 
-  /**
-   * Send multiple independent RPC calls as a JSON-RPC batch array.
-   * Returns an array of responses in the same order as the input calls.
-   * Reduces round-trips for Dashboard/status views.
-   */
+  /** Runs independent calls through the same routing and ownership as single calls. */
   async batchRpc(
     repoId: string,
     calls: Array<{ method: string; params: unknown }>,
   ): Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>> {
-    const parsed = parseRepoId(repoId);
-    if (!parsed) {
-      // Local agent: execute sequentially (local agent doesn't support batch)
-      const results: Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }> = [];
-      for (const call of calls) {
-        try {
-          const result = await this.localAgent.request(call.method, call.params);
-          results.push({ result });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          results.push({ error: { code: -32000, message } });
-        }
+    // The sidecar accepts one request object per NDJSON line, not JSON arrays.
+    // Reusing route also preserves registered transports and reconnect admission.
+    return Promise.all(calls.map(async call => {
+      try {
+        return { result: await this.route(repoId, call.method, call.params) };
+      } catch (reason: unknown) {
+        const error = reason instanceof Error ? reason : new Error(String(reason));
+        const details = error as Error & { code?: unknown; data?: unknown };
+        const code = typeof details.code === "number" ? details.code : -32000;
+        return { error: { code, message: error.message, ...(details.data !== undefined ? { data: details.data } : {}) } };
       }
-      return results;
-    }
-
-    return this.sendBatchToRemote(parsed.profileId, calls);
+    }));
   }
 
   /**
@@ -253,29 +251,43 @@ export class RpcRouter extends EventEmitter {
    * Call this after the agent channel is established on a connection.
    */
   attachChannel(profileId: string, channel: ClientChannel): void {
-    this.lineBuffers.set(profileId, "");
-    // Initialize bandwidth counter for this profile
-    if (!this.bandwidthCounters.has(profileId)) {
-      this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 });
-    }
-
-    channel.on("data", (data: Buffer) => {
-      // Track incoming bytes
+    const previous = this.channels.get(profileId);
+    if (previous?.channel === channel) return;
+    previous?.stop(new Error("Remote agent channel replaced before its RPC completed; outcome is unknown"));
+    if (channel.destroyed || channel.readableEnded || channel.writableEnded) throw new Error("Remote agent channel is already closed");
+    const owner: ChannelState = {
+      channel, decoder: new StringDecoder("utf8"), buffer: "", pending: new Map(),
+      stop: reason => {
+        if (this.channels.get(profileId) !== owner) return;
+        this.channels.delete(profileId);
+        channel.removeListener("data", data);
+        channel.removeListener("end", end);
+        owner.buffer = "";
+        for (const pending of owner.pending.values()) pending.fail(reason);
+        owner.pending.clear();
+      },
+    };
+    const data = (chunk: Buffer) => {
+      if (this.channels.get(profileId) !== owner) return;
       const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesIn += data.length;
-      }
-      this.handleChannelData(profileId, data);
-    });
-
-    channel.on("close", () => {
-      this.lineBuffers.delete(profileId);
-      // Reject all pending requests for this profile
-      for (const [] of this.pending) {
-        // We can't easily filter by profileId here, so we leave them
-        // to time out. The timeout mechanism handles cleanup.
-      }
-    });
+      if (counter) counter.bytesIn += chunk.length;
+      this.handleChannelData(profileId, owner, chunk);
+    };
+    const end = () => owner.stop(new Error("Remote agent output ended before its RPC completed; outcome is unknown"));
+    const error = (reason: Error) => owner.stop(reason);
+    const close = () => {
+      owner.stop(new Error("Remote agent channel closed before its RPC completed; outcome is unknown"));
+      // The session manager owns the physical stream. Keep its error listener
+      // until close, so a retired channel cannot emit an unhandled late error.
+      channel.removeListener("error", error);
+      channel.removeListener("close", close);
+    };
+    this.channels.set(profileId, owner);
+    if (!this.bandwidthCounters.has(profileId)) this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 });
+    channel.on("data", data);
+    channel.on("end", end);
+    channel.on("error", error);
+    channel.on("close", close);
   }
 
   /**
@@ -395,135 +407,35 @@ export class RpcRouter extends EventEmitter {
    * `operationTimeoutMs` setting, falling back to the router-level
    * `requestTimeoutMs` default.
    */
-  sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
-    const conn = this.sessionManager.getConnection(profileId);
-    if (!conn || !conn.channels.agent) {
-      return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
-    }
-
-    const channel = conn.channels.agent;
-    const id = this.nextId++;
-    const timeoutMs = conn.profile?.operationTimeoutMs ?? this.requestTimeoutMs;
-
-    const request: JsonRpcRequest = {
-      jsonrpc: "2.0",
-      id,
-      method,
-      params,
-    };
-
-    return new Promise<unknown>((resolve, reject) => {
-      // Set up per-request timeout
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`RPC timeout: ${method} did not respond within ${timeoutMs}ms`));
-      }, timeoutMs);
-
-      this.pending.set(id, { resolve, reject, timer });
-
-      // Write NDJSON frame (JSON + newline)
-      const frame = JSON.stringify(request) + "\n";
-      // Track outgoing bytes
-      const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesOut += Buffer.byteLength(frame, "utf8");
-      }
-      channel.write(frame, (err?: Error | null) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
-    });
-  }
-
-  /**
-   * Send a batch of RPC calls as a JSON-RPC batch array to the remote agent.
-   */
-  private sendBatchToRemote(
-    profileId: string,
-    calls: Array<{ method: string; params: unknown }>,
-  ): Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>> {
-    const conn = this.sessionManager.getConnection(profileId);
-    if (!conn || !conn.channels.agent) {
-      return Promise.reject(new Error(`No agent channel for profile: ${profileId}`));
-    }
-
-    const channel = conn.channels.agent;
-
-    // Assign IDs to each call in the batch
-    const batchRequests: JsonRpcRequest[] = calls.map((call) => ({
-      jsonrpc: "2.0" as const,
-      id: this.nextId++,
-      method: call.method,
-      params: call.params,
-    }));
-
-    const ids = batchRequests.map((r) => r.id);
-
-    return new Promise<Array<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }>>((resolve, reject) => {
-      const results = new Map<number, { result?: unknown; error?: { code: number; message: string; data?: unknown } }>();
+  async sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+    const owner = this.channels.get(profileId);
+    if (!owner) throw new Error(`No active agent channel for profile: ${profileId}`);
+    const timeoutMs = this.sessionManager.getConnection(profileId)?.profile?.operationTimeoutMs ?? this.requestTimeoutMs;
+    const request: JsonRpcRequest = { jsonrpc: "2.0", id: this.nextId++, method, params };
+    // Serialize before registering callbacks. A circular input must not leave
+    // a pending entry or timer after rejecting without writing any bytes.
+    const frame = JSON.stringify(request) + "\n";
+    return new Promise((resolve, reject) => {
       let settled = false;
-
-      const timer = setTimeout(() => {
+      const cleanup = () => { clearTimeout(timer); owner.pending.delete(request.id); };
+      const fail = (reason: Error) => {
         if (settled) return;
-        settled = true;
-        // Clean up pending entries
-        for (const id of ids) {
-          this.pending.delete(id);
-        }
-        reject(new Error(`Batch RPC timeout: did not receive all responses within ${this.requestTimeoutMs}ms`));
-      }, this.requestTimeoutMs);
-
-      const checkComplete = () => {
-        if (results.size === ids.length && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          // Return results in the same order as input calls
-          const ordered = ids.map((id) => results.get(id) ?? { error: { code: -32000, message: "Missing response" } });
-          resolve(ordered);
-        }
+        settled = true; cleanup(); reject(reason);
       };
-
-      // Register pending entries for each request in the batch
-      for (const req of batchRequests) {
-        const batchTimer = setTimeout(() => {
-          // Individual timeout — handled by the batch-level timer
-        }, this.requestTimeoutMs);
-
-        this.pending.set(req.id, {
-          resolve: (value: unknown) => {
-            clearTimeout(batchTimer);
-            results.set(req.id, { result: value });
-            checkComplete();
-          },
-          reject: (err: Error) => {
-            clearTimeout(batchTimer);
-            results.set(req.id, { error: { code: -32000, message: err.message } });
-            checkComplete();
-          },
-          timer: batchTimer,
-        });
-      }
-
-      // Write the batch as a single NDJSON line (JSON array + newline)
-      const frame = JSON.stringify(batchRequests) + "\n";
-      // Track outgoing bytes for batch
-      const counter = this.bandwidthCounters.get(profileId);
-      if (counter) {
-        counter.bytesOut += Buffer.byteLength(frame, "utf8");
-      }
-      channel.write(frame, (err?: Error | null) => {
-        if (err && !settled) {
-          settled = true;
-          clearTimeout(timer);
-          for (const id of ids) {
-            this.pending.delete(id);
-          }
-          reject(err);
+      const timer = setTimeout(() => fail(new Error(`RPC timeout: ${method} did not respond within ${timeoutMs}ms`)), timeoutMs);
+      const accept = (response: JsonRpcResponse) => {
+        if (settled) return;
+        if (response.error) {
+          fail(Object.assign(new Error(response.error.message), { code: response.error.code, data: response.error.data }));
+          return;
         }
-      });
+        settled = true; cleanup(); resolve(response.result);
+      };
+      owner.pending.set(request.id, { accept, fail });
+      const counter = this.bandwidthCounters.get(profileId);
+      if (counter) counter.bytesOut += Buffer.byteLength(frame, "utf8");
+      try { owner.channel.write(frame, (error?: Error | null) => { if (error) fail(error); }); }
+      catch (error: unknown) { fail(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 
@@ -555,18 +467,11 @@ export class RpcRouter extends EventEmitter {
    * Handle incoming data from a remote agent channel. Implements
    * NDJSON parsing: buffer partial lines, process complete lines.
    */
-  private handleChannelData(profileId: string, data: Buffer): void {
-    const text = data.toString("utf8");
-    const buffer = (this.lineBuffers.get(profileId) ?? "") + text;
-    const lines = buffer.split("\n");
-
-    // The last element is either empty (if data ended with \n) or a
-    // partial line that needs more data.
-    this.lineBuffers.set(profileId, lines.pop() ?? "");
-
+  private handleChannelData(profileId: string, owner: ChannelState, data: Buffer): void {
+    const lines = (owner.buffer + owner.decoder.write(data)).split("\n");
+    owner.buffer = lines.pop() ?? "";
     for (const line of lines) {
-      if (!line.trim()) continue;
-      this.processLine(profileId, line);
+      if (line.trim()) this.processLine(profileId, owner, line);
     }
   }
 
@@ -574,7 +479,7 @@ export class RpcRouter extends EventEmitter {
    * Process a single NDJSON line from the remote agent. Could be a
    * response (has `id`) or a notification (has `method`, no `id`).
    */
-  private processLine(profileId: string, line: string): void {
+  private processLine(profileId: string, owner: ChannelState, line: string): void {
     let frame: JsonRpcFrame;
     try {
       frame = JSON.parse(line) as JsonRpcFrame;
@@ -583,13 +488,7 @@ export class RpcRouter extends EventEmitter {
       return;
     }
 
-    // Handle batch responses (array of responses)
-    if (Array.isArray(frame)) {
-      for (const item of frame as JsonRpcResponse[]) {
-        this.handleSingleResponse(item);
-      }
-      return;
-    }
+    if (frame === null || typeof frame !== "object") return;
 
     // Notification: no `id` field, has `method`
     if (isNotification(frame)) {
@@ -602,27 +501,14 @@ export class RpcRouter extends EventEmitter {
     }
 
     // Response: has `id`
-    this.handleSingleResponse(frame as JsonRpcResponse);
+    this.handleSingleResponse(owner, frame as JsonRpcResponse);
   }
 
-  private handleSingleResponse(response: JsonRpcResponse): void {
-    if (response.id == null) return;
-
-    const id = typeof response.id === "number" ? response.id : Number(response.id);
-    const pending = this.pending.get(id);
+  private handleSingleResponse(owner: ChannelState, response: JsonRpcResponse): void {
+    if (!response || typeof response.id !== "number") return;
+    const pending = owner.pending.get(response.id);
     if (!pending) return;
-
-    clearTimeout(pending.timer);
-    this.pending.delete(id);
-
-    if (response.error) {
-      const err = new Error(response.error.message);
-      (err as Error & { code?: number; data?: unknown }).code = response.error.code;
-      (err as Error & { code?: number; data?: unknown }).data = response.error.data;
-      pending.reject(err);
-    } else {
-      pending.resolve(response.result);
-    }
+    pending.accept(response);
   }
 }
 

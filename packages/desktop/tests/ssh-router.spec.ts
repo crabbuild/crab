@@ -458,7 +458,7 @@ describe("RpcRouter — notification forwarding", () => {
 });
 
 describe("RpcRouter — batch RPC", () => {
-  it("sends batch as JSON array and returns ordered results", async () => {
+  it("sends independent NDJSON requests and returns ordered results", async () => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();
     sm.setStatus("server", "connected");
@@ -475,11 +475,8 @@ describe("RpcRouter — batch RPC", () => {
 
     const promise = router.batchRpc("ssh://server/repo", calls);
 
-    // Verify batch was written as a JSON array
-    expect(channel.written).toHaveLength(1);
-    const parsed = JSON.parse(channel.written[0].trim());
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed).toHaveLength(3);
+    // Each NDJSON line must be accepted by the sidecar request dispatcher.
+    expect(channel.written.map(frame => JSON.parse(frame).method)).toEqual(calls.map(call => call.method));
 
     // Simulate individual responses (may arrive out of order)
     simulateResponse(channel, 2, { branches: ["main"] });
@@ -514,10 +511,10 @@ describe("RpcRouter — batch RPC", () => {
 
     const results = await promise;
     expect(results[0]).toEqual({ result: { name: "repo" } });
-    expect(results[1]).toEqual({ error: { code: -32000, message: "Method not found" } });
+    expect(results[1]).toEqual({ error: { code: -32601, message: "Method not found" } });
   });
 
-  it("falls back to sequential calls for local repos", async () => {
+  it("routes local calls through the local agent", async () => {
     const la = new MockLocalAgent();
     la.nextResult = "local-result";
     const { router } = createRouter(undefined, la);

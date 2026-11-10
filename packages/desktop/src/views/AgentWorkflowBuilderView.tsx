@@ -69,8 +69,9 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 import { JsonSchemaBuilderDialog } from "../components/workflow/JsonSchemaBuilderDialog";
-import { intelligenceLabel, modelsForAgent } from "../components/orchestrator/model-catalog";
-import type { IntelligenceLevel, ModelEntry } from "../components/orchestrator/model-catalog";
+import { intelligenceLabel, modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
+import { ModelDiscoveryStatus } from "../components/orchestrator/ModelDiscoveryStatus";
+import type { AgentModel } from "../../electron/orchestrator-adapters";
 import type { OpenRepo } from "../state";
 import type {
   AgentWorkflowAgentType,
@@ -300,49 +301,10 @@ const EDGE_OPERATOR_LABELS: Record<WorkflowOutputPredicate["operator"], string> 
   in: "in",
 };
 
-const DEFAULT_INTELLIGENCE_OPTIONS: IntelligenceLevel[] = ["low", "medium", "high", "extra-high"];
-
-function modelOptionsForAgent(agentType: AgentWorkflowAgentType, currentModel?: string): ModelEntry[] {
-  const options = modelsForAgent(agentType);
-  const model = currentModel?.trim();
-  if (!model || options.some((option) => option.value === model)) return options;
-  return [...options, { value: model, label: model, tier: "other" }];
-}
-
-function intelligenceOptionsForModel(
-  agentType: AgentWorkflowAgentType,
-  modelValue?: string,
-  currentIntelligence?: string,
-): string[] {
-  const options = modelsForAgent(agentType);
-  const selectedModel = modelValue
-    ? options.find((option) => option.value === modelValue)
-    : options.find((option) => option.tier === "recommended") ?? options[0];
-  const levels = selectedModel?.intelligenceLevels ?? DEFAULT_INTELLIGENCE_OPTIONS;
-  const intelligence = currentIntelligence?.trim();
-  if (!intelligence || levels.includes(intelligence as IntelligenceLevel)) return levels;
-  return [...levels, intelligence];
-}
-
-function isModelCompatibleWithAgent(agentType: AgentWorkflowAgentType, modelValue?: string): boolean {
-  if (!modelValue || agentType === "custom") return true;
-  const options = modelsForAgent(agentType);
-  return options.length === 0 || options.some((option) => option.value === modelValue);
-}
-
-function isIntelligenceCompatibleWithModel(
-  agentType: AgentWorkflowAgentType,
-  modelValue: string | undefined,
-  intelligence: string | undefined,
-): boolean {
-  if (!intelligence) return true;
-  return intelligenceOptionsForModel(agentType, modelValue).includes(intelligence);
-}
-
-function formatIntelligenceLabel(level: string): string {
-  return DEFAULT_INTELLIGENCE_OPTIONS.includes(level as IntelligenceLevel)
-    ? intelligenceLabel(level as IntelligenceLevel)
-    : level;
+function intelligenceOptionsForModel(models: AgentModel[], modelValue?: string, currentIntelligence?: string): string[] {
+  const model = models.find(model => model.value === modelValue);
+  const levels = model?.intelligenceLevels ?? [];
+  return currentIntelligence && !levels.includes(currentIntelligence) ? [...levels, currentIntelligence] : levels;
 }
 
 const CONDITION_OPERATOR_OPTIONS: Array<{ value: WorkflowOutputPredicate["operator"]; label: string; needsValue: boolean }> = [
@@ -2354,6 +2316,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
             >
               <div className="flex h-full min-h-0 flex-col border-l border-gx-border">
                 <PropertiesPanel
+                  repoPath={repo.path}
                   definition={definition}
                   definitions={definitions}
                   selectedNode={selectedNode}
@@ -2640,6 +2603,7 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
 }
 
 function PropertiesPanel({
+  repoPath,
   definition,
   definitions,
   selectedNode,
@@ -2654,6 +2618,7 @@ function PropertiesPanel({
   onOpenSubWorkflow,
   onCreateSubWorkflow,
 }: {
+  repoPath: string;
   definition: AgentWorkflowDefinition;
   definitions: AgentWorkflowDefinition[];
   selectedNode: AgentWorkflowNode | null;
@@ -2680,35 +2645,19 @@ function PropertiesPanel({
   const activeAgentType = selectedNode?.type === "agent_task"
     ? selectedNode.agentType ?? definition.defaultAgentType
     : definition.defaultAgentType;
-  const modelOptions = useMemo(() => {
-    return modelOptionsForAgent(activeAgentType, selectedNode?.model);
-  }, [activeAgentType, selectedNode?.model]);
-  const intelligenceOptions = useMemo(() => {
-    return intelligenceOptionsForModel(activeAgentType, selectedNode?.model, selectedNode?.intelligence);
-  }, [activeAgentType, selectedNode?.intelligence, selectedNode?.model]);
-  const handleAgentTypeChange = useCallback((agentTypeValue: string) => {
-    const nextAgentType = (agentTypeValue || undefined) as AgentWorkflowAgentType | undefined;
-    const resolvedAgentType = nextAgentType ?? definition.defaultAgentType;
-    const currentModel = selectedNode?.model?.trim();
-    const currentIntelligence = selectedNode?.intelligence?.trim();
-    const patch: Partial<AgentWorkflowNode> = { agentType: nextAgentType };
-    if (currentModel && !isModelCompatibleWithAgent(resolvedAgentType, currentModel)) {
-      patch.model = undefined;
-      patch.intelligence = undefined;
-    } else if (currentIntelligence && !isIntelligenceCompatibleWithModel(resolvedAgentType, currentModel, currentIntelligence)) {
-      patch.intelligence = undefined;
-    }
-    onNodeChange(patch);
-  }, [definition.defaultAgentType, onNodeChange, selectedNode?.intelligence, selectedNode?.model]);
-  const handleModelChange = useCallback((modelValue: string) => {
-    const nextModel = modelValue || undefined;
-    const currentIntelligence = selectedNode?.intelligence?.trim();
-    const patch: Partial<AgentWorkflowNode> = { model: nextModel };
-    if (currentIntelligence && !isIntelligenceCompatibleWithModel(activeAgentType, nextModel, currentIntelligence)) {
-      patch.intelligence = undefined;
-    }
-    onNodeChange(patch);
-  }, [activeAgentType, onNodeChange, selectedNode?.intelligence]);
+  const modelDiscovery = useAgentModels(activeAgentType, selectedNode?.type === "agent_task" ? repoPath : undefined);
+  const models = modelDiscovery.models;
+  const availableModels = useMemo(() => modelOptions(models, selectedNode?.model), [models, selectedNode?.model]);
+  const intelligenceOptions = useMemo(() => intelligenceOptionsForModel(models, selectedNode?.model, selectedNode?.intelligence),
+    [models, selectedNode?.model, selectedNode?.intelligence]);
+  const handleAgentTypeChange = useCallback((value: string) => {
+    const agentType = (value || undefined) as AgentWorkflowAgentType | undefined;
+    const changed = (agentType ?? definition.defaultAgentType) !== activeAgentType;
+    onNodeChange({ agentType, ...(changed ? { model: undefined, intelligence: undefined } : {}) });
+  }, [activeAgentType, definition.defaultAgentType, onNodeChange]);
+  const handleModelChange = useCallback((value: string) => {
+    onNodeChange({ model: value || undefined, intelligence: undefined });
+  }, [onNodeChange]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -2876,6 +2825,7 @@ function PropertiesPanel({
                     onChange={(planFirst) => onNodeChange({ planFirst })}
                   />
                 </div>
+                <ModelDiscoveryStatus discovery={modelDiscovery} />
                 <div className="grid grid-cols-2 gap-2">
                   <label className="space-y-1 text-[11px] text-gx-muted">
                     <span>Model</span>
@@ -2885,7 +2835,7 @@ function PropertiesPanel({
                       onChange={(event) => handleModelChange(event.target.value)}
                     >
                       <option value="">Agent default</option>
-                      {modelOptions.map((model) => (
+                      {availableModels.map((model) => (
                         <option key={model.value} value={model.value} title={model.description}>
                           {model.label}
                         </option>
@@ -2902,7 +2852,7 @@ function PropertiesPanel({
                       <option value="">Agent default</option>
                       {intelligenceOptions.map((level) => (
                         <option key={level} value={level}>
-                          {formatIntelligenceLabel(level)}
+                          {intelligenceLabel(level)}
                         </option>
                       ))}
                     </select>

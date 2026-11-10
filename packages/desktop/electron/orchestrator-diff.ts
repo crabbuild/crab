@@ -1,26 +1,28 @@
 /**
  * Diff Computation & Apply for the Crab Desktop Orchestrator.
  *
- * Computes structured diffs between the base ref and agent branch HEAD,
+ * Computes structured diffs for saved trees and complete live workspaces,
  * applies changes via merge or cherry-pick, and handles conflict detection.
  */
 
 import { execFile as execFileCb } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as os from "node:os";
 import { promisify } from "node:util";
+import type { BrowserWindow, IpcMain } from "electron";
 
-import type { Task } from "./orchestrator";
+import type { Orchestrator, Task } from "./orchestrator";
 import { removeWorktree } from "./orchestrator-worktree";
 import type { RpcRouter } from "./ssh-router";
+import { decodeGitPath } from "./git-path";
 
 const execFile = promisify(execFileCb);
 const GIT_DIFF_TIMEOUT_MS = 10_000;
-const MAX_UNTRACKED_DIFF_BYTES = 256 * 1024;
 
 async function gitForDiff(
   args: string[],
-  options: { cwd: string; maxBuffer?: number },
+  options: { cwd: string; maxBuffer?: number; indexFile?: string },
 ): Promise<{ stdout: string; stderr: string }> {
   return execFile("git", args, {
     cwd: options.cwd,
@@ -30,6 +32,7 @@ async function gitForDiff(
     env: {
       ...process.env,
       GIT_OPTIONAL_LOCKS: "0",
+      ...(options.indexFile ? { GIT_INDEX_FILE: options.indexFile } : {}),
     },
   });
 }
@@ -220,6 +223,7 @@ async function mergeWithoutCheckout(
 function parseFileStatus(letter: string): DiffFile["status"] {
   switch (letter) {
     case "A":
+    case "C":
       return "added";
     case "D":
       return "deleted";
@@ -240,229 +244,151 @@ export function parseDiffOutput(
   rawDiff: string,
   nameStatusOutput: string,
 ): DiffFile[] {
-  if (!rawDiff.trim()) return [];
+  const entries = nameStatusOutput.split("\n").filter(line => line.length > 0).map(line => {
+    const [code, first, second] = line.split("\t");
+    const status = parseFileStatus(code.charAt(0));
+    const twoPaths = code.startsWith("R") || code.startsWith("C");
+    const filePath = twoPaths ? second : first;
+    const decoded = filePath === undefined ? null : decodeGitPath(filePath);
+    const oldPath = twoPaths ? decodeGitPath(first) : undefined;
+    if (decoded === null || oldPath === null) throw new Error("Remote Git returned an invalid file path");
+    return { path: decoded, status, ...(oldPath ? { oldPath } : {}) };
+  });
+  const patches = rawDiff.split(/(?=^diff --git )/m).filter(Boolean);
+  if (patches.length !== entries.length) throw new Error("Remote Git could not pair every changed file with its patch");
+  return entries.map((entry, index) => {
+    const patch = patches[index];
+    return { ...entry, patch, ...patchStats(patch) };
+  });
+}
 
-  // Parse name-status to get file statuses and rename info.
-  const statusMap = new Map<string, { status: DiffFile["status"]; oldPath?: string }>();
-  for (const line of nameStatusOutput.trim().split("\n")) {
-    if (!line.trim()) continue;
-    const parts = line.split("\t");
-    const statusLetter = parts[0].charAt(0); // R100 → R
-    const status = parseFileStatus(statusLetter);
+/** Owns local/remote comparison routing and exposes read failures to the renderer. */
+export function registerDiffIpc(ipcMain: IpcMain, orchestrator: Pick<Orchestrator, "getTask" | "getRpcRouter">, getMainWindow: () => BrowserWindow | null): void {
+  ipcMain.handle(
+    "orchestrator:get-diff",
+    async (_evt, payload: { taskId: string; checkpointSha?: string; checkpointFromSha?: string }) => {
+      try {
+        const task = orchestrator.getTask(payload.taskId);
+        if (!task) {
+          return { success: false, error: `Task not found: ${payload.taskId}` };
+        }
 
-    if (status === "renamed" && parts.length >= 3) {
-      statusMap.set(parts[2], { status, oldPath: parts[1] });
-    } else if (parts.length >= 2) {
-      statusMap.set(parts[1], { status });
-    }
-  }
+        let diff;
+        if (task.isRemote) {
+          if (payload.checkpointSha) throw new Error("Saved-file comparisons require a local workspace");
+          const router = orchestrator.getRpcRouter();
+          if (!router) throw new Error("SSH router not configured for remote diff");
+          diff = await computeRemoteDiff(task, router);
+        } else {
+          const fromRef = payload.checkpointSha ? payload.checkpointFromSha ?? task.baseRef : task.baseRef;
+          const toRef = payload.checkpointSha ?? "HEAD";
+          diff = await computeDiff(task, fromRef, toRef);
+        }
 
-  // Split the raw diff into per-file patches.
-  const fileDiffs = rawDiff.split(/^diff --git /m).filter((s) => s.trim());
-  const files: DiffFile[] = [];
-
-  for (const fileDiff of fileDiffs) {
-    const patch = `diff --git ${fileDiff}`;
-
-    // Extract the file path from the diff header.
-    // Format: "a/path/to/file b/path/to/file"
-    const headerMatch = fileDiff.match(/^a\/(.+?) b\/(.+)/m);
-    if (!headerMatch) continue;
-
-    const filePath = headerMatch[2];
-
-    // Count additions and deletions from the hunk lines.
-    let additions = 0;
-    let deletions = 0;
-    for (const line of fileDiff.split("\n")) {
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        additions++;
-      } else if (line.startsWith("-") && !line.startsWith("---")) {
-        deletions++;
+        // Also relay as a diff-ready event for any listeners.
+        const win = getMainWindow();
+        if (win && !win.isDestroyed()) {
+          win.webContents.send("orchestrator:diff-ready", {
+            taskId: task.id,
+            diff: diff.rawDiff,
+            files: diff.files,
+          });
+        }
+        return { success: true, diff };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
       }
-    }
-
-    const statusInfo = statusMap.get(filePath) ?? { status: "modified" as const };
-
-    files.push({
-      path: filePath,
-      status: statusInfo.status,
-      additions,
-      deletions,
-      patch,
-      ...(statusInfo.oldPath ? { oldPath: statusInfo.oldPath } : {}),
-    });
-  }
-
-  return files;
+    },
+  );
 }
 
-/**
- * Computes a structured diff between the task's base ref and the current
- * worktree state (including uncommitted changes).
- *
- * Strategy:
- * 1. First try: `git diff <baseRef>` — diffs baseRef against the working tree,
- *    capturing both committed AND uncommitted changes.
- * 2. If that's empty, try uncommitted changes only: `git diff HEAD`
- * 3. If still empty, try staged changes: `git diff --cached`
- */
-export async function computeDiff(task: Task): Promise<TaskDiff> {
-  const cwd = task.worktreePath || task.repoPath;
-
-  let rawDiff = "";
-  let nameStatus = "";
-
-  // Strategy 1: diff from base ref to working tree (committed + uncommitted).
+/** Compares saved trees or the complete live workspace without changing its index. */
+export async function computeDiff(task: Task, fromRef = task.baseRef, toRef = "HEAD"): Promise<TaskDiff> {
+  if (task.isRemote) throw new Error("Remote file comparisons require a connected remote agent");
+  const live = toRef === "HEAD";
+  const cwd = live ? task.worktreePath : task.repoPath;
+  const { stdout: from } = await gitForDiff(["rev-parse", "--verify", "--end-of-options", `${fromRef}^{tree}`], { cwd });
+  const args = ["diff", "--patch-with-raw", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+    "--src-prefix=a/", "--dst-prefix=b/", "--find-renames", "--submodule=short",
+    "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", from.trim()];
+  let directory: string | undefined;
+  let indexFile: string | undefined;
   try {
-    const result = await gitForDiff(
-      ["diff", task.baseRef],
-      { cwd, maxBuffer: 50 * 1024 * 1024 },
-    );
-    rawDiff = result.stdout;
-
-    const nsResult = await gitForDiff(
-      ["diff", "--name-status", task.baseRef],
-      { cwd },
-    );
-    nameStatus = nsResult.stdout;
-  } catch {
-    // baseRef might not be resolvable in the worktree — try alternatives.
-  }
-
-  // Strategy 2: unstaged working tree changes (git diff with no args).
-  // This catches edits Claude made without committing.
-  if (!rawDiff.trim()) {
-    try {
-      const result = await gitForDiff(
-        ["diff"],
-        { cwd, maxBuffer: 50 * 1024 * 1024 },
-      );
-      rawDiff = result.stdout;
-
-      const nsResult = await gitForDiff(
-        ["diff", "--name-status"],
-        { cwd },
-      );
-      nameStatus = nsResult.stdout;
-    } catch {
-      // Empty repo or no changes.
+    if (live) {
+      const [root, common, repository] = await Promise.all([
+        gitDirectory(cwd, "--show-toplevel"), gitDirectory(cwd, "--git-common-dir"), gitDirectory(task.repoPath, "--git-common-dir"),
+      ]);
+      if (root !== await fs.realpath(cwd) || common !== repository) throw new Error("Saved workspace no longer matches its Git repository");
+      directory = await fs.mkdtemp(path.join(os.tmpdir(), "crab-diff-"));
+      indexFile = path.join(directory, "index");
+      const { stdout: indexPath } = await gitForDiff(["rev-parse", "--git-path", "index"], { cwd });
+      try { await fs.copyFile(path.resolve(cwd, indexPath.replace(/\r?\n$/, "")), indexFile); } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      // Intent entries let Git compare untracked files (including saved baseline
+      // paths) without staging content. The user's real index remains untouched.
+      await gitForDiff(["add", "--intent-to-add", "--all", "--", "."], { cwd, indexFile });
+    } else {
+      const { stdout: to } = await gitForDiff(["rev-parse", "--verify", "--end-of-options", `${toRef}^{tree}`], { cwd });
+      args.push(to.trim());
     }
+    args.push("--");
+    // One invocation owns paths and patches; separate reads can disagree while
+    // files change. NUL-delimited raw paths preserve quoted/newline filenames.
+    const { stdout } = await gitForDiff(args, { cwd, indexFile, maxBuffer: 50 * 1024 * 1024 });
+    const { files, rawDiff } = parseRawDiff(stdout);
+    return {
+      taskId: task.id, baseRef: fromRef, headRef: toRef, files, rawDiff,
+      totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
+      totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0),
+    };
+  } finally {
+    if (directory) await fs.rm(directory, { recursive: true, force: true });
   }
-
-  // Strategy 3: staged changes (git diff --cached).
-  if (!rawDiff.trim()) {
-    try {
-      const result = await gitForDiff(
-        ["diff", "--cached"],
-        { cwd, maxBuffer: 50 * 1024 * 1024 },
-      );
-      rawDiff = result.stdout;
-
-      const nsResult = await gitForDiff(
-        ["diff", "--cached", "--name-status"],
-        { cwd },
-      );
-      nameStatus = nsResult.stdout;
-    } catch {
-      // No staged changes.
-    }
-  }
-
-  // Strategy 4: check for new untracked files without staging them.
-  // Staging from a read-only diff request can block large/filter-backed repos
-  // and should never mutate the user's index.
-  if (!rawDiff.trim()) {
-    try {
-      const untracked = await buildUntrackedDiff(cwd);
-      rawDiff = untracked.rawDiff;
-      nameStatus = untracked.nameStatus;
-    } catch {
-      // Best-effort.
-    }
-  }
-
-  // Get the HEAD ref.
-  let headRef = "";
-  try {
-    const result = await gitForDiff(["rev-parse", "HEAD"], { cwd });
-    headRef = result.stdout.trim();
-  } catch {
-    headRef = "unknown";
-  }
-
-  const files = parseDiffOutput(rawDiff, nameStatus);
-
-  const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0);
-  const totalDeletions = files.reduce((sum, f) => sum + f.deletions, 0);
-
-  return {
-    taskId: task.id,
-    baseRef: task.baseRef,
-    headRef,
-    files,
-    totalAdditions,
-    totalDeletions,
-    rawDiff,
-  };
 }
 
-async function buildUntrackedDiff(cwd: string): Promise<{ rawDiff: string; nameStatus: string }> {
-  const { stdout } = await gitForDiff(["ls-files", "--others", "--exclude-standard", "-z"], { cwd });
-  const files = stdout.split("\0").filter(Boolean);
-  const patches: string[] = [];
-  const nameStatus: string[] = [];
+async function gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir"): Promise<string> {
+  const { stdout } = await gitForDiff(["rev-parse", option], { cwd });
+  return fs.realpath(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
+}
 
-  for (const filePath of files) {
-    const absolutePath = path.resolve(cwd, filePath);
-    if (!absolutePath.startsWith(path.resolve(cwd) + path.sep)) continue;
-
-    let stat;
-    try {
-      stat = await fs.stat(absolutePath);
-    } catch {
-      continue;
-    }
-    if (!stat.isFile()) continue;
-
-    nameStatus.push(`A\t${filePath}`);
-
-    let content: Buffer;
-    try {
-      content = await fs.readFile(absolutePath);
-    } catch {
-      continue;
-    }
-
-    if (content.includes(0) || content.byteLength > MAX_UNTRACKED_DIFF_BYTES) {
-      patches.push([
-        `diff --git a/${filePath} b/${filePath}`,
-        "new file mode 100644",
-        "index 0000000..0000000",
-        `Binary files /dev/null and b/${filePath} differ`,
-      ].join("\n"));
-      continue;
-    }
-
-    const text = content.toString("utf-8").replace(/\r\n/g, "\n");
-    const lines = text.length === 0
-      ? []
-      : text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-    patches.push([
-      `diff --git a/${filePath} b/${filePath}`,
-      "new file mode 100644",
-      "index 0000000..0000000",
-      "--- /dev/null",
-      `+++ b/${filePath}`,
-      `@@ -0,0 +1,${lines.length} @@`,
-      ...lines.map((line) => `+${line}`),
-    ].join("\n"));
-  }
-
-  return {
-    rawDiff: patches.length > 0 ? `${patches.join("\n")}\n` : "",
-    nameStatus: nameStatus.length > 0 ? `${nameStatus.join("\n")}\n` : "",
+function parseRawDiff(output: string): { files: DiffFile[]; rawDiff: string } {
+  const entries: Array<Pick<DiffFile, "path" | "status" | "oldPath">> = [];
+  let cursor = 0;
+  const field = () => {
+    const end = output.indexOf("\0", cursor);
+    if (end < 0) throw new Error("Git returned an incomplete file comparison");
+    const value = output.slice(cursor, end);
+    cursor = end + 1;
+    return value;
   };
+  while (output[cursor] === ":") {
+    const status = field().split(" ").at(-1)?.charAt(0);
+    const first = field();
+    const renamed = status === "R" || status === "C";
+    entries.push({ path: renamed ? field() : first, status: parseFileStatus(status ?? ""), ...(renamed ? { oldPath: first } : {}) });
+  }
+  const rawDiff = output.slice(cursor).replace(/^\0/, "");
+  const patches = rawDiff.split(/(?=^diff --git )/m).filter(Boolean);
+  if (entries.length !== patches.length) throw new Error("Git could not pair every changed file with its patch");
+  const files = entries.map((entry, index) => {
+    const patch = patches[index];
+    return { ...entry, patch, ...patchStats(patch) };
+  });
+  return { files, rawDiff };
+}
+
+function patchStats(patch: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith("+")) additions++;
+    else if (inHunk && line.startsWith("-")) deletions++;
+  }
+  return { additions, deletions };
 }
 
 // ─── Remote Diff Computation ─────────────────────────────────────────────────
@@ -500,9 +426,10 @@ export async function computeRemoteDiff(
     head_ref: string;
   };
 
-  const rawDiff = result.diff ?? "";
-  const nameStatus = result.name_status ?? "";
-  const headRef = result.head_ref ?? "unknown";
+  const rawDiff = result.diff;
+  const nameStatus = result.name_status;
+  const headRef = result.head_ref;
+  if (typeof rawDiff !== "string" || typeof nameStatus !== "string" || typeof headRef !== "string") throw new Error("Remote agent returned an incomplete file comparison");
 
   const files = parseDiffOutput(rawDiff, nameStatus);
   const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0);

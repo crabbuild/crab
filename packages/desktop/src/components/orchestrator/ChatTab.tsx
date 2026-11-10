@@ -11,9 +11,7 @@ import {
   ListTodo,
   Loader2,
   Pin,
-  Target,
   User,
-  X,
 } from "lucide-react";
 import { OrchestratorTask } from "./TaskCard";
 import { TodoList, TodoItem } from "./TodoList";
@@ -37,20 +35,19 @@ import { resolveToolCard } from "./tool-cards";
 import { HunkActionsProvider } from "./tool-cards/HunkActionsContext";
 import { TurnCostChip } from "./TurnCostChip";
 import { ResumeBanner } from "./ResumeBanner";
+import { GoalBar } from "./GoalBar";
 import { publishToast } from "../../lib/toasts";
 import type { AgentWorkflowDefinition, AgentWorkflowRun } from "../../ipc";
 
 // ── Types ───────────────────────────────────────────────────────────
-// Shared types live in chat-types.ts to break the circular dependency
-// with tool-cards/types.ts. Re-exported here for backward compat.
-export type { ChatMessage, ToolEvent, Checkpoint } from "./chat-types";
-import type { ChatMessage, ToolEvent, Checkpoint } from "./chat-types";
+import type { ChatMessage, ToolEvent, Checkpoint } from "../../../electron/agent-chat-messages";
+import { ModelDiscoveryStatus, type ModelDiscoveryControls } from "./ModelDiscoveryStatus";
 
 interface Props {
   task: OrchestratorTask;
   messages: ChatMessage[];
   isStreaming: boolean;
-  onSendMessage: (text: string, extras?: { attachments?: ChatAttachment[]; agentType?: string; model?: string | null; mode?: ChatMode }) => void;
+  onSendMessage: (text: string, extras?: { attachments?: ChatAttachment[]; agentType?: string; model?: string | null; mode?: ChatMode; intelligence?: string | null }) => void;
   onStop: () => void;
   /** Number of feedback iterations sent for this task. */
   iterationCount?: number;
@@ -74,6 +71,8 @@ interface Props {
   onAgentChange?: (agentType: string) => void;
   /** Models compatible with the selected agent. */
   models?: ChatInputModel[];
+  modelDiscovery?: ModelDiscoveryControls;
+  intelligenceLevels?: string[];
   /** Currently selected model (empty = agent default). */
   selectedModel?: string;
   /** Called when the user picks a different model. */
@@ -117,6 +116,8 @@ export function ChatTab({
   agents,
   selectedAgentType,
   onAgentChange,
+  modelDiscovery,
+  intelligenceLevels = [],
   models,
   selectedModel,
   onModelChange,
@@ -160,11 +161,8 @@ export function ChatTab({
   const [localAgentType, setLocalAgentType] = useState(selectedAgentType ?? task.agentName);
   const [localModel, setLocalModel] = useState(selectedModel ?? "");
   const [localMode, setLocalMode] = useState<ChatMode>(mode ?? "instant");
-  const [goal, setGoal] = useState<string | null>(null);
-  const [goalLoading, setGoalLoading] = useState(false);
-  const [goalEditing, setGoalEditing] = useState(false);
-  const [goalDraft, setGoalDraft] = useState("");
-
+  const [intelligence, setIntelligence] = useState<string | null>(task.reasoningLevel ?? null);
+  useEffect(() => { setIntelligence(task.reasoningLevel ?? null); }, [task.id, task.reasoningLevel]);
   // Keep local state aligned with parent-controlled props.
   useEffect(() => { if (selectedAgentType !== undefined) setLocalAgentType(selectedAgentType); }, [selectedAgentType]);
   useEffect(() => { if (selectedModel !== undefined) setLocalModel(selectedModel); }, [selectedModel]);
@@ -180,6 +178,7 @@ export function ChatTab({
   }, [onAgentChange]);
 
   const handleModelChange = useCallback((m: string) => {
+    setIntelligence(null);
     setLocalModel(m);
     onModelChange?.(m);
   }, [onModelChange]);
@@ -209,49 +208,15 @@ export function ChatTab({
   // agent is working.
   const [turnCosts, setTurnCosts] = useState<Array<{ timestamp: number; cost: number }>>([]);
 
-  // Fetch goal on mount and when streaming finishes
-  const handleSaveGoal = useCallback(async () => {
-    if (!goalDraft.trim()) {
-      try {
-        await (window as any).crab?.orchestrator?.clearGoal?.(task.id);
-      } catch { /* best-effort */ }
-      setGoal(null);
-      setGoalEditing(false);
-      return;
-    }
-    setGoalLoading(true);
-    try {
-      await (window as any).crab?.orchestrator?.setGoal?.(task.id, goalDraft.trim());
-      setGoal(goalDraft.trim());
-    } catch { /* best-effort */ }
-    setGoalLoading(false);
-    setGoalEditing(false);
-  }, [task.id, goalDraft]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const fetchGoal = async () => {
-      try {
-        const result = await (window as any).crab?.orchestrator?.getGoal?.(task.id);
-        if (cancelled) return;
-        if (result?.success && result.goal) {
-          setGoal(result.goal);
-        }
-      } catch { /* best-effort */ }
-    };
-    fetchGoal();
-    return () => { cancelled = true; };
-  }, [task.id, isStreaming]);
-
   useEffect(() => {
     let cancelled = false;
     const fetchCosts = () => {
       (window as any).crab?.orchestrator
         ?.getTurnCosts?.(task.id)
-        .then((result: { success?: boolean; turns?: Array<{ timestamp: number; cost: number }> }) => {
+        .then((result: { success?: boolean; turns?: Array<{ timestamp: number; cost?: number }> }) => {
           if (cancelled) return;
           if (result?.success && Array.isArray(result.turns)) {
-            setTurnCosts(result.turns);
+            setTurnCosts(result.turns.flatMap(turn => turn.cost === undefined ? [] : [{ ...turn, cost: turn.cost }]));
           }
         })
         .catch(() => {});
@@ -397,6 +362,7 @@ export function ChatTab({
                   agentType: submission.agentType,
                   model: submission.model,
                   mode: submission.mode,
+                  intelligence,
                 });
               }
             })
@@ -426,9 +392,10 @@ export function ChatTab({
         agentType: submission.agentType,
         model: submission.model,
         mode: submission.mode,
+        intelligence,
       });
     },
-    [isStreaming, onAddTodo, onSendMessage, slashCommands],
+    [isStreaming, onAddTodo, onSendMessage, slashCommands, intelligence],
   );
 
   // Handle slash command selection by expanding it through the orchestrator
@@ -454,6 +421,7 @@ export function ChatTab({
               agentType: activeAgentType,
               model: activeModel || null,
               mode: activeMode,
+              intelligence,
             });
           }
         })
@@ -461,7 +429,7 @@ export function ChatTab({
           setSlashPending(null);
         });
     },
-    [onSendMessage, activeAgentType, activeModel, activeMode, slashCommands],
+    [onSendMessage, activeAgentType, activeModel, activeMode, slashCommands, intelligence],
   );
 
   // Handle "Create command" from the dropdown.
@@ -585,48 +553,7 @@ export function ChatTab({
         onResume={focusComposer}
       />
 
-      {/* Goal bar */}
-      {(goal || goalEditing) && (
-        <div className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-gx-border/40 bg-gx-surface/40 px-3 py-1.5">
-          <Target size={12} className="shrink-0 text-gx-accent" />
-          {goalEditing ? (
-            <>
-              <input
-                type="text"
-                value={goalDraft}
-                onChange={(e) => setGoalDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleSaveGoal(); if (e.key === "Escape") setGoalEditing(false); }}
-                placeholder="What should this task accomplish?"
-                className="flex-1 bg-transparent text-[11px] text-gx-text outline-none placeholder:text-gx-muted/50"
-                autoFocus
-              />
-              <button onClick={handleSaveGoal} disabled={goalLoading} className="text-[10px] text-gx-accent hover:text-gx-accent/80">
-                {goalLoading ? "Saving..." : "Save"}
-              </button>
-              <button onClick={() => setGoalEditing(false)} className="text-gx-muted hover:text-gx-text">
-                <X size={11} />
-              </button>
-            </>
-          ) : (
-            <>
-              <span
-                className="flex-1 text-[11px] text-gx-text/80 cursor-pointer hover:text-gx-text"
-                onClick={() => { setGoalDraft(goal ?? ""); setGoalEditing(true); }}
-                title="Click to edit goal"
-              >
-                {goal}
-              </span>
-              <button
-                onClick={() => setGoalEditing(false)}
-                className="text-gx-muted hover:text-gx-text"
-                title="Hide goal"
-              >
-                <X size={11} />
-              </button>
-            </>
-          )}
-        </div>
-      )}
+      {task.agentName === "codex" && <GoalBar key={task.id} taskId={task.id} isStreaming={isStreaming} closed={["archived", "applied", "discarded"].includes(task.status)} />}
 
       {/* Messages area */}
       <div
@@ -790,7 +717,11 @@ export function ChatTab({
 
       {/* Input area */}
       <div className="shrink-0 p-3">
-        <div className="mx-auto max-w-4xl">
+        {(task.status === "archived" || task.status === "applied" || task.status === "discarded") && <p role="status" className="mx-auto mb-2 max-w-4xl text-xs text-gx-muted">
+          {task.status === "discarded" ? "This conversation was discarded. Start a new chat to continue." : "Reopen this conversation to send messages."}
+        </p>}
+        <fieldset disabled={task.status === "archived" || task.status === "applied" || task.status === "discarded"} className="mx-auto min-w-0 max-w-4xl border-0 p-0">
+        <ModelDiscoveryStatus discovery={modelDiscovery} />
         <ChatInput
           placeholder={
             task.status === "reviewing"
@@ -806,6 +737,9 @@ export function ChatTab({
           models={models ?? []}
           model={activeModel}
           onModelChange={handleModelChange}
+          intelligence={intelligence}
+          intelligenceLevels={intelligenceLevels}
+          onIntelligenceChange={setIntelligence}
           mode={activeMode}
           onModeChange={handleModeChange}
           slashCommands={slashCommands}
@@ -819,7 +753,7 @@ export function ChatTab({
           activeEditorFile={activeEditorFile ?? null}
           activeEditorLabel={activeEditorLabel ?? null}
         />
-        </div>{/* close max-w-4xl */}
+        </fieldset>
       </div>
     </div>
     <CreateCommandDialog

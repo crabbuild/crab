@@ -1,10 +1,7 @@
 /**
  * Shared Codex parsing utilities.
  *
- * Contains the regex filters, event parsers, and decision mapping used
- * by the CodexAppServerAdapter (app-server mode). Extracted here so the
- * ~600-line item dispatcher lives in one place and both adapters share
- * identical parsing logic.
+ * Maps official app-server items to the shared agent event contract.
  */
 
 import type { AgentEvent } from "./orchestrator-adapters";
@@ -78,61 +75,12 @@ export const CODEX_MCP_NOISE_RE =
 export const CODEX_NOISE_LINE_RE =
   /^(Reading additional input from stdin|Reading prompt from stdin)/i;
 
-// ─── Decision Mapping ────────────────────────────────────────────────────────
-
-/**
- * Maps Crab Desktop's approval vocabulary to the Codex protocol's
- * decision strings.
- *
- * | Crab decision | Codex decision     | Semantics                          |
- * |---------------|--------------------|------------------------------------|
- * | `allow`       | `acceptForSession` | Standing — Codex caches the rule.  |
- * | `allow_once`  | `accept`           | This invocation only.              |
- * | `deny`        | `decline`          | Reject; turn continues if possible.|
- * | `cancel`      | `cancel`           | Reject and interrupt (shutdown).   |
- */
-export function mapDecisionToCodex(d: "allow" | "allow_once" | "deny" | "cancel"): string {
-  switch (d) {
-    case "allow":
-      return "acceptForSession";
-    case "allow_once":
-      return "accept";
-    case "deny":
-      return "decline";
-    case "cancel":
-      return "cancel";
-    default: {
-      throw new Error("unreachable decision");
-    }
-  }
-}
-
-
 // ─── Shared State Interface ──────────────────────────────────────────────────
 
-/**
- * Mutable state that the parsing functions read and write. Each adapter
- * instance owns one of these; the free functions receive it by reference.
- */
 export interface CodexParseState {
-  /** Text accumulated for the currently streaming assistant message. */
+  agentMessages: Map<string, string>;
   lastAgentMessage: string;
-  /**
-   * Last assistant message that already closed with a turn/completed.
-   * Codex can deliver the matching item/completed envelope after the
-   * turn has closed; keep this around so that replay is ignored instead
-   * of being treated as the first text of the next turn.
-   */
-  lastCompletedAgentMessage?: string;
-  /** True after turn.started and false after turn.completed. */
-  turnOpen?: boolean;
-  /** Fires when the dup-text dedup branch suppresses a redundant
-   *  `item.completed` text event. Wired by the adapter to increment
-   *  the renderer-local `dupTextCollisions` diagnostic counter. */
-  onDupTextCollision?: () => void;
 }
-
-// ─── Event Parsing ───────────────────────────────────────────────────────────
 
 /**
  * Builds a `file_edit` AgentEvent from a single Codex `file_change`
@@ -188,198 +136,24 @@ function buildFileChangeEvent(
   };
 }
 
-/**
- * Maps a Codex JSONL line to zero or more AgentEvents. A single line
- * can produce a content event plus a usage event (e.g. turn.completed
- * carries both a status and token usage).
- *
- * Supports two wire formats:
- *   1. CLI format (`codex exec --json`): `{"type":"item.started","item":{...}}`
- *   2. App-server format (WebSocket): `{"method":"item/started","params":{"item":{...}}}`
- *
- * Both are normalised to the same internal handling.
- */
-export function parseCodexEvents(
-  raw: Record<string, unknown>,
-  state: CodexParseState,
-): AgentEvent[] {
+/** Parse the item notifications used by the app-server adapter. */
+export function parseCodexEvents(raw: Record<string, unknown>, state: CodexParseState): AgentEvent[] {
+  const params = raw.params as Record<string, unknown> | undefined;
+  if (!params) return [];
   const timestamp = Date.now();
-
-  // Normalise: support both `type`-based (CLI) and `method`-based (app-server) formats.
-  let type = raw.type as string | undefined;
-  if (!type && raw.method) {
-    // Convert method format: "item/started" → "item.started", "turn/completed" → "turn.completed"
-    type = String(raw.method).replace(/\//g, ".");
-    // For method-based format, the payload is in `params`.
-    const params = raw.params as Record<string, unknown> | undefined;
-    if (params) {
-      // Merge params fields into raw for uniform access below.
-      if (params.item) (raw as any).item = params.item;
-      if (params.turn) (raw as any).turn = params.turn;
-      if (params.usage) (raw as any).usage = params.usage;
-      if (params.delta !== undefined) (raw as any).delta = params.delta;
-      if (params.itemId) (raw as any).itemId = params.itemId;
-      if (params.threadId) (raw as any).thread_id = params.threadId;
-    }
+  if (raw.method === "item/agentMessage/delta") {
+    const itemId = String(params.itemId);
+    const delta = String(params.delta ?? "");
+    if (!delta) return [];
+    const text = (state.agentMessages.get(itemId) ?? "") + delta;
+    state.agentMessages.set(itemId, text);
+    state.lastAgentMessage = text;
+    return [{ type: "text", timestamp, content: delta, itemId }];
   }
-
-  switch (type) {
-    case "thread.started": {
-      const threadId = String(
-        raw.thread_id ?? raw.threadId ?? "",
-      );
-      if (!threadId) return [];
-      return [{
-        type: "thread_started",
-        timestamp,
-        threadId,
-      }];
-    }
-    case "turn.started":
-      state.turnOpen = true;
-      state.lastAgentMessage = "";
-      return [];
-
-    case "turn.completed": {
-      const out: AgentEvent[] = [];
-      const turn = raw.turn as Record<string, unknown> | undefined;
-      const usage = (raw.usage ?? turn?.usage) as Record<string, unknown> | undefined;
-      if (usage) {
-        const usageEvent = extractUsageEvent(usage);
-        if (usageEvent) out.push(usageEvent);
-      }
-      const content = state.lastAgentMessage;
-      out.push({
-        type: "done",
-        timestamp,
-        content,
-      });
-      state.lastCompletedAgentMessage = content;
-      state.lastAgentMessage = "";
-      state.turnOpen = false;
-      return out;
-    }
-
-    case "turn.failed":
-    case "error":
-      state.lastAgentMessage = "";
-      state.turnOpen = false;
-      return [{
-        type: "error",
-        timestamp,
-        error: String(
-          (raw.error as Record<string, unknown> | undefined)?.message
-            ?? raw.message ?? raw.error ?? "Codex reported an error",
-        ),
-      }];
-
-    case "item.started":
-    case "item.updated":
-    case "item.completed":
-      return parseCodexItem(raw, timestamp, type, state);
-
-    // ── Streaming delta events ──────────────────────────────────────
-    case "item.agentMessage.delta": {
-      const delta = String(raw.delta ?? "");
-      if (!delta) return [];
-      state.lastAgentMessage += delta;
-      return [{ type: "text", timestamp, content: delta }];
-    }
-
-    case "item.commandExecution.outputDelta": {
-      const delta = String(raw.delta ?? "");
-      if (!delta) return [];
-      return [{
-        type: "tool_result",
-        timestamp,
-        tool: "Bash",
-        itemId: raw.itemId ? String(raw.itemId) : undefined,
-        output: delta,
-      }];
-    }
-
-    case "item.fileChange.outputDelta": {
-      const delta = String(raw.delta ?? "");
-      if (!delta) return [];
-      return [{
-        type: "tool_result",
-        timestamp,
-        tool: "Write",
-        itemId: raw.itemId ? String(raw.itemId) : undefined,
-        output: delta,
-      }];
-    }
-
-    case "item.reasoning.summaryTextDelta":
-    case "item.reasoning.textDelta": {
-      const delta = String(raw.delta ?? "");
-      if (!delta) return [];
-      return [{ type: "thinking", timestamp, content: delta }];
-    }
-
-    case "item.reasoning.summaryPartAdded":
-      return [];
-
-    case "item.plan.delta": {
-      const delta = String(raw.delta ?? "");
-      if (!delta) return [];
-      return [{
-        type: "task",
-        timestamp,
-        tool: "EnterPlanMode",
-        itemId: raw.itemId ? String(raw.itemId) : undefined,
-        input: { plan: delta, status: "streaming" },
-      }];
-    }
-
-    case "item.mcpToolCall.progress": {
-      const progress = raw.progress ?? raw.message ?? raw.delta;
-      if (!progress) return [];
-      return [{
-        type: "tool_result",
-        timestamp,
-        tool: String(raw.tool ?? "mcp"),
-        itemId: raw.itemId ? String(raw.itemId) : undefined,
-        input: { progress: true },
-        output: typeof progress === "string" ? progress : JSON.stringify(progress),
-      }];
-    }
-
-    // ── Approval requests (sandbox mode) ────────────────────────────
-    case "item.commandExecution.requestApproval":
-    case "item.fileChange.requestApproval": {
-      const kind: NonNullable<AgentEvent["approval"]>["kind"] =
-        type === "item.fileChange.requestApproval" ? "file" : "command";
-      const requestId = String(raw.request_id ?? raw.requestId ?? raw.id ?? `${type}-${timestamp}`);
-      const cmd = String(
-        raw.command ?? (raw.params as Record<string, unknown> | undefined)?.command ?? "",
-      );
-      const filePath = String(
-        raw.path ?? raw.file ?? (raw.params as Record<string, unknown> | undefined)?.path ?? "",
-      );
-      const summary = kind === "command"
-        ? (cmd ? `Run command: ${cmd}` : "Run command outside sandbox")
-        : (filePath ? `Write outside sandbox: ${filePath}` : "Write file outside sandbox");
-      const detail = kind === "command" ? cmd : filePath;
-      return [{
-        type: "approval_request",
-        timestamp,
-        approval: {
-          requestId,
-          kind,
-          summary,
-          detail,
-          blocking: true,
-        },
-      }];
-    }
-
-    case "serverRequest.resolved":
-      return [];
-
-    default:
-      return [{ type: "generic", timestamp, input: raw }];
+  if (raw.method === "item/started" || raw.method === "item/completed") {
+    return parseCodexItem(params, timestamp, raw.method === "item/started" ? "item.started" : "item.completed", state);
   }
+  return [];
 }
 
 /**
@@ -405,26 +179,14 @@ export function parseCodexItem(
     case "agentMessage":
       if (envelope === "item.completed") {
         const text = String(item.text ?? "");
-        // If deltas have already accumulated this message (or a trimmed
-        // version of it), the final item.completed envelope is redundant.
-        // A duplicate can also arrive just after turn/completed, after the
-        // streaming buffer has been cleared; in that case compare with the
-        // last completed assistant message as well.
-        // Use trimmed comparison to handle trailing whitespace differences.
-        const matchesStreaming =
-          !!text && (state.lastAgentMessage === text || state.lastAgentMessage.trim() === text.trim());
-        const completed = state.lastCompletedAgentMessage ?? "";
-        const matchesCompleted =
-          state.turnOpen === false &&
-          !!text &&
-          !!completed &&
-          (completed === text || completed.trim() === text.trim());
-        if (matchesStreaming || matchesCompleted) {
-          state.onDupTextCollision?.();
-          return [];
-        }
-        if (text) state.lastAgentMessage = text;
-        return text ? [{ type: "text", timestamp, content: text }] : [];
+        const itemId = String(item.id);
+        const previous = state.agentMessages.get(itemId);
+        state.agentMessages.set(itemId, text);
+        state.lastAgentMessage = text;
+        // Completion is the authoritative snapshot for this item. Matching
+        // text on another item must not suppress a distinct assistant message.
+        if (previous === text) return [];
+        return [{ type: "text", timestamp, content: text, itemId, textMode: "replace" }];
       }
       return [];
 
@@ -682,7 +444,7 @@ export function parseCodexItem(
 
     case "entered_review_mode":
     case "enteredReviewMode": {
-      if (envelope === "item.completed" || envelope === "item.started") {
+      if (envelope === "item.started") {
         const review = String(item.review ?? "current changes");
         return [{
           type: "generic",
@@ -729,50 +491,16 @@ export function parseCodexItem(
   }
 }
 
-/**
- * Extracts token usage data from a Codex `usage` payload. Maps the
- * modern field names to our normalised `AgentEvent.usage`.
- *
- * Accepts both wire formats:
- *   - App-server (camelCase, current): `inputTokens`, `outputTokens`,
- *     `cachedInputTokens`, `reasoningOutputTokens`. See:
- *     https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
- *     (struct `Usage`, with `#[serde(rename_all = "camelCase")]`).
- *   - Legacy / exec-mode JSONL: `input_tokens`, `output_tokens`,
- *     `cached_input_tokens`, `reasoning_output_tokens`.
- *
- * `cachedInputTokens` maps to `cacheReadInputTokens`; Codex does not
- * expose cache-creation tokens separately, so that counter stays at 0.
- */
+/** Normalize a request's app-server usage into disjoint billing categories. */
 export function extractUsageEvent(usage: Record<string, unknown>): AgentEvent | null {
-  const inputTokens =
-    typeof usage.inputTokens === "number" ? usage.inputTokens :
-    typeof usage.input_tokens === "number" ? usage.input_tokens :
-    typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
-  const baseOutput =
-    typeof usage.outputTokens === "number" ? usage.outputTokens :
-    typeof usage.output_tokens === "number" ? usage.output_tokens :
-    typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
-  const reasoningTokens =
-    typeof usage.reasoningOutputTokens === "number" ? usage.reasoningOutputTokens :
-    typeof usage.reasoning_output_tokens === "number" ? usage.reasoning_output_tokens : 0;
-  const outputTokens = baseOutput + reasoningTokens;
-  const cacheReadInputTokens =
-    typeof usage.cachedInputTokens === "number" ? usage.cachedInputTokens :
-    typeof usage.cached_input_tokens === "number" ? usage.cached_input_tokens : 0;
-
-  if (inputTokens === 0 && outputTokens === 0 && cacheReadInputTokens === 0) {
-    return null;
-  }
-
-  return {
-    type: "usage",
-    timestamp: Date.now(),
-    usage: {
-      inputTokens,
-      outputTokens,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens,
-    },
-  };
+  const cacheReadInputTokens = Number(usage.cachedInputTokens ?? 0);
+  const cacheCreationInputTokens = Number(usage.cacheWriteInputTokens ?? 0);
+  // Responses includes cached input in inputTokens and reasoning in outputTokens.
+  // The cost tracker prices cache categories separately; subtract them once.
+  const inputTokens = Math.max(0, Number(usage.inputTokens ?? 0) - cacheReadInputTokens - cacheCreationInputTokens);
+  const outputTokens = Number(usage.outputTokens ?? 0);
+  if (!inputTokens && !outputTokens && !cacheReadInputTokens && !cacheCreationInputTokens) return null;
+  return { type: "usage", timestamp: Date.now(), usage: {
+    inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
+  } };
 }

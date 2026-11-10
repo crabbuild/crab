@@ -3,7 +3,7 @@ import { defineConfig } from "@playwright/test";
 /**
  * Playwright configuration.
  *
- * Two projects:
+ * Three projects:
  *
  * 1. "a11y" — accessibility (axe-core) tests that run against the Vite dev
  *    server in Chromium. These are fast and run on every PR.
@@ -13,6 +13,9 @@ import { defineConfig } from "@playwright/test";
  *    and Windows. They are excluded from the
  *    default `playwright test` run unless the E2E_SMOKE env var is set, so
  *    local `npm run test:a11y` stays fast.
+ *
+ * 3. "agent-requests" — question and approval cards against an isolated
+ *    renderer fixture, using the installed Chrome browser and the Vite server.
  */
 export default defineConfig({
   testDir: "./tests",
@@ -20,6 +23,12 @@ export default defineConfig({
   retries: 0,
 
   projects: [
+    {
+      name: "agent-requests",
+      testDir: "./tests/browser",
+      testMatch: /agent-requests\.pw\.ts$/,
+      use: { baseURL: "http://localhost:5173", browserName: "chromium", channel: "chrome" },
+    },
     {
       name: "a11y",
       testMatch: /a11y(?:-orchestrator)?\.spec\.ts$/,
