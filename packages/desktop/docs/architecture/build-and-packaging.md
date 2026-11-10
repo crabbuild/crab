@@ -3,6 +3,13 @@
 This document describes how Crab Desktop is built, tested, and
 packaged for distribution across macOS, Linux, and Windows.
 
+Electron 45 embeds Node 24. Build scripts run on Node 22.12+ within 22.x.
+Native Node modules use the Electron ABI; better-sqlite3 13 uses N-API, while
+the declared SSH addon dependency uses NAN 2.30 for current V8 APIs. The native
+installer calls electron-rebuild's public API and retains the macOS PTY source
+build that provides an executable spawn helper. The packaged macOS minimum is
+13.0, inherited from Electron rather than overridden in builder configuration.
+
 ## Build Pipeline
 
 The build process has three independent stages that can run in
@@ -60,7 +67,7 @@ choice is shared with the CLI and server consumers in the Cargo workspace.
 ### Cross-Compilation
 
 For multi-platform builds:
-- macOS: Universal binary (aarch64 + x86_64) via `lipo`
+- macOS: Separate ARM64 and x64 binaries built on matching native runners
 - Linux GNU: built on the target architecture against the glibc 2.28/GCC 8
   runtime ABI in AlmaLinux 8, using GCC Toolset 14 for current C++ dependencies.
   Hosts without that libc/compiler combination invoke Docker automatically; tests use the

@@ -2,7 +2,7 @@
   "name": "crab-desktop",
   "private": true,
   "version": "2.0.0-alpha.1",
-  "description": "Crab \u2014 serverless git for large files. Desktop client built on Electron + React + TailwindCSS.",
+  "description": "Crab — serverless git for large files. Desktop client built on Electron + React + TailwindCSS.",
   "author": "Crab",
   "license": "Apache-2.0",
   "repository": {
@@ -57,7 +57,7 @@
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "anser": "^2.3.5",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "^13.0.3",
     "blake3": "^2.1.7",
     "clsx": "^2.1.1",
     "electron-log": "^5.4.4",
@@ -84,8 +84,8 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.1",
-    "@electron/rebuild": "^3.7.1",
-    "@playwright/test": "^1.49.0",
+    "@electron/rebuild": "^4.2.1",
+    "@playwright/test": "^1.65.0",
     "@shikijs/monaco": "^4.0.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.14.12",
@@ -97,8 +97,8 @@
     "@typescript-eslint/parser": "^8.15.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
     "eslint": "^9.15.0",
     "eslint-plugin-react-hooks": "^5.1.0",
     "fast-check": "^4.7.0",
@@ -110,6 +110,6 @@
     "vitest": "^1.6.1"
   },
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22.12.0 <23"
   }
 }

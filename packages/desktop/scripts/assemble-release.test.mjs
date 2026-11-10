@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 const { findFile, resolveFiles } = require('electron-updater/out/providers/Provider');
 const { MacUpdater } = require('electron-updater/out/MacUpdater');
 const FpmTarget = require('app-builder-lib/out/targets/FpmTarget').default;
-const { executeAppBuilderAsJson } = require('app-builder-lib/out/util/appBuilder');
+const { convertIcon } = require('app-builder-lib/out/util/iconConverter');
 const childProcess = require('node:child_process');
 const script = fileURLToPath(new URL('./assemble-release.mjs', import.meta.url));
 const version = '2.3.4';
@@ -43,7 +43,7 @@ test('Windows installer icon can be generated from the configured image', async 
   for (const icon of [config.nsis.installerIcon, config.nsis.uninstallerIcon]) {
     if (icon) assert.ok(readFileSync(path.resolve(desktop, icon)).length > 0);
   }
-  const result = await executeAppBuilderAsJson(['icon', '--format', 'ico', '--root', path.join(desktop, 'build'), '--root', desktop, '--out', output, '--input', config.win.icon]);
+  const result = await convertIcon({ sources: [config.win.icon], fallbackSources: [], roots: [path.join(desktop, 'build'), desktop], format: 'ico', outDir: output });
   assert.ok(result.icons?.some((icon) => icon.file.endsWith('.ico')));
 });
 

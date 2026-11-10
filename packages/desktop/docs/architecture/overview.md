@@ -26,7 +26,7 @@ the UI, process management, and data operations.
                              │ IPC whitelist: 200+ methods
 ┌────────────────────────────▼───────────────────────────────────┐
 │                     MAIN PROCESS (Privileged)                  │
-│  Electron 33 · Node.js                                         │
+│  Electron 45 · Node 24                                         │
 │                                                                │
 │  ┌─────────────┐ ┌──────────────┐ ┌────────────────────────┐   │
 │  │ Agent       │ │ Orchestrator │ │ Terminal Pool          │   │
@@ -145,7 +145,7 @@ App Shutdown
 | Renderer | @xterm/xterm | Terminal emulator |
 | Renderer | Monaco Editor | Code editing + diffs |
 | Renderer | @pierre/trees | File tree rendering |
-| Main | Electron 33 | Desktop shell |
+| Main | Electron 45 / Node 24 | Desktop shell |
 | Main | node-pty | Terminal PTY |
 | Main | better-sqlite3 | Local persistence |
 | Main | zeromq | Inter-process messaging |

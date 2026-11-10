@@ -40,15 +40,19 @@ generated state out of Git changes; existing tracked files and ignore rules rema
 
 ## Build
 
-Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
+Requirements: Node 22.12+ within 22.x, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
 by Cargo and Electron native modules. Build each OS and architecture on its
 native runner. The desktop CLI enables NFS and the release provider/workflow
 features; it does not require a FUSE driver.
-Windows native modules require Visual Studio 2022 with the C++ desktop workload;
-the current Electron rebuild tooling does not recognize Visual Studio 2026.
+Windows CI uses Visual Studio 2022 with the C++ desktop workload.
 Native installation rebuilds node-pty from source on macOS because its prebuilt
 spawn helper lacks executable permissions. The matching helper must be executable
 in development and in the packaged application.
+
+The desktop uses Electron 45 and its embedded Node 24 runtime. Electron downloads
+on first use rather than through its package's install hook. macOS packages
+require macOS 13 or later; this requirement comes from Electron's application
+metadata. Native CLI/sidecar runtime qualification is separate from GUI support.
 
 On macOS, mount the Workspace volume and give the **Codex process running the
 commands** access to it. Each checkout needs its own Cargo target directory.

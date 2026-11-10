@@ -1888,3 +1888,89 @@ suppression was applied.
   repository RPCs on AlmaLinux 8, Debian 12, and Amazon Linux 2023. Alpine/musl,
   Electron/native Node module minimum distributions, Windows owner cleanup,
   published assets, and new-head cross-platform CI remain separate gates.
+
+
+## Qualified GNU ARM64 runtime and supported Electron candidate (2026-11-10)
+
+The complete GNU ARM64 release build now passes using the owned 10 GiB test VM.
+All three staged binaries pass the linked glibc/C++ ABI limits and external
+OpenSSL rejection, and their manifest hashes match. Actual AlmaLinux 8, Debian
+12 and Amazon Linux 2023 containers each pass CLI/sidecar versions plus ping,
+open, write and exact read-back RPCs. The exact runtime passes 272 native tests;
+one existing S3 case remains ignored without an isolated bucket. All containers
+close and the owned VM is stopped. Evidence: `linux-native-toolset14-retry-build.log`,
+`linux-qualified-distros.log`, `linux-qualified-test.log`, and
+`linux-portability-verification.json`. GNU x64, Alpine/musl and GUI distribution
+minimums remain separate gates.
+
+The supported-runtime candidate selects Electron 45.2.3, with embedded Node
+24.22.2, and uses the public Electron rebuild API. Electron's macOS bundle now
+requires macOS 13. Better-sqlite3 13.0.3 uses its maintained N-API implementation;
+NAN 2.30.0 supplies the supported V8 callback contract needed by cpu-features.
+There are no dependency patches, overrides or vendored replacements. Builder
+26's updater configuration and icon conversion calls use its current APIs.
+The directory package builds with the actual native SQLite, PTY and SSH addons.
+The existing logical ASAR daemon entry remains canonical.
+
+The [Electron breaking-change contract](https://www.electronjs.org/docs/latest/breaking-changes)
+requires asynchronous clipboard writes and deprecates synchronous safeStorage.
+Screenshot copying now awaits the PNG ClipboardItem write and returns failure
+on native rejection. Saved connections use the asynchronous key provider,
+reject Linux basic_text/unknown backends, and atomically rotate ciphertext when
+requested. Reads and mutations share one queue so a delayed rotation cannot
+overwrite a concurrent save. Existing vault schemas and ciphertext are retained.
+All 31 storage and two clipboard cases pass, including rotation failure and
+overlapping save/read behavior. These fake-key-provider tests establish queue
+and error behavior, not operating-system keyring migration.
+
+A synthetic old-runtime keyring migration probe was blocked in the macOS
+Keychain authorization UI before creating a vault. The owned process and daemon
+were closed with verified identity. No existing saved credentials were read,
+reset or replaced, and no authorization was bypassed. A native old-ciphertext
+migration and native clipboard copy still need a dedicated authorized GUI
+session. Evidence: `keyring-migration-blocker.json` and `keyring-main-sample.txt`.
+
+The packaged SQLite probe opens an actual previous-schema database through the
+new native binding, preserves its old row and full-text index, adds the metadata
+column, writes a new reply with item metadata, then closes/reopens and verifies
+both rows, metadata and full-text search. Evidence:
+`electron45-packaged-sqlite.json`. Production/fixture types, renderer/Electron
+builds, 27 build-tool checks and 73 scoped persistence/storage/native-PTY checks
+pass. Cross-OS qualification of this runtime remains required.
+
+The packaged runtime exposed an existing navigation feedback loop: ordinary
+history observations were delivered back to the repository view as restore
+commands and could replace a newer terminal selection. History now issues
+restore snapshots only for back/forward and explicit session restoration.
+The unchanged packaged core case passes terminal selection, back navigation,
+command-terminal switching and reload. Cross-repository restore identity and
+restore-on-mount remain separate qualification work.
+
+A subsequent full run reached every enabled feature assertion but failed while
+deleting the profile fixture's HOME: authenticated daemon shutdown closed only
+the server, leaving process-owned durability timers alive. RPC, idle and
+successful replacement now delegate to daemon-main's shutdown owner, with the
+requested terminal-kill policy. The checkpoint timer stops before the final
+checkpoint; history, quota and memory resources close before process exit.
+Standalone server instances retain their own transport/terminal cleanup.
+The RPC acknowledgement precedes shutdown, so clients can distinguish acceptance
+from process closure. Ninety scoped daemon/control tests pass. Fixtures that
+create a HOME authenticate to that HOME's daemon, await its actual PID disappearance,
+then delete it; fixtures inheriting a HOME never stop its durable daemon.
+
+The post-runtime-upgrade audit still reports 31 vulnerable package entries,
+including two critical entries in the old test toolchain. These include build
+and test dependencies, so the count does not establish application exploitability.
+The next dependency priority is the supported Vite/Vitest toolchain plus remaining
+updater/transitive fixes. Evidence: `electron45-dependency-audit.json`.
+
+
+The rebuilt Electron 45 package passes all five enabled combined smoke cases:
+updater metadata/failures, workflow output/failures, repository/chat/terminal,
+profile isolation and sidebar quit/restart persistence. Storage alone is skipped
+without an isolated bucket. Both fixture-owned daemons exit through authenticated
+shutdown before fixture deletion; the inherited qualification daemon is stopped
+separately with matched birth identity. All three are confirmed gone. Evidence:
+`electron45-shutdown-full.json` and `electron45-shutdown-full-home.json`.
+This is unsigned macOS qualification, not cross-platform or production release
+approval. The PR stays open and unmerged.
