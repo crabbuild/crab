@@ -1548,6 +1548,40 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   fixture directories. Durable terminal ownership and fixture teardown need
   diagnosis before assigning that failure to application shutdown.
 
+- Packaged startup exposed an unconditional workflow webhook bind on port 17789.
+  Another local instance already owned it, so the real package could not finish
+  launching. The address is shipped in `v2.0.0-alpha.1`; it remains unchanged.
+  Startup now acquires it only for enabled webhook triggers. Save/enable waits
+  for listener readiness before persisting activation, bind failure reaches IPC
+  and the workflow status text, and a later request can retry. The
+  [Node listener contract](https://nodejs.org/docs/latest-v22.x/api/net.html#serverlisten)
+  requires awaiting asynchronous bind success/error. A pre-fix admission
+  regression fails; six webhook checks cover refusal/cause/retry, real HTTP
+  dispatch, admission and error delivery. Full workflow execution/shutdown
+  remains separately qualified, not established by its stubbed runner.
+
+- The real macOS package then exposed node-pty's helper resolving to
+  `app.asar.unpacked.unpacked` when the daemon starts from a physical unpacked
+  entry. Launch the canonical logical `app.asar/dist-electron/daemon` entry;
+  [Electron's ASAR contract](https://www.electronjs.org/docs/latest/tutorial/asar-archives)
+  resolves native files through the archive. A built-package probe reproduces
+  the missing helper and spawn failure from the old origin, then executes an
+  actual shell and exits zero from the logical origin. No dependency was edited.
+  The 95 workflow/terminal checks pass, including 49 repeated terminal checks
+  after building. Production/fixture types, Electron/renderer builds and the
+  unsigned directory package pass. The packaged repository/chat/terminal smoke
+  and profile/repository restart smoke each pass on current source in separate
+  runs. Fixtures now explicitly kill only their canonical repository's durable
+  PTYs and wait for PID disappearance before deletion; app quit intentionally
+  detaches those sessions. Windows confirmation still requires CI. A combined
+  rerun fails the worktree-detail-panel assertion; earlier profile-quit timeouts
+  also remain unexplained despite a later uninstrumented pass. Stable full
+  packaged qualification is still open. Evidence: `webhook-start-before.json`,
+  `webhook-start-final.json`, `packaged-startup-scoped.json`,
+  `packaged-startup-terminal-final.json`, `packaged-node-pty-origin.json`,
+  `packaged-node-pty-origin-validation.log`, `packaged-startup-final.json` and
+  `packaged-startup-final-clean.json` in the owned output.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;

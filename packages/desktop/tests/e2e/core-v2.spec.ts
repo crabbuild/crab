@@ -1,4 +1,4 @@
-import { test, expect, _electron as electron, type Page } from "@playwright/test";
+import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
@@ -29,6 +29,25 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
     const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
     return bridge.rpc(method, params);
   }, { method, params });
+}
+
+async function closeFixtureTerminals(application: ElectronApplication, directory: string): Promise<void> {
+  const repoPath = realpathSync(directory);
+  const page = await application.firstWindow();
+  const sessions = await page.evaluate(repoPath => window.crab.termListDaemonSessions(repoPath), repoPath);
+  // App quit detaches durable PTYs. Explicitly terminate only this fixture's
+  // repository sessions before deleting directories their shells still own.
+  await page.evaluate(async ({ sessions, repoPath }) => {
+    await Promise.all(sessions.map(session => window.crab.termKillDaemonSession(session.daemonSessionId, repoPath)));
+  }, { sessions, repoPath });
+  await expect.poll(() => sessions.filter(session => {
+    if (!session.pid) throw new Error("Fixture terminal has no process identity");
+    try { process.kill(session.pid, 0); return true; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      return false;
+    }
+  }).map(session => session.pid), { timeout: 10_000 }).toEqual([]);
 }
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
@@ -221,7 +240,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Skills", exact: true })).toHaveCount(0);
     const agentDetection = await page.evaluate(() => window.crab.orchestrator.detectAgents());
-    expect(agentDetection.success).toBe(true);
+    if (!agentDetection.success || !agentDetection.agents) throw new Error(agentDetection.error ?? "Agent detection returned no result");
     await page.getByRole("button", { name: "Chat", exact: true }).click();
     if (!agentDetection.agents.some((agent: { available: boolean }) => agent.available)) {
       await page.getByRole("button", { name: "Skip for now", exact: true }).click();
@@ -369,7 +388,8 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
 
   } finally {
-    await application.close();
+    try { await closeFixtureTerminals(application, root); }
+    finally { await application.close(); }
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -419,9 +439,9 @@ test("terminal restore is isolated by profile and repository", async () => {
     expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).layout).toBeNull();
     expect(existsSync(path.join(testHome, ".crab-desktop", "terminal-state.json"))).toBe(false);
   } finally {
-    await application.close();
-    // Agent version probes can finish writing their isolated HOME after Electron exits.
-    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+    try { await closeFixtureTerminals(application, repository); }
+    finally { await application.close(); }
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

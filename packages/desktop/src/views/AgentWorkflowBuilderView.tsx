@@ -1423,6 +1423,8 @@ function AgentWorkflowBuilderInner({ repo }: AgentWorkflowBuilderViewProps) {
     const result = await window.crab.agentWorkflows.listTriggers(repo.path);
     if (result.success) {
       setTriggers(result.triggers);
+    } else {
+      setStatusMessage(result.error ?? "Workflow triggers could not load.");
     }
   }, [repo.path]);
 

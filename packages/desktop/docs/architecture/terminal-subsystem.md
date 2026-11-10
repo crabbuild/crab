@@ -23,6 +23,10 @@ owns routing and renderer attachments. Closing an app window, quitting, or
 upgrading disconnects the client without killing daemon PTYs. The next app
 instance probes and reuses the live daemon even when its application entry path
 has changed. An explicitly requested in-process terminal remains ephemeral.
+The packaged daemon launches through its logical
+`app.asar/dist-electron/daemon/daemon-main.cjs` entry. Electron resolves its native
+modules into the unpacked files; using the physical `.unpacked` entry makes
+node-pty expand its helper path twice and prevents macOS shell creation.
 Live daemon replacement is deferred while PTYs exist: the adopted-fd backend
 cannot resize those PTYs. Application updates can reuse the existing owner.
 

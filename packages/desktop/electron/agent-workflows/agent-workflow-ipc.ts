@@ -18,7 +18,7 @@ import { AgentWorkflowTriggerScheduler } from "./trigger-scheduler";
 import { AgentWorkflowWebhookServer } from "./webhook-server";
 
 export function registerAgentWorkflowIpc(
-  ipcMain: IpcMain,
+  ipcMain: Pick<IpcMain, "handle">,
   getMainWindow: () => BrowserWindow | null,
   getOrchestrator: () => Orchestrator | null,
 ): AgentWorkflowRunner {
@@ -45,7 +45,11 @@ export function registerAgentWorkflowIpc(
   });
 
   const webhookServer = new AgentWorkflowWebhookServer(triggerStore, definitionStore, runner);
-  webhookServer.start();
+  // Ordinary app startup needs no listener. The shipped webhook address is
+  // reserved only for enabled triggers, and bind failure must not crash chat.
+  void triggerStore.list().then(triggers => {
+    if (triggers.some(trigger => trigger.kind === "webhook" && trigger.enabled)) return webhookServer.start();
+  }).catch((error: unknown) => console.error("[agent-workflow] webhooks unavailable:", error));
 
   runner.recoverActiveRuns()
     .catch((err: unknown) => {
@@ -256,7 +260,9 @@ export function registerAgentWorkflowIpc(
 
   ipcMain.handle("agent-workflow:list-triggers", async (_evt, payload: { repoPath?: string }) => {
     try {
-      return { success: true, triggers: await triggerStore.list(payload.repoPath) };
+      const triggers = await triggerStore.list(payload.repoPath);
+      if (triggers.some(trigger => trigger.kind === "webhook" && trigger.enabled)) await webhookServer.start();
+      return { success: true, triggers };
     } catch (err: unknown) {
       return { success: false, error: errorMessage(err), triggers: [] };
     }
@@ -264,6 +270,7 @@ export function registerAgentWorkflowIpc(
 
   ipcMain.handle("agent-workflow:save-trigger", async (_evt, payload: { trigger: AgentWorkflowTrigger }) => {
     try {
+      if (payload.trigger.kind === "webhook" && payload.trigger.enabled !== false) await webhookServer.start();
       return { success: true, trigger: await triggerStore.save(payload.trigger) };
     } catch (err: unknown) {
       return { success: false, error: errorMessage(err) };
@@ -281,6 +288,9 @@ export function registerAgentWorkflowIpc(
 
   ipcMain.handle("agent-workflow:set-trigger-enabled", async (_evt, payload: { triggerId: string; enabled: boolean }) => {
     try {
+      const trigger = await triggerStore.get(payload.triggerId);
+      if (!trigger) throw new Error(`Workflow trigger not found: ${payload.triggerId}.`);
+      if (payload.enabled && trigger.kind === "webhook") await webhookServer.start();
       return { success: true, trigger: await triggerStore.setEnabled(payload.triggerId, payload.enabled) };
     } catch (err: unknown) {
       return { success: false, error: errorMessage(err) };
