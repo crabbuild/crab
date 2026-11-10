@@ -279,7 +279,6 @@ export function FilesTab({ task, selectedFile, onSelectFile }: Props) {
                 cacheKey={`agent-${task.id}::${activeKey}`}
                 value={activeContent.content}
                 readOnly
-                repoRoot={task.worktreePath}
               />
             )}
           </div>

@@ -34,6 +34,9 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
     application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
     const page = await application.firstWindow();
+    // Electron owns the beforeunload decision. Playwright's automatic dialog
+    // dismissal races that native handler and obscures the actual test result.
+    page.on("dialog", dialog => { if (dialog.type() !== "beforeunload") void dialog.dismiss(); });
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
     await page.exposeFunction("recordSelectedOwner", (event: typeof events[number]) => events.push(event));
@@ -141,6 +144,7 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
       if (pending) await application.evaluate(() => (globalThis as typeof globalThis & { selectedSave?: { release: () => void } }).selectedSave?.release()).catch(() => {});
       const page = application.windows()[0];
       if (page) writeFileSync(test.info().outputPath("renderer-final-state.txt"), await page.locator("body").innerText().catch(() => "Renderer closed"));
+      await application.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; }).catch(() => {});
       await application.close();
     }
     writeFileSync(test.info().outputPath("application-stderr.log"), stderr);

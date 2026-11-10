@@ -247,7 +247,7 @@ export class LocalProvider extends BaseProvider {
     const dir = path.dirname(fullPath);
     await fs.promises.mkdir(dir, { recursive: true });
     await fs.promises.writeFile(fullPath, content, "utf8");
-    return { path: fullPath, written: content.length };
+    return { path: fullPath, written: Buffer.byteLength(content, "utf8") };
   }
 
   async fsRead(

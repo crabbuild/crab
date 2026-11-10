@@ -89,6 +89,27 @@ describe("RemoteProvider polling fallback", () => {
     vi.useRealTimers();
   });
 
+  it("writes through the admitted repository session with a relative path and UTF-8 acknowledgement", async () => {
+    mockRouter.route.mockResolvedValue({ written: true, size: Buffer.byteLength("🦀 café", "utf8") });
+    const result = await provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "🦀 café");
+    expect(mockRouter.route).toHaveBeenCalledWith(REPO_ID, "write_text", {
+      repo_id: REPO_ID, path: "note.txt", content: "🦀 café", native_session_id: "ssh:1",
+    });
+    expect(result).toEqual({ path: "/home/user/project/note.txt", written: 10 });
+  });
+
+  it("rejects writes outside the repository before dispatch", async () => {
+    await expect(provider.fsWrite(REPO_ID, "/home/user/project-other/note.txt", "text")).rejects.toThrow("inside the selected repository");
+    expect(mockRouter.route).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a successful file change for a partial remote acknowledgement", async () => {
+    const changed = vi.fn(); provider.on("fs/changed", changed);
+    mockRouter.route.mockResolvedValue({ written: true, size: 1 });
+    await expect(provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "text")).rejects.toThrow("complete buffer");
+    expect(changed).not.toHaveBeenCalled();
+  });
+
   it("starts polling when agent does not support fileWatching", async () => {
     await provider.watchStart(REPO_ID);
 

@@ -100,6 +100,16 @@ let agent: Agent | null = null;
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
 let isShuttingDown = false;
+let quitRequested = false;
+// Resolve the renderer's unsaved-buffer decision before tearing down native,
+// terminal or SSH owners; cancelling Quit must leave the app fully usable.
+app.on("before-quit", event => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  event.preventDefault();
+  if (quitRequested) return;
+  quitRequested = true;
+  mainWindow.close();
+});
 
 // Workspace state (managed by IPC handlers)
 let workspaceRootPath: string | null = null;
@@ -238,7 +248,22 @@ async function createWindow() {
     },
   });
 
-  const owner = mainWindow.webContents;
+  const window = mainWindow;
+  const owner = window.webContents;
+  window.on("close", () => { if (!owner.isDestroyed()) owner.send("crab:term-save-request"); });
+  owner.on("will-prevent-unload", event => {
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "warning", buttons: ["Keep editing", "Discard edits"], defaultId: 0, cancelId: 0,
+      message: "Some file edits have not been saved.",
+      detail: "Keep editing to retry saving. Discarding will lose the pending edits.",
+    });
+    if (choice === 1) event.preventDefault();
+    else quitRequested = false;
+  });
+  window.once("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+    if (quitRequested) app.quit();
+  });
   const ownerId = owner.id;
   const closeMedia = () => { void media?.closeOwner(ownerId).catch(error => console.error("Media cleanup failed", error)); };
   owner.on("did-start-navigation", (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) closeMedia(); });
@@ -1913,7 +1938,7 @@ app.whenReady().then(async () => {
   app.on("browser-window-created", (_event, window) => {
     window.once("closed", () => { if (!mainWindow || mainWindow === window) knownHosts.cancelPending(); });
   });
-  app.on("before-quit", () => knownHosts.cancelPending());
+  app.on("before-quit", () => { if (!mainWindow) knownHosts.cancelPending(); });
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
@@ -2316,6 +2341,7 @@ app.whenReady().then(async () => {
   }
 
   app.on("before-quit", () => {
+    if (mainWindow) return;
     termRouter.dispose();
     daemonSubsystem?.dispose();
   });
@@ -2424,14 +2450,6 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
-});
-
-// Save terminal state before the app quits. The renderer sends its
-// layout via IPC when it receives the "before-quit" signal.
-app.on("before-quit", () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("crab:term-save-request");
-  }
 });
 
 app.on("will-quit", (e) => {

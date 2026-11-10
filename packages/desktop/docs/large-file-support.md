@@ -29,8 +29,9 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. Active local text/Markdown buffers retain unacknowledged edits during repair. Remaining: tab/remote buffer ownership, other UI state recovery, live removal during admitted opening and real multi-hop cancellation. |
-| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Remaining: repository-switch repeatability under suite load, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening and real multi-hop cancellation. |
+| P0 | Physical write integrity | One native write owner handles temporary publication and existing file modes. | `write_text` and `write_bytes` currently use `with_extension("crab-tmp")`; different extensions with the same stem can target the same temporary path. Qualify competing saves and preserve executable modes before claiming general remote mutation parity. |
+| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
 
@@ -42,13 +43,13 @@ materialization smoke does not imply mutation parity or durable recovery.
 
 ### Next bounded slices
 
-1. Finish recovery parity before extending transfer features. Preserve pending
-   edits across tab disposal/reopening and remote editors; recapture notebook
-   documents and restore kernel/query and media state deliberately. Selected
-   comparisons and active local text/Markdown buffers have same-ID repair proof.
-   Consolidate the two local save loops and the remote pending-save store into
-   one acknowledged buffer owner that survives tab unmount; use the existing
-   provider for physical writes. Dashboard, Datasets,
+1. Finish recovery parity before extending transfer features. The shared working
+   buffer now preserves pending text/Markdown through tab disposal/reopening,
+   repository switching and SSH reconnect. It replaces both local save loops
+   and the remote save hook, and writes through the existing provider. Next,
+   recapture notebook documents and deliberately restore kernel/query and media
+   state. Qualify auxiliary worktree/cross-repository comparison recovery and
+   snapshot model isolation through their actual UI entry points. Dashboard, Datasets,
    cached metrics and shared hydration inventories have local same-ID native
    repair proof; qualify storage rebind and SSH reconnect. Device metadata before
    construction is now qualified below. Storage replacement/cold bindings, SDK
@@ -56,7 +57,9 @@ materialization smoke does not imply mutation parity or durable recovery.
    broaden provider/profile coverage. Prove removal during an admitted opening
    against held real storage, and cancellation through actual jump hosts. Keep
    refreshes at their existing owner; add no component retry queue.
-2. Complete one real repository round trip for each Crab/LFS profile: physical
+2. First close native write publication/mode integrity: competing files must not
+   share a temporary path, and replacement must preserve executable modes. Then
+   complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
    lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
    working provider path; unsupported native filesystem RPCs must not masquerade
@@ -80,6 +83,56 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Acknowledged working-buffer checkpoint
+
+Text and Markdown now share one physical working-buffer owner. The editor view
+may unmount; pending text, dirty state, save error and the admitted writer remain
+owned by the repository/file identity. Returning to a tab or reopening it does
+not replace pending text with a disk read. An older save acknowledges only its
+own content; newer edits drain through the same serialized writer. Clean blur
+is a no-op. Read tickets reject obsolete replies after editing, new reads,
+native replacement or an earlier buffer lifetime.
+
+The existing repository-runtime event stream updates retained buffers even when
+no editor is mounted. SSH disconnect retains pending text and shows a waiting
+status; a newly admitted native session retries it through the repository
+provider. Repeated announcements of the same owner do not create retries.
+Failures retain the buffer and expose Retry saving. Markdown Preview renders
+that same retained text. Read-only revisions and orchestrator snapshots use
+isolated Monaco models instead of overwriting a physical working-file model.
+
+Repository-scoped remote writes now call the existing native `write_text` with
+its required repository ID, relative file path and native session. The provider
+rejects paths outside the selected repository and incomplete acknowledgements.
+Both local and SSH acknowledgements report UTF-8 bytes. This qualifies isolated
+Files editor saves. Native temporary-file collision and mode preservation,
+remote create/rename/delete and the standalone file editor still need a
+canonical working path and actual UI proof.
+
+Closing/reloading the application asks before losing unacknowledged edits. Quit
+first resolves that decision, then tears down terminal/SSH/native owners. Keep
+editing leaves services running so Retry saving remains usable. Buffers are
+memory-owned; crash recovery and durable transfer journals remain separate open
+work. No disk draft store or additional retry queue is introduced.
+
+Focused proof passes 118 cases across six buffer/provider/native/router/diff
+suites. Three packaged macOS arm64 cases use actual Git repositories and verify
+unchanged unrelated index bytes. Text and Markdown encounter real provider
+write failures, survive tab switching/close/reopen and repository switching,
+cancel Quit with native ping still working, then persist exact bytes through
+Retry saving. A real SSH/native fixture saves multibyte text, hits a filesystem
+permission failure, retains pending Markdown across tab closure and connection
+loss, then automatically writes the latest text after reconnect. Native wire
+requests carry the correct repository and relative path. Eleven source/diff/media
+regressions also pass on this package. The fourteen distinct scenarios pass
+across the final targeted runs; the broader run had two repository-switch
+timeouts before both traced repetitions passed without renderer errors or
+unexpected native prompts. Their cause remains unproven, so suite-load
+repeatability in CI stays a release gate. Project/spec types, Rust format,
+renderer/Electron builds and unsigned packaging pass; all 905 assets and the
+unchanged qualified native pair match. These checks qualify the bounded buffer
+behaviors; the complete acceptance matrix remains open.
 
 ## Storage identity checkpoint
 
@@ -110,8 +163,9 @@ serialize writes and acknowledge only the content actually persisted. Failures
 retain pending content and offer Retry saving. A clean editor's blur is a no-op,
 so clicking repository Retry cannot submit an old unedited buffer. Generic
 workspace configuration writes retain their separate unscoped IPC use case.
-The remote save hook rejects older acknowledgements and records active writes;
-this is not complete remote write ordering or tab-buffer ownership.
+At this earlier checkpoint, the remote save hook only rejected older
+acknowledgements and recorded active writes. The shared buffer checkpoint above
+replaces it and qualifies tab ownership and the repository-scoped SSH writer.
 
 The packaged fixture keeps the logical repository ID, removes its real Git
 directory, kills its owned native process, changes content, restores Git and
@@ -134,11 +188,11 @@ actual Crab chunk/LFS comparison, notebook comparison and native file/media
 recovery. All 1,680 Rust/Cargo inputs and native hashes match the qualified native
 producer. No dependency, lockfile, snapshot or inventory updates are needed.
 
-Remote editable buffers, switching/closing tabs, notebook document/kernel/query
-state, media playback position, storage-rebind/SSH UI qualification, plain Git
-patch cancellation and the complete acceptance matrix remain open. The next
-buffer consolidation must replace existing save owners, not add a retry queue
-beside them.
+At this earlier checkpoint, remote editable buffers and switching/closing tabs
+were still open; the shared buffer checkpoint above now qualifies those bounded
+cases. Notebook document/kernel/query state, media playback position,
+storage-rebind/SSH selected-source UI qualification, plain Git patch cancellation
+and the complete acceptance matrix remain open.
 
 ### Dashboard and dataset metadata recovery
 

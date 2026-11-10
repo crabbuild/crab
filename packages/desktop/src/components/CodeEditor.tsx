@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import * as monaco from "monaco-editor";
 import { languageForPath } from "../lib/language";
 import { useSettings } from "../settings";
@@ -91,15 +91,17 @@ export function CodeEditor({ path, cacheKey, value, readOnly = true, line, onCha
 
   // The cache key scopes models per-worktree to prevent edits leaking
   // between worktrees that share the same relative file path.
-  const modelKey = cacheKey ?? path;
+  const instanceId = useId();
+  const modelKey = cacheKey ?? `${instanceId}:${path}`;
 
   // The Monaco model URI must be an absolute file:// path matching what
   // we send to the LSP server — otherwise diagnostics can't be attached
   // to the correct model. When repoRoot is available we use the real
-  // absolute path; otherwise we fall back to a synthetic file:// URI.
+  // absolute path. Snapshots use isolated URIs so viewing history cannot
+  // replace a pending working model or publish snapshot text to its LSP.
   const modelUri = repoRoot
     ? monaco.Uri.file(`${repoRoot}/${path}`)
-    : monaco.Uri.parse(`file:///${path}`);
+    : monaco.Uri.from({ scheme: "crab-buffer", path: `/${encodeURIComponent(modelKey)}` });
   const fileUri = modelUri.toString();
 
   // Keep refs in sync so the editor callbacks always see the latest.
@@ -197,6 +199,12 @@ export function CodeEditor({ path, cacheKey, value, readOnly = true, line, onCha
     }
     suppressChangeRef.current = false;
   }, [path, value, modelKey]);
+
+  useEffect(() => () => {
+    if (cacheKey) return;
+    MODEL_CACHE.get(modelKey)?.dispose();
+    MODEL_CACHE.delete(modelKey);
+  }, [modelKey, cacheKey]);
 
   // Jump to line.
   useEffect(() => {
@@ -381,9 +389,7 @@ function getOrCreateModel(
     if (existing.getLanguageId() !== language) {
       monaco.editor.setModelLanguage(existing, language);
     }
-    // Always sync model content with the provided value (disk content).
-    // The auto-save ensures edits are written to disk promptly, so
-    // the value passed here reflects the latest persisted state.
+    // Working editors supply the retained buffer; snapshots have separate URIs.
     if (existing.getValue() !== content) {
       existing.setValue(content);
     }

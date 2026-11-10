@@ -1,3 +1,4 @@
+import { fileBuffers } from "./lib/file-buffer-store";
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import { parseRepoId } from "../electron/ssh-types";
@@ -689,6 +690,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: "job-lines-batch", lines: batch });
     };
 
+    const protectPendingEdits = (event: BeforeUnloadEvent) => {
+      if (!fileBuffers.pendingCount()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protectPendingEdits);
     const off = onAgentEvent((evt) => {
       if (evt.method === "progress/line") {
         lineBuf.push(evt.params as ProgressLine);
@@ -705,10 +712,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "job-transfer", transfer: evt.params as ProgressTransfer });
       } else if (evt.method === "repo:capabilities-changed") {
         const p = evt.params as { repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string };
+        fileBuffers.runtime(p.repo_id, p.capabilities.canEdit, p.native_session_id);
         dispatch({ type: "repo-runtime-changed", ...p });
       }
     });
     return () => {
+      window.removeEventListener("beforeunload", protectPendingEdits);
       off();
       if (flushTimer) clearTimeout(flushTimer);
       // Flush remaining lines on unmount.

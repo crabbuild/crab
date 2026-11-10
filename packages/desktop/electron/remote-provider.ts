@@ -18,6 +18,7 @@
  * - Stops watching on connection loss, restarts on reconnection
  */
 
+import { posix } from "node:path";
 import {
   BaseProvider,
   type FsCreateResult,
@@ -246,13 +247,24 @@ export class RemoteProvider extends BaseProvider {
   async fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult> {
     const parsed = this.assertRemoteAndConnected(repoId);
 
-    const result = await this.fileEditor.writeFile(parsed.profileId, path, content);
+    const relativePath = posix.relative(parsed.remotePath, path);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
+      throw new Error("The file must be inside the selected repository.");
+    }
+    // Native writes require repository context and belong to the currently
+    // admitted session. Path-only file-editor RPCs cannot satisfy that contract.
+    const result = await this.request("write_text", {
+      repo_id: repoId, path: relativePath, content, native_session_id: this.nativeSession(repoId),
+    }) as { written: boolean; size: number };
+    if (result.written !== true || result.size !== Buffer.byteLength(content, "utf8")) {
+      throw new Error("The remote file save did not write the complete buffer.");
+    }
 
     // Cache the write for stale fallback
     this.readCache.set(`${repoId}:${path}`, { content, timestamp: Date.now() });
 
     this.emit("fs/changed", { type: "fs/changed" as const, repoPath: repoId });
-    return { path, written: result.success ? content.length : 0 };
+    return { path, written: result.size };
   }
 
   async fsRead(repoId: string, path: string): Promise<FsReadResult> {
