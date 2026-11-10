@@ -8,6 +8,8 @@ vi.mock("../electron/orchestrator-adapters", async importOriginal => ({
 vi.mock("../electron/orchestrator-settings", () => ({ loadAgentConfig: () => ({ binaryPath: "/fixture/agent", extraArgs: ["--fixture"], env: { MODEL_FIXTURE: "value" } }) }));
 import { AgentAdapter, createAdapter, type AgentModel } from "../electron/orchestrator-adapters";
 import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
+import type { Orchestrator, Task } from "../electron/orchestrator";
+import type { RpcRouter } from "../electron/ssh-router";
 
 class ModelAdapter extends AgentAdapter {
   readonly name = "Fixture";
@@ -27,8 +29,9 @@ describe("renderer-owned model discovery IPC", () => {
   let adapter: ModelAdapter;
   let owner: Owner;
   let shutdown: () => Promise<void>;
+  let orchestrator: Pick<Orchestrator, "getTask" | "getRpcRouter" | "agentProcessFactory">;
   const models: AgentModel[] = [{ value: "native-model", label: "Native model", intelligenceLevels: [] }];
-  const list = (requestId = "request", sender = owner, cwd = "/fixture") => handlers.get("orchestrator:list-models")!({ sender }, { requestId, agentType: "claude-code", cwd });
+  const list = (requestId = "request", sender = owner, cwd = "/fixture", taskId?: string) => handlers.get("orchestrator:list-models")!({ sender }, { requestId, agentType: "claude-code", cwd, taskId });
   const cancel = (requestId = "request", sender = owner) => handlers.get("orchestrator:cancel-model-discovery")!({ sender }, requestId);
 
   beforeEach(() => {
@@ -37,7 +40,8 @@ describe("renderer-owned model discovery IPC", () => {
     owner = Object.assign(new EventEmitter(), { id: 1 });
     vi.mocked(createAdapter).mockReturnValue(adapter);
     handlers = new Map();
-    shutdown = registerModelDiscoveryIpc({ handle: (name: string, handler: unknown) => { handlers.set(name, handler as Handler); } } as unknown as IpcMain);
+    orchestrator = { getTask: vi.fn(), getRpcRouter: vi.fn(), agentProcessFactory: vi.fn() };
+    shutdown = registerModelDiscoveryIpc({ handle: (name: string, handler: unknown) => { handlers.set(name, handler as Handler); } } as unknown as IpcMain, orchestrator);
   });
 
   it("uses configured launch settings and retires the process/listener after returning models", async () => {
@@ -88,8 +92,53 @@ describe("renderer-owned model discovery IPC", () => {
     expect(await original).toEqual({ success: true, models });
   });
 
-  it("rejects remote discovery before launching a local provider", async () => {
-    expect(await list("remote", owner, "ssh://profile/repo")).toEqual({ success: false, error: "Model discovery requires a local repository" });
+  it("rejects disconnected remote discovery before launching a local provider", async () => {
+    expect(await list("remote", owner, "ssh://profile/repo")).toEqual({ success: false, error: "Remote model discovery requires a connected remote agent" });
+    expect(createAdapter).not.toHaveBeenCalled();
+  });
+
+  it("uses the selected SSH profile without copying client launch settings", async () => {
+    const channel = new EventEmitter();
+    const router = { remoteChannelOwner: vi.fn(() => channel) } as unknown as RpcRouter;
+    vi.mocked(orchestrator.getRpcRouter).mockReturnValue(router);
+    const request = list("remote", owner, "ssh://profile/repo 雪");
+    adapter.resolve?.(models);
+    expect({ result: await request, factory: vi.mocked(createAdapter).mock.calls[0], context: adapter.listModels.mock.calls[0] }).toEqual({
+      result: { success: true, models }, factory: ["claude-code", undefined, undefined, undefined, { processFactory: expect.any(Function) }], context: ["/repo 雪", undefined],
+    });
+    expect(router.remoteChannelOwner).toHaveBeenCalledWith("profile");
+  });
+
+  it("resolves an existing task's path and process owner from saved state", async () => {
+    const task = { id: "saved", isRemote: true, remoteProfileId: "profile", worktreePath: "/server/task" } as Task;
+    const processFactory = vi.fn();
+    vi.mocked(orchestrator.getTask).mockReturnValue(task);
+    vi.mocked(orchestrator.agentProcessFactory).mockReturnValue(processFactory);
+    const request = list("remote-task", owner, "/client/stale", task.id);
+    adapter.resolve?.(models);
+    expect({ result: await request, factory: vi.mocked(createAdapter).mock.calls[0], context: adapter.listModels.mock.calls[0] }).toEqual({
+      result: { success: true, models }, factory: ["claude-code", undefined, undefined, undefined, { processFactory }], context: ["/server/task", undefined],
+    });
+    expect(orchestrator.agentProcessFactory).toHaveBeenCalledWith(task);
+  });
+
+  it("does not probe a local path when the saved task is missing", async () => {
+    expect(await list("missing", owner, "/client/stale", "missing")).toEqual({ success: false, error: "Task not found: missing" });
+    expect(createAdapter).not.toHaveBeenCalled();
+  });
+
+  it("keeps configured local discovery on the saved local task path", async () => {
+    vi.mocked(orchestrator.getTask).mockReturnValue({ id: "saved", worktreePath: "/local/task" } as Task);
+    const request = list("local-task", owner, "ssh://stale/repo", "saved");
+    adapter.resolve?.(models);
+    expect({ result: await request, binary: vi.mocked(createAdapter).mock.calls[0][1], context: adapter.listModels.mock.calls[0] }).toEqual({
+      result: { success: true, models }, binary: "/fixture/agent", context: ["/local/task", { MODEL_FIXTURE: "value" }],
+    });
+    expect(orchestrator.getRpcRouter).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported remote providers before reading client launch settings", async () => {
+    expect(await handlers.get("orchestrator:list-models")!({ sender: owner }, { agentType: "custom", requestId: "custom", cwd: "ssh://profile/repo" })).toEqual({ success: false, error: "Remote model discovery requires Codex or Claude Code" });
     expect(createAdapter).not.toHaveBeenCalled();
   });
 

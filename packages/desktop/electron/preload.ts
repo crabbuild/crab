@@ -1014,7 +1014,7 @@ contextBridge.exposeInMainWorld("crab", {
       }),
     cancelTask: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:cancel-task", { taskId }),
-    listModels: (agentType: string, cwd: string, requestId: string) => ipcRenderer.invoke("orchestrator:list-models", { agentType, cwd, requestId }),
+    listModels: (agentType: string, cwd: string, requestId: string, taskId?: string) => ipcRenderer.invoke("orchestrator:list-models", { agentType, cwd, requestId, taskId }),
     cancelModelDiscovery: (requestId: string) => ipcRenderer.invoke("orchestrator:cancel-model-discovery", requestId),
     iterate: (taskId: string, feedback: string, options?: import("./orchestrator-adapters").AgentTurnOptions, messageId?: string) =>
       ipcRenderer.invoke("orchestrator:iterate", { taskId, feedback, options, messageId }),

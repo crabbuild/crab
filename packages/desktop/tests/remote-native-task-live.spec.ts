@@ -4,13 +4,16 @@ import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import type { IpcMain } from "electron";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
 import { Orchestrator, type Task } from "../electron/orchestrator";
 import { ChatDatabase } from "../electron/orchestrator-chat-db";
 import { registerChatIpc } from "../electron/orchestrator-chat";
-import { getExpandedEnv, type AgentEvent } from "../electron/orchestrator-adapters";
+import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
+import { getExpandedEnv, type AgentEvent, type AgentModel } from "../electron/orchestrator-adapters";
 import { terminalSshServer } from "./fixtures/ssh-terminal-server";
 
 const liveRoot = process.env.CRAB_AGENT_LIVE_ROOT;
@@ -18,7 +21,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -48,6 +51,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     let orchestrator = new Orchestrator({ persistPath, rpcRouter: router, timeoutMs: 120_000 });
     const db = new ChatDatabase(path.join(root, "chat.sqlite"));
     const events: AgentEvent[] = [];
+    const catalogs: Record<string, { repository: number; workspace: number }> = {};
     let task: Task | undefined;
     const wire = () => orchestrator.on("orchestrator:event", ({ taskId, event }: { taskId: string; event: AgentEvent }) => {
       events.push(event);
@@ -97,6 +101,28 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
           await expect(checkpoints.createCheckpoint(task, 2)).rejects.toThrow();
           expect((await checkpoints.listCheckpoints(task)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
         } finally { await rm(lock); }
+      } else if (mode === "catalogs") {
+        type Handler = Parameters<IpcMain["handle"]>[1];
+        const handlers = new Map<string, Handler>();
+        const stop = registerModelDiscoveryIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, orchestrator);
+        const sender = Object.assign(new EventEmitter(), { id: 1 });
+        const discover = (agentType: string, cwd: string, taskId?: string) => handlers.get("orchestrator:list-models")!(
+          { sender } as Parameters<Handler>[0], { agentType, cwd, taskId, requestId: crypto.randomUUID() },
+        ) as Promise<{ success: boolean; models?: AgentModel[]; error?: string }>;
+        try {
+          for (const provider of ["codex", "claude-code"]) {
+            const repository = await discover(provider, repoId);
+            // A caller's stale raw path must not override saved SSH ownership.
+            const workspace = await discover(provider, "/client-only/stale-path", task.id);
+            expect([repository, workspace]).toEqual([{ success: true, models: expect.any(Array) }, { success: true, models: expect.any(Array) }]);
+            catalogs[provider] = { repository: repository.models!.length, workspace: workspace.models!.length };
+            expect(Object.values(catalogs[provider]).every(count => count > 0)).toBe(true);
+          }
+          const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
+          const contexts = opens.map(params => ({ cwd: (params as { cwd: string }).cwd, taskId: (params as { task_id?: string }).task_id }));
+          expect(contexts.slice(-4)).toEqual([repo, task.worktreePath, repo, task.worktreePath].map(cwd => ({ cwd, taskId: cwd === repo ? undefined : task!.id })));
+          expect(events).toEqual([]);
+        } finally { await stop(); }
       } else {
         wire();
         type Handler = Parameters<Parameters<typeof registerChatIpc>[0]["handle"]>[1];
@@ -131,7 +157,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       channel.end(); timer = setTimeout(() => channel.destroy(), 15_000);
       try { await closed; } finally {
         clearTimeout(timer); db.close(); router.detachChannel("fixture"); client.end(); await server.close(); requests.mockRestore(); vi.unstubAllEnvs();
-        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, events, diagnostics }, null, 2));
+        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, events, diagnostics }, null, 2));
         if (succeeded) await rm(root, { recursive: true, force: true });
       }
     }

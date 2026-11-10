@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentModel } from "../../../electron/orchestrator-adapters";
 
 /** Load the catalog from the configured provider in this repository's context. */
-export function useAgentModels(agentType: string | undefined, cwd: string | null | undefined) {
+export function useAgentModels(agentType: string | undefined, cwd: string | null | undefined, taskId?: string) {
   const [catalog, setCatalog] = useState<{ key: string; models: AgentModel[]; status: string | null; loading: boolean }>({ key: "", models: [], status: null, loading: false });
   const [revision, setRevision] = useState(0);
   const active = useRef<{ key: string; id: string } | null>(null);
-  const key = `${agentType ?? ""}\0${cwd ?? ""}`;
+  const key = JSON.stringify([agentType, cwd, taskId]);
   const cancel = useCallback(() => {
     const request = active.current;
     if (!request || request.key !== key) return;
@@ -20,7 +20,7 @@ export function useAgentModels(agentType: string | undefined, cwd: string | null
     const id = crypto.randomUUID();
     active.current = { key, id };
     setCatalog({ key, models: [], status: "Loading models…", loading: true });
-    window.crab.orchestrator.listModels(agentType, cwd, id).then(result => {
+    window.crab.orchestrator.listModels(agentType, cwd, id, taskId).then(result => {
       if (active.current?.id !== id) return;
       active.current = null;
       setCatalog({ key, models: result.success ? result.models ?? [] : [], status: result.success ? null : `Could not load models: ${result.error ?? "provider unavailable"}`, loading: false });
@@ -34,7 +34,7 @@ export function useAgentModels(agentType: string | undefined, cwd: string | null
       active.current = null;
       void window.crab.orchestrator.cancelModelDiscovery(id).catch(() => {});
     };
-  }, [agentType, cwd, key, revision]);
+  }, [agentType, cwd, taskId, key, revision]);
   const current = catalog.key === key ? catalog : { models: [], status: null, loading: false };
   return { models: current.models, status: current.status, loading: current.loading, cancel, retry };
 }

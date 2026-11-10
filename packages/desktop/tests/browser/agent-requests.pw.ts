@@ -51,7 +51,7 @@ test("restores an archived workspace without retrying inference and refreshes it
   await page.goto("/tests/fixtures/agent-workspace.html");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.workspaceFixture.calls)).toEqual(["list", "restore", "list"]);
-  await expect.poll(() => page.evaluate(() => window.workspaceFixture.modelPaths)).toContain("/fixture/restored");
+  await expect.poll(() => page.evaluate(() => window.workspaceFixture.modelRequests)).toContainEqual({ cwd: "/fixture/restored", taskId: "workspace-task" });
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
 });
 

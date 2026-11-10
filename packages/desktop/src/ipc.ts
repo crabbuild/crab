@@ -1359,7 +1359,7 @@ declare global {
         onEvent: (listener: (payload: { taskId: string; event: import("../electron/orchestrator-adapters").AgentEvent }) => void) => () => void;
         onChatUpdate: (listener: (update: import("../electron/agent-chat-messages").ChatUpdate) => void) => () => void;
         onError: (listener: (payload: { taskId: string | null; message: string }) => void) => () => void;
-        listModels: (agentType: string, cwd: string, requestId: string) => Promise<{ success: boolean; models?: import("../electron/orchestrator-adapters").AgentModel[]; error?: string }>;
+        listModels: (agentType: string, cwd: string, requestId: string, taskId?: string) => Promise<{ success: boolean; models?: import("../electron/orchestrator-adapters").AgentModel[]; error?: string }>;
         cancelModelDiscovery: (requestId: string) => Promise<void>;
         iterate: (taskId: string, feedback: string, options?: import("../electron/orchestrator-adapters").AgentTurnOptions, messageId?: string) => Promise<{ success: boolean; uncertain?: boolean; unsent?: boolean; error?: string }>;
         respondInput: (taskId: string, requestId: string, response: import("../electron/orchestrator-adapters").AgentInputResponse) => Promise<{ success: boolean; error?: string }>;

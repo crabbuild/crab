@@ -32,6 +32,7 @@ import { loadAgentConfig, migrateSettings } from "./orchestrator-settings";
 import { buildAgentModelFlags } from "./orchestrator-steering";
 import { CheckpointManager } from "./orchestrator-checkpoints";
 import { remoteAgentProcessFactory } from "./ssh-native-process";
+import type { AgentProcessFactory } from "./agent-process";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
 import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
@@ -579,13 +580,20 @@ export class Orchestrator extends EventEmitter {
     return this.rpcRouter;
   }
 
+  /** Captures the task's host and disposable workspace owner for native I/O. */
+  agentProcessFactory(task: Task): AgentProcessFactory | undefined {
+    if (!task.isRemote) return undefined;
+    if (!this.rpcRouter || !task.remoteProfileId) throw new Error("Native process requires a connected remote agent");
+    return remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId, this.ownedWorkspaceTask(task)?.id);
+  }
+
   /** Binds checkpoint I/O to the saved workspace and current SSH channel. */
   checkpointManager(task: Task): CheckpointManager {
     if (!task.isRemote) return this.checkpoints;
     if (!this.rpcRouter || !task.remoteProfileId) throw new Error("Remote checkpoints require a connected remote agent");
     // Capture both factories once: reconnect cannot splice one snapshot across
     // channels, and repository refs remain accessible after worktree removal.
-    const workspace = remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId, this.ownedWorkspaceTask(task)?.id);
+    const workspace = this.agentProcessFactory(task)!;
     const repository = remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId);
     return new CheckpointManager((saved, cwd) => cwd === saved.worktreePath ? workspace : repository);
   }
@@ -747,8 +755,7 @@ export class Orchestrator extends EventEmitter {
     // from settings so users can configure each agent independently.
     if (task.isRemote && !["codex", "claude-code"].includes(task.agentType)) throw new Error("Remote conversations require Codex or Claude Code");
     const agentConfig: ReturnType<typeof loadAgentConfig> = task.isRemote ? {} : loadAgentConfig(task.agentType);
-    const processFactory = task.isRemote
-      ? remoteAgentProcessFactory(this.rpcRouter!, task.remoteProfileId!, this.ownedWorkspaceTask(task)?.id) : undefined;
+    const processFactory = this.agentProcessFactory(task);
     // Requested settings belong to this startup until native acknowledgement.
     // A shallow view also supplies custom agents' model flags without changing
     // the saved task when startup rejects a later control.

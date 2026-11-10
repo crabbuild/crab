@@ -34,9 +34,9 @@ const budgets = new Set<(payload: Budget) => void>();
 const switches = new Set<(payload: Switch) => void>();
 const task = { id: "workspace-task", title: "Workspace fixture", agentType: "claude-code", status: "archived", createdAt: 1, prompt: "Saved prompt", worktreePath: "/fixture/old" };
 const calls: string[] = [];
-const modelPaths: string[] = [];
+const modelRequests: Array<{ cwd: string; taskId?: string }> = [];
 const fixture = {
-  calls, modelPaths,
+  calls, modelRequests,
   failArchive: false,
   failDiscard: false,
   status: (status: Status["status"]) => { task.status = status; statuses.forEach(listener => listener({ taskId: task.id, status })); },
@@ -61,7 +61,7 @@ Object.defineProperty(window, "crab", { value: {
     onTaskStatus: (listener: (payload: Status) => void) => subscribe(statuses, listener),
     onBudgetWarning: (listener: (payload: Budget) => void) => subscribe(budgets, listener),
     onNonconcurrentStop: (listener: (payload: Switch) => void) => subscribe(switches, listener),
-    listModels: async (_agent: string, cwd: string) => { modelPaths.push(cwd); return { success: true, models: [] }; },
+    listModels: async (_agent: string, cwd: string, _requestId: string, taskId?: string) => { modelRequests.push({ cwd, taskId }); return { success: true, models: [] }; },
     cancelModelDiscovery: async () => {},
     listCheckpoints: async () => ({ success: true, checkpoints: [], backups: [] }),
     onCheckpointCreated: idle,

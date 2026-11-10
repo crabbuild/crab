@@ -1434,6 +1434,27 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   and ARM64 CI retains diagnostics and built assets even after qualification
   failure. No timeout was increased and no failing check was bypassed.
 
+- Model discovery now resolves saved task ownership before reading client
+  configuration. New SSH chats use their qualified profile/repository handle;
+  existing conversations supply the saved task ID, so a raw server path cannot
+  start a local provider. Discovery shares chat/checkpoint process factories,
+  including disposable workspace UUIDs and channel replacement fences. Remote
+  catalogs inherit only server settings. Renderer cancellation, late-result
+  fencing and app-quit closure remain shared across hosts.
+  Four regressions fail before the fix. All 407 scoped checks pass, with 14 final
+  discovery checks covering local task context, unsupported providers and
+  request ownership. Seven browser cases pass, including the restored workspace's
+  task ID reaching discovery. Real SSH IPC returns Codex's eight and Claude's five
+  models in both repository and saved task contexts, with deliberately invalid
+  client launch settings excluded and no user turn emitted. Production and
+  touched native-fixture types, Electron/renderer builds, Rust formatting and
+  diff checks pass. Evidence: `remote-model-before.json`, `remote-model-broad.json`,
+  `remote-model-final.json`, `remote-model-browser.json`,
+  `remote-model-native-live.json` and `catalogs-remote-native-task.json` in the
+  owned output. Server PATH resolution and the remote agent-availability picker
+  remain separate release gates; these catalogs qualify the native IPC path on
+  macOS loopback with the existing server login.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1471,7 +1492,7 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   claiming accurate resumed accounting for pre-fix histories.
 - Qualify pending checkpoint-command cancellation through direct Stop, channel
   loss and backend death, including retained private-index recovery.
-- Complete remote-agent availability/catalogs, server PATH discovery, scripts,
+- Complete remote-agent availability, server PATH discovery, scripts,
   goals, file restore/Revert and historical comparisons. The main native task
   pipeline now has real SSH initial/follow-up/cold-resume and Apply/Discard proof.
   Remote comparison has compiled-sidecar, RPC and task-view proof over stdio;

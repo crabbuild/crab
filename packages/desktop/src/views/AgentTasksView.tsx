@@ -327,7 +327,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
   const transcriptTask = selectedTask && !selectedTask.pendingCreation ? selectedTask.id : undefined;
   const [messages, setMessages] = useAgentChat(transcriptTask);
   const closedConversation = selectedTask ? ["archived", "applied", "discarded"].includes(selectedTask.status) : false;
-  const modelCatalog = useAgentModels(closedConversation ? undefined : selectedTask?.agentName, selectedTask?.worktreePath);
+  const modelCatalog = useAgentModels(closedConversation || !transcriptTask ? undefined : selectedTask?.agentName, selectedTask?.worktreePath, transcriptTask);
   const selectedModel = selectedTask ? composerModel[selectedTask.id] ?? selectedTask.model : undefined;
   const availableModels = modelOptions(modelCatalog.models, selectedModel);
 

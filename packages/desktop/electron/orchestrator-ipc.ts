@@ -450,7 +450,7 @@ export function registerOrchestratorIpc(
     },
   );
 
-  const stopModelDiscovery = registerModelDiscoveryIpc(ipcMain);
+  const stopModelDiscovery = registerModelDiscoveryIpc(ipcMain, orchestrator);
 
   // Fire off a probe in the background so the first UI request hits a
   // warm cache. Any errors surface later through the regular handler.
