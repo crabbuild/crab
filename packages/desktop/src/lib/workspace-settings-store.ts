@@ -54,7 +54,7 @@ export interface WorkspaceDocumentState {
   error: string | null;
 }
 
-interface Target { repoId: string; fullPath: string; canEdit: boolean; owner?: string | null }
+interface Target { repoId: string; fullPath: string; canEdit: boolean; owner: string | null }
 interface Entry {
   target?: Target;
   state: WorkspaceDocumentState;
@@ -136,6 +136,6 @@ export class WorkspaceSettingsStore {
 }
 
 export const workspaceDocuments = new WorkspaceSettingsStore(
-  target => mainProcess.fsReadFile(target.repoId, target.fullPath, WORKSPACE_DOCUMENT_LIMIT),
-  async (target, content) => (await mainProcess.fsWriteFile(target.repoId, target.fullPath, content)).written,
+  target => mainProcess.fsReadFile(target.repoId, target.fullPath, WORKSPACE_DOCUMENT_LIMIT, target.owner),
+  async (target, content) => (await mainProcess.fsWriteFile(target.repoId, target.fullPath, content, target.owner)).written,
 );

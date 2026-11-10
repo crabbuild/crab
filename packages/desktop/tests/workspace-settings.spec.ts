@@ -12,7 +12,7 @@ describe("shared workspace document", () => {
     root = await fs.mkdtemp(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "workspace-settings-"));
     file = path.join(root, "settings.json");
     store = new WorkspaceSettingsStore(target => readTextFile(target.fullPath, 64 * 1024), (target, content) => writeTextAtomically(target.fullPath, content));
-    store.bind("workspace", { repoId: "workspace", fullPath: file, canEdit: true });
+    store.bind("workspace", { repoId: "workspace", fullPath: file, canEdit: true, owner: null });
   });
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
 
@@ -86,7 +86,7 @@ describe("shared workspace document", () => {
   it("read-only bindings reject mutation before any physical read or write", async () => {
     const read = vi.fn(), write = vi.fn();
     const readonly = new WorkspaceSettingsStore(read, write);
-    readonly.bind("snapshot", { repoId: "snapshot", fullPath: "/snapshot/settings.json", canEdit: false });
+    readonly.bind("snapshot", { repoId: "snapshot", fullPath: "/snapshot/settings.json", canEdit: false, owner: null });
     expect(await readonly.update("snapshot", document => { document.theme = "light"; })).toBe(false);
     expect(read).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
   });
@@ -99,8 +99,8 @@ describe("shared workspace document", () => {
       return readTextFile(target.fullPath, 64 * 1024);
     }, (target, content) => writeTextAtomically(target.fullPath, content));
     const heldFile = path.join(root, "held.json");
-    independent.bind("held", { repoId: "held", fullPath: heldFile, canEdit: true });
-    independent.bind("ready", { repoId: "ready", fullPath: file, canEdit: true });
+    independent.bind("held", { repoId: "held", fullPath: heldFile, canEdit: true, owner: null });
+    independent.bind("ready", { repoId: "ready", fullPath: file, canEdit: true, owner: null });
     const held = independent.update("held", document => { document.theme = "dark"; });
     try {
       expect(await independent.update("ready", document => { document.theme = "light"; })).toBe(true);

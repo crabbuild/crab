@@ -58,7 +58,7 @@ export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPa
     // us from re-fetching `.gitattributes` every time another piece
     // of repo state ticks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.repo_id, repo.path, repo.is_remote, enabled]);
+  }, [repo.repo_id, repo.path, repo.is_remote, repo.native_session_id, enabled]);
 
   useEffect(() => {
     refresh();
@@ -72,7 +72,7 @@ export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPa
 async function readRepoFile(repo: OpenRepo, relPath: string): Promise<string | null> {
   const root = repositoryWorktree(repo);
   if (root) {
-    const res = await mainProcess.fsReadFile(repo.repo_id, `${root.replace(/[\\/]$/, "")}/${relPath}`, 256 * 1024);
+    const res = await mainProcess.fsReadFile(repo.repo_id, `${root.replace(/[\\/]$/, "")}/${relPath}`, 256 * 1024, repo.native_session_id);
     return res.exists ? res.content : null;
   }
   const result = await rpc.readText(repo.repo_id, relPath, { max_bytes: 256 * 1024 });

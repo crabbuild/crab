@@ -25,10 +25,11 @@ function fixture(timeout?: number, storage: Pick<StorageConnections, "request" |
   const channels = new Map<string, Channel>();
   const statuses = new Map<string, string>();
   const work = new Map<string, Promise<unknown>>();
+  let nativeSession = "current";
   const manager = { repositoryWork: (repoId: string) => work.get(repoId),
     getStatus: (id: string) => statuses.get(id) ?? "connected",
     getConnection: (id: string) => ({ channels: { agent: channels.get(id)?.asChannel() } }),
-    repositoryRuntime: (_id: string, repoId: string) => ({ repoId, sessionId: "current" }),
+    repositoryRuntime: (_id: string, repoId: string) => ({ repoId, sessionId: nativeSession }),
   };
   const router = new RpcRouter(manager as unknown as SshSessionManager, { request: async () => ({}) }, storage, { requestTimeoutMs: timeout });
   const attach = (profile: string) => {
@@ -37,7 +38,7 @@ function fixture(timeout?: number, storage: Pick<StorageConnections, "request" |
     router.attachChannel(profile, channel.asChannel());
     return channel;
   };
-  return { router, attach, setStatus: (profile: string, status: string) => statuses.set(profile, status), setWork: (repoId: string, pending: Promise<unknown>) => work.set(repoId, pending) };
+  return { router, attach, setSession: (session: string) => { nativeSession = session; }, setStatus: (profile: string, status: string) => statuses.set(profile, status), setWork: (repoId: string, pending: Promise<unknown>) => work.set(repoId, pending) };
 }
 
 function observe(promise: Promise<unknown>) {
@@ -193,13 +194,31 @@ describe("SSH captured source ownership", () => {
     const { router, attach } = fixture();
     const channel = attach("one");
     const params = { repo_id: "ssh://one/repo", file_id: "captured", offset: 0, length: 1 };
-    await expect(router.sendToRemoteAgent("one", "read_range", { ...params, native_session_id: "old" })).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+    for (const expected of ["old", null, undefined]) {
+      await expect(router.sendToRemoteAgent("one", "read_range", { ...params, native_session_id: expected })).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+    }
     await expect(router.sendToRemoteAgent("one", "file_close", { ...params, native_session_id: "old" })).resolves.toEqual({ closed: "captured" });
     expect(channel.frames).toHaveLength(0);
     const read = router.sendToRemoteAgent("one", "read_range", { ...params, native_session_id: "current" });
     expect(channel.frames[0].params).not.toHaveProperty("native_session_id");
     channel.reply(channel.frames[0].id, { result: { bytes_b64: "YQ==" } });
     await expect(read).resolves.toEqual({ bytes_b64: "YQ==" });
+  });
+
+  it.each(["read_text", "write_text"])("%s cannot cross repository replacement during credential preparation", async method => {
+    let release!: () => void;
+    const preparation = new Promise<void>(resolve => { release = resolve; });
+    const storage: Pick<StorageConnections, "request" | "redactValue"> = {
+      ...mockStorageConnections,
+      request: async (name, params, send) => { await preparation; return send(name, params); },
+    };
+    const { router, attach, setSession } = fixture(undefined, storage);
+    const channel = attach("one");
+    const requested = router.route("ssh://one/repo", method, { repo_id: "ssh://one/repo", path: "settings.json", content: "pending", native_session_id: "current" });
+    const rejected = expect(requested).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+    setSession("replacement"); release();
+    try { await rejected; expect(channel.frames).toHaveLength(0); }
+    finally { release(); channel.emit("end"); }
   });
   it("does not freshen stale metadata when a reconnect prefetch uses cache fallback", async () => {
     vi.useFakeTimers();

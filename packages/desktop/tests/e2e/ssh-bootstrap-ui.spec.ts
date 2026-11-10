@@ -64,7 +64,7 @@ test("desktop SSH connection opens and reads a real logical large file through t
     const forbidden = path.join(local, "must-never-be-written");
     await expect(page.evaluate(({ forbidden }) => {
       if (!window.crab) throw new Error("Missing desktop bridge");
-      return window.crab.fsWriteFile("ssh://unopened/repository", forbidden, "wrong machine");
+      return window.crab.fsWriteFile("ssh://unopened/repository", forbidden, "wrong machine", null);
     }, { forbidden })).rejects.toThrow("SSH repository is not open");
     expect(existsSync(forbidden)).toBe(false);
     const handle = await call(page, "open_local", { repo_id: "ssh-navigation", path: local }) as unknown as RepoHandle;

@@ -50,6 +50,9 @@ save failures retain the buffer and offer **Retry saving**.
 Quit offers **Keep editing** or **Discard edits** while edits are pending.
 Discarding drops unsent edits; Crab waits for admitted local saves and their
 failure cleanup before exiting.
+SSH document reads and saves retain the caller's native session. A replacement
+blocks stale saves, preserves pending input, and lets the observed new runtime
+retry the editor buffer.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

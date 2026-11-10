@@ -25,6 +25,22 @@ Renderer                Main Process              Agent Sidecar
    │ ◄───────────────────── │                         │
 ```
 
+## Physical file bridge ownership
+
+Repository documents use `fsReadFile(repoId, path, maxBytes, nativeSessionId)`
+and `fsWriteFile(repoId, path, content, nativeSessionId)`. The renderer supplies
+its observed session; preload and main preserve it. SSH sends that expected
+identity through credential preparation to the router's final wire-admission
+check. A replaced or missing session rejects before dispatch. The identity is
+removed before native JSON-RPC serialization, so it is not a native RPC field.
+
+Workspace read-modify-write actions retain one session across both calls.
+Editor retries capture their newly observed runtime identity. Local Node reads
+and publications do not depend on native reader availability; local workspace
+documents use a stable null owner. The task viewer's separate one-path local
+read remains an explicit task-worktree/SSH ownership gap in the large-file
+acceptance matrix; it is not a repository-document overload.
+
 ## JSON-RPC 2.0 Wire Format
 
 The agent speaks newline-delimited JSON-RPC 2.0 over stdio.

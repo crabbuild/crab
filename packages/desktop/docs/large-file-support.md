@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local repository-switch watcher stalls now have a measured fix and packaged proof below. Remaining: caller-session ownership across physical read/save IPC, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader repeatability/profile qualification. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local repository-switch watcher stalls and physical read/save caller-session handoff now have packaged proof below. Remaining: notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader repeatability/profile qualification. |
 | P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit now drains admitted local publication and failure cleanup, with packaged proof below. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
@@ -48,13 +48,11 @@ alongside each slice.
 
 ### Next bounded slices
 
-1. Qualify caller ownership across physical read/save IPC before extending
-   transfer features: the remote provider currently selects the admitted native
-   session at dispatch; renderer binding-change checks do not alone prove the
-   read-to-write handoff on the real wire. Keep one provider writer and retain
-   local filesystem independence. Discard-quit now joins admitted local saves;
-   broaden shutdown qualification alongside the keep-editing proof. Finish recovery parity:
-   the shared working
+1. Finish recovery parity on the existing owners. Physical read/save IPC now
+   retains the caller's session through wire admission, with packaged SSH proof
+   across an unobserved owner replacement. Discard-quit joins admitted local
+   saves. Broaden provider/platform and shutdown qualification alongside the
+   keep-editing proof. The shared working
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
@@ -99,6 +97,38 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Physical file caller-session checkpoint
+
+A packaged SSH regression held a completed settings read while closing and
+reopening the real native repository owner. Runtime notification delivery was
+held independently, so the renderer still owned its earlier binding. The prior
+package acknowledged the task mutation and overwrote the replacement document
+with that earlier read. The physical-file bridge had selected the provider's
+current session instead of retaining its caller's session.
+
+Repository-scoped `fsReadFile` and `fsWriteFile` now carry the caller's session
+through preload, main, provider and credential preparation to the existing final
+wire guard. The document owner uses the same session for its read and write;
+the shared editor writer captures its observed session on each save attempt.
+SSH cannot substitute a replacement or missing session. Runtime delivery can
+then rebind and retry the retained buffer under the new owner. Local filesystem
+I/O continues independently of native readiness; local workspace-document
+bindings use a stable null owner. Physical tracking reads carry their observed session
+and refresh when its native epoch changes. No second writer, recovery queue,
+native RPC shape or dependency is introduced.
+
+The new package rejects the stale task write before any native write frame,
+preserves the replacement document and task input, rejects the stale editor
+save and physical read, and acknowledges the retained buffer after runtime
+delivery. A new task action preserves the replacement document's sibling keys.
+Exact UTF-8 bytes, mode, index bytes and temporary cleanup are checked. Focused
+transport checks also replace the session during credential preparation and
+prove neither text read nor write reaches the wire. Ten focused suites pass
+166 cases; nine packaged local/SSH cases pass together, including the existing
+large-file bootstrap, reconnect, native-offline save and Quit cleanup flows.
+Broader workflow, recovery
+and provider/platform requirements remain in the matrix above.
 
 ## Local save shutdown checkpoint
 

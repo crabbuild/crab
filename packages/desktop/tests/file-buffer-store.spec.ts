@@ -60,7 +60,7 @@ describe("repository file buffers", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(write).not.toHaveBeenCalled();
     store.runtime(target.repoId, true, "native:2"); store.runtime(target.repoId, true, "native:2"); await tick();
-    expect(write.mock.calls).toEqual([[{ repoId: "ssh://profile/repo", fullPath: "/repo/file.txt" }, "offline"]]);
+    expect(write.mock.calls).toEqual([[{ repoId: "ssh://profile/repo", fullPath: "/repo/file.txt" }, "offline", "native:2"]]);
     expect(store.pendingCount()).toBe(0);
   });
 
@@ -70,7 +70,7 @@ describe("repository file buffers", () => {
     store.edit("file", "pending"); const saved = store.save("file"); await tick();
     store.runtime(target.repoId, false, null); store.runtime(target.repoId, true, "native:2");
     first.reject(new Error("old session lost")); await saved;
-    expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls.map(call => call[2])).toEqual(["native:1", "native:2"]);
     expect(store.snapshot("file")).toMatchObject({ content: "pending", dirty: false, error: null });
   });
 
@@ -80,7 +80,7 @@ describe("repository file buffers", () => {
     store.edit("file", "pending"); const saved = store.save("file"); await tick();
     store.bind("file", { ...target, repoId: "replacement", nativeSessionId: "native:2" });
     first.reject(new Error("repository closed")); await saved;
-    expect(write.mock.calls.at(-1)).toEqual([{ repoId: "replacement", fullPath: "/repo/file.txt" }, "pending"]);
+    expect(write.mock.calls.at(-1)).toEqual([{ repoId: "replacement", fullPath: "/repo/file.txt" }, "pending", "native:2"]);
     expect(store.snapshot("file").dirty).toBe(false);
   });
 

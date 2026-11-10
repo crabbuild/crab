@@ -241,17 +241,17 @@ export class RemoteProvider extends BaseProvider {
     return { deleted: path, trash: false };
   }
 
-  async fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult> {
+  async fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult> {
     const parsed = this.assertRemoteAndConnected(repoId);
 
     const relativePath = posix.relative(parsed.remotePath, path);
     if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
       throw new Error("The file must be inside the selected repository.");
     }
-    // Native writes require repository context and belong to the currently
-    // admitted session. Path-only file-editor RPCs cannot satisfy that contract.
+    // Keep the caller's session through credential preparation and wire
+    // admission. Substituting the current owner can publish an obsolete read.
     const result = await this.request("write_text", {
-      repo_id: repoId, path: relativePath, content, native_session_id: this.nativeSession(repoId),
+      repo_id: repoId, path: relativePath, content, native_session_id: nativeSessionId,
     }) as { written: boolean; size: number };
     if (result.written !== true || result.size !== Buffer.byteLength(content, "utf8")) {
       throw new Error("The remote file save did not write the complete buffer.");
@@ -261,7 +261,7 @@ export class RemoteProvider extends BaseProvider {
     return { path, written: result.size };
   }
 
-  async fsRead(repoId: string, path: string, maxBytes = 512 * 1024): Promise<FsReadResult> {
+  async fsRead(repoId: string, path: string, maxBytes = 512 * 1024, nativeSessionId: string | null): Promise<FsReadResult> {
     const parsed = this.assertRemoteAndConnected(repoId);
     const relativePath = posix.relative(parsed.remotePath, path);
     if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
@@ -272,7 +272,7 @@ export class RemoteProvider extends BaseProvider {
       // Mutable documents must never merge a stale reconnect cache or a
       // truncated prefix into a new write. Read through the live repo owner.
       const result = await this.request("read_text", {
-        repo_id: repoId, path: relativePath, max_bytes: maxBytes, native_session_id: this.nativeSession(repoId),
+        repo_id: repoId, path: relativePath, max_bytes: maxBytes, native_session_id: nativeSessionId,
       }) as { text: string | null; truncated: boolean; reason?: string };
       if (result.truncated !== false || typeof result.text !== "string") throw new Error(result.reason ?? "The remote file was not read completely.");
       return { exists: true, content: result.text };

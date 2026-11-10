@@ -104,11 +104,11 @@ export interface RepoProvider {
   /** Delete a file or directory. Optionally move to trash (local only). */
   fsDelete(repoId: string, path: string, useTrash?: boolean): Promise<FsDeleteResult>;
 
-  /** Write text content to a file. */
-  fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
+  /** Write text content; SSH retains the caller's native session through admission. */
+  fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult>;
 
   /** Read text content from a file. */
-  fsRead(repoId: string, path: string, maxBytes?: number): Promise<FsReadResult>;
+  fsRead(repoId: string, path: string, maxBytes: number | undefined, nativeSessionId: string | null): Promise<FsReadResult>;
 
   // ── Capabilities ─────────────────────────────────────────────
 
@@ -149,8 +149,8 @@ export abstract class BaseProvider extends EventEmitter implements ProviderEvent
   abstract fsCreate(repoId: string, path: string, kind: "file" | "directory"): Promise<FsCreateResult>;
   abstract fsRename(repoId: string, oldPath: string, newPath: string): Promise<FsRenameResult>;
   abstract fsDelete(repoId: string, path: string, useTrash?: boolean): Promise<FsDeleteResult>;
-  abstract fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
-  abstract fsRead(repoId: string, path: string, maxBytes?: number): Promise<FsReadResult>;
+  abstract fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult>;
+  abstract fsRead(repoId: string, path: string, maxBytes: number | undefined, nativeSessionId: string | null): Promise<FsReadResult>;
   abstract capabilities(repoId: string): Promise<CapabilitySet>;
   abstract dispose(): void;
 }

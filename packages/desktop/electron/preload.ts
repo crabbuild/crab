@@ -304,9 +304,9 @@ contextBridge.exposeInMainWorld("crab", {
   },
   fsOpenExternal: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-open-external", fullPath),
-  fsWriteFile: (repoId: string, fullPath: string, content: string) =>
-    ipcRenderer.invoke("crab:fs-write-file", repoId, fullPath, content),
-  fsReadFile: (...args: [string] | [string, string, number?]) =>
+  fsWriteFile: (repoId: string, fullPath: string, content: string, nativeSessionId: string | null) =>
+    ipcRenderer.invoke("crab:fs-write-file", repoId, fullPath, content, nativeSessionId),
+  fsReadFile: (...args: [string] | [string, string, number | undefined, string | null]) =>
     ipcRenderer.invoke("crab:fs-read-file", ...args) as Promise<{ exists: boolean; content: string | null }>,
   fsReadImage: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-read-image", fullPath) as Promise<{

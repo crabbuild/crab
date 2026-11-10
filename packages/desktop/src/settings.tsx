@@ -310,7 +310,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const root = repo ? repositoryWorktree(repo) : undefined;
   const key = repo && root ? repositoryKey(repo) : "";
   const canEdit = !!root && !!repo?.capabilities?.canEdit;
-  const owner = repo && parseRepoId(repo.repo_id) ? repo.native_session_id : undefined;
+  const owner = repo && parseRepoId(repo.repo_id) ? repo.native_session_id : null;
   const subscribe = useCallback((listener: () => void) => key ? workspaceDocuments.subscribe(key, listener) : () => {}, [key]);
   const snapshot = useCallback(() => workspaceDocuments.snapshot(key), [key]);
   const workspaceState = useSyncExternalStore(subscribe, snapshot, snapshot);

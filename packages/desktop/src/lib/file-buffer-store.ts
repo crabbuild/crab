@@ -11,12 +11,12 @@ export interface FileBufferState {
 
 interface Target { repoId: string; fullPath: string }
 interface Binding extends Target { available: boolean; nativeSessionId: string | null }
-type Write = (target: Target, content: string) => Promise<void>;
+type Write = (target: Target, content: string, nativeSessionId: string | null) => Promise<void>;
 interface Entry {
   state: FileBufferState;
   acknowledged: string | null;
   target?: Target;
-  nativeSessionId?: string | null;
+  nativeSessionId: string | null;
   runtimeKnown: boolean;
   bindingVersion: number;
   read?: symbol;
@@ -117,9 +117,9 @@ export class FileBufferStore {
     const task = Promise.resolve().then(async () => {
       this.publish(entry, { saving: true, error: null });
       while (entry.state.dirty && entry.state.available && entry.state.content !== null && entry.target) {
-        const content = entry.state.content, target = entry.target, bindingVersion = entry.bindingVersion;
+        const content = entry.state.content, target = entry.target, bindingVersion = entry.bindingVersion, nativeSessionId = entry.nativeSessionId;
         try {
-          await this.write(target, content);
+          await this.write(target, content, nativeSessionId);
           entry.acknowledged = content;
           this.publish(entry, { dirty: entry.state.content !== content, error: null });
         } catch (error) {
@@ -142,7 +142,7 @@ export class FileBufferStore {
   private entry(key: string): Entry {
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { state: EMPTY, acknowledged: null, runtimeKnown: false, bindingVersion: 0, listeners: new Set() };
+      entry = { state: EMPTY, acknowledged: null, nativeSessionId: null, runtimeKnown: false, bindingVersion: 0, listeners: new Set() };
       this.entries.set(key, entry);
     }
     return entry;
@@ -174,7 +174,7 @@ export class FileBufferStore {
   }
 }
 
-export const fileBuffers = new FileBufferStore(async (target, content) => {
-  const result = await mainProcess.fsWriteFile(target.repoId, target.fullPath, content);
+export const fileBuffers = new FileBufferStore(async (target, content, nativeSessionId) => {
+  const result = await mainProcess.fsWriteFile(target.repoId, target.fullPath, content, nativeSessionId);
   if (result.written !== new TextEncoder().encode(content).length) throw new Error("The file save did not write the complete buffer.");
 });

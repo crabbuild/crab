@@ -826,19 +826,19 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     await shell.openPath(fullPath);
   });
 
-  ipcMain.handle("crab:fs-write-file", async (_evt, repoId: string, fullPath: string, content: string) => {
+  ipcMain.handle("crab:fs-write-file", async (_evt, repoId: string, fullPath: string, content: string, nativeSessionId: string | null) => {
     const provider = getProviderRegistry().resolve(repoId);
     if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
-    return provider.fsWrite(repoId, fullPath, content);
+    return provider.fsWrite(repoId, fullPath, content, nativeSessionId);
   });
 
-  ipcMain.handle("crab:fs-read-file", async (_evt, firstArg: string, secondArg?: string, maxBytes?: number) => {
+  ipcMain.handle("crab:fs-read-file", async (_evt, ...args: [string] | [string, string, number | undefined, string | null]) => {
     // The task file viewer still supplies a worktree path without a repo handle.
     // Repository documents always resolve a provider and cannot fall through.
-    if (secondArg === undefined) return readTextFile(firstArg, maxBytes);
-    const provider = getProviderRegistry().resolve(firstArg);
+    if (args.length === 1) return readTextFile(args[0]);
+    const provider = getProviderRegistry().resolve(args[0]);
     if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
-    return provider.fsRead(firstArg, secondArg, maxBytes);
+    return provider.fsRead(args[0], args[1], args[2], args[3]);
   });
 
   // Read binary content from a file on disk and return it as a
