@@ -14,18 +14,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import type { Task } from "./orchestrator";
 import { assertWorkspace } from "./orchestrator-worktree";
-import { AgentProcessClosureError, runAgentCommand, type AgentProcessFactory } from "./agent-process";
+import { AgentProcessClosureError, runAgentCommand, spawnLocalAgent, type AgentProcessFactory } from "./agent-process";
 import { parseRepoId } from "./ssh-router";
-
-const execFile = promisify(execFileCb);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -43,26 +39,32 @@ export interface Checkpoint {
 // ─── CheckpointManager ──────────────────────────────────────────────────────
 
 export class CheckpointManager {
-  constructor(private readonly remote?: (task: Task, cwd: string) => AgentProcessFactory) {}
+  constructor(private readonly remote?: (task: Task, cwd: string) => AgentProcessFactory, private readonly signal?: AbortSignal) {}
 
   private readonly refPrefix = "refs/crab/checkpoints";
   private readonly pendingPrefix = "refs/crab/checkpoint-intents";
   private readonly basePrefix = "refs/crab/bases";
   private readonly restorePrefix = "refs/crab/restore-backups";
 
-  private async command(task: Task, binary: string, args: string[], cwd: string): Promise<{ stdout: string }> {
+  private async command(task: Task, binary: string, args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 30_000): Promise<{ stdout: string }> {
     if (!this.remote || !task.remoteProfileId) throw new Error("Remote checkpoints require a connected workspace owner");
     const repository = parseRepoId(task.repoPath);
     if (!repository || repository.profileId !== task.remoteProfileId) throw new Error("Remote checkpoint repository identity changed");
     const directory = cwd === task.repoPath ? repository.remotePath : cwd;
     const factory = this.remote(task, directory);
-    return runAgentCommand(factory, binary, args, directory);
+    return runAgentCommand(factory, binary, args, { cwd: directory, signal, timeoutMs });
   }
 
-  private git(task: Task, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; killSignal?: NodeJS.Signals }): Promise<{ stdout: string }> {
-    if (!task.isRemote) return execFile("git", args, options);
-    const environment: string[] = [];
-    if (options.env?.GIT_OPTIONAL_LOCKS === "0") environment.push("GIT_OPTIONAL_LOCKS=0");
+  private git(task: Task, args: string[], options: { cwd: string; env?: Record<string, string>; timeout?: number }): Promise<{ stdout: string }> {
+    // Local Git keeps Node's existing unbounded default; task cancellation now
+    // owns its whole group. Remote commands retain their transport deadline.
+    // Metadata reads must not refresh the user's real index as a side effect.
+    // Required locks for explicit add/restore/ref writes still apply.
+    if (!task.isRemote) {
+      const env = { GIT_OPTIONAL_LOCKS: "0", ...options.env };
+      return runAgentCommand(spawnLocalAgent, "git", args, { cwd: options.cwd, env, signal: this.signal, timeoutMs: options.timeout });
+    }
+    const environment = ["GIT_OPTIONAL_LOCKS=0"];
     if (options.env?.GIT_INDEX_FILE) environment.push(`GIT_INDEX_FILE=${options.env.GIT_INDEX_FILE}`);
     if (options.env?.GIT_AUTHOR_NAME) {
       // Snapshot authors are product metadata. Never copy a local login's
@@ -70,15 +72,14 @@ export class CheckpointManager {
       environment.push("GIT_AUTHOR_NAME=crab-orchestrator", "GIT_AUTHOR_EMAIL=orchestrator@crab.local",
         "GIT_COMMITTER_NAME=crab-orchestrator", "GIT_COMMITTER_EMAIL=orchestrator@crab.local");
     }
-    const binary = environment.length ? "env" : "git";
-    const command = environment.length ? [...environment, "git", ...args] : args;
-    return this.command(task, binary, command, options.cwd);
+    const command = [...environment, "git", ...args];
+    return this.command(task, "env", command, options.cwd, this.signal, options.timeout);
   }
 
   /** Commits a completed owned turn on its workspace host. */
   async commitTurn(task: Task, turnNumber: number): Promise<boolean> {
-    const options = { cwd: task.worktreePath, timeout: 10_000, killSignal: "SIGTERM" as const,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_AUTHOR_NAME: "crab-agent", GIT_AUTHOR_EMAIL: "agent@crab.local",
+    const options = { cwd: task.worktreePath, timeout: 10_000,
+      env: { GIT_AUTHOR_NAME: "crab-agent", GIT_AUTHOR_EMAIL: "agent@crab.local",
         GIT_COMMITTER_NAME: "crab-agent", GIT_COMMITTER_EMAIL: "agent@crab.local" } };
     await this.git(task, ["add", "-A"], options);
     try { await this.git(task, ["diff", "--cached", "--quiet"], options); return false; } catch (error: unknown) {
@@ -166,41 +167,10 @@ export class CheckpointManager {
    * full snapshot path to ensure correctness.
    */
   async createLightweightCheckpoint(task: Task, turnNumber: number): Promise<{ ref: string; sha: string }> {
-    const worktree = task.worktreePath;
-
-    // Check if the worktree is clean (no staged, unstaged, or untracked changes).
-    let isClean = false;
-    try {
-      // `git status --porcelain` outputs nothing when the tree is clean.
-      const { stdout } = await this.git(task, ["status", "--porcelain", "--untracked-files=all"],
-        { cwd: worktree },
-      );
-      isClean = stdout.trim().length === 0;
-    } catch {
-      isClean = false;
-    }
-
-    if (!isClean) {
-      // Worktree is dirty — fall back to the full snapshot for correctness.
-      return this.createCheckpoint(task, turnNumber);
-    }
-
-    // Worktree is clean — use HEAD directly.
-    let headSha = "";
-    try {
-      const { stdout } = await this.git(task, ["rev-parse", "HEAD"],
-        { cwd: worktree },
-      );
-      headSha = stdout.trim();
-    } catch {
-      // No HEAD (empty repo) — fall back to full snapshot.
-      return this.createCheckpoint(task, turnNumber);
-    }
-
-    if (!headSha) {
-      return this.createCheckpoint(task, turnNumber);
-    }
-
+    const { stdout } = await this.git(task, ["status", "--porcelain", "--untracked-files=all"], { cwd: task.worktreePath });
+    if (stdout.trim()) return this.createCheckpoint(task, turnNumber);
+    const headSha = await this.headSha(task);
+    if (!headSha) return this.createCheckpoint(task, turnNumber);
     return this.recordCheckpoint(task, turnNumber, headSha);
   }
 
@@ -223,28 +193,27 @@ export class CheckpointManager {
     );
   }
 
-  private async snapshotWorkingTree(
-    task: Task,
-    message: string,
-  ): Promise<string> {
-    const worktree = task.worktreePath;
-
-    // Resolve current HEAD — used as the parent of the snapshot commit.
-    let headSha = "";
+  private async headSha(task: Task): Promise<string | undefined> {
     try {
-      const { stdout } = await this.git(task, ["rev-parse", "HEAD"],
-        { cwd: worktree },
-      );
-      headSha = stdout.trim();
+      const { stdout } = await this.git(task, ["rev-parse", "HEAD"], { cwd: task.worktreePath });
+      const sha = stdout.trim();
+      if (!sha) throw new Error("Git did not return a HEAD commit");
+      return sha;
     } catch (error: unknown) {
+      if (error instanceof AgentProcessClosureError || this.signal?.aborted) throw error;
       // An unborn branch has no parent commit. Other HEAD failures cannot
       // silently turn a damaged repository into a new root snapshot.
-      const { stdout: symbolic } = await this.git(task, ["symbolic-ref", "HEAD"], { cwd: worktree });
+      const { stdout: symbolic } = await this.git(task, ["symbolic-ref", "HEAD"], { cwd: task.worktreePath });
       const ref = symbolic.trim();
-      const { stdout: refs } = await this.git(task, ["for-each-ref", "--format=%(refname)", ref], { cwd: worktree });
+      const { stdout: refs } = await this.git(task, ["for-each-ref", "--format=%(refname)", ref], { cwd: task.worktreePath });
       if (refs.split("\n").includes(ref)) throw error;
+      return undefined;
     }
+  }
 
+  private async snapshotWorkingTree(task: Task, message: string): Promise<string> {
+    const worktree = task.worktreePath;
+    const headSha = await this.headSha(task);
     // Build a temp index that mirrors the current working tree.
     const filename = `crab-ckpt-index-${randomUUID()}`;
     const directory = task.isRemote
@@ -261,7 +230,7 @@ export class CheckpointManager {
       const { stdout: indexPath } = await this.git(task, ["rev-parse", "--git-path", "index"], { cwd: worktree });
       try {
         const original = paths.resolve(worktree, indexPath.trimEnd());
-        if (task.isRemote) await this.command(task, "sh", ["-c", 'if [ -f "$1" ]; then cp "$1" "$2"; elif [ -e "$1" ]; then exit 1; fi', "crab-index", original, tmpIndex], worktree);
+        if (task.isRemote) await this.command(task, "sh", ["-c", 'if [ -f "$1" ]; then cp "$1" "$2"; elif [ -e "$1" ]; then exit 1; fi', "crab-index", original, tmpIndex], worktree, this.signal);
         else fs.copyFileSync(original, tmpIndex);
       } catch (error: unknown) {
         // Git treats an absent index as empty, including on an unborn branch.
@@ -273,12 +242,12 @@ export class CheckpointManager {
       // how `git add .` behaves, so generated files we don't care about
       // (build outputs, node_modules) stay out of the snapshot.
       await this.git(task, ["add", "-A", "--", "."],
-        { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
+        { cwd: worktree, env: { GIT_INDEX_FILE: tmpIndex } },
       );
 
       // Write the index as a tree object.
       const { stdout: treeOut } = await this.git(task, ["write-tree"],
-        { cwd: worktree, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } },
+        { cwd: worktree, env: { GIT_INDEX_FILE: tmpIndex } },
       );
       const tree = treeOut.trim();
 
@@ -291,7 +260,6 @@ export class CheckpointManager {
         {
           cwd: worktree,
           env: {
-            ...process.env,
             GIT_INDEX_FILE: tmpIndex,
             GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "crab-orchestrator",
             GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "orchestrator@crab.local",
@@ -308,17 +276,20 @@ export class CheckpointManager {
       uncertain = error instanceof AgentProcessClosureError;
       throw error;
     } finally {
-      // An uncertain remote process can still use its index. Retain that file
+      // An uncertain process can still use its index. Retain that file
       // until recovery establishes closure; never unlink beneath an owner.
-      if (task.isRemote) {
-        if (!uncertain) {
-          try { await this.command(task, "rm", ["-f", tmpIndex, `${tmpIndex}.lock`], worktree); } catch (cleanup: unknown) {
-            if (failure) throw new AggregateError([failure, cleanup], "Snapshot failed and its private index needs cleanup");
-            throw cleanup;
-          }
+      if (!uncertain) {
+        try {
+          // Cleanup deliberately has no cancelled signal: it belongs to this
+          // operation and must finish before its physical owner is released.
+          if (task.isRemote) await this.command(task, "rm", ["-f", tmpIndex, `${tmpIndex}.lock`], worktree);
+          else for (const file of [tmpIndex, `${tmpIndex}.lock`]) fs.rmSync(file, { force: true });
+        } catch (cleanup: unknown) {
+          if (!failure) throw cleanup;
+          const error = new AggregateError([failure, cleanup], "Snapshot failed and its private index needs cleanup");
+          if (cleanup instanceof AgentProcessClosureError) throw new AgentProcessClosureError(error);
+          throw error;
         }
-      } else {
-        try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
       }
     }
   }

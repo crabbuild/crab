@@ -8,6 +8,9 @@ import { Orchestrator } from "../electron/orchestrator";
 import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
 import type { RpcRouter } from "../electron/ssh-router";
 import * as settings from "../electron/orchestrator-settings";
+import { AgentProcessClosureError } from "../electron/agent-process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 vi.mock("../electron/orchestrator-adapters", async original => ({ ...await original<typeof import("../electron/orchestrator-adapters")>(), createAdapter: vi.fn() }));
 vi.mock("../electron/ssh-native-process", () => ({ remoteAgentProcessFactory: vi.fn() }));
@@ -27,6 +30,7 @@ describe("remote tasks through the shared native pipeline", () => {
   let directory: string;
   let orchestrator: Orchestrator;
   let adapters: NativeAdapter[];
+  let unknownCheckpoint: boolean;
   const sha = "a".repeat(40);
   const remoteFactory = () => { throw new Error("The native adapter owns protocol I/O"); };
   const router = {
@@ -35,7 +39,7 @@ describe("remote tasks through the shared native pipeline", () => {
   };
 
   beforeEach(async () => {
-    vi.clearAllMocks(); adapters = [];
+    vi.clearAllMocks(); adapters = []; unknownCheckpoint = false;
     directory = await mkdtemp(path.join(tmpdir(), "crab-remote-native-"));
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     vi.mocked(remoteAgentProcessFactory).mockReturnValue(remoteFactory);
@@ -53,7 +57,8 @@ describe("remote tasks through the shared native pipeline", () => {
   });
   afterEach(async () => {
     for (const adapter of adapters) adapter.closure = Promise.resolve();
-    await orchestrator.shutdown();
+    if (unknownCheckpoint) await expect(orchestrator.shutdown()).rejects.toThrow("shutdown failed");
+    else await orchestrator.shutdown();
     vi.restoreAllMocks(); vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true });
   });
   const create = () => orchestrator.createTask("Native remote prompt", "claude-code", "ssh://server/repo");
@@ -116,5 +121,71 @@ describe("remote tasks through the shared native pipeline", () => {
     vi.mocked(CheckpointManager.prototype.createLightweightCheckpoint).mockRejectedValue(new Error("Remote snapshot failed"));
     await expect(orchestrator.startTask(task.id)).rejects.toThrow("Remote snapshot failed");
     expect({ adapters: adapters.length, status: task.status }).toEqual({ adapters: 0, status: "failed" });
+  });
+
+  it("joins a stopped startup's checkpoint writer before reporting closure", async () => {
+    const task = await create();
+    let release!: () => void;
+    vi.mocked(CheckpointManager.prototype.pinBase).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(sha); }));
+    const startup = orchestrator.startTask(task.id);
+    const cancelled = expect(startup).rejects.toThrow("cancelled");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    let stopped = false;
+    const stopping = orchestrator.cancelTask(task.id).then(() => { stopped = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect({ stopped, providers: adapters.length }).toEqual({ stopped: false, providers: 0 });
+    } finally { release(); await Promise.all([stopping, cancelled]); }
+  });
+
+  it("joins post-turn Git before Stop resolves", async () => {
+    const task = await create(); await orchestrator.startTask(task.id);
+    let release!: () => void;
+    vi.mocked(CheckpointManager.prototype.commitTurn).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(false); }));
+    complete();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    let stopped = false;
+    const stopping = orchestrator.cancelTask(task.id).then(() => { stopped = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(stopped).toBe(false);
+    } finally { release(); await stopping; }
+  });
+
+  it("retains uncertain checkpoint closure and refuses later mutation", async () => {
+    const task = await create(); await orchestrator.startTask(task.id);
+    vi.mocked(CheckpointManager.prototype.commitTurn).mockRejectedValueOnce(new AgentProcessClosureError(new Error("Unknown Git writer")));
+    const failure = vi.fn(); orchestrator.on("orchestrator:error", failure);
+    complete(); await vi.waitFor(() => expect(failure).toHaveBeenCalled());
+    unknownCheckpoint = true;
+    await expect(orchestrator.cancelTask(task.id)).rejects.toThrow("closure");
+    await expect(orchestrator.discardTask(task.id)).rejects.toThrow("closure");
+    expect(() => orchestrator.createChildTaskForAgent(task.id, "codex", "Child")).toThrow("closure");
+    expect(router.sendToRemoteAgent).not.toHaveBeenCalled();
+    await expect(orchestrator.shutdown()).rejects.toThrow();
+  });
+
+  it("retains a lost query for quit without treating it as a workspace writer", async () => {
+    const task = await create();
+    vi.spyOn(CheckpointManager.prototype, "listCheckpoints").mockRejectedValueOnce(new AgentProcessClosureError(new Error("Unknown reader")));
+    unknownCheckpoint = true;
+    await expect(orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task))).rejects.toBeInstanceOf(AgentProcessClosureError);
+    await orchestrator.discardTask(task.id);
+    expect({ status: task.status, methods: router.sendToRemoteAgent.mock.calls.map(call => call[1]) }).toEqual({ status: "discarded", methods: ["task_discard"] });
+  });
+
+  it("cancels an owned checkpoint reader before quit completes", async () => {
+    const task = await create();
+    let finish!: () => void;
+    const closed = new Promise<void>(resolve => { finish = resolve; });
+    const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => {
+      process.stdout.end(); process.stderr.end(); process.emit("close", null); finish(); return true;
+    }) });
+    const factory = vi.fn(() => ({ process, closed }));
+    vi.mocked(remoteAgentProcessFactory).mockReturnValue(factory);
+    const query = expect(orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task))).rejects.toThrow("cancelled");
+    await vi.waitFor(() => expect(factory).toHaveBeenCalled());
+    await orchestrator.shutdown(); await query;
+    expect(process.kill).toHaveBeenCalledOnce();
   });
 });

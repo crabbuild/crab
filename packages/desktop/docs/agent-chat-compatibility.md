@@ -1516,6 +1516,38 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   execution remains a production gate; mock request mapping does not prove it.
   No runtime shim, skipped gate, baseline or suppression was added.
 
+- Stop now joins checkpoint preparation, follow-up publication, post-turn Git and
+  private-index cleanup. Local Git uses the same owned-command boundary as SSH;
+  cancellation waits for physical closure. Accepted workspace mutations still
+  finish during quit, while read-only ref queries cancel and drain. Unknown
+  writer closure retains its private index and fences later workspace mutations;
+  losing a read-only query does not claim ownership of writes. Four lifecycle
+  regressions fail before this change. Real Git also exposed status refreshing
+  the user index despite unchanged contents: three index-byte checks fail before
+  setting `GIT_OPTIONAL_LOCKS=0` on both hosts. The
+  [Git environment contract](https://git-scm.com/docs/git#Documentation/git.txt-GITOPTIONALLOCKS)
+  disables that optional refresh while preserving required write locks. The
+  final scoped run passes 475 checks. The rebuilt native pair passes 53 checks,
+  including local and SSH TERM-resistant Git-filter parent/child cancellation,
+  exact index preservation and private-index/lock cleanup. Existing-login Codex
+  and Claude initial/warm/cold turns, checkpoint refs and Apply/Discard pass.
+  Production/fixture types, Electron/native builds, workflow parsing and Rust
+  formatting pass. Evidence: `checkpoint-stop-before.json`,
+  `checkpoint-index-refresh-before.json`, `checkpoint-stop-broad-final.json`,
+  `checkpoint-stop-native-final.json` and `checkpoint-stop-native-build.log` in
+  the owned output. Channel loss, backend death, durable orphan/index recovery,
+  escaped sessions and Windows descendant ownership remain separate gates.
+
+- The actual Linux ARM64 CI artifact from `d444f4061f2` fails to load on Debian
+  12 (glibc 2.36), even after its OpenSSL 3 dependency is installed: linked symbols
+  require `GLIBC_2.38` and `GLIBC_2.39`. The downloaded archive matches CI's SHA256;
+  qualification used an isolated Debian 12 container and recorded
+  `linux-d444-debian12-with-openssl.log`. Linux needs an older build ABI and
+  qualification against supported distributions. Windows CI also fails packaged
+  smoke cleanup with `EBUSY` / `WinError 32` while terminal processes retain
+  fixture directories. Durable terminal ownership and fixture teardown need
+  diagnosis before assigning that failure to application shutdown.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1551,8 +1583,9 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   shutdown integration; local process-group proof does not establish that.
 - Resolve historical cost files lacking provider session/model baselines before
   claiming accurate resumed accounting for pre-fix histories.
-- Qualify pending checkpoint-command cancellation through direct Stop, channel
-  loss and backend death, including retained private-index recovery.
+- Qualify checkpoint-command cancellation through channel loss and backend
+  death, including durable retained private-index and process recovery. Direct
+  Stop now has real local/SSH Git-filter descendant proof.
 - Qualify server login/PATH setup and complete remote scripts,
   goals, file restore/Revert and historical comparisons. The main native task
   pipeline now has real SSH initial/follow-up/cold-resume and Apply/Discard proof.

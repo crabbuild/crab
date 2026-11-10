@@ -45,4 +45,50 @@ describe("remote checkpoint resource ownership", () => {
       ]);
     }
   });
+
+  it.each(["status", "head"] as const)("does not reinterpret unknown %s closure as a dirty or unborn repository", async mode => {
+    const calls: string[] = [];
+    const factory: AgentProcessFactory = (binary, args) => {
+      calls.push(binary === "env" ? args[args.indexOf("git") + 1] : args[0]);
+      const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
+      return { process, closed: Promise.reject(new Error("Unknown Git closure")) };
+    };
+    const manager = new CheckpointManager(() => factory);
+    const operation = mode === "status" ? manager.createLightweightCheckpoint(task, 0) : manager.snapshotHead(task);
+    await expect(operation).rejects.toBeInstanceOf(AgentProcessClosureError);
+    expect(calls).toEqual([mode === "status" ? "status" : "rev-parse"]);
+  });
+
+  it("cleans a cancelled private index only after its writer closes", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    let release!: () => void;
+    let killed: ReturnType<typeof vi.fn> | undefined;
+    const factory: AgentProcessFactory = (binary, args) => {
+      calls.push(binary);
+      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
+      const closed = new Promise<void>(resolve => {
+        const git = binary === "env" ? args.slice(args.indexOf("git") + 1) : args;
+        if (binary === "env" && git[0] === "add") {
+          killed = child.kill;
+          release = () => { child.stdout.end(); child.stderr.end(); child.emit("close", null); resolve(); };
+          return;
+        }
+        queueMicrotask(() => {
+          const output = git[0] !== "rev-parse" ? "" : git.includes("--absolute-git-dir") ? "/server/private-git\n"
+            : git.includes("--git-path") ? "/server/private-git/index\n" : `${"a".repeat(40)}\n`;
+          child.stdout.end(output); child.stderr.end(); child.emit("close", 0); resolve();
+        });
+      });
+      return { process: child, closed };
+    };
+    const manager = new CheckpointManager(() => factory, controller.signal);
+    const operation = manager.snapshotHead(task);
+    const cancelled = expect(operation).rejects.toThrow("Preparation cancelled");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    controller.abort(new Error("Preparation cancelled"));
+    expect({ signals: killed?.mock.calls, cleanup: calls.includes("rm") }).toEqual({ signals: [["SIGTERM"]], cleanup: false });
+    release(); await cancelled;
+    expect(calls.at(-1)).toBe("rm");
+  });
 });

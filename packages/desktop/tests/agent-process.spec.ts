@@ -71,7 +71,7 @@ describe("owned workspace command capture", () => {
 
   it("preserves split UTF-8 output through the physical closure receipt", async () => {
     const { child, factory, finish } = fixture();
-    const captured = runAgentCommand(factory, "git", ["show", "HEAD"], "/workspace");
+    const captured = runAgentCommand(factory, "git", ["show", "HEAD"], { cwd: "/workspace" });
     const bytes = Buffer.from("雪🙂");
     child.stdout.write(bytes.subarray(0, 4)); child.stdout.write(bytes.subarray(4));
     finish();
@@ -81,7 +81,7 @@ describe("owned workspace command capture", () => {
   it.each(["timeout", "output"])("retains the writer after %s until closure is confirmed", async reason => {
     vi.useFakeTimers();
     const { child, factory, finish } = fixture();
-    const captured = runAgentCommand(factory, "git", [], "/workspace");
+    const captured = runAgentCommand(factory, "git", [], { cwd: "/workspace", timeoutMs: 30_000 });
     let settled = false; void captured.then(() => { settled = true; }, () => { settled = true; });
     if (reason === "timeout") await vi.advanceTimersByTimeAsync(30_000);
     else child.stderr.write(Buffer.alloc(1024 * 1024 + 1));
@@ -92,9 +92,27 @@ describe("owned workspace command capture", () => {
 
   it("distinguishes unknown physical closure from a failed completed command", async () => {
     const { factory, reject } = fixture();
-    const captured = runAgentCommand(factory, "git", [], "/workspace");
+    const captured = runAgentCommand(factory, "git", [], { cwd: "/workspace" });
     const failure = expect(captured).rejects.toBeInstanceOf(AgentProcessClosureError);
     reject(new Error("SSH owner retired"));
     await failure;
+  });
+
+  it("refuses an already cancelled command before opening a process", async () => {
+    const { factory } = fixture();
+    const signal = AbortSignal.abort(new Error("Preparation cancelled"));
+    await expect(runAgentCommand(factory, "git", [], { cwd: "/workspace", signal })).rejects.toThrow("Preparation cancelled");
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("awaits physical closure after cancellation", async () => {
+    const { child, factory, finish } = fixture();
+    const controller = new AbortController();
+    const captured = runAgentCommand(factory, "git", [], { cwd: "/workspace", signal: controller.signal });
+    let settled = false; void captured.then(() => { settled = true; }, () => { settled = true; });
+    controller.abort(new Error("Preparation cancelled"));
+    await Promise.resolve();
+    expect({ settled, signals: child.kill.mock.calls }).toEqual({ settled: false, signals: [["SIGTERM"]] });
+    finish(); await expect(captured).rejects.toThrow("Preparation cancelled");
   });
 });

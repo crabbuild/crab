@@ -180,6 +180,16 @@ describe("orchestrator-checkpoints", () => {
   });
 
   describe("createCheckpoint", () => {
+    it("does not refresh the user's index stat cache for a lightweight checkpoint", async () => {
+      const task = createMockTask(repoDir);
+      const index = path.join(repoDir, ".git", "index");
+      const original = fs.readFileSync(index);
+      const modified = new Date(Date.now() - 30_000);
+      fs.utimesSync(path.join(repoDir, "README.md"), modified, modified);
+      await checkpointManager.createLightweightCheckpoint(task, 0);
+      expect(fs.readFileSync(index)).toEqual(original);
+    });
+
     it("captures untracked files even when user status configuration hides them", async () => {
       const task = createMockTask(repoDir);
       await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });

@@ -12,6 +12,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import Sqlite from "better-sqlite3";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 import { Orchestrator, Task, type TaskSubmission } from "../electron/orchestrator";
 import { ChatDatabase } from "../electron/orchestrator-chat-db";
@@ -132,50 +134,58 @@ vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
 }));
 
-vi.mock("node:util", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:util")>();
-  return {
-    ...actual,
-    promisify: vi.fn(() => {
-      return async (...args: any[]) => {
-        const command = args[0] as string;
-        const cmdArgs = args[1] as string[];
-        const options = args[2] as { cwd?: string } | undefined;
-        execFileCalls.push({ command, args: cmdArgs, cwd: options?.cwd });
-        if (cmdArgs[0] === "write-tree" || cmdArgs[0] === "commit-tree") return { stdout: "a".repeat(40) + "\n", stderr: "" };
-        const revision = cmdArgs.at(-1)?.replace(/\^\{commit\}$/, "");
-        if (cmdArgs[0] === "rev-parse" && revision && /^[a-f0-9]{40}$/.test(revision)) return { stdout: revision + "\n", stderr: "" };
-        if (cmdArgs[0] === "update-ref") {
-          const values = cmdArgs.slice(1).filter(value => value !== "--no-deref");
-          if (values[0] === "-d") checkpointRefs.delete(values[1]);
-          else checkpointRefs.add(values[0]);
-        }
-        if (cmdArgs[0] === "for-each-ref" && cmdArgs[1] === "--format=%(refname)") {
-          return { stdout: checkpointRefs.has(cmdArgs[2]) ? `${cmdArgs[2]}\n` : "", stderr: "" };
-        }
-        if (failPostTurnGitAdd && cmdArgs[0] === "add" && cmdArgs.includes("-A")) throw new Error("Archive snapshot failed");
-        if (heldPostTurnGitAdd && cmdArgs[0] === "add" && cmdArgs.includes("-A")) return heldPostTurnGitAdd;
-        if (hangPostTurnGitAdd && cmdArgs.includes("add") && cmdArgs.includes("-A")) {
-          return new Promise(() => {});
-        }
-        if (cmdArgs[0] === "checkout" && cmdArgs[1]) {
-          mockCurrentBranch = cmdArgs[1];
-          return { stdout: "", stderr: "" };
-        }
-        if (cmdArgs.includes("rev-parse") && cmdArgs.includes("--abbrev-ref")) {
-          return { stdout: `${mockCurrentBranch}\n`, stderr: "" };
-        }
-        if (cmdArgs.includes("rev-parse") && cmdArgs.includes("HEAD")) {
-          return { stdout: "abc123def456789\n", stderr: "" };
-        }
-        if (cmdArgs.includes("rev-parse")) {
-          return { stdout: "abc123def456789\n", stderr: "" };
-        }
-        return { stdout: "", stderr: "" };
-      };
-    }),
-  };
-});
+async function mockCommand(command: string, cmdArgs: string[], options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
+  execFileCalls.push({ command, args: cmdArgs, cwd: options?.cwd });
+  if (cmdArgs[0] === "write-tree" || cmdArgs[0] === "commit-tree") return { stdout: "a".repeat(40) + "\n", stderr: "" };
+  const revision = cmdArgs.at(-1)?.replace(/\^\{commit\}$/, "");
+  if (cmdArgs[0] === "rev-parse" && revision && /^[a-f0-9]{40}$/.test(revision)) return { stdout: revision + "\n", stderr: "" };
+  if (cmdArgs[0] === "update-ref") {
+    const values = cmdArgs.slice(1).filter(value => value !== "--no-deref");
+    if (values[0] === "-d") checkpointRefs.delete(values[1]);
+    else checkpointRefs.add(values[0]);
+  }
+  if (cmdArgs[0] === "for-each-ref" && cmdArgs[1] === "--format=%(refname)") {
+    return { stdout: checkpointRefs.has(cmdArgs[2]) ? `${cmdArgs[2]}\n` : "", stderr: "" };
+  }
+  if (failPostTurnGitAdd && cmdArgs[0] === "add" && cmdArgs.includes("-A")) throw new Error("Archive snapshot failed");
+  if (heldPostTurnGitAdd && cmdArgs[0] === "add" && cmdArgs.includes("-A")) return heldPostTurnGitAdd;
+  if (hangPostTurnGitAdd && cmdArgs.includes("add") && cmdArgs.includes("-A")) {
+    return new Promise(() => {});
+  }
+  if (cmdArgs[0] === "checkout" && cmdArgs[1]) {
+    mockCurrentBranch = cmdArgs[1];
+    return { stdout: "", stderr: "" };
+  }
+  if (cmdArgs.includes("rev-parse") && cmdArgs.includes("--abbrev-ref")) {
+    return { stdout: `${mockCurrentBranch}\n`, stderr: "" };
+  }
+  if (cmdArgs.includes("rev-parse") && cmdArgs.includes("HEAD")) {
+    return { stdout: "abc123def456789\n", stderr: "" };
+  }
+  if (cmdArgs.includes("rev-parse")) {
+    return { stdout: "abc123def456789\n", stderr: "" };
+  }
+  return { stdout: "", stderr: "" };
+}
+
+vi.mock("node:util", async importOriginal => ({
+  ...await importOriginal<typeof import("node:util")>(), promisify: vi.fn(() => mockCommand),
+}));
+
+vi.mock("../electron/agent-process", async importOriginal => ({
+  ...await importOriginal<typeof import("../electron/agent-process")>(),
+  spawnLocalAgent: vi.fn((binary: string, args: string[], options: { cwd: string }) => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true) });
+    let finish!: () => void;
+    const closed = new Promise<void>(resolve => { finish = resolve; });
+    void mockCommand(binary, args, options).then(({ stdout, stderr }) => {
+      child.stdout.end(stdout); child.stderr.end(stderr); child.emit("close", 0); finish();
+    }, (error: Error & { code?: number }) => {
+      child.stdout.end(); child.stderr.end(error.message); child.emit("close", error.code ?? 1); finish();
+    });
+    return { process: child, closed };
+  }),
+}));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -272,7 +282,7 @@ describe("Orchestrator", () => {
       try {
         await vi.advanceTimersByTimeAsync(0);
         expect(closed).toBe(false);
-      } finally { release(); await Promise.all([restoring, shutdown]); resolve.mockRestore(); }
+      } finally { release(); try { await Promise.all([restoring, shutdown]); } finally { resolve.mockRestore(); } }
     });
 
     it("validates snapshot ownership before stopping a native owner", async () => {
@@ -544,7 +554,7 @@ describe("Orchestrator", () => {
       failPostTurnGitAdd = true;
       mockAdapterInstances[0].simulateEvent({ type: "done", timestamp: 1, outcome: "completed" });
       await vi.advanceTimersByTimeAsync(0);
-      expect({ status: task.status, outcome: task.events.at(-1)?.outcome, errors }).toEqual({ status: "reviewing", outcome: "completed", errors: ["Auto-commit after turn failed: Archive snapshot failed"] });
+      expect({ status: task.status, outcome: task.events.at(-1)?.outcome, errors }).toEqual({ status: "reviewing", outcome: "completed", errors: [expect.stringContaining("Archive snapshot failed")] });
     });
 
     it.each(["codex", "claude-code"])("blocks %s's first native dispatch when its checkpoint cannot be captured", async agent => {
@@ -1826,9 +1836,12 @@ describe("Orchestrator", () => {
       const cancelled = expect(iteration).rejects.toThrow("Message cancelled before submission");
       try {
         await vi.advanceTimersByTimeAsync(0);
-        await orchestrator.cancelTask(task.id);
+        let stopped = false;
+        const stopping = orchestrator.cancelTask(task.id).then(() => { stopped = true; });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stopped).toBe(false);
         release(snapshot);
-        await cancelled;
+        await Promise.all([stopping, cancelled]);
         expect({ status: task.status, processes: mockAdapterInstances.length, submissions: mockAdapterInstances[0].iterateCalls,
           feedback: task.feedback, turn: task.turnNumber }).toEqual({ status: "stopped", processes: 1, submissions: [], feedback: [], turn: undefined });
       } finally {

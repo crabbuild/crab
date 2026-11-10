@@ -114,9 +114,17 @@ export class AgentProcessClosureError extends Error {
   constructor(cause: unknown) { super("Command process closure is unconfirmed", { cause }); }
 }
 
+export class WorkspaceCommandCancelledError extends Error {
+  constructor() { super("Workspace command was cancelled"); }
+}
+
 /** Captures an argument-only command, retaining its owner through failure or timeout. */
-export async function runAgentCommand(factory: AgentProcessFactory, binary: string, args: string[], cwd: string): Promise<{ stdout: string }> {
-  const owner = factory(binary, args, { cwd });
+export async function runAgentCommand(factory: AgentProcessFactory, binary: string, args: string[], options: {
+  cwd: string; env?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number;
+}): Promise<{ stdout: string }> {
+  const { cwd, env, signal, timeoutMs } = options;
+  signal?.throwIfAborted();
+  const owner = factory(binary, args, { cwd, env });
   const output: Buffer[][] = [[], []];
   const sizes = [0, 0];
   let failure: Error | undefined;
@@ -133,7 +141,10 @@ export async function runAgentCommand(factory: AgentProcessFactory, binary: stri
   // make delivery uncertain; physical closure remains the completion boundary.
   owner.process.stdin?.on("error", () => {});
   owner.process.stdin?.end();
-  const timer = setTimeout(() => stop(new Error("Workspace command timed out")), 30_000);
+  const abort = () => stop(signal?.reason instanceof Error ? signal.reason : new Error("Workspace command was cancelled", { cause: signal?.reason }));
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => stop(new Error("Workspace command timed out")), timeoutMs);
   try {
     try { await owner.closed; } catch (error: unknown) { throw new AgentProcessClosureError(error); }
     const stdout = Buffer.concat(output[0]).toString("utf8");
@@ -141,5 +152,5 @@ export async function runAgentCommand(factory: AgentProcessFactory, binary: stri
     if (failure) throw failure;
     if (exitCode !== 0) throw Object.assign(new Error(`${binary} exited with code ${exitCode}: ${stderr}`), { code: exitCode, stderr });
     return { stdout };
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,8 @@ import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
 import { Orchestrator, type Task } from "../electron/orchestrator";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
+import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
 import { ChatDatabase } from "../electron/orchestrator-chat-db";
 import { registerChatIpc } from "../electron/orchestrator-chat";
 import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
@@ -22,7 +24,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -60,6 +62,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     const events: AgentEvent[] = [];
     const catalogs: Record<string, { repository: number; workspace: number }> = {};
     let availability: unknown;
+    let cancellation: unknown;
     let task: Task | undefined;
     const wire = () => orchestrator.on("orchestrator:event", ({ taskId, event }: { taskId: string; event: AgentEvent }) => {
       events.push(event);
@@ -82,33 +85,78 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
-      task = await orchestrator.createTask("Use a built-in file writing or patch tool to create remote-proof.txt containing exactly remote-one followed by a newline. Do not use shell commands, external services or subagents. Reply Done.", mode === "claude-code" ? mode : "codex", repoId);
-      const checkpoints = orchestrator.checkpointManager(task);
+      task = await orchestrator.createTask("Use a built-in file writing or patch tool to create remote-proof.txt containing exactly remote-one followed by a newline. Do not use shell commands, external services or subagents. Reply Done.", mode === "claude-code" ? mode : "codex", mode === "checkpoint-stop-local" ? repo : repoId);
       if (mode === "checkpoints") {
-        await writeFile(path.join(task.worktreePath, ".gitignore"), "ignored-new.txt\n");
-        await writeFile(path.join(task.worktreePath, "ignored-new.txt"), "staged ignored addition\n");
-        await run("git", ["add", "-f", "ignored-new.txt"], { cwd: task.worktreePath });
-        await writeFile(path.join(task.worktreePath, "seed.txt"), "staged\n");
-        await run("git", ["add", "seed.txt"], { cwd: task.worktreePath });
-        const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
-        const original = await readFile(path.resolve(task.worktreePath, index));
-        await writeFile(path.join(task.worktreePath, "seed.txt"), "unstaged\n");
-        await writeFile(path.join(task.worktreePath, "ignored-new.txt"), "updated ignored addition\n");
-        await writeFile(path.join(task.worktreePath, "雪🙂.txt"), "untracked\n");
-        const captured = await checkpoints.createCheckpoint(task, 0);
+        const saved = task;
+        const factory = remoteAgentProcessFactory(router, "fixture");
+        const checkpoints = new CheckpointManager(() => factory);
+        await writeFile(path.join(saved.worktreePath, ".gitignore"), "ignored-new.txt\n");
+        await writeFile(path.join(saved.worktreePath, "ignored-new.txt"), "staged ignored addition\n");
+        await run("git", ["add", "-f", "ignored-new.txt"], { cwd: saved.worktreePath });
+        await writeFile(path.join(saved.worktreePath, "seed.txt"), "staged\n");
+        await run("git", ["add", "seed.txt"], { cwd: saved.worktreePath });
+        const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: saved.worktreePath })).stdout.trim();
+        const original = await readFile(path.resolve(saved.worktreePath, index));
+        await writeFile(path.join(saved.worktreePath, "seed.txt"), "unstaged\n");
+        await writeFile(path.join(saved.worktreePath, "ignored-new.txt"), "updated ignored addition\n");
+        await writeFile(path.join(saved.worktreePath, "雪🙂.txt"), "untracked\n");
+        const captured = await checkpoints.createCheckpoint(saved, 0);
         const files = await run("git", ["ls-tree", "-r", "--name-only", captured.sha], { cwd: repo });
-        expect({ index: await readFile(path.resolve(task.worktreePath, index)), listed: await checkpoints.listCheckpoints(task), tracked: (await run("git", ["show", `${captured.sha}:seed.txt`], { cwd: repo })).stdout,
+        expect({ index: await readFile(path.resolve(saved.worktreePath, index)), listed: await checkpoints.listCheckpoints(saved), tracked: (await run("git", ["show", `${captured.sha}:seed.txt`], { cwd: repo })).stdout,
           untracked: (await run("git", ["show", `${captured.sha}:雪🙂.txt`], { cwd: repo })).stdout,
           ignored: (await run("git", ["show", `${captured.sha}:ignored-new.txt`], { cwd: repo })).stdout, hasFiles: files.stdout.length > 0 }).toEqual({ index: original, listed: [{ ...captured, turnNumber: 0 }], tracked: "unstaged\n", untracked: "untracked\n", ignored: "updated ignored addition\n", hasFiles: true });
-        await checkpoints.holdCheckpoint(task, 1, captured.sha);
-        await checkpoints.recordCheckpoint(task, 1, captured.sha); await checkpoints.releaseCheckpoint(task, 1);
-        expect((await checkpoints.listCheckpoints(task)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
-        const lock = path.join(repo, ".git", "refs", "crab", "checkpoints", task.id, "2.lock");
+        await checkpoints.holdCheckpoint(saved, 1, captured.sha);
+        await checkpoints.recordCheckpoint(saved, 1, captured.sha); await checkpoints.releaseCheckpoint(saved, 1);
+        expect((await checkpoints.listCheckpoints(saved)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
+        const lock = path.join(repo, ".git", "refs", "crab", "checkpoints", saved.id, "2.lock");
         await writeFile(lock, "owned fixture lock");
         try {
-          await expect(checkpoints.createCheckpoint(task, 2)).rejects.toThrow();
-          expect((await checkpoints.listCheckpoints(task)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
+          await expect(checkpoints.createCheckpoint(saved, 2)).rejects.toThrow();
+          expect((await checkpoints.listCheckpoints(saved)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
         } finally { await rm(lock); }
+      } else if (mode.startsWith("checkpoint-stop-")) {
+        const marker = path.join(root, "filter-owner"); const proof = path.join(root, "filter-writes"); const release = path.join(root, "filter-release");
+        const script = path.join(root, "filter.sh");
+        await writeFile(script, `#!/bin/sh
+if [ -z "\${GIT_INDEX_FILE:-}" ]; then exec cat; fi
+trap '' TERM
+(trap '' TERM; while [ ! -f ${quote(release)} ]; do printf x >> ${quote(proof)}; sleep 0.05; done) &
+child=$!
+printf '%s\\n' "$$" "$child" "$GIT_INDEX_FILE" > ${quote(marker)}
+wait "$child"
+`, { mode: 0o755 });
+        await run("git", ["config", "filter.crab-checkpoint.clean", `sh ${quote(script)}`], { cwd: repo });
+        await run("git", ["config", "filter.crab-checkpoint.required", "true"], { cwd: repo });
+        await writeFile(path.join(task.worktreePath, ".gitattributes"), "seed.txt filter=crab-checkpoint\n");
+        // A stale stat cache makes status want to refresh the real index even
+        // though these file bytes are unchanged. Preparation must leave it alone.
+        const modified = new Date(Date.now() + 5000);
+        await utimes(path.join(task.worktreePath, "seed.txt"), modified, modified);
+        const indexPath = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
+        const index = path.resolve(task.worktreePath, indexPath); const original = await readFile(index);
+        wire();
+        const startup = orchestrator.startTask(task.id);
+        const cancelled = expect(startup).rejects.toThrow(/cancelled/);
+        let stopping: Promise<void> | undefined;
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await vi.waitFor(async () => expect((await readFile(marker, "utf8")).trim().split("\n")).toHaveLength(3), { timeout: 15_000 });
+          const [parent, child, privateIndex] = (await readFile(marker, "utf8")).trim().split("\n");
+          stopping = orchestrator.cancelTask(task.id);
+          await Promise.race([stopping, new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("Checkpoint Stop did not close its writer")), 20_000); })]);
+          const alive = (pid: string) => { try { process.kill(Number(pid), 0); return true; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; } };
+          const bytes = await readFile(proof);
+          await new Promise(resolve => setTimeout(resolve, 200));
+          expect({ status: task.status, writers: [alive(parent), alive(child)], proof: await readFile(proof), index: await readFile(index), events }).toEqual({ status: "stopped", writers: [false, false], proof: bytes, index: original, events: [] });
+          await expect(readFile(privateIndex)).rejects.toMatchObject({ code: "ENOENT" });
+          await expect(readFile(`${privateIndex}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+          cancellation = { host: task.isRemote ? "ssh" : "local", pids: [Number(parent), Number(child)], writersStopped: true, userIndexUnchanged: true, privateIndexRemoved: true, privateLockRemoved: true, outputStable: true, providerEvents: events.length };
+          await cancelled;
+        } finally {
+          clearTimeout(deadline); await writeFile(release, "release fixture writer\n");
+          await startup.catch(() => {}); await stopping?.catch(() => {});
+          await run("git", ["config", "--remove-section", "filter.crab-checkpoint"], { cwd: repo });
+        }
       } else if (mode === "availability") {
         type Handler = Parameters<IpcMain["handle"]>[1];
         const handlers = new Map<string, Handler>();
@@ -171,7 +219,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
         chat = registerChatIpc({ handle: (name, handler) => handlers.set(name, handler) }, orchestrator, db, () => null);
         await orchestrator.iterate(task.id, "Use your built-in edit/patch tool to replace remote-two with remote-three in remote-proof.txt. Do not use other tools, shell commands or subagents. Reply Done."); await wait();
         expect({ file: await readFile(path.join(task.worktreePath, "remote-proof.txt"), "utf8"), session: mode === "codex" ? task.codexThreadId : task.claudeSessionId,
-          turns: (await orchestrator.checkpointManager(task).listCheckpoints(task)).map(checkpoint => checkpoint.turnNumber), feedback: task.feedback.length,
+          turns: (await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!))).map(checkpoint => checkpoint.turnNumber), feedback: task.feedback.length,
           visible: chat.snapshot(task.id).messages.some(message => message.id === "remote-warm-input") }).toEqual({ file: "remote-three\n", session, turns: [0, 1, 2], feedback: 2, visible: true });
       }
       if (mode === "codex") {
@@ -179,17 +227,18 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
         expect({ status: task.status, file: await readFile(path.join(repo, "remote-proof.txt"), "utf8") }).toEqual({ status: "applied", file: "remote-three\n" });
       } else {
         await orchestrator.discardTask(task.id);
-        expect({ status: task.status, checkpoints: await orchestrator.checkpointManager(task).listCheckpoints(task) }).toEqual({ status: "discarded", checkpoints: [] });
+        expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
+      if (mode === "checkpoint-stop-local") expect(opens).toEqual([]);
+      else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {
       await orchestrator.shutdown().catch(error => { diagnostics += `\nShutdown: ${String(error)}`; });
       channel.end(); timer = setTimeout(() => channel.destroy(), 15_000);
       try { await closed; } finally {
         clearTimeout(timer); db.close(); router.detachChannel("fixture"); client.end(); await server.close(); requests.mockRestore(); vi.unstubAllEnvs();
-        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, availability, events, diagnostics }, null, 2));
+        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, availability, cancellation, events, diagnostics }, null, 2));
         if (succeeded) await rm(root, { recursive: true, force: true });
       }
     }

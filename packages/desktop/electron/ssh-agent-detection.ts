@@ -36,7 +36,7 @@ export class AgentDetector {
       const { stdout } = await runAgentCommand(factory, "/bin/sh", ["-c",
         'p=$(command -v "$1") || exit 0; printf "%s\\n" "$p"; exec "$p" --version',
         "crab-agent-detection", agent.binary,
-      ], context.remotePath);
+      ], { cwd: context.remotePath, timeoutMs: 30_000 });
       const [path = "", ...version] = stdout.trim().split("\n");
       return { ...agent, path, version: version.join("\n").trim(), available: path !== "" };
     }));

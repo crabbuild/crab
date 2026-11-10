@@ -32,7 +32,7 @@ import { loadAgentConfig, migrateSettings } from "./orchestrator-settings";
 import { buildAgentModelFlags } from "./orchestrator-steering";
 import { CheckpointManager } from "./orchestrator-checkpoints";
 import { remoteAgentProcessFactory } from "./ssh-native-process";
-import type { AgentProcessFactory } from "./agent-process";
+import { AgentProcessClosureError, WorkspaceCommandCancelledError, type AgentProcessFactory } from "./agent-process";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
 import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
@@ -270,7 +270,8 @@ export type TaskSubmission = { taskId: string; id: string; content: string } & (
   | { state: "unconfirmed"; error: string }
 );
 
-type TaskStartup = { promise: Promise<void>; prompt: string; kind: TaskInputKind; goal?: CodexGoalMutation; configuration?: AgentTurnOptions; dispatched?: boolean };
+type TaskStartup = { promise: Promise<void>; controller: AbortController; prompt: string; kind: TaskInputKind; goal?: CodexGoalMutation; configuration?: AgentTurnOptions; dispatched?: boolean };
+type CheckpointJob = { task: Task; kind: "write" | "query"; controller: AbortController; promise: Promise<unknown>; failure?: AgentProcessClosureError };
 type SetupResult = ScriptResult & { skipped?: boolean };
 type SetupWaiter = { taskId: string; controller: AbortController; promise: Promise<SetupResult> };
 type SetupJob = { id: string; owner: Task; controller: AbortController; waiters: Set<SetupWaiter>; promise: Promise<SetupResult>; output: string };
@@ -300,7 +301,8 @@ export class Orchestrator extends EventEmitter {
   private completionJournalAttached = false;
   private workspaceTransitions = new Map<Task, "removed" | "restored" | "archived" | "applied" | "closed" | "updated">();
   private timeouts = new Map<string, ReturnType<typeof setTimeout>>();
-  private checkpoints = new CheckpointManager();
+  private checkpointJobs = new Set<CheckpointJob>();
+  private checkpointClosing = false;
   private readonly timeoutMs: number;
   private readonly maxConcurrent: number;
   private readonly taskDb: OrchestratorTaskDatabase;
@@ -416,7 +418,7 @@ export class Orchestrator extends EventEmitter {
     };
 
     if (worktreeMode === "primary") {
-      task.baseRef = await this.checkpointManager(task).captureBase(task);
+      task.baseRef = await this.checkpointOperation(task, manager => manager.captureBase(task));
     }
 
     this.tasks.set(id, task);
@@ -507,7 +509,7 @@ export class Orchestrator extends EventEmitter {
       remoteProfileId: remoteInfo.profileId,
     };
 
-    if (worktreeMode !== "auto") task.baseRef = await this.checkpointManager(task).captureBase(task);
+    if (worktreeMode !== "auto") task.baseRef = await this.checkpointOperation(task, manager => manager.captureBase(task));
     this.tasks.set(id, task);
     await this.persistTasks();
     this.emit("orchestrator:task-status", { taskId: id, status: task.status });
@@ -588,14 +590,49 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** Binds checkpoint I/O to the saved workspace and current SSH channel. */
-  checkpointManager(task: Task): CheckpointManager {
-    if (!task.isRemote) return this.checkpoints;
+  private checkpointManager(task: Task, signal: AbortSignal): CheckpointManager {
+    if (!task.isRemote) return new CheckpointManager(undefined, signal);
     if (!this.rpcRouter || !task.remoteProfileId) throw new Error("Remote checkpoints require a connected remote agent");
     // Capture both factories once: reconnect cannot splice one snapshot across
     // channels, and repository refs remain accessible after worktree removal.
     const workspace = this.agentProcessFactory(task)!;
     const repository = remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId);
-    return new CheckpointManager((saved, cwd) => cwd === saved.worktreePath ? workspace : repository);
+    return new CheckpointManager((saved, cwd) => cwd === saved.worktreePath ? workspace : repository, signal);
+  }
+
+  /** Queries refs without granting a lost reader ownership of workspace writes. */
+  queryCheckpoints<T>(task: Task, operation: (manager: Pick<CheckpointManager, "listCheckpoints" | "listRestoreBackups">) => Promise<T>): Promise<T> {
+    this.assertAcceptingWork();
+    return this.checkpointOperation(task, operation, undefined, "query");
+  }
+
+  private async checkpointOperation<T>(task: Task, operation: (manager: CheckpointManager) => Promise<T>, signal?: AbortSignal, kind: CheckpointJob["kind"] = "write"): Promise<T> {
+    if (this.checkpointClosing) throw new WorkspaceCommandCancelledError();
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    const manager = this.checkpointManager(task, controller.signal);
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const promise = Promise.resolve().then(() => operation(manager));
+    const job: CheckpointJob = { task, kind, controller, promise };
+    this.checkpointJobs.add(job);
+    try { return await promise; } catch (error: unknown) {
+      // An unconfirmed process can still write. Keep its failed receipt as a
+      // workspace fence even after the turn/job has otherwise finished.
+      if (error instanceof AgentProcessClosureError) job.failure = error;
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (!job.failure) this.checkpointJobs.delete(job);
+    }
+  }
+
+  private async waitCheckpointJobs(tasks?: Task[]): Promise<void> {
+    const jobs = [...this.checkpointJobs].filter(job => !tasks || job.kind === "write" && tasks.some(task => task.id === job.task.id));
+    const results = await Promise.allSettled(jobs.map(job => job.promise));
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected" && result.reason instanceof AgentProcessClosureError);
+    if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Workspace command closure is unconfirmed");
   }
 
   /**
@@ -632,7 +669,7 @@ export class Orchestrator extends EventEmitter {
     let resolveStartup!: () => void;
     let rejectStartup!: (error: unknown) => void;
     const promise = new Promise<void>((resolve, reject) => { resolveStartup = resolve; rejectStartup = reject; });
-    const startup: TaskStartup = { promise, prompt: prompt ?? task.feedback.at(-1) ?? task.prompt, kind: kind ?? task.lastInputKind ?? "message", goal, configuration };
+    const startup: TaskStartup = { promise, controller: new AbortController(), prompt: prompt ?? task.feedback.at(-1) ?? task.prompt, kind: kind ?? task.lastInputKind ?? "message", goal, configuration };
     // Error listeners can synchronously request a follow-up. Publish the
     // pending startup before launching so they cannot bypass its completion.
     this.startups.set(taskId, startup);
@@ -732,19 +769,19 @@ export class Orchestrator extends EventEmitter {
     if (task.status !== "running") throw new Error("Task startup was cancelled");
     this.assertWorkspaceAvailable(task);
     startup.dispatched = true;
-    await this.prepareWorkspace(task);
+    await this.prepareWorkspace(task, startup.controller.signal);
     if (task.status !== "running") throw new Error("Task startup was cancelled");
     this.assertWorkspaceAvailable(task);
 
     // Capture a rollback baseline before constructing any provider owner.
     // Continuing after a Git failure would misrepresent recoverable changes.
     this.migrateWorkspaceMetadata(task);
-    task.baseRef = await this.checkpointManager(task).pinBase(task);
+    task.baseRef = await this.checkpointOperation(task, manager => manager.pinBase(task), startup.controller.signal);
     if (!skipCheckpoint) {
       const turnNumber = task.turnNumber ?? 0;
-      const checkpoint = turnNumber === 0
-        ? await this.checkpointManager(task).createLightweightCheckpoint(task, turnNumber)
-        : await this.checkpointManager(task).createCheckpoint(task, turnNumber);
+      const checkpoint = await this.checkpointOperation(task, manager => turnNumber === 0
+        ? manager.createLightweightCheckpoint(task, turnNumber)
+        : manager.createCheckpoint(task, turnNumber), startup.controller.signal);
       this.emit("orchestrator:checkpoint-created", { taskId, turnNumber, ...checkpoint });
     }
     if (task.status !== "running") throw new Error("Task startup was cancelled");
@@ -977,6 +1014,9 @@ export class Orchestrator extends EventEmitter {
     // terminal notification must not replace stopped with an interrupted turn.
     task.status = "stopped";
     task.completedAt = Date.now();
+    const startup = this.startups.get(taskId);
+    const submissions = [...(this.pendingSubmissions.get(taskId) ?? [])].map(input => input.settled);
+    startup?.controller.abort(new WorkspaceCommandCancelledError());
     const preparation = this.setupWaiters(taskId).map(waiter => this.settleSetupWaiter(waiter));
     this.cancelPendingSubmissions(taskId);
     this.cancelQueuedAdmission(taskId);
@@ -984,13 +1024,20 @@ export class Orchestrator extends EventEmitter {
     this.closingTasks.add(taskId);
     try {
       const adapter = this.adapters.get(taskId);
-      if (adapter) {
+      const closeAdapter = async () => {
+        if (!adapter) return;
         await adapter.cancel();
         if (this.adapters.get(taskId) === adapter) this.adapters.delete(taskId);
-      }
-      await Promise.all(preparation);
-      await this.closeGoalReaders(taskId);
-      await this.goalControls.get(taskId)?.promise.catch(() => {});
+      };
+      // Join the enclosing jobs as well as their current process. Cancellation
+      // can still owe private-index cleanup or accepted-input publication.
+      const results = await Promise.allSettled([closeAdapter(), ...preparation, ...submissions,
+        startup?.promise.catch(() => {}), this.closeGoalReaders(taskId),
+        this.goalControls.get(taskId)?.promise.catch(() => {})]);
+      const checkpoints = await Promise.allSettled([this.postTurnSnapshots.get(taskId), this.inputRecovery.get(taskId), this.waitCheckpointJobs([task])]);
+      const errors = [...results, ...checkpoints].filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (errors.length === 1) throw errors[0].reason;
+      if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Task closure is unconfirmed");
       await this.pauseStoppedGoal(task);
     } finally {
       this.closingTasks.delete(taskId);
@@ -1144,10 +1191,13 @@ export class Orchestrator extends EventEmitter {
         {
           // Capture and pin on the workspace host before native dispatch.
           // Publish only after provider acceptance.
-          sha = await this.checkpointManager(task).snapshotHead(task);
-          signal.throwIfAborted();
-          this.assertWorkspaceAvailable(task);
-          await this.checkpointManager(task).holdCheckpoint(task, turnNumber, sha);
+          sha = await this.checkpointOperation(task, async manager => {
+            const snapshot = await manager.snapshotHead(task);
+            signal.throwIfAborted();
+            this.assertWorkspaceAvailable(task);
+            await manager.holdCheckpoint(task, turnNumber, snapshot);
+            return snapshot;
+          }, signal);
         }
       } catch (error: unknown) {
         // Failed preparation owns no native input. Retain its exact text for
@@ -1245,7 +1295,7 @@ export class Orchestrator extends EventEmitter {
           // its intent for explicit Retry instead of replaying an older prompt.
           const queued = input.phase === "queued";
           if (queued) {
-            if (input.sha) await this.checkpointManager(task).releaseCheckpoint(task, input.turnNumber);
+            if (input.sha) await this.checkpointOperation(task, manager => manager.releaseCheckpoint(task, input.turnNumber));
             input.phase = "unsent";
             input.previousUnsent = undefined;
             if (!this.adapters.has(taskId)) {
@@ -1324,7 +1374,8 @@ export class Orchestrator extends EventEmitter {
     // any later failure is idempotent and uses the original pinned snapshot.
     await this.persistTasks();
     if (input.sha && input.outcome !== "rejected") {
-      const { ref } = await this.checkpointManager(task).recordCheckpoint(task, input.turnNumber, input.sha);
+      const sha = input.sha;
+      const { ref } = await this.checkpointOperation(task, manager => manager.recordCheckpoint(task, input.turnNumber, sha));
       this.emit("orchestrator:checkpoint-created", { taskId: task.id, turnNumber: input.turnNumber, sha: input.sha, ref });
     }
   }
@@ -1332,7 +1383,7 @@ export class Orchestrator extends EventEmitter {
   private async clearTaskInput(task: Task): Promise<void> {
     const input = task.pendingInput;
     if (!input) return;
-    if (input.sha) await this.checkpointManager(task).releaseCheckpoint(task, input.turnNumber);
+    if (input.sha) await this.checkpointOperation(task, manager => manager.releaseCheckpoint(task, input.turnNumber));
     task.pendingInput = input.outcome === "rejected" && input.previousUnsent
       ? { ...input.previousUnsent, phase: "unsent", turnNumber: (task.turnNumber ?? 0) + 1 } : undefined;
     try { await this.persistTasks(); } catch (error: unknown) { task.pendingInput = input; throw error; }
@@ -1392,7 +1443,7 @@ export class Orchestrator extends EventEmitter {
       if (!file) throw new Error("This file no longer has changes. Reload changes before reverting it.");
       oldPath = file.status === "renamed" ? file.oldPath : undefined;
     };
-    return this.editFiles(taskId, task => this.checkpointManager(task).revertFile(task, filePath, oldPath), validate);
+    return this.editFiles(taskId, task => this.checkpointOperation(task, manager => manager.revertFile(task, filePath, oldPath)), validate);
   }
 
   /** Restores a conversation's files while retaining its history and native identity. */
@@ -1402,11 +1453,11 @@ export class Orchestrator extends EventEmitter {
       if (!owner || owner.status === "discarded") throw new Error("Full file restoration requires a Crab-owned worktree");
       // Validate before cancelling providers, then recheck under writer closure.
       // Keep preflight inside the operation owner so quit drains it too.
-      await this.checkpointManager(task).snapshotSha(task, sourceRef);
+      await this.checkpointOperation(task, manager => manager.snapshotSha(task, sourceRef));
       this.migrateWorkspaceMetadata(task);
       if (readTaskMetadata(owner.worktreePath)?.taskId !== owner.id) throw new Error("This directory no longer belongs to the saved workspace. Start a new chat for it.");
     };
-    return this.editFiles(taskId, task => this.checkpointManager(task).restoreFiles(task, sourceRef), validate);
+    return this.editFiles(taskId, task => this.checkpointOperation(task, manager => manager.restoreFiles(task, sourceRef)), validate);
   }
 
   private async editFiles(taskId: string, change: (task: Task) => Promise<void>, validate?: (task: Task) => Promise<void>): Promise<void> {
@@ -1508,7 +1559,7 @@ export class Orchestrator extends EventEmitter {
       this.emit("orchestrator:submission", { taskId, id: input.id, content: input.content, state: "rejected" } satisfies TaskSubmission);
       return;
     }
-    const skipCheckpoint = await this.checkpointManager(task).hasCheckpoint(task, task.turnNumber ?? 0);
+    const skipCheckpoint = await this.checkpointOperation(task, manager => manager.hasCheckpoint(task, task.turnNumber ?? 0));
     task.status = "created";
     task.completedAt = undefined;
     task.exitCode = undefined;
@@ -1646,7 +1697,7 @@ export class Orchestrator extends EventEmitter {
       try {
         const keepBase = [...this.tasks.values()].some(candidate => candidate.id !== task.id && candidate.status !== "discarded"
           && candidate.repoPath === task.repoPath && candidate.baseRef === task.baseRef);
-        await this.checkpointManager(task).cleanup(task, keepBase);
+        await this.checkpointOperation(task, manager => manager.cleanup(task, keepBase));
       } catch (error: unknown) {
         const warning = `Conversation discarded; snapshot cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
         cleanupWarning = cleanupWarning ? `${cleanupWarning}\n${warning}` : warning;
@@ -2476,7 +2527,7 @@ export class Orchestrator extends EventEmitter {
       && ["running", "iterating"].includes(candidate.status))) return;
 
     const turnNum = task.pendingInput?.turnNumber ?? task.turnNumber ?? 0;
-    const committed = await this.checkpointManager(task).commitTurn(task, turnNum);
+    const committed = await this.checkpointOperation(task, manager => manager.commitTurn(task, turnNum));
     if (!committed) return;
     this.emit("orchestrator:turn-committed", { taskId, turnNumber: turnNum });
   }
@@ -2716,6 +2767,7 @@ export class Orchestrator extends EventEmitter {
         taskId,
         message: `Auto-commit after turn failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+      if (err instanceof AgentProcessClosureError) throw err;
     }).finally(() => {
       if (this.postTurnSnapshots.get(taskId) === snapshot) this.postTurnSnapshots.delete(taskId);
     });
@@ -2831,6 +2883,8 @@ export class Orchestrator extends EventEmitter {
 
   private assertWorkspaceAvailable(task: Task): void {
     this.assertAcceptingWork();
+    const failed = [...this.checkpointJobs].find(job => job.kind === "write" && job.failure && job.task.worktreePath === task.worktreePath && job.task.remoteProfileId === task.remoteProfileId);
+    if (failed) throw new Error("Workspace command closure is unconfirmed", { cause: failed.failure });
     const transition = [...this.workspaceTransitions].find(([owner]) => owner.worktreePath === task.worktreePath && owner.remoteProfileId === task.remoteProfileId);
     if (transition) {
       throw new Error(`This workspace is being ${transition[1]}. Wait for the operation to finish.`);
@@ -2858,6 +2912,9 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async shutdownAttempt(): Promise<void> {
+    // Queries owe no durable write. Stop them while accepted mutations finish
+    // through their enclosing workspace/input jobs and private-index cleanup.
+    for (const job of this.checkpointJobs) if (job.kind === "query") job.controller.abort(new WorkspaceCommandCancelledError());
     const scripts = this.workspaceScripts.shutdown();
     const setupJobs = [...this.workspaceSetups.values()].map(job => job.promise.catch(error => { if (!(error instanceof WorkspaceScriptCancelledError)) throw error; }));
     const conversations = [...this.tasks.values()].filter(task => task.agentType !== "workflow");
@@ -2894,8 +2951,12 @@ export class Orchestrator extends EventEmitter {
       ...this.inputRecovery.values(), ...reads, ...[...this.goalControls.values()].map(control => control.promise.catch(() => {})),
       ...workspaceOperations]);
     const snapshots = await Promise.allSettled(this.postTurnSnapshots.values());
+    // Accepted restore/archive/ref publication must finish; only preparation
+    // receives cancellation. Fence new internal jobs after their producers close.
+    this.checkpointClosing = true;
+    const commands = await Promise.allSettled([this.waitCheckpointJobs()]);
     await this.persistTasks();
-    const errors = [...results, ...snapshots].filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    const errors = [...results, ...snapshots, ...commands].filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Agent shutdown failed");
   }
 
@@ -2932,6 +2993,7 @@ export class Orchestrator extends EventEmitter {
     if (!task.isRemote) closing.push(this.workspaceScripts.close(task, this.ownsTaskWorktree(task)));
     await Promise.all([...closing, ...preparing, ...submitting, ...starting.map(startup => startup.catch(() => {}))]);
     await Promise.all(conversations.map(conversation => this.postTurnSnapshots.get(conversation.id)));
+    await this.waitCheckpointJobs(conversations);
     this.migrateWorkspaceMetadata(task);
     return conversations;
   }
