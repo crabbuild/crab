@@ -72,7 +72,7 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
       - name: Install macOS SSH terminal test dependency
         if: runner.os == 'macOS'
         run: command -v tmux || brew install tmux
@@ -116,12 +116,11 @@ jobs:
       - name: Build desktop runtime and application
         run: npm run build
       - name: Test native desktop integration
-        # Worktree integration tests invoke the same CLI bundled with the app.
-        run: |
-          extension=
-          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked
+        # Linux tests use the same baseline toolchain and CLI as the build.
+        run: npm run build:agent -- --test
+      - name: Qualify Linux runtime ABI and repository operations
+        if: runner.os == 'Linux'
+        run: node scripts/qualify-linux-runtime.mjs
       - name: Qualify checkpoint ownership and remote availability
         if: runner.os != 'Windows'
         run: |
@@ -225,9 +224,6 @@ jobs:
     timeout-minutes: 180
     env:
       CARGO_INCREMENTAL: 0
-      # The repository config names a cross linker; this runner builds natively.
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: cc
-      CC_aarch64_unknown_linux_gnu: cc
     defaults:
       run:
         shell: bash
@@ -244,12 +240,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - name: Build and verify remote CLI and sidecar
         run: npm run build:agent
       - name: Test native remote runtime
-        run: CRAB_BIN="$CARGO_TARGET_DIR/release/crab" cargo test --release -p crab-desktop-agent --locked
+        run: npm run build:agent -- --test
+      - name: Qualify Linux runtime ABI and repository operations
+        run: node scripts/qualify-linux-runtime.mjs
       - name: Install SSH qualification dependencies
         # This fixture uses only JavaScript modules; no Electron native ABI is loaded.
         run: npm ci --ignore-scripts

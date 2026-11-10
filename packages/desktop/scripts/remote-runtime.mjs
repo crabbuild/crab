@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -6,6 +7,22 @@ import { fileURLToPath } from "node:url";
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(alpha|beta|rc)\.(0|[1-9]\d*))?$/;
 const targets = new Set(["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"]);
+
+/** Checks the linked GNU runtime contract before publishing Linux binaries. */
+export function verifyLinuxAbi(file) {
+  const symbols = execFileSync("readelf", ["--version-info", file], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  const limits = { GLIBC: [2, 28], GLIBCXX: [3, 4, 25], CXXABI: [1, 3, 11] };
+  const required = [...symbols.matchAll(/Name: (GLIBC|GLIBCXX|CXXABI)_([\d.]+)/g)];
+  if (!required.some(([, name]) => name === "GLIBC")) throw new Error(`Linux binary has no GNU libc version contract: ${file}`);
+  const unsupported = required.filter(([, name, value]) => {
+    const version = value.split(".").map(Number); const limit = limits[name];
+    const different = version.findIndex((part, index) => part !== (limit[index] ?? 0));
+    return different >= 0 && version[different] > (limit[different] ?? 0);
+  }).map(([, name, value]) => `${name}_${value}`);
+  if (unsupported.length) throw new Error(`${file} exceeds the Linux glibc 2.28/GCC 8 ABI: ${[...new Set(unsupported)].join(", ")}`);
+  const libraries = execFileSync("readelf", ["--dynamic", file], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  if (/NEEDED.*lib(?:ssl|crypto)\.so/.test(libraries)) throw new Error(`Linux runtime requires external OpenSSL: ${file}`);
+}
 
 export async function stageRemoteRuntime(directory, output) {
   const runtime = JSON.parse(await readFile(path.join(directory, "runtime.json"), "utf8"));

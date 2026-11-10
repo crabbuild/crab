@@ -73,9 +73,18 @@ scratch directory instead of the developer's Workspace volume.
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
 
-Run native integration tests after building the runtime, with `CRAB_BIN` set to
-`$CARGO_TARGET_DIR/release/crab` (`crab.exe` on Windows). Worktree tests invoke
-the real CLI, so building only the sidecar is insufficient.
+Run `npm run build:agent -- --test` after building the runtime. It sets
+`CRAB_BIN` to the built CLI; worktree tests invoke that real binary.
+
+Linux GNU builds run the native compiler and tests in
+`scripts/linux-native.Dockerfile` through Docker unless the host already has
+glibc 2.28 and GCC 14 or newer. The image uses AlmaLinux 8,
+GCC Toolset 14, and the pinned Rust toolchain; its Cargo cache and artifacts stay
+in the checkout's external target directory. Staging rejects binaries requiring newer
+glibc/GCC runtime symbols or external OpenSSL. `node scripts/qualify-linux-runtime.mjs`
+then exercises the real CLI and sidecar repository writes/reads on AlmaLinux 8,
+Debian 12, and Amazon Linux 2023. This gate covers the GNU native payload;
+Alpine/musl and Electron/native Node modules need separate qualification.
 
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses

@@ -2068,11 +2068,26 @@ WORKSPACE_PROVIDER_SDK_DEPENDENCIES = {
     "aws-sdk-s3control": "1",
     "aws-sdk-sts": "1",
     "azure_core": "0.21",
-    "azure_identity": "0.21",
-    "azure_mgmt_storage": "0.21",
-    "azure_storage": "0.21",
-    "azure_storage_blobs": "0.21",
-    "google-cloud-storage": "0.24",
+    "azure_identity": {
+        "version": "0.21", "default-features": False,
+        "features": ["development", "enable_reqwest_rustls", "old_azure_cli"],
+    },
+    "azure_mgmt_storage": {
+        "version": "0.21", "default-features": False,
+        "features": ["default_tag", "enable_reqwest_rustls"],
+    },
+    "azure_storage": {
+        "version": "0.21", "default-features": False,
+        "features": ["enable_reqwest_rustls", "hmac_rust"],
+    },
+    "azure_storage_blobs": {
+        "version": "0.21", "default-features": False,
+        "features": ["enable_reqwest_rustls", "hmac_rust"],
+    },
+    "google-cloud-storage": {
+        "version": "0.24", "default-features": False,
+        "features": ["auth", "rustls-tls"],
+    },
     "google-cloud-token": "0.1.2",
 }
 WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
@@ -2081,7 +2096,10 @@ WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
     "bytes": "1.11",
     "futures-util": "0.3",
     "object_store": {"version": "0.14.1", "default-features": False},
-    "reqwest": {"version": "0.12", "default-features": False},
+    "reqwest": {
+        "version": "0.12", "default-features": False,
+        "features": ["rustls-tls-native-roots"],
+    },
     "rusqlite": {
         "version": "=0.40.2",
         "default-features": False,

@@ -1752,3 +1752,39 @@ build/test tools as well as Electron and the updater; the counts do not establis
 application exploitability. Evidence: `desktop-dependency-audit.json`. Upgrade
 and lockfile review remain required; no automatic fix, override, or audit
 suppression was applied.
+
+## GNU runtime portability qualification (2026-11-10)
+
+- Linux native builds and tests use an AlmaLinux 8 toolchain container unless
+  their host already has glibc 2.28 and GCC 14+. GCC Toolset 14 supports the current DuckDB C++
+  sources while staging still enforces glibc 2.28, GLIBCXX 3.4.25, and CXXABI
+  1.3.11. The compiler and runtime ABI are separate contracts: GCC 8 fails four
+  actual DuckDB translation units; Toolset 14 passes their syntax checks. Its
+  linked C++17 filesystem/reference-wrapper fixture passes the ABI gate and
+  executes on stock AlmaLinux 8. Full CLI/sidecar rebuild and distro RPC proof
+  remain pending. Evidence: `linux-native-baseline-build-trusted.log`,
+  `linux-native-toolset14-preflight.log`, and `linux-native-toolset14-runtime.log`.
+- Azure and Google SDKs use Rustls without changing SDK versions or removing
+  their other default authentication, API-tag, and signing features. Reqwest
+  also loads native roots so system/private CAs remain available. The lockfile
+  removes eight platform-TLS/OpenSSL packages, with no additions or version
+  changes. Four exact release feature graphs cover Linux x64/arm64, macOS
+  arm64, and Windows x64: OpenSSL is absent and native roots remain enabled.
+- Actual Google Storage and Azure Core clients reject an unknown CA, accept
+  a trusted private CA, and reject a trusted certificate with the wrong hostname.
+  The owned HTTPS server records the two accepted requests without authorization
+  headers. Evidence: `linux-cloud-tls-contract.json`; no cloud credentials or
+  live provider operations are used by this TLS probe.
+- The real ELF policy accepts a baseline C++ fixture, rejects both downloaded
+  `d444f4061f2` Linux binaries for their newer GLIBC requirements, and rejects a
+  deliberately OpenSSL-linked fixture. Evidence: `linux-abi-policy-real-elf.log`.
+- After rebasing on `fe527105459`, the macOS CLI/NFS helper/sidecar build passes
+  with the new SDK transport. Native integration reports 273 passes and one
+  existing ignored case. All 114 scoped desktop checks, 27 build-tool checks,
+  23 architecture regression tests, production types, and Electron build pass.
+  Evidence: `linux-portability-mac-native-rebased.log`,
+  `linux-portability-mac-native-tests.log`, and `rebased-scoped.json`.
+- GNU release qualification still requires the full rebuilt pair and real
+  repository RPCs on AlmaLinux 8, Debian 12, and Amazon Linux 2023. Alpine/musl,
+  Electron/native Node module minimum distributions, Windows owner cleanup,
+  published assets, and new-head cross-platform CI remain separate gates.
