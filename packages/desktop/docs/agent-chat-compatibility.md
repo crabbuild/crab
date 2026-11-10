@@ -1651,7 +1651,7 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 Run live checks only in an owned scratch directory:
 
 ```sh
-CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/agent-chat-live.spec.ts --maxWorkers 1 --minWorkers 1
+CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/agent-chat-live.spec.ts --maxWorkers 1
 ```
 
 The test uses the installed agents and their existing authentication, performs
@@ -1663,7 +1663,7 @@ owners. Build them first so this check exercises current source:
 
 ```sh
 npm run build:electron
-CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/agent-shutdown-live.spec.ts --maxWorkers 1 --minWorkers 1
+CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/agent-shutdown-live.spec.ts --maxWorkers 1
 ```
 
 This fixture currently qualifies macOS/POSIX shutdown; it does not replace the
@@ -1672,7 +1672,7 @@ packaged Crab restart and supported-OS gates above.
 The script-owner checks use real shell groups and the installed Crab binary:
 
 ```sh
-CRAB_BIN=<installed-crab-binary> CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/workspace-scripts-live.spec.ts --maxWorkers 1 --minWorkers 1
+CRAB_BIN=<installed-crab-binary> CRAB_AGENT_LIVE_ROOT=<absolute-scratch-directory> npm test -- tests/workspace-scripts-live.spec.ts --maxWorkers 1
 ```
 
 The request-card browser checks run separately from packaged smoke:
@@ -1974,3 +1974,65 @@ separately with matched birth identity. All three are confirmed gone. Evidence:
 `electron45-shutdown-full.json` and `electron45-shutdown-full-home.json`.
 This is unsigned macOS qualification, not cross-platform or production release
 approval. The PR stays open and unmerged.
+
+
+## Desktop dependency security candidate (2026-11-10)
+
+Vite 8.3.7, React plugin 6.3.0 and Vitest 5.1.0 replace the old build/test
+toolchain. Node typings follow the supported Node 22 host. The existing native
+crash/recovery runner now declares vite-node 6 directly and uses its exported
+CLI; it no longer relies on Vitest's transitive private executable. The real
+Electron-node loader reaches the fixture's argument validation in an owned
+HOME without invoking either provider. Vite's removed object-form manual chunks
+becomes a Rolldown code-splitting group for Monaco. Removed minWorkers options
+are deleted from desktop CI and runnable documentation.
+
+Vitest's supported mock signature takes a function type, and constructor mocks
+must be constructible. Three touched fixture types use that signature; ssh2's
+Client fixture now uses a function constructor. Assertions and test inclusion
+remain intact. The initial upgraded run passes 111 checks and exposes 52 SSH
+fixture failures; the constructor correction passes all 54 SSH cases. The
+combined rerun passes all 163 selected storage, clipboard, terminal, SSH,
+workflow, updater, chat database and Codex resume cases. Production and touched
+fixture types pass. The exported CLI probe is `toolchain-fixture-loader.json`;
+regression evidence is `toolchain-scoped.json`, `toolchain-ssh-fixed.json`, and
+`security-scoped.json`.
+
+Normal updates within existing ranges select electron-updater 6.8.11 and remove
+its vulnerable private builder-util-runtime copy, retaining 9.7.0. They also
+update DOMPurify, Browserslist, brace expansion, YAML, compression and CSS parsing.
+The application's two glob callers use maintained minimatch 11.0.6's named
+minimatch function, including dot-file matching in SSH sync. Both workspace
+discovery surfaces plus SSH, storage and updater pass 123 focused checks after
+the final dependency update. Production types, renderer/Electron builds and all
+27 build-tool checks pass. No patch, override, vendor edit, audit suppression
+or unexpected registry is introduced.
+
+The final read-only audit reports **zero critical and zero high** entries,
+with **11 moderate and three low** entries still open. Most moderate entries
+are parent-package reports of minimatch 9/10 inside build/lint dependencies:
+app-builder-lib pins @electron/universal 2.0.3, and the latest TypeScript ESLint
+parser still requires minimatch 10. npm's suggested major fixes include builder
+and ESLint downgrades; these are not suitable substitutes for a maintained
+upstream fix or separately approved dependency override. The three low entries
+are the existing Streamdown/KaTeX/Mermaid tree; a renderer upgrade needs its
+own API and behavior qualification. Evidence: `security-final-audit.json`,
+`toolchain-lock-review.json` and `security-lock-review.json`. Audit package
+counts include build tools and transitive parent entries; they do not establish
+application exploitability or production readiness.
+
+
+The final security candidate's rebuilt unsigned macOS package passes all five
+enabled combined smoke cases with zero unexpected or flaky results. Storage
+remains skipped without its isolated bucket. Both explicitly owned-home daemon
+processes are gone before fixture removal, and the qualification parent daemon
+is closed separately with verified birth identity. Evidence:
+`security-final-packaged.json` and `security-final-packaged-home.json`.
+The final fixture type probe also passes. Broader and cross-platform checks
+remain assigned to CI; these results do not qualify signing or publication.
+
+Dependency contracts reviewed for this batch: [Vite 8 migration](https://vite.dev/guide/migration),
+[Vitest 5 migration](https://vitest.dev/guide/migration/),
+[Vitest 4 removed APIs and constructor mocks](https://v4.vitest.dev/guide/migration.html),
+[minimatch 11 matching contract](https://github.com/isaacs/minimatch/blob/v11.0.6/README.md),
+and the [updater redirect advisory](https://github.com/advisories/GHSA-p2f4-r6v6-j797).

@@ -210,7 +210,7 @@ staged v2 CLI. Tests run under Electron to match the installed native-module ABI
 ```bash
 npm run typecheck
 npm run test:build
-npm test -- --maxWorkers 2 --minWorkers 1
+npm test -- --maxWorkers 2
 cargo test -p crab-desktop-agent --locked
 npm run package:dir
 npm run test:e2e-smoke

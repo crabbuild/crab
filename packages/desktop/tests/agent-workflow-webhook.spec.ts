@@ -50,7 +50,7 @@ describe("workflow webhook listener", () => {
       listener = this;
       return Reflect.apply(listen, this, [0, ...args.slice(1)]);
     });
-    const startRun = vi.fn<Parameters<AgentWorkflowRunner["startRun"]>, ReturnType<AgentWorkflowRunner["startRun"]>>().mockResolvedValue(run);
+    const startRun = vi.fn<AgentWorkflowRunner["startRun"]>().mockResolvedValue(run);
     const server = new AgentWorkflowWebhookServer({ list: async () => [trigger] }, { get: async () => definition }, { startRun });
     try {
       const ready = server.start();

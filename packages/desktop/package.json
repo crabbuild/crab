@@ -65,7 +65,7 @@
     "fuse.js": "^7.3.0",
     "lucide-react": "^1.14.0",
     "marked": "^15.0.0",
-    "minimatch": "^10.2.5",
+    "minimatch": "^11.0.6",
     "monaco-editor": "^0.52.0",
     "node-pty": "^1.1.0",
     "react": "^18.3.1",
@@ -88,14 +88,14 @@
     "@playwright/test": "^1.65.0",
     "@shikijs/monaco": "^4.0.2",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20.14.12",
+    "@types/node": "^22.20.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/react-window": "^1.8.8",
     "@types/ssh2": "^1.15.5",
     "@typescript-eslint/eslint-plugin": "^8.15.0",
     "@typescript-eslint/parser": "^8.15.0",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^6.3.0",
     "autoprefixer": "^10.4.20",
     "electron": "^45.2.3",
     "electron-builder": "^26.18.0",
@@ -106,8 +106,9 @@
     "shiki": "^4.0.2",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.9.3",
-    "vite": "^5.4.11",
-    "vitest": "^1.6.1"
+    "vite": "^8.3.7",
+    "vite-node": "^6.0.0",
+    "vitest": "^5.1.0"
   },
   "engines": {
     "node": ">=22.12.0 <23"

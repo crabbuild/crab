@@ -59,7 +59,7 @@ class MockClient extends EventEmitter {
 let mockClientInstances: MockClient[] = [];
 
 vi.mock("ssh2", () => ({
-  Client: vi.fn(() => {
+  Client: vi.fn(function () {
     const client = new MockClient();
     mockClientInstances.push(client);
     return client;
@@ -718,10 +718,10 @@ describe("SSH connection ownership", () => {
 
 describe("SSH host verification ownership", () => {
   let manager: SshSessionManager;
-  let verify: ReturnType<typeof vi.fn<[string, number, Buffer, AbortSignal], Promise<void>>>;
+  let verify: ReturnType<typeof vi.fn<ConstructorParameters<typeof SshSessionManager>[0]>>;
   beforeEach(() => {
     vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock";
-    verify = vi.fn<[string, number, Buffer, AbortSignal], Promise<void>>(async () => {}); manager = new SshSessionManager(verify);
+    verify = vi.fn<ConstructorParameters<typeof SshSessionManager>[0]>(async () => {}); manager = new SshSessionManager(verify);
   });
   afterEach(async () => { await manager.disconnect("test-profile-1"); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
   async function start() {

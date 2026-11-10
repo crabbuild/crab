@@ -15,7 +15,7 @@ describe("remote release runtime", () => {
   beforeEach(async () => { directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-store-")); });
   afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
   function options(packaged = true) { return { packaged, appPath: directory, version: metadata.version, cacheDirectory: path.join(directory, "cache") }; }
-  const responses = () => vi.fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>(async input => {
+  const responses = () => vi.fn<typeof fetch>(async input => {
     const name = new URL(String(input)).pathname.split("/").at(-1)!;
     if (name.endsWith(".json")) return new Response(JSON.stringify(metadata));
     return new Response(Uint8Array.from(name.endsWith("-crab-desktop-agent") ? agent : crab));

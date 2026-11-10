@@ -37,7 +37,7 @@ with SIGTERM to close its clients and clean its remote tmux server.
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron \
-  node_modules/vite-node/vite-node.mjs \
+  node_modules/vite-node/dist/cli.mjs \
   tests/fixtures/terminal-recovery/ssh-server.ts "$FIXTURE_ROOT"
 ```
 

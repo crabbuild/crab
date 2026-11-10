@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Electron's node-gyp recognizes Visual Studio 2022, not the 2026 toolset.
+        # Use the qualified Visual Studio 2022 workload for Windows native addons.
         os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2022]
     env:
       CARGO_INCREMENTAL: 0
@@ -182,7 +182,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
-          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npm test -- tests/ssh-deployer.spec.ts --maxWorkers 1 --minWorkers 1
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npm test -- tests/ssh-deployer.spec.ts --maxWorkers 1
       - name: Upload remote runtime assets
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
@@ -206,7 +206,7 @@ jobs:
             packages/desktop/release/rc*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
-        run: npm test -- --maxWorkers 2 --minWorkers 1
+        run: npm test -- --maxWorkers 2
       - name: Retain packaged app failure context
         if: failure()
         uses: actions/upload-artifact@v4
@@ -252,7 +252,7 @@ jobs:
       - name: Qualify native ARM64 SSH runtime upload and startup
         run: |
           mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
-          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1 --minWorkers 1
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -25,7 +25,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("native input owner c
     await run("git", ["commit", "--allow-empty", "-m", "Owned fixture"], { cwd: repo });
     const settings = path.join(directory, "settings.json");
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", settings);
-    const child = spawn(process.execPath, [require.resolve("vite-node/vite-node.mjs"), path.resolve("tests/fixtures/pending-input-crash.ts"), directory, agent, phase], {
+    const child = spawn(process.execPath, [require.resolve("vite-node/cli"), path.resolve("tests/fixtures/pending-input-crash.ts"), directory, agent, phase], {
       detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CRAB_DESKTOP_SETTINGS_PATH: settings },
     });
     let stderr = "";
