@@ -61,6 +61,15 @@ interface RepoDetailProps {
  */
 export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
   const sessionManager = useSession();
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  useEffect(() => setReopenError(null), [repo.native_session_id]);
+  async function reopenRepository() {
+    setReopening(true); setReopenError(null);
+    try { await rpc.reopen(repo.path ?? repo.url, repo); }
+    catch (error) { setReopenError(error instanceof Error ? error.message : String(error)); }
+    finally { setReopening(false); }
+  }
 
   const [rev, setRev] = useState<string | null>(null);
   const [activeView, setActiveViewRaw] = useState<SidebarView>(() => {
@@ -798,6 +807,10 @@ export function RepoDetail({ repo, navEntry, onNavigate, activityDrawerOpen, onT
 
   return (
     <div className="flex h-full min-w-0 flex-col">
+      {repo.native_session_id === null && <div role={reopenError || repo.native_error ? "alert" : "status"} className="flex shrink-0 items-center justify-between gap-3 border-b border-gx-border bg-gx-surface px-3 py-2 text-xs">
+        <span className="min-w-0 break-words text-gx-muted">{reopenError ?? repo.native_error ?? "Restoring repository services…"}</span>
+        {(reopenError || repo.native_error) && <button type="button" className="btn shrink-0 text-xs" disabled={reopening} onClick={() => void reopenRepository()}>{reopening ? "Reopening…" : "Retry reopening repository"}</button>}
+      </div>}
       <div className="flex min-h-0 flex-1">
         <WorkspaceShell
           views={views}

@@ -34,6 +34,8 @@ export interface CapabilitiesChangedEvent {
   type: "capabilities-changed";
   repoId: string;
   capabilities: CapabilitySet;
+  nativeSessionId: string | null;
+  error?: string;
 }
 
 export type ProviderEvent = FsChangedEvent | CapabilitiesChangedEvent;
@@ -76,6 +78,7 @@ export interface FsReadResult {
  * (file watching, fs mutations, capabilities).
  */
 export interface RepoProvider {
+  nativeSession(repoId: string): string | null;
   /**
    * Core dispatch — handles any RPC method. This is the primary
    * entry point for all git and agent operations.
@@ -139,6 +142,7 @@ export interface ProviderEventEmitter {
  * RepoProvider interface contract with typed event emission.
  */
 export abstract class BaseProvider extends EventEmitter implements ProviderEventEmitter {
+  abstract nativeSession(repoId: string): string | null;
   abstract request(method: string, params: Record<string, unknown>): Promise<unknown>;
   abstract watchStart(repoId: string): Promise<void>;
   abstract watchStop(repoId: string): Promise<void>;

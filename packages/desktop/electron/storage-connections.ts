@@ -137,6 +137,19 @@ export class StorageConnections {
     return value;
   }
 
+  async reopen(repoId: string, nativeSend: Send): Promise<unknown> {
+    const session = this.sessions.get(repoId);
+    if (!session) throw new Error("Repository storage session is no longer available");
+    // Bindings outlive a native process. Resolve the current selection instead
+    // of replaying credentials or an explicit profile saved by an older open.
+    const selected = this.cached?.bindings[session.key];
+    return this.request(session.remote ? "open_url" : "open_local", {
+      repo_id: repoId,
+      ...(session.remote ? { url: session.url } : { path: session.key }),
+      ...(selected ? { storage_connection_id: selected } : {}),
+    }, nativeSend);
+  }
+
   async request(method: string, params: unknown, nativeSend: Send): Promise<unknown> {
     const send: Send = async (name, payload) => {
       const repoId = record(payload) ? text(payload.repo_id) : "";
@@ -225,7 +238,7 @@ export class StorageConnections {
     const session = this.sessions.get(repoId);
     const key = session?.key || (typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd));
     const explicit = Object.hasOwn(payload, "storage_connection_id");
-    const needsAuth = explicit || method.startsWith("crab_") || method.startsWith("workflow_") ||
+    const needsAuth = explicit || (method === "open_local" && !!this.cached?.bindings[key]) || method.startsWith("crab_") || method.startsWith("workflow_") ||
       ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method);
     // Local browsing and app startup do not depend on an unlocked cloud keyring.
     const vault = needsAuth ? await this.read() : undefined;

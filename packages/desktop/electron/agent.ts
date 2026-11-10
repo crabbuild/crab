@@ -1,320 +1,317 @@
-import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
-import { EventEmitter, once } from "node:events";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { app, dialog } from "electron";
 import type { StorageConnections } from "./storage-connections";
+import { parseAgentCapabilities, type AgentCapabilities } from "./ssh-types";
 
-// Narrow JSON-RPC 2.0 types. The agent sends three frame shapes:
-//   - success response: { jsonrpc, id, result }
-//   - error   response: { jsonrpc, id, error: { code, message, data? } }
-//   - notification:     { jsonrpc, method, params }
-// We only read the fields we care about; anything else is opaque.
-
-interface RpcSuccess {
-  jsonrpc: "2.0";
-  id: number | string | null;
-  result: unknown;
-}
-interface RpcError {
-  jsonrpc: "2.0";
-  id: number | string | null;
-  error: { code: number; message: string; data?: unknown };
-}
-interface RpcNotification {
-  jsonrpc: "2.0";
-  method: string;
-  params: unknown;
-}
-
+interface RpcSuccess { jsonrpc: "2.0"; id: number | string | null; result: unknown }
+interface RpcError { jsonrpc: "2.0"; id: number | string | null; error: { code: number; message: string; data?: unknown } }
+interface RpcNotification { jsonrpc: "2.0"; method: string; params: unknown }
 type RpcFrame = RpcSuccess | RpcError | RpcNotification;
-
-function isResponse(frame: RpcFrame): frame is RpcSuccess | RpcError {
-  return "id" in frame && frame.id !== undefined;
+interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void }
+interface Runtime {
+  child: ChildProcessWithoutNullStreams;
+  id: string;
+  pending: Map<string, Pending>;
+  ready: Promise<void>;
+  started: Promise<void>;
+  closed: Promise<void>;
+  capabilities: AgentCapabilities | null;
+  failure?: Error;
+  stopping: boolean;
+}
+interface OpenRepository {
+  method: "open_local" | "open_url";
+  params: Record<string, unknown>;
+  sessionId: string | null;
+  error?: Error;
+}
+export interface RepositoryRuntime {
+  repoId: string;
+  sessionId: string | null;
+  error?: string;
 }
 
-interface Pending {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
+function fields(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
-
-// Jobs that the crab CLI supports resuming from a checkpoint.
-const RESUMABLE_OPS = new Set(["push", "hydrate"]);
+function opened(value: unknown, repoId: string): Record<string, unknown> {
+  const result = fields(value);
+  if (result?.repo_id !== repoId) throw new Error("Native agent returned an invalid repository identity");
+  return result;
+}
 
 export class Agent extends EventEmitter {
-  private child: ChildProcessWithoutNullStreams | null = null;
-  private readonly binary: string;
-  private readonly env: NodeJS.ProcessEnv;
-  private readonly extraArgs: string[];
-  private pending = new Map<string, Pending>();
+  private runtime: Runtime | null = null;
+  private repositories = new Map<string, OpenRepository>();
+  private repositoryWork = new Map<string, Promise<unknown>>();
   private nextId = 1;
+  private nextRuntime = 1;
+  private nextRepositorySession = 1;
   private stopping = false;
-
-  // Restart-debounce state (§F.3): track recent crash timestamps.
   private crashTimestamps: number[] = [];
+  private recentStderrLines: string[] = [];
   private static readonly CRASH_WINDOW_MS = 30_000;
   private static readonly MAX_AUTO_RESTARTS = 1;
 
-  // Ring buffer of recent stderr lines for crash dumps.
-  private recentStderrLines: string[] = [];
-  private static readonly MAX_STDERR_LINES = 500;
-
-  constructor(binary: string, env: NodeJS.ProcessEnv = process.env, extraArgs: string[] = [], private storageConnections?: StorageConnections) {
-    super();
-    this.binary = binary;
-    this.env = env;
-    this.extraArgs = extraArgs;
-  }
+  constructor(private readonly binary: string, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections) { super(); }
 
   async start(): Promise<void> {
+    const existing = this.runtime;
+    if (existing) {
+      if (!existing.failure && !existing.stopping) return existing.started;
+      await existing.closed;
+      if (this.stopping || existing.stopping) throw new Error("Native agent stopped during startup");
+      return this.start();
+    }
     this.stopping = false;
-    const child = spawn(this.binary, this.extraArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: this.env,
+    const child = spawn(this.binary, this.extraArgs, { stdio: ["pipe", "pipe", "pipe"], env: this.env });
+    let closed!: () => void;
+    const run: Runtime = {
+      child, id: `local:${this.nextRuntime++}`, pending: new Map(), stopping: false, capabilities: null,
+      closed: new Promise<void>(resolve => { closed = resolve; }),
+      ready: Promise.resolve().then(() => this.prepare(run)), started: Promise.resolve(),
+    };
+    run.started = run.ready.then(() => this.restoreRepositories(run)).catch(async error => {
+      if (this.runtime === run) for (const [repoId, repository] of this.repositories) {
+        repository.sessionId = null;
+        repository.error = error instanceof Error ? error : new Error(String(error));
+        this.publishRuntime(repoId, repository);
+      }
+      await this.stop(run); throw error;
     });
-    this.child = child;
-
-    child.on("error", (error) => {
-      this.child = null;
-      for (const pending of this.pending.values()) pending.reject(error);
-      this.pending.clear();
-    });
-
-    readline.createInterface({ input: child.stdout }).on("line", (line) => {
-      if (!line) return;
-      this.onLine(line);
-    });
-
-    // Capture stderr lines into a ring buffer for crash dumps.
-    const stderrRl = readline.createInterface({ input: child.stderr });
-    stderrRl.on("line", (rawLine) => {
+    this.runtime = run;
+    child.on("error", error => this.fail(run, error));
+    child.stdin.on("error", error => this.fail(run, error));
+    readline.createInterface({ input: child.stdout }).on("line", line => { if (line) this.onLine(run, line); });
+    readline.createInterface({ input: child.stderr }).on("line", rawLine => {
       const line = this.storageConnections?.redactText(rawLine) ?? rawLine;
       this.recentStderrLines.push(line);
-      if (this.recentStderrLines.length > Agent.MAX_STDERR_LINES) {
-        this.recentStderrLines.shift();
-      }
+      if (this.recentStderrLines.length > 500) this.recentStderrLines.shift();
       process.stderr.write(`[agent] ${line}\n`);
       this.emit("stderr", line);
     });
-
-    child.on("exit", (code, signal) => {
-      this.child = null;
-      for (const p of this.pending.values()) {
-        p.reject(new Error(`agent exited before response (code=${code})`));
-      }
-      this.pending.clear();
+    let interrupted: string[] = [];
+    child.once("exit", (code, signal) => {
+      if (this.runtime !== run) return;
+      interrupted = [...run.pending.keys()];
+      this.fail(run, new Error(`Native agent exited (code=${code}, signal=${signal ?? "none"})`));
       this.emit("exit", code, signal);
-
-      // Non-zero exit = crash. Handle restart-debounce (§F.3).
-      if (!this.stopping && code !== 0 && code !== null) {
-        void this.handleCrash(code, signal);
-      }
     });
+    child.once("close", (code, signal) => {
+      closed();
+      if (this.runtime !== run) return;
+      this.runtime = null;
+      // Exit can precede the end of inherited pipes. A replacement must not
+      // share pending replies or contend with a process still draining them.
+      if (!this.stopping && !run.stopping && run.capabilities) void this.handleCrash(code, signal, interrupted);
+    });
+    return run.started;
+  }
 
-    // Sanity check with a bounded timeout. The round-trip should take
-    // milliseconds; if it stalls, something is deeply wrong with the
-    // spawn (missing exec bit, quarantine, stdio buffering quirk).
-    // We raise a descriptive error rather than letting the app hang
-    // waiting for a reply that will never come.
+  supports(...methods: string[]): boolean {
+    const run = this.runtime;
+    const capabilities = run?.capabilities;
+    return !!run && !run.failure && !run.stopping && !!capabilities && methods.length > 0 && methods.every(method => capabilities.methods.includes(method));
+  }
+
+  repositorySession(repoId: string): string | null {
+    const run = this.runtime;
+    return run && !run.failure && !run.stopping ? this.repositories.get(repoId)?.sessionId ?? null : null;
+  }
+
+  hasRepository(repoId: string): boolean { return this.repositories.has(repoId); }
+
+  private async prepare(run: Runtime): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        this.request("ping", {}),
-        new Promise<void>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("agent ping timed out after 10 s")), 10_000);
-        }),
+        (async () => {
+          await this.dispatch(run, "ping", {});
+          const capabilities = parseAgentCapabilities(await this.dispatch(run, "capabilities", {}));
+          this.assertCurrent(run);
+          run.capabilities = capabilities;
+        })(),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Native agent startup timed out after 10 s")), 10_000); }),
       ]);
-    } catch (error) {
-      await this.shutdown();
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+    } finally { clearTimeout(timer); }
+  }
+
+  private async restoreRepositories(run: Runtime): Promise<void> {
+    await Promise.allSettled([...this.repositories].map(([repoId, repository]) => this.serialize(repoId, async () => {
+      if (this.repositories.get(repoId) !== repository) return;
+      try {
+        const result = this.storageConnections
+          ? await this.storageConnections.reopen(repoId, (method, params) => this.sendRequest(run, method, params))
+          : await this.sendRequest(run, repository.method, repository.params);
+        opened(result, repoId); this.assertCurrent(run);
+        if (this.repositories.get(repoId) !== repository) return;
+        repository.sessionId = `${run.id}:${this.nextRepositorySession++}`; repository.error = undefined;
+        this.publishRuntime(repoId, repository);
+      } catch (error) {
+        if (this.runtime !== run || run.failure || this.repositories.get(repoId) !== repository) return;
+        repository.error = error instanceof Error ? error : new Error(String(error));
+        repository.sessionId = null;
+        this.publishRuntime(repoId, repository);
+        this.emit("notification", "repo/reopen_failed", { repo_id: repoId, message: repository.error.message });
+      }
+    })));
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
-    if (this.storageConnections) {
-      return this.storageConnections.request(method, params, (name, payload) => this.sendRequest(name, payload));
+    const payload = fields(params);
+    const repoId = typeof payload?.repo_id === "string" ? payload.repo_id : null;
+    if ((method === "open_local" || method === "open_url") && (!this.runtime || this.runtime.failure || this.runtime.stopping)) await this.start();
+    if (method === "close" && repoId) this.repositories.delete(repoId);
+    const run = this.runtime;
+    // A revoked process retains ownership of draining its native repositories.
+    // Revoke the desired open even when there is no transport to send close on.
+    if (method === "close" && (!run || run.failure || run.stopping)) return {};
+    if (!run) throw new Error("Native agent is not running");
+    await run.ready;
+    this.assertCurrent(run);
+    if (repoId && payload && (method === "open_local" || method === "open_url")) {
+      return this.serialize(repoId, async () => {
+        const previous = this.repositories.get(repoId);
+        // Native open removes the old repository before it may fail. Revoke
+        // captures before replacement, even when the process stays alive.
+        if (previous) { previous.sessionId = null; previous.error = undefined; this.publishRuntime(repoId, previous); }
+        try {
+          const result = opened(await this.dispatch(run, method, params), repoId);
+          this.assertCurrent(run);
+          const saved = { ...payload }; delete saved.__storage_auth;
+          const repository: OpenRepository = { method, params: saved, sessionId: `${run.id}:${this.nextRepositorySession++}` };
+          this.repositories.set(repoId, repository);
+          this.publishRuntime(repoId, repository);
+          return { ...result, native_session_id: repository.sessionId };
+        } catch (error) {
+          if (previous && this.runtime === run && !run.failure && this.repositories.get(repoId) === previous) {
+            previous.error = error instanceof Error ? error : new Error(String(error));
+            this.publishRuntime(repoId, previous);
+          }
+          throw error;
+        }
+      });
     }
-    return this.sendRequest(method, params);
+    if (method === "close" && repoId) return this.serialize(repoId, async () => {
+      this.repositories.delete(repoId);
+      return this.dispatch(run, method, params);
+    });
+    if (repoId && method !== "rpc/cancel") {
+      // Cancellation must bypass repository setup; waiting for the operation
+      // being cancelled would deadlock its control request.
+      await this.repositoryWork.get(repoId);
+      const failure = this.repositories.get(repoId)?.error;
+      if (failure) throw failure;
+    }
+    return this.dispatch(run, method, params);
   }
 
-  private async sendRequest(method: string, params: unknown): Promise<unknown> {
-    if (!this.child) throw new Error("agent not running");
+  private serialize<T>(repoId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.repositoryWork.get(repoId);
+    const work = (previous ? previous.catch(() => {}) : Promise.resolve()).then(operation);
+    this.repositoryWork.set(repoId, work);
+    const finished = () => { if (this.repositoryWork.get(repoId) === work) this.repositoryWork.delete(repoId); };
+    void work.then(finished, finished);
+    return work;
+  }
+
+  private dispatch(run: Runtime, method: string, params: unknown): Promise<unknown> {
+    return this.storageConnections
+      ? this.storageConnections.request(method, params, (name, payload) => this.sendRequest(run, name, payload))
+      : this.sendRequest(run, method, params);
+  }
+
+  private assertCurrent(run: Runtime): void {
+    if (run.failure) throw run.failure;
+    if (this.runtime !== run || run.stopping) throw new Error("Native agent session is no longer available");
+  }
+
+  private async sendRequest(run: Runtime, method: string, params: unknown): Promise<unknown> {
+    this.assertCurrent(run);
     const id = String(this.nextId++);
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.child!.stdin.write(frame, (err) => {
-        if (err) {
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
+      run.pending.set(id, { resolve, reject });
+      run.child.stdin.write(frame, error => { if (error) { run.pending.delete(id); reject(error); } });
     });
+  }
+
+  private publishRuntime(repoId: string, repository: OpenRepository): void {
+    this.emit("repository-runtime", { repoId, sessionId: repository.sessionId, error: repository.error?.message } satisfies RepositoryRuntime);
+  }
+
+  private fail(run: Runtime, error: Error): void {
+    if (this.runtime !== run || run.failure) return;
+    run.failure = error;
+    for (const pending of run.pending.values()) pending.reject(error);
+    run.pending.clear();
+    for (const [repoId, repository] of this.repositories) {
+      repository.sessionId = null;
+      this.publishRuntime(repoId, repository);
+    }
+  }
+
+  private async stop(run: Runtime): Promise<void> {
+    run.stopping = true;
+    this.fail(run, new Error("Native agent stopped"));
+    run.child.stdin.end();
+    // EOF lets the native owner cancel and drain work. A fixed kill timer can
+    // truncate publication or close SlateDB while its writer still owns work.
+    await run.closed;
   }
 
   async shutdown(): Promise<void> {
-    if (!this.child) return;
     this.stopping = true;
-    const child = this.child;
-    this.child = null;
-    // Keep Electron alive while EOF drains requests and closes SDK sessions.
-    const exited = once(child, "exit");
-    const timer = setTimeout(() => child.kill("SIGTERM"), 8_000);
-    try {
-      child.stdin.end();
-      await exited;
-    } finally {
-      clearTimeout(timer);
-    }
+    if (this.runtime) await this.stop(this.runtime);
   }
 
-  private onLine(line: string): void {
+  private onLine(run: Runtime, line: string): void {
+    if (this.runtime !== run || run.failure) return;
     let frame: RpcFrame;
-    try {
-      frame = JSON.parse(line) as RpcFrame;
-    } catch (err) {
-      process.stderr.write("[agent] malformed RPC frame\n");
-      return;
-    }
-
-    if (isResponse(frame)) {
-      const id = String(frame.id);
-      const pending = this.pending.get(id);
+    try { frame = JSON.parse(line) as RpcFrame; }
+    catch { process.stderr.write("[agent] malformed RPC frame\n"); return; }
+    if ("id" in frame) {
+      const pending = run.pending.get(String(frame.id));
       if (!pending) return;
-      this.pending.delete(id);
-      if ("error" in frame) {
-        const err = new Error(frame.error.message);
-        (err as Error & { code?: number; data?: unknown }).code = frame.error.code;
-        (err as Error & { code?: number; data?: unknown }).data = frame.error.data;
-        pending.reject(err);
-      } else {
-        pending.resolve(frame.result);
-      }
+      run.pending.delete(String(frame.id));
+      if ("error" in frame) pending.reject(Object.assign(new Error(frame.error.message), { code: frame.error.code, data: frame.error.data }));
+      else pending.resolve(frame.result);
       return;
     }
-
-    // Progress is log text; repository content responses must remain byte-exact.
-    if (frame.method === "progress/line" && frame.params && typeof frame.params === "object" && "line" in frame.params && typeof frame.params.line === "string") {
-      frame.params.line = this.storageConnections?.redactText(frame.params.line) ?? frame.params.line;
-    }
+    if (frame.method === "progress/line" && frame.params && typeof frame.params === "object" && "line" in frame.params && typeof frame.params.line === "string") frame.params.line = this.storageConnections?.redactText(frame.params.line) ?? frame.params.line;
     this.emit("notification", frame.method, frame.params);
   }
 
-  // ── Crash recovery (§F.3) ──────────────────────────────────────
-
-  private async handleCrash(code: number, signal: string | null): Promise<void> {
+  private async handleCrash(code: number | null, signal: string | null, interrupted: string[]): Promise<void> {
     const now = Date.now();
+    this.crashTimestamps = this.crashTimestamps.filter(timestamp => now - timestamp < Agent.CRASH_WINDOW_MS);
     this.crashTimestamps.push(now);
-
-    // Prune timestamps older than the crash window.
-    this.crashTimestamps = this.crashTimestamps.filter(
-      (ts) => now - ts < Agent.CRASH_WINDOW_MS,
-    );
-
-    // Write crash dump to ~/.crab/desktop/crash/<ts>.json
-    this.writeCrashDump(code, signal);
-
-    const recentCrashes = this.crashTimestamps.length;
-
-    if (recentCrashes <= Agent.MAX_AUTO_RESTARTS) {
-      // Auto-restart with a toast notification.
-      this.emit("notification", "agent/crash_restart", {
-        message: "Agent crashed — restarting automatically.",
-        code,
-        signal,
-      });
-      try {
-        await this.start();
-        // After restart, emit a notification about in-flight jobs.
-        this.emitResumeNotices();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.emit("notification", "agent/failed", { message: msg });
-      }
-    } else {
-      // Too many crashes in the window — ask the user.
-      const result = await dialog.showMessageBox({
-        type: "error",
-        title: "Crab Desktop — Agent crashed repeatedly",
-        message:
-          `The agent has crashed ${recentCrashes} times in the last 30 seconds.\n\n` +
-          "Would you like to restart it, or quit the application?",
-        buttons: ["Restart", "Quit"],
-        defaultId: 0,
-        cancelId: 1,
-      });
-
-      if (result.response === 0) {
-        // User chose restart — reset the crash window.
-        this.crashTimestamps = [];
-        try {
-          await this.start();
-          this.emitResumeNotices();
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          this.emit("notification", "agent/failed", { message: msg });
-        }
-      } else {
-        app.quit();
-      }
+    this.writeCrashDump(code, signal, interrupted);
+    if (this.crashTimestamps.length > Agent.MAX_AUTO_RESTARTS) {
+      const result = await dialog.showMessageBox({ type: "error", title: "Crab Desktop — Agent crashed repeatedly", message: `Desktop services stopped ${this.crashTimestamps.length} times in the last 30 seconds.`, buttons: ["Restart", "Quit"], defaultId: 0, cancelId: 1 });
+      if (this.stopping) return;
+      if (result.response !== 0) { app.quit(); return; }
+      this.crashTimestamps = [];
     }
-  }
-
-  /**
-   * Write a crash dump JSON file to ~/.crab/desktop/crash/<ts>.json
-   * containing the exit code, signal, last 500 log lines, and any
-   * pending jobs from the renderer state (passed via the "exit" event
-   * listener in main.ts).
-   */
-  private writeCrashDump(code: number, signal: string | null): void {
+    this.emit("notification", "agent/crash_restart", { message: "Desktop services stopped — restarting.", code, signal });
     try {
-      const crashDir = path.join(app.getPath("home"), ".crab", "desktop", "crash");
-      if (!fs.existsSync(crashDir)) {
-        fs.mkdirSync(crashDir, { recursive: true });
-      }
-
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const dumpPath = path.join(crashDir, `${ts}.json`);
-
-      const dump = {
-        timestamp: new Date().toISOString(),
-        exit_code: code,
-        signal,
-        last_500_log_lines: this.recentStderrLines.slice(-500),
-        pending_jobs: this.getPendingJobIds(),
-      };
-
-      fs.writeFileSync(dumpPath, JSON.stringify(dump, null, 2), "utf8");
-    } catch {
-      // Best-effort — don't let crash-dump writing itself crash.
-      process.stderr.write("[crab-desktop] failed to write crash dump\n");
+      await this.start();
+      this.emit("notification", "agent/restart_complete", { message: "Desktop services restarted. Repository recovery results are reported separately." });
+    } catch (error) {
+      this.emit("notification", "agent/failed", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  /**
-   * Returns the IDs of pending RPC requests at the time of crash.
-   * These represent in-flight operations that were interrupted.
-   */
-  private getPendingJobIds(): string[] {
-    return Array.from(this.pending.keys());
-  }
-
-  /**
-   * After a restart, emit notifications about in-flight jobs.
-   * Jobs whose CLI supports resume (push, hydrate) get a "resume"
-   * notice; others get a "please re-run manually" notice.
-   */
-  private emitResumeNotices(): void {
-    // The pending map was cleared on exit, but we can read the last
-    // crash dump to find what was in-flight. For now, emit a generic
-    // notice — the renderer can check its own job state to determine
-    // which jobs were running.
-    this.emit("notification", "agent/restart_complete", {
-      message: "Agent restarted after crash.",
-      resumable_ops: Array.from(RESUMABLE_OPS),
-    });
+  private writeCrashDump(code: number | null, signal: string | null, interrupted: string[]): void {
+    try {
+      const directory = path.join(app.getPath("userData"), "crash");
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const timestamp = new Date().toISOString();
+      fs.writeFileSync(path.join(directory, `${timestamp.replace(/[:.]/g, "-")}.json`), JSON.stringify({ timestamp, exit_code: code, signal, last_500_log_lines: this.recentStderrLines.slice(-500), pending_requests: interrupted }, null, 2), { encoding: "utf8", mode: 0o600 });
+    } catch { process.stderr.write("[crab-desktop] failed to write crash dump\n"); }
   }
 }

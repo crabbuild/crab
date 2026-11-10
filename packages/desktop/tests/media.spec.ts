@@ -23,7 +23,7 @@ function fixture(size = 31) {
   });
   const notify = vi.fn();
   const media = new MediaResources(request, notify);
-  const open = () => media.open(1, { repo_id: "repo", path: "movie.webm" });
+  const open = () => media.open(1, { repo_id: "repo", path: "movie.webm", native_session_id: "native:1" });
   return { request, notify, media, open };
 }
 
@@ -158,7 +158,7 @@ describe("captured media", () => {
     await vi.waitFor(() => expect(request).toHaveBeenCalledWith("rpc/cancel", expect.objectContaining({ repo_id: "repo" })));
     captured.resolve({ file_id: "late", size: 31, kind: "crab" });
     await Promise.all([closing, failure]);
-    expect(request).toHaveBeenCalledWith("file_close", { repo_id: "repo", file_id: "late" });
+    expect(request).toHaveBeenCalledWith("file_close", { repo_id: "repo", file_id: "late", native_session_id: "native:1" });
   });
 
   it("drains all captures even when cancellation or native cleanup fails", async () => {
@@ -175,13 +175,13 @@ describe("captured media", () => {
     const failedClose = expect(closing).rejects.toThrow("Reader cleanup failed");
     captured.resolve({ file_id: "late", size: 31, kind: "crab" });
     await Promise.all([failedClose, failedOpening]);
-    expect(request).toHaveBeenCalledWith("file_close", { repo_id: "repo", file_id: "late" });
+    expect(request).toHaveBeenCalledWith("file_close", { repo_id: "repo", file_id: "late", native_session_id: "native:1" });
   });
 
   it("isolates owners and repositories and refuses new work after shutdown", async () => {
     const { media, open } = fixture();
     const first = await open();
-    const other = await media.open(2, { repo_id: "other", path: "audio.wav" });
+    const other = await media.open(2, { repo_id: "other", path: "audio.wav", native_session_id: "native:2" });
     await expect(media.close(2, first.media_id)).rejects.toThrow("another window");
     await media.closeRepo("repo");
     expect((await media.fetch(new Request(first.url))).status).toBe(410);
@@ -189,5 +189,43 @@ describe("captured media", () => {
     await media.closeAll();
     expect((await media.fetch(new Request(other.url))).status).toBe(410);
     await expect(open()).rejects.toThrow("closed");
+  });
+
+  it("revokes a lost session without sending its handles to a replacement", async () => {
+    const { media, request, notify, open } = fixture();
+    const source = await open();
+    const sibling = await media.open(2, { repo_id: "other", path: "audio.wav", native_session_id: "native:2" });
+    request.mockClear();
+    await media.invalidateRepo("repo");
+    await media.close(1, source.media_id);
+    expect((await media.fetch(new Request(source.url))).status).toBe(410);
+    expect((await media.fetch(new Request(sibling.url, { method: "HEAD" }))).status).toBe(200);
+    expect(request).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(1, source.media_id, expect.objectContaining({ code: "NATIVE_SESSION_LOST" }));
+    await media.closeAll();
+  });
+
+  it("discards a late capture after session loss and drains it without stale cleanup", async () => {
+    const { media, request, open } = fixture();
+    const captured = deferred<unknown>();
+    request.mockImplementation(async () => captured.promise);
+    const opening = open();
+    const failure = expect(opening).rejects.toThrow("Media preview closed");
+    let drained = false;
+    const invalidating = media.invalidateRepo("repo").then(() => { drained = true; });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    captured.resolve({ file_id: "old", size: 31, kind: "crab" });
+    await Promise.all([invalidating, failure]);
+    expect(request.mock.calls.map(([method]) => method)).toEqual(["file_open"]);
+  });
+
+  it("binds reads and cleanup to the capture's native session", async () => {
+    const { media, request, open } = fixture();
+    const source = await open();
+    const response = await media.fetch(new Request(source.url, { headers: { Range: "bytes=0-3" } }));
+    await response.arrayBuffer();
+    await media.closeAll();
+    expect(request.mock.calls.every(([, params]) => params.native_session_id === "native:1")).toBe(true);
   });
 });

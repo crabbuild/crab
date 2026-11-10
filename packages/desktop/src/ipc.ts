@@ -12,6 +12,7 @@ export interface RepoHandle {
   url: string;
   is_remote: boolean;
   cache_dir: string;
+  native_session_id: string | null;
   /** Present when an in-flight op (merge/rebase/cherry-pick) was
    *  found on disk at open time. The renderer can use this to show
    *  a resume banner without a second RPC. */
@@ -1562,8 +1563,9 @@ export function callCancellable<T>(
   const enriched: Record<string, unknown> = typeof params === "object" && params !== null
     ? { ...params, op_id }
     : { op_id };
-  const cancellation: { op_id: string; repo_id?: string } = { op_id };
+  const cancellation: { op_id: string; repo_id?: string; native_session_id?: unknown } = { op_id };
   if (typeof enriched.repo_id === "string") cancellation.repo_id = enriched.repo_id;
+  if (Object.hasOwn(enriched, "native_session_id")) cancellation.native_session_id = enriched.native_session_id;
   const promise = request<T>(method, enriched).finally(() => { settled = true; });
   const cancel = () => {
     if (cancelled || settled) return;
@@ -1719,17 +1721,17 @@ export const rpc = {
   managedCreateRepository: (service: string, repository: string) =>
     call<ManagedRepository>("managed_create_repository", { service, repository }),
 
-  openLocal: (path: string, storage_connection_id?: string | null) =>
-    call<RepoHandle>("open_local", { repo_id: nextRepoId("local"), path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+  openLocal: (path: string, storage_connection_id?: string | null, repo_id = nextRepoId("local")) =>
+    call<RepoHandle>("open_local", { repo_id, path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
 
-  reopen: async (path: string): Promise<RepoHandle> => {
+  reopen: async (path: string, repository?: Pick<RepoHandle, "repo_id" | "is_remote" | "url">): Promise<RepoHandle> => {
     const remote = parseRepoId(path);
-    if (!remote) return rpc.openLocal(path);
+    if (!remote) return repository?.is_remote ? rpc.openUrl(repository.url, undefined, repository.repo_id) : rpc.openLocal(path, undefined, repository?.repo_id);
     return window.crab.ssh.openAsRepo(remote.profileId, remote.remotePath);
   },
 
-  openUrl: (url: string, storage_connection_id?: string | null) =>
-    call<RepoHandle>("open_url", { repo_id: nextRepoId("url"), url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+  openUrl: (url: string, storage_connection_id?: string | null, repo_id = nextRepoId("url")) =>
+    call<RepoHandle>("open_url", { repo_id, url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
 
   close: (repo_id: string) => call<{ closed: string }>("close", { repo_id }),
 
@@ -1746,21 +1748,21 @@ export const rpc = {
   stat: (repo_id: string, path: string, rev?: string) =>
     call<FileStat>("stat", { repo_id, path, rev }),
 
-  openMedia: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+  openMedia: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
     call<MediaSource>("media_open", { repo_id, path, ...opts }, signal),
 
   closeMedia: (media_id: string) => call<{ closed: string }>("media_close", { media_id }),
 
-  openFile: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+  openFile: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
     call<CapturedFile>("file_open", { repo_id, path, ...opts }, signal),
 
-  fileChunks: (repo_id: string, file_id: string, start: number, limit: number, signal?: AbortSignal) =>
-    call<FileChunkPage>("file_chunks", { repo_id, file_id, start, limit }, signal),
+  fileChunks: (repo_id: string, file_id: string, native_session_id: string, start: number, limit: number, signal?: AbortSignal) =>
+    call<FileChunkPage>("file_chunks", { repo_id, file_id, native_session_id, start, limit }, signal),
 
-  closeFile: (repo_id: string, file_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id }),
+  closeFile: (repo_id: string, file_id: string, native_session_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id, native_session_id }),
 
-  materializeFile: (repo_id: string, file_id: string, op_id: string) =>
-    call<{ written_bytes: number }>("file_materialize", { repo_id, file_id, op_id }),
+  materializeFile: (repo_id: string, file_id: string, op_id: string, native_session_id: string) =>
+    call<{ written_bytes: number }>("file_materialize", { repo_id, file_id, op_id, native_session_id }),
 
   cancelOperation: (repo_id: string, op_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id }),
 

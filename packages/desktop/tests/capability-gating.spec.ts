@@ -80,6 +80,7 @@ function makeMockSessionManager(status = "connected") {
   return Object.assign(emitter, {
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
   });
 }
 
@@ -214,6 +215,7 @@ describe("RemoteProvider capabilities", () => {
 
   it("returns no capabilities without a negotiated native agent", async () => {
     mockCapNegotiator.getCached.mockReturnValue(null);
+    mockSessionManager.agentSession.mockReturnValue(null);
 
     const caps = await provider.capabilities(REPO_ID);
 
@@ -225,9 +227,10 @@ describe("RemoteProvider capabilities", () => {
     const changes: unknown[] = [];
     provider.on("capabilities-changed", event => changes.push(event));
     mockCapNegotiator.getCached.mockReturnValue(null);
+    mockSessionManager.agentSession.mockReturnValue(null);
     mockSessionManager.emit("ssh:agent-unavailable", { profileId: "profile-1" });
     await Promise.resolve();
-    expect(changes).toEqual([{ type: "capabilities-changed", repoId: REPO_ID, capabilities: noCapabilities() }]);
+    expect(changes).toEqual([{ type: "capabilities-changed", repoId: REPO_ID, capabilities: noCapabilities(), nativeSessionId: null, error: "Desktop services are unavailable." }]);
   });
 
   it("returns noCapabilities for non-remote repo_id", async () => {

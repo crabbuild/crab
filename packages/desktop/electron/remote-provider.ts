@@ -87,7 +87,7 @@ export class RemoteProvider extends BaseProvider {
 
   /** Bound handler for SSH connection status changes (stored for cleanup). */
   private readonly onStatusChanged: (payload: { profileId: string; status: SshConnectionStatus; error?: string }) => void;
-  private readonly onAgentUnavailable: (payload: { profileId: string }) => void;
+  private readonly onAgentUnavailable: (payload: { profileId: string; message?: string }) => void;
 
   constructor(options: RemoteProviderOptions) {
     super();
@@ -103,9 +103,9 @@ export class RemoteProvider extends BaseProvider {
     // Subscribe to connection status changes to stop/restart watching
     this.onStatusChanged = this.handleStatusChanged.bind(this);
     this.sessionManager.on("ssh:status-changed", this.onStatusChanged);
-    this.onAgentUnavailable = ({ profileId }) => {
+    this.onAgentUnavailable = ({ profileId, message }) => {
       this.stopWatchingProfile(profileId);
-      void this.emitCapabilityChanges(profileId);
+      void this.emitCapabilityChanges(profileId, message ?? "Desktop services are unavailable.");
     };
     this.sessionManager.on("ssh:agent-unavailable", this.onAgentUnavailable);
   }
@@ -124,6 +124,11 @@ export class RemoteProvider extends BaseProvider {
       if (this.getConnectionStatus(parsed.profileId) !== "connected") return {};
     }
     return this.router.route(repoId, method, params);
+  }
+
+  nativeSession(repoId: string): string | null {
+    const remote = parseRepoId(repoId);
+    return remote ? this.sessionManager.agentSession(remote.profileId) : null;
   }
 
   // ── File Watching ────────────────────────────────────────────
@@ -287,7 +292,7 @@ export class RemoteProvider extends BaseProvider {
 
     const status = this.getConnectionStatus(parsed.profileId);
 
-    if (status !== "connected" || !this.capabilityNegotiator.getCached(parsed.profileId)) return noCapabilities();
+    if (status !== "connected" || !this.sessionManager.agentSession(parsed.profileId)) return noCapabilities();
 
     return {
       canEdit: true,
@@ -296,6 +301,7 @@ export class RemoteProvider extends BaseProvider {
       canWorktree: true,
       canForge: true,
       canHydrate: false, // Remote repos don't support crab hydrate/dehydrate
+      canMaterialize: this.capabilityNegotiator.isSupported(parsed.profileId, "file_open", "file_materialize", "file_close"),
       canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "git_grep"),
       canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "exec_command"),
       canTrash: false, // Remote servers have no trash concept
@@ -372,7 +378,8 @@ export class RemoteProvider extends BaseProvider {
 
     // Re-resolve capabilities for all watched repos on this profile and
     // emit capabilities-changed events so the renderer updates UI controls.
-    void this.emitCapabilityChanges(profileId);
+    const error = ["error", "disconnected"].includes(status) ? payload.error ?? "SSH connection is unavailable." : undefined;
+    void this.emitCapabilityChanges(profileId, error);
   }
 
   private stopWatchingProfile(profileId: string): void {
@@ -401,15 +408,19 @@ export class RemoteProvider extends BaseProvider {
    * `capabilities-changed` events for each one. Called when the SSH
    * connection state transitions (connected ↔ disconnected ↔ reconnecting).
    */
-  private async emitCapabilityChanges(profileId: string): Promise<void> {
+  private async emitCapabilityChanges(profileId: string, error?: string): Promise<void> {
     for (const state of this.watchedRepos.values()) {
       if (state.profileId !== profileId) continue;
 
+      const nativeSessionId = this.sessionManager.agentSession(profileId);
       const caps = await this.capabilities(state.repoId);
+      if (this.sessionManager.agentSession(profileId) !== nativeSessionId) continue;
       this.emit("capabilities-changed", {
         type: "capabilities-changed" as const,
         repoId: state.repoId,
         capabilities: caps,
+        nativeSessionId,
+        error,
       });
     }
   }

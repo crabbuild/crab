@@ -66,6 +66,33 @@ describe("built-in storage connections", () => {
     expect((await list()).connections).toEqual([saved]);
   });
 
+  it("reopens a native repository with its current binding instead of its original selection", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    await call("open_local", { repo_id: "local", path: directory, storage_connection_id: first.id });
+    await call("storage_connections_bind", { repo_id: "local", id: second.id });
+    send.mockClear();
+    await store.reopen("local", send);
+    expect(send).toHaveBeenCalledWith("open_local", expect.objectContaining({ repo_id: "local", __storage_auth: expect.objectContaining({ id: second.id }) }));
+  });
+
+  it("does not reopen a removed storage identity with ambient credentials", async () => {
+    const saved = await save();
+    await call("open_local", { repo_id: "local", path: directory, storage_connection_id: saved.id });
+    await call("storage_connections_remove", { id: saved.id });
+    send.mockClear();
+    await expect(store.reopen("local", send)).rejects.toThrow("saved connection was removed");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("reopens unbound local browsing while the keyring is locked", async () => {
+    await call("open_local", { repo_id: "local", path: directory });
+    crypto.isEncryptionAvailable.mockReturnValue(false);
+    send.mockClear();
+    await store.reopen("local", send);
+    expect(send).toHaveBeenCalledWith("open_local", { repo_id: "local", path: directory });
+  });
+
   it("rejects Linux's plaintext-key backend while preserving local browsing", async () => {
     crypto.getSelectedStorageBackend.mockReturnValue("basic_text");
     store = new StorageConnections(file, crypto, "linux");

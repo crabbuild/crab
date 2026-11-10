@@ -46,7 +46,7 @@ class MockClientChannel extends EventEmitter {
   end = vi.fn();
   write = vi.fn();
   setWindow = vi.fn();
-  stderr = new EventEmitter();
+  stderr = Object.assign(new EventEmitter(), { resume: vi.fn() });
 }
 
 class MockClient extends EventEmitter {
@@ -224,6 +224,33 @@ describe("SshSessionManager", () => {
       for (const client of mockClientInstances) client.emit("ready");
       expect((await joined).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
       expect(mockClientInstances).toHaveLength(1);
+    });
+
+    it("reuses a restored repository instead of replacing its newly captured readers", async () => {
+      const profile = makeProfile();
+      const channels: MockClientChannel[] = [];
+      const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
+      const send = vi.fn(async (_profile: string, method: string, params: { repo_id: string }) => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
+      manager.configureAgentDeployment({
+        agentDeployer: { ensureAgent: vi.fn(async () => {
+          const channel = new MockClientChannel();
+          channel.end.mockImplementation(() => { channel.emit("close", 0); });
+          channels.push(channel); return channel;
+        }) } as unknown as AgentDeployer,
+        capabilityNegotiator: { getCached: () => capabilities, negotiate: async () => capabilities, clearCache: vi.fn() } as unknown as CapabilityNegotiator,
+        rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
+      });
+      await connectProfile(manager, profile);
+      try {
+        await manager.ensureAgent(profile.id);
+        await manager.openRepository(profile.id, "/repository");
+        await manager.openRepository(profile.id, "/repository");
+        expect(send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(1);
+        channels[0].emit("close", 0);
+        await manager.ensureAgent(profile.id);
+        await manager.openRepository(profile.id, "/repository");
+        expect(send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(2);
+      } finally { await manager.disconnect(profile.id); }
     });
 
     it.each([false, true])("disconnect joins authentication without resurrection (handshake started: %s)", async started => {

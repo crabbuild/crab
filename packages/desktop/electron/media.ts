@@ -13,8 +13,10 @@ type Notify = (owner: number, id: string, error: RpcFailure) => void;
 interface Opening {
   owner: number;
   repo: string;
+  session: string;
   operation: string;
   cancelled: boolean;
+  invalidated: boolean;
   task: Promise<unknown>;
   cleanupFailure?: unknown;
 }
@@ -22,10 +24,12 @@ interface Opening {
 interface Resource {
   owner: number;
   repo: string;
+  session: string;
   file: string;
   size: number;
   mime: string;
   closed: boolean;
+  invalidated: boolean;
   closing?: Promise<void>;
   requests: Set<AbortController>;
   pending: Map<string, Promise<unknown>>;
@@ -59,10 +63,11 @@ export class MediaResources {
     if (this.stopped) throw new Error("Media reads are closed");
     const params = record(value);
     if (typeof params.repo_id !== "string" || typeof params.path !== "string") throw new Error("Media requires a repository and path");
+    if (typeof params.native_session_id !== "string") throw new Error("Media requires an available native session");
     const mime = MIME[params.path.split(".").pop()?.toLowerCase() ?? ""];
     if (!mime) throw new Error("Unsupported media container");
     const operation = typeof params.op_id === "string" ? params.op_id : randomUUID();
-    const opening: Opening = { owner, repo: params.repo_id, operation, cancelled: false, task: Promise.resolve() };
+    const opening: Opening = { owner, repo: params.repo_id, session: params.native_session_id, operation, cancelled: false, invalidated: false, task: Promise.resolve() };
     this.openings.add(opening);
     const work = this.capture(opening, params, mime);
     opening.task = work;
@@ -73,13 +78,13 @@ export class MediaResources {
     const opened = record(await this.request("file_open", { ...params, op_id: opening.operation }));
     if (typeof opened.file_id !== "string") throw new Error("Media reader did not return a file identity");
     if (opening.cancelled || this.stopped || !["git", "crab", "lfs"].includes(String(opened.kind)) || typeof opened.size !== "number" || !Number.isSafeInteger(opened.size) || opened.size < 0) {
-      try { await this.request("file_close", { repo_id: opening.repo, file_id: opened.file_id }); }
+      try { if (!opening.invalidated) await this.request("file_close", { repo_id: opening.repo, file_id: opened.file_id, native_session_id: opening.session }); }
       catch (error) { opening.cleanupFailure = error; throw error; }
       throw new Error(opening.cancelled || this.stopped ? "Media preview closed" : "Media reader returned an invalid source description");
     }
     const id = randomUUID();
-    this.resources.set(id, { owner: opening.owner, repo: opening.repo, file: opened.file_id, size: opened.size, mime,
-      closed: false, requests: new Set(), pending: new Map() });
+    this.resources.set(id, { owner: opening.owner, repo: opening.repo, session: opening.session, file: opened.file_id, size: opened.size, mime,
+      closed: false, invalidated: false, requests: new Set(), pending: new Map() });
     return { media_id: id, url: `crab-content://media/${id}`, size: opened.size, kind: String(opened.kind) };
   }
 
@@ -92,7 +97,12 @@ export class MediaResources {
     resource.closing = Promise.resolve().then(async () => {
       for (const controller of resource.requests) controller.abort();
       await Promise.allSettled(resource.pending.values());
-      await this.request("file_close", { repo_id: resource.repo, file_id: resource.file });
+      // A revoked session cannot accept captures. Its owner drains separately;
+      // never send an old identity to a replacement while reads settle.
+      if (!resource.invalidated) {
+        try { await this.request("file_close", { repo_id: resource.repo, file_id: resource.file, native_session_id: resource.session }); }
+        catch (error) { if (!resource.invalidated) throw error; }
+      }
       this.resources.delete(id);
     });
     return resource.closing;
@@ -102,10 +112,23 @@ export class MediaResources {
   async closeRepo(repo: string): Promise<void> { await this.closeMatching(resource => resource.repo === repo); }
   async closeAll(): Promise<void> { this.stopped = true; await this.closeMatching(() => true); }
 
+  async invalidateRepo(repo: string): Promise<void> {
+    const openings = [...this.openings].filter(opening => opening.repo === repo);
+    for (const opening of openings) { opening.invalidated = true; opening.cancelled = true; }
+    const resources = [...this.resources].filter(([, resource]) => resource.repo === repo);
+    for (const [id, resource] of resources) {
+      resource.invalidated = true; resource.closed = true;
+      for (const controller of resource.requests) controller.abort();
+      this.resources.delete(id);
+      this.notify(resource.owner, id, { code: "NATIVE_SESSION_LOST", message: "Desktop services are unavailable. The media reader will reopen after recovery." });
+    }
+    await Promise.allSettled([...openings.map(opening => opening.task), ...resources.flatMap(([, resource]) => [...resource.pending.values()])]);
+  }
+
   private async closeMatching(matches: (value: { owner: number; repo: string }) => boolean) {
     const opening = [...this.openings].filter(matches);
     for (const work of opening) work.cancelled = true;
-    const cancellation = await Promise.allSettled(opening.map(work => this.request("rpc/cancel", { repo_id: work.repo, op_id: work.operation })));
+    const cancellation = await Promise.allSettled(opening.filter(work => !work.invalidated).map(work => this.request("rpc/cancel", { repo_id: work.repo, op_id: work.operation, native_session_id: work.session })));
     // Opening work closes a late captured file before it resolves. Its original
     // caller owns the terminal failure; cleanup still waits for every capture.
     await Promise.allSettled(opening.map(work => work.task));
@@ -186,9 +209,9 @@ export class MediaResources {
     signal.throwIfAborted();
     if (resource.closed) throw new Error("Media preview closed");
     const operation = randomUUID();
-    const work = this.request("read_range", { repo_id: resource.repo, file_id: resource.file, offset, length, op_id: operation });
+    const work = this.request("read_range", { repo_id: resource.repo, file_id: resource.file, native_session_id: resource.session, offset, length, op_id: operation });
     resource.pending.set(operation, work);
-    const cancel = () => { void this.request("rpc/cancel", { repo_id: resource.repo, op_id: operation }).catch(() => undefined); };
+    const cancel = () => { if (!resource.invalidated) void this.request("rpc/cancel", { repo_id: resource.repo, op_id: operation, native_session_id: resource.session }).catch(() => undefined); };
     signal.addEventListener("abort", cancel, { once: true });
     try {
       const result = record(await work);

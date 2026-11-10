@@ -12,8 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { shell } from "electron";
 
-import { fullCapabilities, type CapabilitySet } from "./repo-capabilities";
-import { Agent } from "./agent";
+import { fullCapabilities, noCapabilities, type CapabilitySet } from "./repo-capabilities";
+import { Agent, type RepositoryRuntime } from "./agent";
 import {
   BaseProvider,
   FsCreateResult,
@@ -94,10 +94,18 @@ function shouldIgnore(relativePath: string): boolean {
 export class LocalProvider extends BaseProvider {
   private agent: Agent;
   private watchers = new Map<string, WatcherState>();
+  private readonly onRuntime = (event: RepositoryRuntime) => {
+    const nativeSessionId = this.agent.repositorySession(event.repoId);
+    void this.capabilities(event.repoId).then(capabilities => {
+      if (this.agent.repositorySession(event.repoId) !== nativeSessionId) return;
+      this.emit("capabilities-changed", { type: "capabilities-changed", repoId: event.repoId, nativeSessionId, capabilities, error: event.error });
+    });
+  };
 
   constructor(agent: Agent) {
     super();
     this.agent = agent;
+    agent.on("repository-runtime", this.onRuntime);
   }
 
   // ── Core RPC dispatch ──────────────────────────────────────────
@@ -105,6 +113,8 @@ export class LocalProvider extends BaseProvider {
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     return this.agent.request(method, params);
   }
+
+  nativeSession(repoId: string): string | null { return this.agent.repositorySession(repoId); }
 
   // ── File Watching ──────────────────────────────────────────────
 
@@ -261,8 +271,16 @@ export class LocalProvider extends BaseProvider {
 
   // ── Capabilities ───────────────────────────────────────────────
 
-  async capabilities(_repoId: string): Promise<CapabilitySet> {
-    const caps = fullCapabilities();
+  async capabilities(repoId: string): Promise<CapabilitySet> {
+    if (!this.agent.hasRepository(repoId)) return noCapabilities();
+    const available = this.agent.repositorySession(repoId) !== null;
+    const caps = available ? fullCapabilities() : noCapabilities();
+    // Node filesystem services survive sidecar exit, so editor buffers can
+    // still save. Native features wait for this repository's recovered session.
+    caps.canEdit = true;
+    caps.canWatch = true;
+    caps.canMaterialize = available && this.agent.supports("file_open", "file_materialize", "file_close");
+    caps.canHydrate = available && this.agent.supports("hydrate", "dehydrate");
     // Electron's shell.trashItem works on macOS and Windows but is
     // unreliable on Linux (depends on desktop environment).
     caps.canTrash = process.platform !== "linux";
@@ -272,6 +290,7 @@ export class LocalProvider extends BaseProvider {
   // ── Lifecycle ──────────────────────────────────────────────────
 
   dispose(): void {
+    this.agent.removeListener("repository-runtime", this.onRuntime);
     for (const repoId of [...this.watchers.keys()]) {
       this.watchStop(repoId);
     }

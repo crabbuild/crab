@@ -97,6 +97,7 @@ export interface SshConnection {
   };
   serverInfo?: SshServerInfo;
   jumpClients: Client[];
+  agentSessionId?: string;
 }
 
 // ── Event types ──────────────────────────────────────────────────
@@ -151,7 +152,8 @@ export class SshSessionManager extends EventEmitter {
   private openings = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private closing = new Map<string, Promise<void>>();
   private sftpOpen = new WeakMap<Client, Promise<SFTPWrapper>>();
-  private repositories = new Map<string, Map<string, string>>();
+  private repositories = new Map<string, Map<string, { path: string; handle: Record<string, unknown>; sessionId: string }>>();
+  private nextAgentSession = 1;
 
   constructor(private readonly verifyHostKey: VerifyHostKey = async () => false) {
     super();
@@ -687,6 +689,12 @@ export class SshSessionManager extends EventEmitter {
     return this.agentDeps?.capabilityNegotiator.getCached(profileId) ?? null;
   }
 
+  agentSession(profileId: string): string | null {
+    const connection = this.connections.get(profileId);
+    return connection?.status === "connected" && connection.channels.agent && this.agentCapabilities(profileId)
+      ? connection.agentSessionId ?? null : null;
+  }
+
   async ensureAgent(profileId: string): Promise<void> {
     const connection = this.connections.get(profileId);
     if (!connection || !["connected", "deploying"].includes(connection.status)) throw new Error("SSH connection is not ready for agent deployment");
@@ -706,14 +714,19 @@ export class SshSessionManager extends EventEmitter {
     if (this.getStatus(profileId) !== "connected" || !this.agentCapabilities(profileId)) throw new Error("Deploy the SSH agent before opening a repository");
     const connection = this.connections.get(profileId)!;
     const client = connection.client;
+    const sessionId = this.agentSession(profileId);
     const repoId = `ssh://${profileId}${remotePath}`;
+    const existing = this.repositories.get(profileId)?.get(repoId);
+    // Bootstrap already reopened tracked repositories. Opening again removes
+    // the native owner and invalidates readers captured by its ready event.
+    if (sessionId && existing?.sessionId === sessionId) return { ...existing.handle, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
     const result = await this.agentDeps!.rpcRouter.sendToRemoteAgent(profileId, "open_local", { repo_id: repoId, path: remotePath });
-    if (this.connections.get(profileId) !== connection || connection.client !== client || connection.status !== "connected") throw new Error("SSH repository open was interrupted");
+    if (!sessionId || this.connections.get(profileId) !== connection || connection.client !== client || this.agentSession(profileId) !== sessionId) throw new Error("SSH repository open was interrupted");
     if (!result || typeof result !== "object" || !("repo_id" in result) || result.repo_id !== repoId) throw new Error("SSH agent returned an invalid repository handle");
     let repositories = this.repositories.get(profileId);
     if (!repositories) { repositories = new Map(); this.repositories.set(profileId, repositories); }
-    repositories.set(repoId, remotePath);
-    return { ...result, repo_id: repoId, url: repoId, is_remote: true };
+    repositories.set(repoId, { path: remotePath, handle: result as Record<string, unknown>, sessionId });
+    return { ...result, repo_id: repoId, url: repoId, is_remote: true, native_session_id: sessionId };
   }
 
   forgetRepository(profileId: string, repoId: string): void {
@@ -735,18 +748,24 @@ export class SshSessionManager extends EventEmitter {
       if (!current()) throw new Error("SSH deployment superseded");
       channel.stderr.resume();
       connection.channels.agent = channel;
+      const sessionId = `ssh:${profile.id}:${this.nextAgentSession++}`;
+      connection.agentSessionId = sessionId;
       rpcRouter.attachChannel(profile.id, channel);
       channel.once("close", () => {
         if (current() && connection.channels.agent === channel) {
           connection.channels.agent = undefined;
+          connection.agentSessionId = undefined;
           capabilityNegotiator.clearCache(profile.id);
           if (connection.status === "connected") this.emit("ssh:agent-unavailable", { profileId: profile.id, reason: "AGENT_EXITED", message: "SSH agent exited" });
         }
       });
       const capabilities = await capabilityNegotiator.negotiate(profile.id);
-      for (const [repoId, remotePath] of this.repositories.get(profile.id) ?? []) {
-        await rpcRouter.sendToRemoteAgent(profile.id, "open_local", { repo_id: repoId, path: remotePath });
-        if (!this.repositories.get(profile.id)?.has(repoId)) await rpcRouter.sendToRemoteAgent(profile.id, "close", { repo_id: repoId });
+      for (const [repoId, repository] of this.repositories.get(profile.id) ?? []) {
+        const result = await rpcRouter.sendToRemoteAgent(profile.id, "open_local", { repo_id: repoId, path: repository.path });
+        if (!current() || connection.channels.agent !== channel) throw new Error("SSH deployment superseded");
+        if (!result || typeof result !== "object" || !("repo_id" in result) || result.repo_id !== repoId) throw new Error("SSH agent returned an invalid repository handle");
+        if (this.repositories.get(profile.id)?.get(repoId) !== repository) await rpcRouter.sendToRemoteAgent(profile.id, "close", { repo_id: repoId });
+        else { repository.handle = result as Record<string, unknown>; repository.sessionId = sessionId; }
       }
       await rpcRouter.replayQueue(profile.id);
       signal.throwIfAborted();
@@ -761,6 +780,7 @@ export class SshSessionManager extends EventEmitter {
       }
       if (current()) {
         connection.channels.agent = undefined;
+        connection.agentSessionId = undefined;
         capabilityNegotiator.clearCache(profile.id);
         if (connection.status === "deploying") this.setStatus(profile.id, "connected", failure instanceof Error ? failure.message : String(failure));
         const reason = error instanceof DeployError ? error.code : "AGENT_START_FAILED";

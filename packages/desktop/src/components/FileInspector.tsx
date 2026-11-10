@@ -17,16 +17,18 @@ export function FileInspector({ repo, path, rev }: { repo: OpenRepo; path: strin
   const [file, setFile] = useState<CapturedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const nativeSessionId = repo.native_session_id;
 
   useEffect(() => {
-    const abort = new AbortController();
-    let captured: CapturedFile | undefined;
     setFile(null);
     setError(null);
-    const close = (file: CapturedFile) => rpc.closeFile(repo.repo_id, file.file_id).catch((error: unknown) => {
+    if (!nativeSessionId) return;
+    const abort = new AbortController();
+    let captured: CapturedFile | undefined;
+    const close = (file: CapturedFile) => rpc.closeFile(repo.repo_id, file.file_id, nativeSessionId).catch((error: unknown) => {
       publishToast({ kind: "error", title: "Could not close file reader", body: error instanceof Error ? error.message : String(error) });
     });
-    void rpc.openFile(repo.repo_id, path, { rev: rev ?? undefined, signal: abort.signal }).then(async (file) => {
+    void rpc.openFile(repo.repo_id, path, { native_session_id: nativeSessionId, rev: rev ?? undefined, signal: abort.signal }).then(async (file) => {
       if (abort.signal.aborted) await close(file);
       else { captured = file; setFile(file); }
     }).catch((error: unknown) => {
@@ -36,12 +38,12 @@ export function FileInspector({ repo, path, rev }: { repo: OpenRepo; path: strin
       abort.abort();
       if (captured) void close(captured);
     };
-  }, [repo.repo_id, path, rev, retry]);
+  }, [repo.repo_id, path, rev, retry, nativeSessionId]);
 
   return <section aria-label="File details" className="h-full overflow-auto bg-gx-bg-sub p-4 text-sm">
     <div className="mx-auto max-w-4xl space-y-4 rounded border border-gx-border bg-gx-surface p-4">
       <h2 className="flex items-center gap-2 font-semibold"><Binary size={16} className="text-gx-accent" />File details</h2>
-      {error ? <div className="space-y-2"><p role="alert" className="break-words text-gx-error">{error}</p><button type="button" className="btn text-xs" onClick={() => setRetry(retry + 1)}>Retry opening file</button></div> : !file ? <p role="status" className="flex items-center gap-2 text-gx-muted"><Loader2 size={14} className="animate-spin" />Opening file…</p> : <>
+      {!nativeSessionId ? <p role="status" className="text-gx-muted">Waiting for repository recovery…</p> : error ? <div className="space-y-2"><p role="alert" className="break-words text-gx-error">{error}</p><button type="button" className="btn text-xs" onClick={() => setRetry(retry + 1)}>Retry opening file</button></div> : !file ? <p role="status" className="flex items-center gap-2 text-gx-muted"><Loader2 size={14} className="animate-spin" />Opening file…</p> : <>
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-2 text-xs">
           <dt className="text-gx-muted">Path</dt><dd className="break-all font-mono">{path}</dd>
           <dt className="text-gx-muted">View</dt><dd>{rev === null ? "Working tree" : rev === "" ? "Git index" : rev}</dd>
@@ -51,14 +53,14 @@ export function FileInspector({ repo, path, rev }: { repo: OpenRepo; path: strin
           {file.content_hash && <><dt className="text-gx-muted">{file.kind === "lfs" ? "SHA-256" : "BLAKE3"}</dt><dd className="break-all font-mono">{file.content_hash}</dd></>}
           {file.git_oid && <><dt className="text-gx-muted">Git object</dt><dd className="break-all font-mono">{file.git_oid}</dd></>}
         </dl>
-        {file.can_materialize && <MaterializeFile key={file.file_id} repoId={repo.repo_id} file={file} />}
-        {file.kind === "crab" ? <ChunkDetails key={file.file_id} repoId={repo.repo_id} file={file} onReopen={() => setRetry(retry + 1)} /> : file.kind === "lfs" ? <p className="text-xs text-gx-muted">Git LFS stores this file as one SHA-256 object. It has no Crab chunk recipe.</p> : null}
+        {file.can_materialize && <MaterializeFile key={file.file_id} repoId={repo.repo_id} file={file} nativeSessionId={nativeSessionId} available={repo.capabilities?.canMaterialize ?? false} />}
+        {file.kind === "crab" ? <ChunkDetails key={file.file_id} repoId={repo.repo_id} nativeSessionId={nativeSessionId} file={file} onReopen={() => setRetry(retry + 1)} /> : file.kind === "lfs" ? <p className="text-xs text-gx-muted">Git LFS stores this file as one SHA-256 object. It has no Crab chunk recipe.</p> : null}
       </>}
     </div>
   </section>;
 }
 
-function ChunkDetails({ repoId, file, onReopen }: { repoId: string; file: CapturedFile; onReopen: () => void }) {
+function ChunkDetails({ repoId, nativeSessionId, file, onReopen }: { repoId: string; nativeSessionId: string; file: CapturedFile; onReopen: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [start, setStart] = useState(0);
   const [page, setPage] = useState<FileChunkPage | null>(null);
@@ -69,13 +71,13 @@ function ChunkDetails({ repoId, file, onReopen }: { repoId: string; file: Captur
     const abort = new AbortController();
     setPage(null);
     setError(null);
-    void rpc.fileChunks(repoId, file.file_id, start, PAGE_SIZE, abort.signal).then((page) => {
+    void rpc.fileChunks(repoId, file.file_id, nativeSessionId, start, PAGE_SIZE, abort.signal).then((page) => {
       if (!abort.signal.aborted) setPage(page);
     }).catch((error: unknown) => {
       if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
     });
     return () => abort.abort();
-  }, [expanded, repoId, file.file_id, start, retry]);
+  }, [expanded, repoId, file.file_id, nativeSessionId, start, retry]);
 
   return <div className="space-y-3 border-t border-gx-border pt-3 text-xs">
     <button type="button" className="btn text-xs" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Hide chunks" : "Inspect chunks"}</button>
@@ -102,18 +104,19 @@ function ChunkDetails({ repoId, file, onReopen }: { repoId: string; file: Captur
   </div>;
 }
 
-function MaterializeFile({ repoId, file }: { repoId: string; file: CapturedFile }) {
+function MaterializeFile({ repoId, file, nativeSessionId, available }: { repoId: string; file: CapturedFile; nativeSessionId: string; available: boolean }) {
   const { materializeFile } = useStore();
   const [pending, setPending] = useState(false);
   const [materialized, setMaterialized] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function hydrate() {
+    if (!available) return;
     setPending(true);
     setMessage(null);
     setError(null);
     try {
-      const result = await materializeFile(repoId, file.file_id);
+      const result = await materializeFile(repoId, file.file_id, nativeSessionId);
       setMaterialized(true);
       setMessage(`${formatBytes(result.written_bytes)} materialized on disk. Reopen details to inspect the working copy.`);
     } catch (error) {
@@ -122,7 +125,7 @@ function MaterializeFile({ repoId, file }: { repoId: string; file: CapturedFile 
     } finally { setPending(false); }
   }
   return <div className="space-y-2 border-t border-gx-border pt-3 text-xs">
-    <button type="button" className="btn text-xs" disabled={pending || materialized} onClick={() => void hydrate()}>{pending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}{pending ? "Materializing file…" : "Hydrate to disk"}</button>
+    <button type="button" className="btn text-xs" disabled={pending || materialized || !available} onClick={() => void hydrate()}>{pending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}{pending ? "Materializing file…" : "Hydrate to disk"}</button>
     {pending && <p className="text-gx-muted">Progress and cancellation are available in Activity. You can continue browsing.</p>}
     {message && <p role="status" className="text-gx-muted">{message}</p>}
     {error && <p role="alert" className="break-words text-gx-error">{error}</p>}

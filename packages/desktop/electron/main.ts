@@ -5,6 +5,8 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { noCapabilities } from "./repo-capabilities";
+import type { CapabilitiesChangedEvent } from "./repo-provider";
 import { rpcReply } from "./rpc-transport";
 import { MediaResources } from "./media";
 import { StorageConnections } from "./storage-connections";
@@ -89,16 +91,21 @@ function sendAgentEvent(method: string, params: unknown): void {
   mainWindow.webContents.send("crab:event", { method, params });
 }
 
+function sendRepositoryCapabilities(event: CapabilitiesChangedEvent): void {
+  if (event.nativeSessionId === null) void media?.invalidateRepo(event.repoId).catch(error => console.error("Media invalidation failed", error));
+  sendAgentEvent("repo:capabilities-changed", { repo_id: event.repoId, capabilities: event.capabilities, native_session_id: event.nativeSessionId, error: event.error });
+}
+
 let agent: Agent | null = null;
-let resolveAgentReady!: () => void;
-let rejectAgentReady!: (reason: unknown) => void;
-const agentReady = new Promise<void>((resolve, reject) => {
-  resolveAgentReady = resolve;
-  rejectAgentReady = reject;
+let resolveLocalAgent!: (value: Agent) => void;
+let rejectLocalAgent!: (reason: unknown) => void;
+const localAgent = new Promise<Agent>((resolve, reject) => {
+  resolveLocalAgent = resolve;
+  rejectLocalAgent = reject;
 });
-// The window can issue RPC before shell/PTY startup has finished. Keep those
-// requests pending until the native ping succeeds, or surface its real failure.
-void agentReady.catch(() => {});
+// Only local calls wait for construction. Each process owns its own readiness;
+// an unavailable local sidecar must not prevent authenticated SSH reads.
+void localAgent.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
 let isShuttingDown = false;
@@ -339,15 +346,12 @@ function registerIpc(skillManager: SkillManager) {
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
   async function requestAgent(method: string, params: unknown): Promise<unknown> {
-    await agentReady;
-    if (!agent) throw new Error("agent not running");
-
-    if (method.startsWith("storage_connections_")) return agent.request(method, params);
+    if (method.startsWith("storage_connections_")) return (await localAgent).request(method, params);
     const registry = getProviderRegistry();
 
     // Handle repo open methods: register provider before returning handle.
     if (method === "open_local" || method === "open_url") {
-      const handle = await agent.request(method, params);
+      const handle = await (await localAgent).request(method, params);
       // Register the appropriate provider for this repo_id.
       const repoId = (handle as { repo_id?: string })?.repo_id;
       if (repoId) {
@@ -380,11 +384,11 @@ function registerIpc(skillManager: SkillManager) {
           void provider.watchStop(repoId).catch(() => {});
           result = await provider.request(method, params as Record<string, unknown>);
         } else {
-          result = await agent.request(method, params);
+          result = await (await localAgent).request(method, params);
         }
         registry.unregister(repoId);
       } else {
-        result = await agent.request(method, params);
+        result = await (await localAgent).request(method, params);
       }
       return result;
     }
@@ -394,7 +398,18 @@ function registerIpc(skillManager: SkillManager) {
     if (repoId) {
       const provider = registry.resolve(repoId);
       if (provider) {
-        return provider.request(method, params as Record<string, unknown>);
+        const payload = params as Record<string, unknown>;
+        if (Object.hasOwn(payload, "native_session_id")) {
+          const { native_session_id: expected, ...nativeParams } = payload;
+          if (!expected || provider.nativeSession(repoId) !== expected) {
+            // A revoked session drains under its original owner. Cleanup must
+            // never send an old file identity into a replacement process.
+            if (method === "file_close") return { closed: payload.file_id };
+            throw Object.assign(new Error("The file reader's native session ended. Reopen the file."), { code: "NATIVE_SESSION_LOST" });
+          }
+          return provider.request(method, nativeParams);
+        }
+        return provider.request(method, payload);
       }
       // Unregistered SSH identities throw in resolve; only local startup
       // without an initialized provider reaches the agent below.
@@ -403,7 +418,7 @@ function registerIpc(skillManager: SkillManager) {
     // No repo_id, or a local provider still starting — send
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
-    return agent.request(method, params);
+    return (await localAgent).request(method, params);
   }
   media = new MediaResources(requestAgent, (owner, id, error) => {
     const contents = webContents.fromId(owner);
@@ -622,9 +637,7 @@ function registerIpc(skillManager: SkillManager) {
     if (provider) {
       return provider.capabilities(repoId);
     }
-    // Fallback: local repos always have full capabilities.
-    const { fullCapabilities } = await import("./repo-capabilities.js");
-    return fullCapabilities();
+    return noCapabilities();
   });
 
   // ---- File operations ----
@@ -1875,8 +1888,7 @@ app.whenReady().then(async () => {
 
   const rpcRouter = new RpcRouter(sshSessionManager, {
     request: async (method: string, params: unknown) => {
-      if (!agent) throw new Error("agent not running");
-      return agent.request(method, params);
+      return (await localAgent).request(method, params);
     },
   });
   _rpcRouter = rpcRouter;
@@ -1903,7 +1915,7 @@ app.whenReady().then(async () => {
   // that stream; remote OAuth or other unowned notifications stay remote.
   rpcRouter.on("progress", ({ method, params }) => sendAgentEvent(method, params));
   remoteProvider.on("fs/changed", event => sendAgentEvent("fs/changed", { repo_path: event.repoPath }));
-  remoteProvider.on("capabilities-changed", event => sendAgentEvent("repo:capabilities-changed", { repo_id: event.repoId, capabilities: event.capabilities }));
+  remoteProvider.on("capabilities-changed", sendRepositoryCapabilities);
 
 
   // Optional SSH IDE services cannot prevent native bootstrap or repository browsing.
@@ -2341,11 +2353,12 @@ app.whenReady().then(async () => {
     const registry = getProviderRegistry();
     const localProvider = new LocalProvider(agent);
     registry.setLocalProvider(localProvider);
+    localProvider.on("capabilities-changed", sendRepositoryCapabilities);
+    resolveLocalAgent(agent);
 
     // Fire-and-forget; we don't want to block the window on the
     // agent's ping round-trip. Failures bubble into the catch below.
-    agent.start().then(resolveAgentReady).catch((err) => {
-      rejectAgentReady(err);
+    agent.start().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       mainWindow?.webContents.send("crab:event", {
         method: "agent/failed",
@@ -2353,7 +2366,7 @@ app.whenReady().then(async () => {
       });
     });
   } catch (err) {
-    rejectAgentReady(err);
+    rejectLocalAgent(err);
     const message = err instanceof Error ? err.message : String(err);
     mainWindow?.webContents.send("crab:event", {
       method: "agent/failed",
@@ -2397,11 +2410,12 @@ app.on("will-quit", (e) => {
   e.preventDefault();
   stopAllWatchers();
   stopAutoUpdater();
-  Promise.all([
+  Promise.allSettled([
     (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
     sidecarManager.stopAll(),
     lspManager.stopAll(),
-  ]).finally(() => {
-    app.exit(0);
+  ]).then(results => {
+    for (const result of results) if (result.status === "rejected") console.error("Desktop shutdown failed", result.reason);
+    app.exit(results.some(result => result.status === "rejected") ? 1 : 0);
   });
 });

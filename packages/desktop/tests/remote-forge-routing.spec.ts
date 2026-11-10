@@ -44,6 +44,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  agentSession() { return "ssh:1"; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
 

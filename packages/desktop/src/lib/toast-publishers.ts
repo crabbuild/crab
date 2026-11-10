@@ -107,13 +107,14 @@ export function setupAgentErrorPublisher(): () => void {
     if (isDndActive()) return;
     const { notifications } = getSettings();
     if (notifications.muteAgentErrors && evt.method === "agent/error") return;
+    if (notifications.muteAgentErrors && evt.method === "agent/failed") return;
     if (notifications.muteAgentErrors && evt.method === "agent/exit") return;
 
-    if (evt.method === "agent/error") {
+    if (evt.method === "agent/error" || evt.method === "agent/failed") {
       const p = evt.params as AgentErrorParams;
       publishToast({
         kind: "error",
-        title: "Agent error",
+        title: evt.method === "agent/failed" ? "Desktop services unavailable" : "Agent error",
         body: p.message,
       });
     } else if (evt.method === "agent/exit") {

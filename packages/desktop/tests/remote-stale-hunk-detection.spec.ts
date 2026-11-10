@@ -65,6 +65,7 @@ function makeMockSessionManager(status = "connected") {
   return Object.assign(emitter, {
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
   });
 }
 

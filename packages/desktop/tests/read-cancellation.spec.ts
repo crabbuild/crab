@@ -53,6 +53,17 @@ describe("read cancellation", () => {
     expect(bridge).not.toHaveBeenCalled();
   });
 
+  it("keeps cancellation bound to the captured native session", async () => {
+    const work = deferred<unknown>();
+    const bridge = vi.fn((method: string, _params: Record<string, unknown>) => method === "rpc/cancel" ? Promise.resolve({ ok: true }) : work.promise);
+    vi.stubGlobal("window", { crab: { rpc: bridge } });
+    const operation = callCancellable("file_open", { repo_id: "repo", path: "weights", native_session_id: "local:1" });
+    operation.cancel();
+    expect(bridge).toHaveBeenLastCalledWith("rpc/cancel", { op_id: expect.any(String), repo_id: "repo", native_session_id: "local:1" });
+    work.reject({ code: "NATIVE_SESSION_LOST", message: "Session ended" });
+    await expect(operation.promise).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
+  });
+
   it("does not cancel an operation that has already completed", async () => {
     const bridge = vi.fn().mockResolvedValue({ size: 12 });
     vi.stubGlobal("window", { crab: { rpc: bridge } });

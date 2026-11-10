@@ -4,7 +4,7 @@ import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWo
 import { SettingsProvider, useSetting, useSettings } from "./settings";
 import { PtyModeProvider } from "./lib/pty-mode-context";
 import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoPath } from "./lib/session-context";
-import { rpc } from "./ipc";
+import { rpc, type RepoHandle } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { RepoDetail } from "./components/RepoDetail";
 import { EmptyState } from "./components/EmptyState";
@@ -386,7 +386,7 @@ function Shell() {
   // that clone/open repos outside of the normal React component flow.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { handle: { repo_id: string; url: string; is_remote: boolean; cache_dir: string }; path: string } | undefined;
+      const detail = (e as CustomEvent).detail as { handle: RepoHandle; path: string } | undefined;
       if (!detail?.handle) return;
       addRepo({
         ...detail.handle,

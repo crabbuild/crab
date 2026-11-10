@@ -156,6 +156,7 @@ export interface SshConnectionState {
 // Persistent slice of state: the recently opened repos. Everything
 // else (active tab, transient dialogs) stays in component state.
 export interface OpenRepo extends RepoHandle {
+  native_error?: string;
   label: string;
   path?: string;
   openedAt: number;
@@ -247,7 +248,7 @@ function loadPersistedRepos(): OpenRepo[] {
       if (typeof path !== "string" || !path || typeof label !== "string" || typeof openedAt !== "number" || !Number.isFinite(openedAt) || paths.has(path)) continue;
       paths.add(path);
       const remote = parseRepoId(path);
-      repos.push({ repo_id: `deferred-${path}`, url: remote ? path : "", is_remote: !!remote, cache_dir: "", path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
+      repos.push({ repo_id: `deferred-${path}`, url: remote ? path : "", is_remote: !!remote, cache_dir: "", native_session_id: null, path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
     }
     return repos;
   } catch { return []; }
@@ -359,7 +360,8 @@ export type Action =
   | { type: "ssh-high-latency-mode"; profileId: string; enabled: boolean }
   | { type: "ssh-bandwidth-update"; profileId: string; bytesIn: number; bytesOut: number }
   | { type: "ssh-connection-remove"; profileId: string }
-  | { type: "repo-capabilities-changed"; repo_id: string; capabilities: CapabilitySet };
+  | { type: "repo-runtime-changed"; repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string }
+  | { type: "repo-capabilities-loaded"; repo_id: string; capabilities: CapabilitySet; expected_session_id: string | null };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -613,14 +615,14 @@ function reducer(state: AppState, action: Action): AppState {
 
     // ── Repo capabilities ────────────────────────────────────────────
 
-    case "repo-capabilities-changed": {
-      // Only create a new repos array if the capabilities actually changed.
+    case "repo-capabilities-loaded": {
       const target = state.repos.find((r) => r.repo_id === action.repo_id);
-      if (!target || target.capabilities === action.capabilities) return state;
-      const repos = state.repos.map((r) =>
-        r.repo_id === action.repo_id ? { ...r, capabilities: action.capabilities } : r,
-      );
-      return { ...state, repos };
+      // An initial query cannot re-enable controls after a later process loss.
+      if (!target || target.native_session_id !== action.expected_session_id) return state;
+      return { ...state, repos: state.repos.map(repo => repo.repo_id === action.repo_id ? { ...repo, capabilities: action.capabilities } : repo) };
+    }
+    case "repo-runtime-changed": {
+      return { ...state, repos: state.repos.map(repo => repo.repo_id === action.repo_id ? { ...repo, capabilities: action.capabilities, native_session_id: action.native_session_id, native_error: action.error } : repo) };
     }
 
   }
@@ -654,7 +656,7 @@ interface Ctx {
   unpinRepo: (path: string) => void;
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
-  materializeFile: (repoId: string, fileId: string) => Promise<{ written_bytes: number }>;
+  materializeFile: (repoId: string, fileId: string, nativeSessionId: string) => Promise<{ written_bytes: number }>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -693,8 +695,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       } else if (evt.method === "progress/transfer") {
         dispatch({ type: "job-transfer", transfer: evt.params as ProgressTransfer });
       } else if (evt.method === "repo:capabilities-changed") {
-        const p = evt.params as { repo_id: string; capabilities: CapabilitySet };
-        dispatch({ type: "repo-capabilities-changed", repo_id: p.repo_id, capabilities: p.capabilities });
+        const p = evt.params as { repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string };
+        dispatch({ type: "repo-runtime-changed", ...p });
       }
     });
     return () => {
@@ -722,11 +724,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // Fire-and-forget: fetch capabilities and dispatch the result.
       mainProcess.getCapabilities(repo.repo_id).then(
         (caps) => {
-          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: caps });
+          dispatch({ type: "repo-capabilities-loaded", repo_id: repo.repo_id, capabilities: caps, expected_session_id: repo.native_session_id });
         },
         () => {
           // A failed query does not establish native availability.
-          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: noCapabilities() });
+          dispatch({ type: "repo-capabilities-loaded", repo_id: repo.repo_id, capabilities: noCapabilities(), expected_session_id: repo.native_session_id });
         },
       );
     }
@@ -819,11 +821,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
-      materializeFile: async (repoId, fileId) => {
+      materializeFile: async (repoId, fileId, nativeSessionId) => {
         const job_id = nextJobId("hydrate");
         dispatch({ type: "job-start", job_id, op: "hydrate" });
         try {
-          const result = await rpc.materializeFile(repoId, fileId, job_id);
+          const result = await rpc.materializeFile(repoId, fileId, job_id, nativeSessionId);
           dispatch({ type: "job-complete", job_id, status: 0 });
           return result;
         }

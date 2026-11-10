@@ -1,5 +1,5 @@
 import type { RpcRouter } from "./ssh-router";
-import type { AgentCapabilities } from "./ssh-types";
+import { parseAgentCapabilities, type AgentCapabilities } from "./ssh-types";
 
 export class CapabilityNegotiator {
   private cache = new Map<string, { capabilities?: AgentCapabilities }>();
@@ -14,15 +14,8 @@ export class CapabilityNegotiator {
     // Bootstrap runs while the session is deploying, before repository routing
     // is available. The attached channel owns this control request.
     const result: unknown = await this.router.sendToRemoteAgent(profileId, "capabilities", {});
-    if (!result || typeof result !== "object") throw new Error("Incompatible Crab agent capabilities");
-    const { protocol, version, methods } = result as Record<string, unknown>;
-    if (protocol !== 1 || typeof version !== "string" || !version.trim() ||
-        !Array.isArray(methods) || !methods.every((method): method is string => typeof method === "string" && !!method) ||
-        !methods.includes("capabilities") || new Set(methods).size !== methods.length) {
-      throw new Error("Incompatible Crab agent capabilities");
-    }
+    const capabilities = parseAgentCapabilities(result);
     if (this.cache.get(profileId) !== entry) throw new Error("Agent capability negotiation superseded");
-    const capabilities: AgentCapabilities = { protocol, version, methods };
     entry.capabilities = capabilities;
     return capabilities;
   }

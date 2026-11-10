@@ -6,6 +6,7 @@ export interface CapabilitySet {
   canWorktree: boolean;
   canForge: boolean;
   canHydrate: boolean;
+  canMaterialize: boolean;
   canSearch: boolean;
   canExec: boolean;
   canTrash: boolean;
@@ -20,6 +21,7 @@ export function fullCapabilities(): CapabilitySet {
     canWorktree: true,
     canForge: true,
     canHydrate: true,
+    canMaterialize: true,
     canSearch: true,
     canExec: true,
     canTrash: true,
@@ -35,6 +37,7 @@ export function noCapabilities(): CapabilitySet {
     canWorktree: false,
     canForge: false,
     canHydrate: false,
+    canMaterialize: false,
     canSearch: false,
     canExec: false,
     canTrash: false,

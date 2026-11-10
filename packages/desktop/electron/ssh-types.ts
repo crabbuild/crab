@@ -160,6 +160,16 @@ export interface AgentCapabilities {
   methods: string[];
 }
 
+/** Validate the protocol and method inventory returned by a native agent. */
+export function parseAgentCapabilities(value: unknown): AgentCapabilities {
+  if (!value || typeof value !== "object") throw new Error("Incompatible Crab agent capabilities");
+  const { protocol, version, methods } = value as Record<string, unknown>;
+  if (protocol !== 1 || typeof version !== "string" || !version.trim() ||
+      !Array.isArray(methods) || !methods.every((method): method is string => typeof method === "string" && !!method) ||
+      !methods.includes("capabilities") || new Set(methods).size !== methods.length) throw new Error("Incompatible Crab agent capabilities");
+  return { protocol, version, methods };
+}
+
 // ── Bookmark and Recent File Types ───────────────────────────────
 
 export interface RemoteBookmark {

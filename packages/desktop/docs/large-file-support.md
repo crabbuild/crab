@@ -16,7 +16,7 @@ completion. This record tracks implementation and qualification separately.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Complete RPC parity, native restart/capture recovery, real multi-hop cancellation and other targets/providers remain open. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local native restart and capture replacement have packaged proof. Complete RPC parity, failed SSH sibling isolation, identity replacement, real multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
@@ -27,8 +27,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Reliable operation routing and controls | `ProviderRegistry` rejects unopened SSH identities; `RpcRouter` owns progress identity; one capability contract and one renderer event bridge. | Local packaged proof: rejected SSH writes do not touch local files, remote progress/cancellation reaches Activity, and remote native exit disables editing. Fresh cross-platform CI remains required. |
-| P0 | Reopen and connection lifetime | One saved-repository open path for startup/sidebar; one profile connection/bootstrap owner; each jump/SFTP attempt owns its transport. | Packaged empty-start SSH access, restart, failed restore/retry, deferred second-repository selection and runtime reuse pass. Focused cancellation and stale-transport checks pass. Local native restart, retained captures after restart, single-file versus bulk hydration gates and real multi-hop cancellation remain open. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One capability contract and event bridge; single-file materialization is independent of bulk hydration. | Packaged local signal-crash recovery reopens two repositories, rejects stale captures and materializes exact Crab/LFS bytes without changing index pointers. SSH native retry recaptures the retained inspector without a duplicate repository open. Remaining: SSH replay failure isolation, storage-identity replacement capture revocation, local-startup-failure/SSH independence, editor-buffer/media-playback recovery and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -41,7 +40,38 @@ Optional SSH IDE initialization no longer owns core event delivery. Native
 filesystem RPC parity and durable recovery are separate deliverables, not
 implied by a working read/materialization smoke.
 
-Current local proof: 187 focused tests across ten provider/router/connection
+### Next bounded slices
+
+1. Finish recovery parity before extending transfer features. SSH replay must
+   report a missing repository independently while a sibling remains usable.
+   Storage rebind/reopen must revoke captures at the same repository owner;
+   a previous credential context must never survive an identity replacement.
+   Qualify an unavailable local sidecar with working SSH reads, pending editor
+   saves and media playback across native loss, and cancellation through actual
+   jump hosts.
+2. Complete one real repository round trip for each Crab/LFS profile: physical
+   file create/edit/rename/delete, attribute setup, track, stage, commit, push,
+   lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
+   working provider path; unsupported native filesystem RPCs must not masquerade
+   as complete remote editing. Preserve content identities, unrelated index
+   entries, executable modes and review/history source semantics.
+3. Deepen existing operation and cache owners: durable terminal state, supported
+   retry/resume after cold-transfer interruption, acknowledged cancellation,
+   logical versus network counters, active-reader pins, budget enforcement and
+   offline retention. Closing a view must not discard ownership or report a
+   cancelled transfer before native cleanup finishes.
+4. Finish metadata and format bounds on the existing captured-reader path:
+   physical/cache/available/pending bytes, decoded Parquet/query limits,
+   bounded plain-text pointers and remaining format comparisons. Keep unknown
+   measurements unknown and give oversized or malformed content a visible error.
+
+These slices consolidate functionality into File details, Activity and Settings.
+They do not require additional primary navigation destinations or a second
+reconstruction, credential, retry or cache implementation. Every slice retains
+its own byte-identity, failure and packaged-action evidence; provider/profile
+and cross-platform CI qualification remains a release gate for the whole matrix.
+
+Operation-routing checkpoint: 187 focused tests across ten provider/router/connection
 files pass, following four reproduced operation-boundary failures. The packaged
 SSH smoke covers exact 4 MiB hydration, Activity progress, cancellation of a
 512 MiB payload without changing either pointer or leaving a temporary file,
@@ -50,7 +80,8 @@ prefetch tests are removed with their retired path; real packaged opening and
 repository registration remain covered. The native Linux arm64 producer's CI
 failure identified the configured cross-linker missing from the native runner;
 the desktop build now selects `cc` unless Cargo's caller explicitly chooses a
-linker. Fresh Linux arm64 build proof remains required.
+linker. The Linux arm64 producer passed on the earlier published head; fresh
+cross-platform qualification for subsequent recovery changes remains required.
 
 ## Ownership
 
@@ -973,6 +1004,50 @@ acceptance matrix above remains the completion boundary.
   `desktop-reopen-latest-ui-proof/`, `desktop-reopen-synced-ui-proof/`,
   `desktop-reopen-latest-backend-proof/` and
   `desktop-reopen-qualification.json` in the external build directory.
+
+## Native recovery checkpoint
+
+- Local startup joins one process and negotiates the same protocol/method
+  contract as SSH. Pending replies belong to that process. Signal exits trigger
+  recovery only after stdio closes, matching Node's
+  [child-process close contract](https://nodejs.org/api/child_process.html#event-close).
+  Shutdown joins native EOF cleanup instead of imposing an eight-second kill.
+  Crash records use the application profile and retain interrupted request IDs.
+- Successful opens retain repository identity for replay. Recovery resolves the
+  current saved storage binding; one local repository's failed/blocked replay
+  does not prevent its siblings from serving requests. Explicit reopen revokes
+  the old capture session before native replacement, including a failed reopen
+  in a still-running process. Retry can start services after startup failure.
+- Capabilities and native session identity reach the renderer together. Local
+  Node filesystem editing remains available during sidecar loss; native
+  materialization requires the captured repository and complete method set.
+  SSH native loss revokes editing and single-file hydration while retaining the
+  connection. A restored SSH repository reuses its current native handle;
+  opening it a second time had removed readers created by the ready event.
+- Inspectors recapture on session replacement. Inspector/media requests carry
+  their expected native session; stale reads, materialization and cancellation
+  are rejected, while stale close cannot reach the replacement. Media URLs are
+  revoked. In-flight cleanup still joins its original work. Single-file
+  `canMaterialize` and bulk `canHydrate` have separate controls and contracts.
+- The matching unsigned macOS arm64 package passes two prepared GUI smokes in
+  26.1 seconds: local SIGKILL with two repositories, stale file/media rejection,
+  exact 4 MiB Crab/LFS hydration with unchanged index pointers; and actual SSH
+  trust/deployment, visible progress, 512 MiB cancellation with pointer/temp
+  preservation, native EOF with live SSH, visible Retry and fresh inspector
+  recovery. SSH single-file hydration is enabled while bulk hydration remains
+  unavailable. The peer application was reopened after each smoke.
+- 235 focused tests across 15 owner/provider/transport files pass. Production
+  renderer/Electron builds, project types, strict smoke-spec types and Rust
+  formatting pass. Packaged source/asset/native hashes are recorded externally
+  in `native-recovery-qualification.json`; GUI results and screenshots live in
+  `native-recovery-qualified-ui-proof-v2/`. Rust/native inputs are unchanged
+  from the qualified `2f6d36ec12a` pair. The desktop lint command currently has
+  no ESLint configuration; this is not a passing lint result. The preceding
+  published head also has an unqualified NFS TCP port-release CI failure.
+- Remaining recovery work is explicit in the P0 row above. This checkpoint
+  does not qualify storage rebind capture revocation, failed SSH sibling replay,
+  pending editor buffers, playback recovery, durable transfers or the complete
+  large-file acceptance matrix.
 - This closes the saved-repository slice, not the acceptance matrix. Local
   native restart/captured-file recovery and separate single-file/bulk hydration
   gates are the next P0 work. Real multi-hop cancellation, complete remote file
