@@ -644,7 +644,7 @@ export class SshSessionManager extends EventEmitter {
     agentDeployer.on("ssh:deploy-progress", progress);
     this.setStatus(profileId, "deploying");
     try {
-      const starting = agentDeployer.ensureAgent(connection.client).then(channel => {
+      const starting = agentDeployer.ensureAgent(connection.client, connection.lifetime.signal).then(channel => {
         // Deployment can finish after cancellation. It must retire its own
         // stream rather than installing it into a newer connection's slot.
         if (!this.isCurrent(connection)) { channel.destroy(); connection.lifetime.signal.throwIfAborted(); throw new Error("SSH connection replaced"); }
@@ -662,6 +662,7 @@ export class SshSessionManager extends EventEmitter {
       channel.once("end", lost); channel.once("close", lost); channel.once("error", lost);
       await this.owned(connection, deps.capabilityNegotiator.negotiate(profileId));
       this.assertCurrent(connection);
+      this.emit("ssh:deploy-progress", { profileId, stage: "starting", percent: 100 });
     } catch (reason: unknown) {
       if (this.isCurrent(connection)) this.emit("ssh:agent-unavailable", { profileId, reason: reason instanceof DeployError ? reason.code : "UNKNOWN", message: reason instanceof Error ? reason.message : String(reason) });
       throw reason;

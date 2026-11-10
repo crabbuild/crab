@@ -25,6 +25,7 @@ import { registerSkillManagerIpc } from "./skill-manager-ipc";
 import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
 import { SshSessionManager } from "./ssh-manager";
+import { RemoteRuntimeStore } from "./ssh-runtime";
 import { KnownHostsManager, createHostKeyVerifier } from "./ssh-known-hosts";
 import { confirmSshHostKey } from "./ssh-host-key-dialog";
 import { registerSshIpcHandlers } from "./ssh-ipc";
@@ -1840,7 +1841,12 @@ app.whenReady().then(async () => {
     });
     _rpcRouter = rpcRouter;
     const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
-    sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(), capabilityNegotiator, rpcRouter });
+    const runtimeAppPath = app.getAppPath(); const runtimeVersion = app.getVersion();
+    const runtimeCache = path.join(app.getPath("userData"), "remote-runtimes");
+    const runtimeOptions = { packaged: app.isPackaged, appPath: runtimeAppPath, version: runtimeVersion, cacheDirectory: runtimeCache };
+    const remoteRuntimes = new RemoteRuntimeStore(runtimeOptions);
+    const resolveRemoteRuntime = remoteRuntimes.resolve.bind(remoteRuntimes);
+    sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(resolveRemoteRuntime), capabilityNegotiator, rpcRouter });
     const fileTransferManager = new FileTransferManager(sshSessionManager);
     const deltaSyncEngine = new DeltaSyncEngine(rpcRouter);
     const workspaceSyncEngine = new WorkspaceSyncEngine(

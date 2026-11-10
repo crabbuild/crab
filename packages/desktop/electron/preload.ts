@@ -1,3 +1,4 @@
+import type { DeployProgress } from "./ssh-deployer";
 import type { KnownHost } from "./ssh-known-hosts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
@@ -805,8 +806,8 @@ contextBridge.exposeInMainWorld("crab", {
     },
 
     // Deploy progress events (on/off pairs)
-    onDeployProgress: (listener: (payload: { stage: string; percent: number; speed?: number; eta?: number }) => void) => {
-      const handler = (_e: unknown, payload: { stage: string; percent: number; speed?: number; eta?: number }) => listener(payload);
+    onDeployProgress: (listener: (payload: DeployProgress & { profileId: string }) => void) => {
+      const handler = (_e: unknown, payload: DeployProgress & { profileId: string }) => listener(payload);
       ipcRenderer.on("ssh:deploy-progress", handler);
       return () => { ipcRenderer.removeListener("ssh:deploy-progress", handler); };
     },

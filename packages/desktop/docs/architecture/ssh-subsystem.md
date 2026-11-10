@@ -1,148 +1,87 @@
 # SSH Subsystem Architecture
 
-## Overview
+Crab Desktop routes remote repository RPCs over an authenticated SSH channel to
+`crab-desktop-agent`. The sidecar and its Crab CLI come from the same release.
+Remote native Codex/Claude chat dispatch is still an open implementation gate;
+local native-provider proof does not establish remote chat support. See
+[agent chat compatibility](../agent-chat-compatibility.md) for evidence and gaps.
 
-The SSH subsystem enables Crab Desktop to manage repositories on remote
-servers as if they were local. It uses the **Remote Agent** pattern: the
-same `crab-desktop-agent` binary runs on the remote server, and the
-local Electron app tunnels JSON-RPC 2.0 over an SSH channel.
+## Ownership and routing
 
-## Key Principle
+| Surface | Owner | Contract |
+| --- | --- | --- |
+| Authentication and host trust | `electron/ssh-manager.ts`, `ssh-known-hosts.ts` | Verify every direct/jump host before authentication; disconnect cancels pending trust decisions and opening work |
+| Initial/manual/reconnect bootstrap | `electron/ssh-manager.ts` | One connection owns its deployment, channel, capability handshake and readiness publication |
+| Runtime acquisition | `electron/ssh-runtime.ts` | Exact app version and remote target; verified private cache; concurrent borrowers share downloads without sharing cancellation |
+| Remote installation | `electron/ssh-deployer.ts` | Matching CLI/sidecar, private staging, acknowledged writes, remote hashes, atomic publication and owned cleanup |
+| Repository RPC | `electron/ssh-router.ts` | Local requests use the local agent; `ssh://profileId/path` requests use that profile's channel; batches become independent NDJSON requests |
+| Capability negotiation | `electron/ssh-capabilities.ts` | Read actual capabilities after channel attachment; clear stale results when the owner changes |
+| Progress UI | `src/components/ssh/DeployProgressIndicator.tsx` | Typed, profile-scoped events; starting completes only after the capability handshake |
 
-The renderer is completely unaware of whether a repo is local or remote.
-All routing happens in the main process via the RPC Router.
+The router owns UTF-8 framing and outstanding requests per exact channel. EOF,
+error or close retires that channel's requests. Reconnect queues only inspected
+reads; writes and unclassified calls fail immediately, so uncertain writes are
+never replayed. A connected SSH transport without an attached sidecar advertises
+no repository RPC capabilities.
 
-## Components
+## Runtime acquisition and installation
 
-### Main Process (Electron)
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  SSH Session Manager (ssh-manager.ts)                    │
-│  • Connection pool (one TCP conn, many channels)        │
-│  • Reconnection state machine                           │
-│  • Suspend/resume detection                             │
-├─────────────────────────────────────────────────────────┤
-│  RPC Router (ssh-router.ts)                             │
-│  • repo_id → local agent OR remote agent                │
-│  • Transparent to renderer                              │
-│  • Batch RPC support                                    │
-├─────────────────────────────────────────────────────────┤
-│  Response Cache (ssh-cache.ts)                          │
-│  • TTL-based caching with adaptive TTL                  │
-│  • Invalidation on write operations                     │
-│  • Prefetching on repo open                             │
-├─────────────────────────────────────────────────────────┤
-│  Agent Deployer (ssh-deployer.ts)                       │
-│  • Detect remote arch, upload binary via SFTP           │
-│  • Version check + hash-based skip                      │
-├─────────────────────────────────────────────────────────┤
-│  Port Forward Manager (ssh-port-forward.ts)             │
-│  • Local → Remote forwards                              │
-│  • Dynamic detection from terminal output               │
-├─────────────────────────────────────────────────────────┤
-│  File Transfer Manager (ssh-file-transfer.ts)           │
-│  • SFTP upload/download with progress                   │
-│  • Transfer queue with concurrency control              │
-├─────────────────────────────────────────────────────────┤
-│  System Health Monitor (ssh-health.ts)                  │
-│  • Polls disk, memory, GPU metrics                      │
-│  • Alerts on threshold breaches                         │
-├─────────────────────────────────────────────────────────┤
-│  Connection Diagnostics (ssh-diagnostics.ts)            │
-│  • Latency test, bandwidth estimate                     │
-│  • Recommendations engine                               │
-├─────────────────────────────────────────────────────────┤
-│  Resilience Manager (ssh-resilience.ts)                 │
-│  • Session persistence across restarts                  │
-│  • Graceful degradation during reconnection             │
-│  • Audit logging                                        │
-├─────────────────────────────────────────────────────────┤
-│  Performance Manager (ssh-performance.ts)               │
-│  • Prefetching, delta updates                           │
-│  • Connection pooling, lazy subscriptions               │
-│  • Response streaming                                   │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Remote Server
+Supported remote targets are Linux and macOS on x64 or arm64. Development uses
+`resources/native/<mac|linux>-<arch>/runtime.json` and its matching binaries.
+Packaged apps obtain these dedicated assets from the app's exact GitHub release:
 
 ```
-~/.crab/bin/crab-desktop-agent
-  • Same binary, same JSON-RPC protocol
-  • Full access to local filesystem + git + crab
-  • Spawns CLI tools (crab, git, claude, codex)
-  • System health reporting (disk, mem, GPU)
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>.json
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>-crab
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>-crab-desktop-agent
 ```
 
-## Data Flow
+Dedicated remote assets have their own checksums: signing an Electron bundle can
+change its embedded binaries. Release assembly requires all four remote targets
+and verifies identity, regular files, size limits and SHA-256 before publication.
+The downloader restricts redirects to approved HTTPS release hosts, bounds sizes
+and duration, and verifies hashes before publishing its cache. Invalid completed
+caches fail with an explicit removal/reconnect instruction.
 
-### RPC Call (e.g., git status)
-
-1. Renderer calls `window.crab.rpc("git_status_porcelain", { repo_id })`
-2. Main process receives via IPC
-3. RPC Router checks `repo_id` prefix:
-   - Local: forward to local agent process
-   - Remote (`ssh://profileId/path`): forward to remote agent channel
-4. Remote agent processes request, returns JSON-RPC response
-5. Router returns result to renderer via IPC
-
-### Connection Lifecycle
+Each remote pair installs under the authenticated user's home directory:
 
 ```
-DISCONNECTED → CONNECTING → DEPLOYING → CONNECTED
-                                              ↓
-                                         (network error)
-                                              ↓
-                                        RECONNECTING
-                                         ↙        ↘
-                                   CONNECTED    DISCONNECTED
-                                   (success)    (60s timeout)
+.crab/desktop/runtimes/<version>/<platform>-<arch>/<content-hash>/
+  crab
+  crab-desktop-agent
+  git-remote-crab
 ```
 
-## Security Model
+The Git helper is a hard link to that runtime's CLI. Parent directories and
+executables are checked without accepting symbolic-link leaves. An unpredictable
+upload directory has an SSH stdin-owned cleanup guard. Uploads wait for SFTP
+CLOSE acknowledgements before remote checksums and directory publication. An
+upload without progress for 30 seconds fails; cancellation retires SFTP before
+releasing the cleanup guard, preventing a pending write from racing cleanup.
+Published directories are outside that guard's scope. Reuse verifies all three
+executables again; deployment never replaces a running session's binary or kills
+another session by process name.
 
-- Private keys never leave the local machine
-- Credentials stored only in OS keychain
-- Host key verification prevents MITM attacks
-- Remote agent runs as the user (no privilege escalation)
-- Audit log records all connection events (no credentials)
-- Port forwards are explicit and user-configured
+The sidecar starts with `CRAB_BIN` pointing to this CLI and its runtime prepended
+to `PATH`. The session manager attaches its sole RPC reader, negotiates capabilities
+and then publishes connected readiness. A transport failure or cancellation
+retires the owned channel and capability cache before recovery.
 
-## Error Codes
+## Limits and qualification
 
-| Code | Name | Meaning |
-|------|------|---------|
-| 2001 | SSH_AUTH_FAILED | Authentication rejected |
-| 2002 | SSH_HOST_UNREACHABLE | Cannot connect to host |
-| 2003 | SSH_HOST_KEY_CHANGED | Host key mismatch (MITM) |
-| 2004 | SSH_AGENT_DEPLOY_FAILED | Binary upload/chmod failed |
-| 2005 | SSH_AGENT_START_FAILED | Agent process won't start |
-| 2006 | SSH_CHANNEL_CLOSED | SSH channel unexpectedly closed |
-| 2007 | SSH_TIMEOUT | Operation timed out |
-| 2008 | SSH_RECONNECTING | Temporarily unavailable |
-| 2009 | SSH_DISK_FULL | Remote disk full |
-| 2010 | SSH_PERMISSION_DENIED | Remote filesystem permission error |
-| 2011 | SSH_PORT_IN_USE | Port forward failed (port occupied) |
+The sidecar implements core repository RPCs and task comparison. Its capability
+handshake explicitly disables unsupported extended execution, watch and session
+services. The Electron health/audit/diagnostics modules and related design goals
+do not by themselves establish a working remote service; in particular the
+legacy audit bridge is not wired into the production main process.
 
-## Performance Targets
-
-| Operation | Target | Strategy |
-|-----------|--------|----------|
-| File tree expand | < 200ms | Single RPC, lazy load |
-| Git status | < 300ms | Cached 5s, invalidated on write |
-| Open file preview | < 500ms | Remote agent parses |
-| Terminal keystroke | < 50ms | Direct SSH channel |
-| Diff computation | < 1s | Remote agent computes |
-| File save | < 200ms | Direct write via agent |
-
-## Caching Strategy
-
-Adaptive TTL based on connection latency:
-
-| RTT | Status TTL | Refs TTL | Summary TTL |
-|-----|-----------|---------|------------|
-| <50ms | 3s | 5s | 5s |
-| 50-100ms | 5s | 10s | 10s |
-| 100-200ms | 10s | 15s | 15s |
-| >200ms | 15s | 30s | 30s |
+Real loopback SSH/SFTP proof covers immutable installation, reuse, checksum
+failure, owner cancellation and stalls, including quoted/Unicode home paths.
+The built release pair also creates a worktree through its uploaded CLI and
+returns native comparison bytes through the real session manager and router.
+A renderer fixture checks progress isolation between profiles. These checks do
+not qualify remote native chat, concurrent native indexer ownership, a published
+release endpoint, packaged main-process bootstrap or older Linux ABI support.
+Cross-platform CI builds and bootstraps each remote target; its results must be
+reviewed before release. The [manual workspace checklist](../remote-workspace-smoke-test.md)
+tracks user-visible remote operations that need separate qualification.

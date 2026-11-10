@@ -157,7 +157,7 @@ Its session/model totals include subagents and restored spend.
 | Text hunk editing | Apply/revert IPC → orchestrator workspace transition → physical path and preimage validation | Edit card and turn-summary Undo; both native owner boundaries, actual Run descendants, real file regressions, and renderer-to-filesystem success/stale-error checks |
 | Saved file restoration | `restoreFiles` IPC → shared file-operation owner → checkpoint manager → retained Git backup and tree restoration | Saved-file menu, backup recovery, ignored-file rejection, real shared writers, native session/history continuity, and task-view Diff refresh |
 | Local file comparisons | `registerDiffIpc` → `computeDiff` → private intent index and one Git raw/patch stream | Default and saved-turn Diff, PR description reads, archived object reads, unusual paths, actual IPC errors and renderer Reload; remote wire parser remains separate |
-| Remote file comparisons | Same IPC → `RpcRouter` → sidecar dispatcher → `agent/src/task_diff.rs` | Private index, one bounded Git read, tagged response shape, shared path decoding; compiled sidecar and task-view checks over stdio and loopback SSH, with deployment still unqualified |
+| Remote file comparisons | Same IPC → `RpcRouter` → sidecar dispatcher → `agent/src/task_diff.rs` | Private index, one bounded Git read, tagged response shape, shared path decoding; compiled sidecar and task-view checks over stdio and loopback SSH; actual CLI/sidecar deployment proof below |
 | SSH session readiness | Main dependency factory → session manager → deployer/channel → capability negotiator → router | Initial/manual/reconnect share attachment; real sidecar capability response, interrupted tasks, bounded cancellation, profile-owned jump chains and four SSH/browser cases |
 | RPC channel ownership | `RpcRouter.attachChannel` → channel-local pending calls/decoder → sidecar NDJSON requests | Cache/poller batches use ordinary routing; closure/replacement, profile isolation, split UTF-8, error fidelity, timeout and queue-admission regressions; real SSH browser failure during an outstanding read |
 | Extended Codex actions | `electron/orchestrator-ipc.ts` → orchestrator → adapter | Feedback, preload API and operation contracts; remaining command/watch ownership and live controls are gates |
@@ -568,6 +568,54 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- SSH deployment now resolves a verified Crab CLI/sidecar pair for the exact app
+  release and remote target. Development uses the real `resources/native` layout;
+  packaged applications download dedicated release assets over approved HTTPS
+  hosts into a private cache. Concurrent profiles share a download, with
+  cancellation retained by remaining borrowers. Corrupt completed caches fail
+  closed with an explicit removal/reconnect instruction. No provider credential
+  or new product configuration is used for artifact download.
+  The pair and its Git helper install under
+  `~/.crab/desktop/runtimes/<version>/<target>/<content-hash>/`. Uploads wait for
+  the SFTP CLOSE acknowledgement, verify regular executable files and their
+  remote checksums, then publish the directory. A remote stdin-owned guard
+  removes only its own upload directory on interruption. Existing running
+  sessions keep their executable; version guessing and global process checks
+  are removed. The remote sidecar uses its matching uploaded CLI explicitly.
+  One session-owned capability handshake completes deployment; progress is
+  typed and scoped to the selected profile and includes runtime preparation.
+  Real SSH/SFTP checks cover install, reuse, corruption, cancellation and safe
+  quoting. OPEN, WRITE and CLOSE stalls fail after 30 seconds without progress;
+  the fixture confirms that the owned staging directory is removed. The server
+  explicitly acknowledges SSH channel closure, matching the SSH2 subsystem
+  owner contract; writable finish alone is not an SFTP CLOSE acknowledgement. The just-built release pair also passes through the real session
+  manager, capability negotiator and RPC router: it creates a Git worktree with
+  the uploaded CLI, returns native Diff bytes and exits cleanly. Its download
+  transport serves owned build assets; it does not claim a published GitHub
+  endpoint exists before release. A browser case checks profile isolation and
+  retained-state filtering in the actual progress component.
+  Release staging emits Linux/macOS x64/arm64 manifests and both binaries.
+  Assembly rejects missing, corrupt or mismatched runtime assets. CI now builds
+  Linux ARM64 and exercises native SSH bootstrap on each advertised remote
+  target. Cross-platform CI, Linux ABI/minimum-distro qualification, packaged
+  main-process bootstrap and real published-asset checks remain release gates.
+  Evidence: `ssh-runtime-layout-before.json`, `ssh-runtime-sharing-before.json`,
+  `ssh-runtime-final-scoped.json`, `ssh-upload-stall-final2.json`, `ssh-native-runtime-live.json`,
+  `ssh-native-runtime.json`, `ssh-runtime-final-live3.json`,
+  `ssh-runtime-progress-final.json` and `ssh-runtime-release-suite-final.log` in the owned qualification output.
+  The JSON reporter's totals include skipped opt-in cases; validation counts
+  use individual assertion statuses. The preceding connection-test scope was
+  167 passes plus one skipped browser case; its separate seven-case live run
+  passes in full. The runtime scope passes 187 assertions with three opt-in
+  cases skipped. A later native deployment run passes ten deployment cases;
+  its progress browser case hit the 30-second fixture deadline. Restricting
+  Vite dependency discovery to that fixture page removes unrelated HTML
+  entry scans, and the separate browser rerun passes. Four SSH task-view
+  cases, 27 release/build checks, production/fixture types, Electron/renderer
+  builds, workflow YAML parsing and Rust formatting also pass. Broad CI run
+  `42752026672` builds and smokes the Linux package but reports 21 regression
+  failures (routing, capability defaults and remote task lifecycle); these
+  remain under investigation and must not be reported as a green gate.
 - Test Connection now owns its authenticated command until channel closure.
   Its five-second deadline includes opening the exec channel; timeout, transport
   loss, stream errors, failed exit/signal and excessive output fail the test and
@@ -1098,9 +1146,13 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   RPC, and task-view proof over stdio; physical SSH deployment and remote
   baseline ownership still need qualification. Session ownership, capability
   negotiation and actual queued-read replay now have real SSH/browser proof.
-  Production deployment still searches `resources/agents`, while native builds
-  use `resources/native` and packaged `agent` layouts; remote-target binaries,
-  upload and version/hash policy need qualification. Host verification now has
+  Production deployment now uses exact-release CLI/sidecar assets and immutable
+  remote installs, with real native bootstrap proof. Cross-platform CI, Linux
+  ABI/minimum-distro qualification, packaged bootstrap and published-asset checks
+  remain open. Concurrent real native sidecars still need indexer ownership
+  proof: both currently use the account-wide default cache. Manual deployment
+  sets the deploying state before its first await, so a concurrent call is
+  rejected rather than starting a second channel. Host verification now has
   policy, real SSH and native-dialog proof; packaged/cross-OS qualification is
   still open. Test Connection now has bounded remote-command ownership and
   live form failure/retry proof. Do not claim production SSH readiness from the

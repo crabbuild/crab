@@ -65,6 +65,14 @@ function fixture(t, releaseVersion = version) {
     const prefix = version.includes('-') ? version.split('-')[1].split('.')[0] : 'latest';
     writeFileSync(path.join(folder, channel.replace('latest', prefix)), JSON.stringify({ version, files, path: files[0].url, sha512: files[0].sha512, releaseDate: '2026-01-01T00:00:00.000Z' }));
   }
+  const runtimes = path.join(input, 'remote-runtimes'); mkdirSync(runtimes);
+  for (const platform of ['darwin', 'linux']) for (const arch of ['arm64', 'x64']) {
+    const prefix = `Crab-${version}-runtime-${platform}-${arch}`; const hashes = {};
+    for (const name of ['crab', 'crab-desktop-agent']) {
+      const data = Buffer.from(`${prefix}/${name}`); writeFileSync(path.join(runtimes, `${prefix}-${name}`), data); hashes[name] = createHash('sha256').update(data).digest('hex');
+    }
+    writeFileSync(path.join(runtimes, `${prefix}.json`), JSON.stringify({ version, platform, arch, hashes }));
+  }
   const blockmap = `Crab-${version}-mac-arm64.zip.blockmap`;
   writeFileSync(path.join(input, 'mac-arm64', blockmap), 'blockmap');
   const assemble = () => spawnSync(process.execPath, [script, version, input, output], { encoding: 'utf8' });
@@ -122,6 +130,8 @@ test('assembles update channels, installers and verifiable checksums for all pla
 });
 
 for (const [name, mutate, message] of [
+  ['missing remote runtime', ({ input }) => rmSync(path.join(input, 'remote-runtimes', `Crab-${version}-runtime-linux-arm64-crab`)), /ENOENT/],
+  ['corrupted remote runtime', ({ input }) => writeFileSync(path.join(input, 'remote-runtimes', `Crab-${version}-runtime-darwin-x64-crab`), 'corrupted'), /Remote runtime checksum mismatch/],
   ['corrupted installer', ({ input }) => writeFileSync(path.join(input, 'windows-x64', `Crab-${version}-win-x64.exe`), 'corrupt'), /does not match/],
   ['missing installer', ({ input }) => rmSync(path.join(input, 'linux-x64', `Crab-${version}-linux-amd64.deb`)), /ENOENT/],
   ['missing DEB update metadata', ({ input }) => {

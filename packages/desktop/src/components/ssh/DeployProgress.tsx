@@ -1,23 +1,25 @@
+import type { DeployProgress as ProgressValue } from "../../../electron/ssh-deployer";
 import clsx from "clsx";
 import { CheckCircle2, Cpu, HardDrive, Loader2, Play, Upload } from "lucide-react";
 
 export interface DeployProgressProps {
-  stage: "detecting" | "uploading" | "verifying" | "starting";
+  stage: ProgressValue["stage"];
   percent: number;
   speed?: number; // bytes/sec
   eta?: number; // seconds remaining
   visible: boolean;
 }
 
-const STAGES = ["detecting", "uploading", "verifying", "starting"] as const;
+const STAGES = ["detecting", "preparing", "uploading", "verifying", "starting"] as const;
 
 const STAGE_META: Record<
   (typeof STAGES)[number],
   { label: string; icon: typeof Cpu }
 > = {
   detecting: { label: "Detecting architecture", icon: Cpu },
-  uploading: { label: "Uploading agent", icon: Upload },
-  verifying: { label: "Verifying binary", icon: HardDrive },
+  preparing: { label: "Preparing runtime", icon: HardDrive },
+  uploading: { label: "Uploading runtime", icon: Upload },
+  verifying: { label: "Verifying runtime", icon: HardDrive },
   starting: { label: "Starting agent", icon: Play },
 };
 
@@ -45,7 +47,7 @@ export function DeployProgress({
       aria-live="polite"
     >
       {/* Stage indicators */}
-      <div className="flex items-center gap-1 mb-3">
+      <div className="flex flex-wrap items-center gap-1 mb-3">
         {STAGES.map((s, i) => {
           const meta = STAGE_META[s];
           const Icon = meta.icon;

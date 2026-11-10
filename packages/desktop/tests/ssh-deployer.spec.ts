@@ -1,547 +1,216 @@
-/**
- * Unit/integration tests for the AgentDeployer class.
- *
- * Mocks the ssh2 Client and fs modules to test architecture detection,
- * version comparison, hash computation, agent startup, and error handling
- * without real SSH connections.
- */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import * as fs from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { promisify } from "node:util";
+import { SshSessionManager } from "../electron/ssh-manager";
+import { RpcRouter } from "../electron/ssh-router";
+import { CapabilityNegotiator } from "../electron/ssh-capabilities";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { Client, Server, utils, type Connection, type SFTPWrapper, type Stats } from "ssh2";
+import { AgentDeployer } from "../electron/ssh-deployer";
+import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
+import { RemoteRuntimeStore } from "../electron/ssh-runtime";
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { EventEmitter } from "node:events";
-import * as crypto from "node:crypto";
+const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
+const key = utils.parseKey(pem);
+if (key instanceof Error || Array.isArray(key)) throw new Error("Invalid owned SSH key");
+const hostKey = key.getPublicSSH();
+const digest = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
-// ─── Mocks ───────────────────────────────────────────────────────────────────
-
-// Mock fs for binary existence checks and hash computation
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    existsSync: vi.fn(() => true),
-    readFileSync: vi.fn((p: unknown) => {
-      if (typeof p === "string" && p.includes("agents")) {
-        return Buffer.from("mock-binary-content");
-      }
-      if (typeof p === "string" && p.includes("package.json")) {
-        return JSON.stringify({ version: "0.1.0" });
-      }
-      return actual.readFileSync(p as string);
-    }),
-    statSync: vi.fn(() => ({ size: 1024 * 1024 })), // 1MB
-  };
-});
-
-// Mock ssh2 Client
-class MockClientChannel extends EventEmitter {
-  end = vi.fn();
-  write = vi.fn();
-  stderr = new EventEmitter();
-}
-
-class MockSFTPWrapper extends EventEmitter {
-  realpath = vi.fn();
-  mkdir = vi.fn();
-  stat = vi.fn();
-  chmod = vi.fn();
-  createWriteStream = vi.fn();
-  end = vi.fn();
-}
-
-class MockClient extends EventEmitter {
-  connect = vi.fn();
-  end = vi.fn();
-  exec = vi.fn();
-  sftp = vi.fn();
-}
-
-vi.mock("ssh2", () => ({
-  Client: vi.fn(() => new MockClient()),
-}));
-
-import { AgentDeployer, DeployError } from "../electron/ssh-deployer";
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function createMockClient(): MockClient {
-  return new MockClient();
-}
-
-/**
- * Set up the mock client's exec to return specific stdout output.
- */
-function mockExecOutput(client: MockClient, output: string, exitCode = 0): void {
-  client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-    // Handle both (cmd, cb) and (cmd, opts, cb) signatures
-    const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-    const stream = new MockClientChannel();
-    cb(null, stream);
-    setImmediate(() => {
-      stream.emit("data", Buffer.from(output));
-      stream.emit("close", exitCode);
-    });
-  });
-}
-
-/**
- * Set up the mock client's exec to return an error.
- */
-function mockExecError(client: MockClient, error: Error): void {
-  client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-    const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-    cb(error);
-  });
-}
-
-/**
- * Set up the mock client's exec to return different outputs for different commands.
- */
-function mockExecMultiple(client: MockClient, responses: Record<string, { output: string; exitCode?: number }>): void {
-  client.exec.mockImplementation((cmd: string, ...args: unknown[]) => {
-    const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-    const stream = new MockClientChannel();
-    cb(null, stream);
-
-    // Find matching response
-    let matched = false;
-    for (const [pattern, response] of Object.entries(responses)) {
-      if (cmd.includes(pattern)) {
-        setImmediate(() => {
-          stream.emit("data", Buffer.from(response.output));
-          stream.emit("close", response.exitCode ?? 0);
-        });
-        matched = true;
-        break;
-      }
-    }
-
-    if (!matched) {
-      setImmediate(() => {
-        stream.emit("data", Buffer.from(""));
-        stream.emit("close", 0);
+describe.skipIf(process.platform === "win32")("real SFTP runtime installation", () => {
+  let directory: string; let remote: string; let local: string; let server: Server; let client: Client; let owner: AbortController;
+  const connections = new Set<Connection>(); const children = new Set<ChildProcess>(); const descriptors = new Set<number>();
+  let commands: string[]; let uploads: number; let acknowledged: number; let corrupt: boolean;
+  let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>;
+  beforeEach(async () => {
+    directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
+    local = path.join(directory, "app", "resources", "native", "mac-arm64"); await mkdir(remote); await mkdir(local, { recursive: true });
+    const cli = Buffer.from("#!/bin/sh\nprintf 'owned-cli\\n'\n");
+    const agent = Buffer.from('#!/bin/sh\n"$CRAB_BIN" --version\ngit-remote-crab --version\ncat\n');
+    await writeFile(path.join(local, "crab"), cli); await writeFile(path.join(local, "crab-desktop-agent"), agent);
+    await writeFile(path.join(local, "runtime.json"), JSON.stringify({ version: "2.0.0-alpha.1", platform: "darwin", arch: "arm64", hashes: { crab: digest(cli), "crab-desktop-agent": digest(agent) } }));
+    commands = []; native = false; stalledOperation = undefined; written = undefined; exits = []; abortOnWrite = false; uploads = 0; acknowledged = 0; corrupt = false; uname = "Darwin\narm64\n"; owner = new AbortController();
+    server = new Server({ hostKeys: [pem] }, connection => {
+      connections.add(connection); connection.on("error", () => {}); connection.once("close", () => connections.delete(connection));
+      connection.on("authentication", context => {
+        if (context.method !== "publickey" || !context.key.data.equals(hostKey)) { context.reject(); return; }
+        if (context.signature && (!context.blob || !key.verify(context.blob, context.signature, context.hashAlgo))) { context.reject(); return; }
+        context.accept();
       });
-    }
-  });
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
-describe("AgentDeployer", () => {
-  let deployer: AgentDeployer;
-
-  beforeEach(() => {
-    deployer = new AgentDeployer();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  // ── detectRemoteArch ─────────────────────────────────────────────
-
-  describe("detectRemoteArch", () => {
-    it("maps Linux x86_64 to the correct binary name", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Linux\nx86_64\n");
-
-      const result = await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-      expect(result).toBe("crab-desktop-agent-x86_64-linux");
-    });
-
-    it("maps Linux aarch64 to the correct binary name", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Linux\naarch64\n");
-
-      const result = await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-      expect(result).toBe("crab-desktop-agent-aarch64-linux");
-    });
-
-    it("maps Linux arm64 to the aarch64 binary name", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Linux\narm64\n");
-
-      const result = await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-      expect(result).toBe("crab-desktop-agent-aarch64-linux");
-    });
-
-    it("maps Darwin arm64 to the correct binary name", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Darwin\narm64\n");
-
-      const result = await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-      expect(result).toBe("crab-desktop-agent-aarch64-darwin");
-    });
-
-    it("maps Darwin aarch64 to the correct binary name", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Darwin\naarch64\n");
-
-      const result = await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-      expect(result).toBe("crab-desktop-agent-aarch64-darwin");
-    });
-
-    it("throws DeployError with WRONG_ARCH for unsupported OS", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "FreeBSD\nx86_64\n");
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toThrow(DeployError);
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "WRONG_ARCH" });
-    });
-
-    it("throws DeployError with WRONG_ARCH for unsupported architecture", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Linux\nmips64\n");
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toThrow(DeployError);
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "WRONG_ARCH" });
-    });
-
-    it("throws DeployError with ARCH_DETECT_FAILED for malformed uname output", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "incomplete\n");
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "ARCH_DETECT_FAILED" });
-    });
-  });
-
-  // ── checkRemoteAgent ─────────────────────────────────────────────
-
-  describe("checkRemoteAgent", () => {
-    it("returns version string when agent is installed", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "crab-desktop-agent 0.1.0\n");
-
-      const result = await deployer.checkRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(result).toBe("0.1.0");
-    });
-
-    it("returns version from bare version output", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "0.2.3\n");
-
-      const result = await deployer.checkRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(result).toBe("0.2.3");
-    });
-
-    it("returns null when agent is not found", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "bash: ~/.crab/bin/crab-desktop-agent: No such file or directory\n", 127);
-
-      const result = await deployer.checkRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(result).toBeNull();
-    });
-
-    it("returns null when command not found", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "command not found\n", 127);
-
-      const result = await deployer.checkRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(result).toBeNull();
-    });
-
-    it("returns null when exec throws an error", async () => {
-      const client = createMockClient();
-      mockExecError(client, new Error("channel open failed"));
-
-      const result = await deployer.checkRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(result).toBeNull();
-    });
-  });
-
-  // ── compareVersions ──────────────────────────────────────────────
-
-  describe("compareVersions", () => {
-    it("returns 'current' when versions are identical", () => {
-      expect(deployer.compareVersions("0.1.0", "0.1.0")).toBe("current");
-      expect(deployer.compareVersions("1.2.3", "1.2.3")).toBe("current");
-    });
-
-    it("returns 'upgrade' when local is newer (major)", () => {
-      expect(deployer.compareVersions("2.0.0", "1.0.0")).toBe("upgrade");
-    });
-
-    it("returns 'upgrade' when local is newer (minor)", () => {
-      expect(deployer.compareVersions("0.2.0", "0.1.0")).toBe("upgrade");
-    });
-
-    it("returns 'upgrade' when local is newer (patch)", () => {
-      expect(deployer.compareVersions("0.1.1", "0.1.0")).toBe("upgrade");
-    });
-
-    it("returns 'downgrade' when remote is newer (major)", () => {
-      expect(deployer.compareVersions("1.0.0", "2.0.0")).toBe("downgrade");
-    });
-
-    it("returns 'downgrade' when remote is newer (minor)", () => {
-      expect(deployer.compareVersions("0.1.0", "0.2.0")).toBe("downgrade");
-    });
-
-    it("returns 'downgrade' when remote is newer (patch)", () => {
-      expect(deployer.compareVersions("0.1.0", "0.1.1")).toBe("downgrade");
-    });
-
-    it("handles multi-digit version components", () => {
-      expect(deployer.compareVersions("1.10.0", "1.9.0")).toBe("upgrade");
-      expect(deployer.compareVersions("1.9.0", "1.10.0")).toBe("downgrade");
-    });
-  });
-
-  // ── computeLocalHash ─────────────────────────────────────────────
-
-  describe("computeLocalHash", () => {
-    it("produces a consistent SHA-256 hash", () => {
-      const hash1 = deployer.computeLocalHash("/path/to/agents/binary");
-      const hash2 = deployer.computeLocalHash("/path/to/agents/binary");
-      expect(hash1).toBe(hash2);
-    });
-
-    it("returns a valid 64-character hex string", () => {
-      const hash = deployer.computeLocalHash("/path/to/agents/binary");
-      expect(hash).toMatch(/^[a-f0-9]{64}$/);
-    });
-
-    it("matches expected SHA-256 of mock content", () => {
-      // The mock fs.readFileSync returns Buffer.from("mock-binary-content")
-      const expected = crypto
-        .createHash("sha256")
-        .update(Buffer.from("mock-binary-content"))
-        .digest("hex");
-      const hash = deployer.computeLocalHash("/path/to/agents/binary");
-      expect(hash).toBe(expected);
-    });
-  });
-
-  // ── startRemoteAgent ─────────────────────────────────────────────
-
-  describe("startRemoteAgent", () => {
-    it("sends ping RPC and resolves on valid response", async () => {
-      const client = createMockClient();
-
-      client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-        const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-        const channel = new MockClientChannel();
-        cb(null, channel);
-
-        // Simulate the agent responding to the ping after a short delay
-        setImmediate(() => {
-          const response = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            result: { pong: "0.1.0" },
+      connection.on("ready", () => connection.on("session", accept => {
+        const session = accept();
+        session.on("sftp", acceptSftp => bindSftp(acceptSftp()));
+        session.on("exec", (acceptCommand, _reject, info) => {
+          const channel = acceptCommand(); channel.on("error", () => {}); commands.push(info.command);
+          if (info.command === "uname -s && uname -m") { channel.write(uname); channel.exit(0); channel.end(); return; }
+          if (info.command.includes("shasum") && acknowledged !== uploads) throw new Error("Hash attempted before SFTP CLOSE acknowledgement");
+          const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8" } });
+          children.add(child); channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
+          channel.once("close", () => {
+            if (!children.has(child)) return;
+            child.stdin.end(); child.stdout.resume(); child.stderr.resume();
+            const deadline = setTimeout(() => { try { process.kill(-child.pid!, "SIGTERM"); } catch { /* The owned group already exited. */ } }, 3000);
+            child.once("close", () => clearTimeout(deadline));
           });
-          channel.emit("data", Buffer.from(response + "\n"));
+          child.once("error", () => { channel.exit(1); channel.end(); });
+          child.once("close", code => { if (native) exits.push(code); children.delete(child); channel.exit(code ?? 1); channel.end(); });
         });
-      });
-
-      const channel = await deployer.startRemoteAgent(client as unknown as import("ssh2").Client);
-      expect(channel).toBeDefined();
-      expect(channel.write).toHaveBeenCalledWith(
-        expect.stringContaining('"method":"ping"'),
-      );
+      }));
     });
-
-    it("rejects when agent does not respond (channel closes)", async () => {
-      const client = createMockClient();
-
-      client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-        const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-        const channel = new MockClientChannel();
-        cb(null, channel);
-
-        // Simulate the channel closing without a response
-        setImmediate(() => {
-          channel.emit("close");
-        });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Owned fixture did not bind");
+    const hosts = new KnownHostsManager(path.join(directory, "pins.json"), path.join(directory, "user"), path.join(directory, "global"));
+    hosts.accept("127.0.0.1", address.port, hostKey); const verify = createHostKeyVerifier(hosts, async () => false);
+    client = new Client(); client.on("error", () => {});
+    await new Promise<void>((resolve, reject) => {
+      client.once("ready", resolve); client.once("error", reject);
+      client.connect({ host: "127.0.0.1", port: address.port, username: "fixture", privateKey: pem,
+        hostVerifier: (candidate: Buffer, done: (accepted: boolean) => void) => { void verify("127.0.0.1", address.port, candidate, owner.signal).then(() => done(true), () => done(false)); },
       });
-
-      await expect(
-        deployer.startRemoteAgent(client as unknown as import("ssh2").Client),
-      ).rejects.toThrow(DeployError);
-
-      await expect(
-        deployer.startRemoteAgent(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "START_FAILED" });
-    });
-
-    it("rejects when exec fails", async () => {
-      const client = createMockClient();
-      mockExecError(client, new Error("channel open failed"));
-
-      await expect(
-        deployer.startRemoteAgent(client as unknown as import("ssh2").Client),
-      ).rejects.toThrow(DeployError);
-    });
-
-    it("rejects when agent returns an error response to ping", async () => {
-      const client = createMockClient();
-
-      client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-        const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-        const channel = new MockClientChannel();
-        cb(null, channel);
-
-        setImmediate(() => {
-          const response = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            error: { code: -32601, message: "Method not found" },
-          });
-          channel.emit("data", Buffer.from(response + "\n"));
-        });
-      });
-
-      await expect(
-        deployer.startRemoteAgent(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "START_FAILED" });
     });
   });
-
-  // ── Error handling ───────────────────────────────────────────────
-
-  describe("error handling", () => {
-    it("DISK_FULL: checkDiskSpace throws when remote disk is full", async () => {
-      const client = createMockClient();
-
-      // deploy() calls execCommand twice sequentially:
-      // 1. checkBinaryNotRunning: "pgrep -f crab-desktop-agent 2>/dev/null || true"
-      // 2. checkDiskSpace: "df -k ~ 2>/dev/null | tail -1"
-      let callCount = 0;
-      client.exec.mockImplementation((cmd: string, ...args: unknown[]) => {
-        const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-        const stream = new MockClientChannel();
-        cb(null, stream);
-        callCount++;
-
-        setImmediate(() => {
-          if (cmd.includes("pgrep")) {
-            // No running agent
-            stream.emit("data", Buffer.from(""));
-            stream.emit("close", 1);
-          } else if (cmd.includes("df")) {
-            // Very low disk space (1KB available)
-            stream.emit("data", Buffer.from("/dev/sda1 100000 99999 1 100% /home\n"));
-            stream.emit("close", 0);
-          } else {
-            stream.emit("data", Buffer.from(""));
-            stream.emit("close", 0);
-          }
-        });
+  afterEach(async () => {
+    owner.abort(); client?.destroy(); for (const connection of connections) connection.end(); connections.clear();
+    const closed = [...children].map(child => new Promise<void>(resolve => { child.once("close", () => resolve()); try { process.kill(-child.pid!, "SIGTERM"); } catch { /* The owned group already exited. */ } })); await Promise.all(closed); children.clear();
+    for (const descriptor of descriptors) { try { fs.closeSync(descriptor); } catch { /* Closed by the SFTP peer. */ } } descriptors.clear();
+    if (server?.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  });
+  function bindSftp(sftp: SFTPWrapper) {
+    const handles = new Map<string, number>();
+    const safe = (file: string) => { const resolved = path.resolve(file); if (resolved !== remote && !resolved.startsWith(`${remote}${path.sep}`)) throw new Error("Fixture SFTP escaped its owned root"); return resolved; };
+    const status = (id: number, error?: NodeJS.ErrnoException | null) => sftp.status(id, !error ? 0 : error.code === "ENOENT" ? 2 : error.code === "EACCES" ? 3 : 4);
+    const attrs = (id: number, error: NodeJS.ErrnoException | null, stat: fs.Stats) => error ? status(id, error) : sftp.attrs(id, { mode: stat.mode, size: stat.size, uid: stat.uid, gid: stat.gid, atime: Math.floor(stat.atimeMs / 1000), mtime: Math.floor(stat.mtimeMs / 1000) });
+    sftp.on("REALPATH", (id: number, _file: string) => sftp.name(id, [{ filename: remote, longname: remote, attrs: {} as Stats }]));
+    sftp.on("LSTAT", (id: number, file: string) => fs.lstat(safe(file), (error, value) => attrs(id, error, value)));
+    sftp.on("STAT", (id: number, file: string) => fs.stat(safe(file), (error, value) => attrs(id, error, value)));
+    sftp.on("MKDIR", (id: number, file: string, value: { mode?: number }) => fs.mkdir(safe(file), { mode: value.mode }, error => status(id, error)));
+    sftp.on("OPEN", (id: number, file: string, flags: number, value: { mode?: number }) => {
+      const mode = utils.sftp.flagsToString(flags); if (!mode) { sftp.status(id, 4); return; }
+      fs.open(safe(file), mode, value.mode, (error, descriptor) => {
+        if (error) { status(id, error); return; }
+        uploads += 1; const handle = Buffer.from(String(descriptor)); handles.set(handle.toString(), descriptor); descriptors.add(descriptor); if (stalledOperation === "OPEN") { written?.(); return; } sftp.handle(id, handle);
       });
-
-      await expect(
-        deployer.deploy(client as unknown as import("ssh2").Client, "crab-desktop-agent-x86_64-linux"),
-      ).rejects.toMatchObject({ code: "DISK_FULL" });
     });
-
-    it("PERMISSION_DENIED: deploy throws when SFTP channel fails", async () => {
-      const client = createMockClient();
-
-      // Mock pgrep (no running agent) and df (enough space)
-      mockExecMultiple(client, {
-        pgrep: { output: "", exitCode: 0 },
-        "df -k": { output: "Filesystem 1K-blocks Used Available Use% Mounted\n/dev/sda1 100000000 50000000 50000000 50% /home\n", exitCode: 0 },
+    sftp.on("WRITE", (id: number, handle: Buffer, offset: number, data: Buffer) => {
+      const bytes = corrupt ? Buffer.alloc(data.length, 0) : data;
+      const write = (position: number) => fs.write(handles.get(handle.toString())!, bytes, position, bytes.length - position, offset + position, (error, count) => {
+        if (!error && count > 0 && position + count < bytes.length) { write(position + count); return; }
+        if (stalledOperation === "WRITE") { written?.(); return; }
+        status(id, error || (count === 0 ? Object.assign(new Error("Fixture short write"), { code: "EIO" }) : undefined));
+        if (abortOnWrite) owner.abort(new Error("Connection retired during upload"));
       });
-
-      // Mock sftp to fail with permission error
-      client.sftp.mockImplementation((cb: Function) => {
-        cb(new Error("Permission denied"));
-      });
-
-      await expect(
-        deployer.deploy(client as unknown as import("ssh2").Client, "crab-desktop-agent-x86_64-linux"),
-      ).rejects.toMatchObject({ code: "UPLOAD_FAILED" });
+      write(0);
     });
-
-    it("BINARY_RUNNING: deploy throws when agent is already running", async () => {
-      const client = createMockClient();
-
-      // Mock pgrep to return a PID (agent is running)
-      mockExecMultiple(client, {
-        pgrep: { output: "12345\n", exitCode: 0 },
-      });
-
-      await expect(
-        deployer.deploy(client as unknown as import("ssh2").Client, "crab-desktop-agent-x86_64-linux"),
-      ).rejects.toMatchObject({ code: "BINARY_RUNNING" });
+    sftp.on("FSETSTAT", (id: number, handle: Buffer, value: { mode?: number }) => fs.fchmod(handles.get(handle.toString())!, value.mode ?? 0o700, error => status(id, error)));
+    sftp.on("FSTAT", (id: number, handle: Buffer) => fs.fstat(handles.get(handle.toString())!, (error, value) => attrs(id, error, value)));
+    sftp.on("CLOSE", (id: number, handle: Buffer) => {
+      const descriptor = handles.get(handle.toString())!; handles.delete(handle.toString()); descriptors.delete(descriptor);
+      fs.close(descriptor, error => { if (stalledOperation === "CLOSE") { written?.(); return; } acknowledged += 1; status(id, error); });
     });
-
-    it("WRONG_ARCH: detectRemoteArch throws for unsupported platform", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Windows_NT\nx86_64\n");
-
-      await expect(
-        deployer.detectRemoteArch(client as unknown as import("ssh2").Client),
-      ).rejects.toMatchObject({ code: "WRONG_ARCH" });
+    sftp.once("close", () => {
+      // SSH2 exposes the SFTP subsystem directly; its server owner must return
+      // CHANNEL_CLOSE after receiving it, as an SSH daemon would.
+      sftp.end();
+      for (const descriptor of handles.values()) { try { fs.closeSync(descriptor); } catch { /* A CLOSE request may already have retired it. */ } descriptors.delete(descriptor); }
+      handles.clear();
     });
-
-    it("DeployError includes suggestion field", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "FreeBSD\namd64\n");
-
-      try {
-        await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-        expect.fail("Should have thrown");
-      } catch (err) {
-        expect(err).toBeInstanceOf(DeployError);
-        expect((err as DeployError).suggestion).toBeDefined();
-        expect((err as DeployError).suggestion!.length).toBeGreaterThan(0);
-      }
-    });
+    sftp.on("RENAME", (id: number, from: string, to: string) => fs.rename(safe(from), safe(to), error => status(id, error)));
+    sftp.on("REMOVE", (id: number, file: string) => fs.unlink(safe(file), error => status(id, error)));
+    sftp.on("RMDIR", (id: number, file: string) => fs.rmdir(safe(file), error => status(id, error)));
+  }
+  function deployer() {
+    const store = new RemoteRuntimeStore({ packaged: false, appPath: path.join(directory, "app"), version: "2.0.0-alpha.1", cacheDirectory: path.join(directory, "cache") });
+    return new AgentDeployer(store.resolve.bind(store));
+  }
+  async function start() {
+    const channel = await deployer().ensureAgent(client, owner.signal);
+    const output = await new Promise<string>((resolve, reject) => { let data = ""; channel.on("data", (chunk: Buffer) => { data += chunk.toString(); if (data.split("owned-cli").length === 3) resolve(data); }); channel.once("error", reject); });
+    return { channel, output };
+  }
+  it("uploads and starts the matching CLI/sidecar and Git helper in an immutable directory", async () => {
+    const { channel, output } = await start(); channel.end();
+    const parent = path.join(remote, ".crab/desktop/runtimes/2.0.0-alpha.1/darwin-arm64");
+    const versions = await readdir(parent);
+    expect({ output, uploads, acknowledged, versions, cli: await readFile(path.join(parent, versions[0], "crab")), helper: await readFile(path.join(parent, versions[0], "git-remote-crab")), commands: commands.some(command => /pgrep|\.crab\/bin/.test(command)) }).toEqual({ output: "owned-cli\nowned-cli\n", uploads: 2, acknowledged: 2, versions: [expect.stringMatching(/^[a-f0-9]{64}$/)], cli: await readFile(path.join(local, "crab")), helper: await readFile(path.join(local, "crab")), commands: false });
+  });
+  it("reuses a verified runtime while another session is running", async () => {
+    const first = await start(); const second = await start();
+    expect({ uploads, outputs: [first.output, second.output] }).toEqual({ uploads: 2, outputs: ["owned-cli\nowned-cli\n", "owned-cli\nowned-cli\n"] }); first.channel.end(); second.channel.end();
+  });
+  it("does not start a corrupted upload and removes its own staging files", async () => {
+    corrupt = true; await expect(deployer().ensureAgent(client, owner.signal)).rejects.toThrow("checksum mismatch");
+    expect({ starts: commands.filter(command => command.startsWith("exec env")).length, files: await readdir(path.join(remote, ".crab/desktop/runtimes/2.0.0-alpha.1/darwin-arm64")) }).toEqual({ starts: 0, files: [] });
+  });
+  it("owns a fatal SFTP subsystem error until physical closure", async () => {
+    const open = client.sftp.bind(client);
+    vi.spyOn(client, "sftp").mockImplementation(callback => open((error, sftp) => {
+      callback(error, sftp);
+      if (!error) setImmediate(() => sftp.emit("error", new Error("Owned SFTP protocol failure")));
+    }));
+    await expect(deployer().ensureAgent(client, owner.signal)).rejects.toMatchObject({ code: "UPLOAD_FAILED", cause: { message: "Owned SFTP protocol failure" } });
+  });
+  it("rejects unsupported architectures before resolving or uploading a runtime", async () => {
+    uname = "Linux\ns390x\n"; await expect(deployer().ensureAgent(client, owner.signal)).rejects.toMatchObject({ code: "WRONG_ARCH" }); expect(uploads).toBe(0);
+  });
+  it("retires an interrupted upload through its remote staging guard", async () => {
+    abortOnWrite = true; await expect(deployer().ensureAgent(client, owner.signal)).rejects.toThrow("Connection retired during upload");
+    const parent = path.join(remote, ".crab/desktop/runtimes/2.0.0-alpha.1/darwin-arm64");
+    await vi.waitFor(async () => expect(await readdir(parent)).toEqual([]));
   });
 
-  // ── Progress events ──────────────────────────────────────────────
-
-  describe("progress events", () => {
-    it("emits ssh:deploy-progress during detectRemoteArch", async () => {
-      const client = createMockClient();
-      mockExecOutput(client, "Linux\nx86_64\n");
-
-      const events: unknown[] = [];
-      deployer.on("ssh:deploy-progress", (p) => events.push(p));
-
-      await deployer.detectRemoteArch(client as unknown as import("ssh2").Client);
-
-      expect(events.length).toBeGreaterThanOrEqual(2);
-      expect(events[0]).toMatchObject({ stage: "detecting", percent: 0 });
-      expect(events[events.length - 1]).toMatchObject({ stage: "detecting", percent: 100 });
-    });
-
-    it("emits ssh:deploy-progress during startRemoteAgent", async () => {
-      const client = createMockClient();
-
-      client.exec.mockImplementation((_cmd: string, ...args: unknown[]) => {
-        const cb = typeof args[0] === "function" ? args[0] as Function : args[1] as Function;
-        const channel = new MockClientChannel();
-        cb(null, channel);
-
-        setImmediate(() => {
-          const response = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            result: { pong: "0.1.0" },
-          });
-          channel.emit("data", Buffer.from(response + "\n"));
-        });
-      });
-
-      const events: unknown[] = [];
-      deployer.on("ssh:deploy-progress", (p) => events.push(p));
-
-      await deployer.startRemoteAgent(client as unknown as import("ssh2").Client);
-
-      expect(events).toContainEqual(expect.objectContaining({ stage: "starting", percent: 0 }));
-      expect(events).toContainEqual(expect.objectContaining({ stage: "starting", percent: 100 }));
-    });
+  it.each(["OPEN", "WRITE", "CLOSE"] as const)("bounds an upload whose SSH connection stays alive but SFTP stops acknowledging %s", async operation => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let result: unknown; const stalled = new Promise<void>(resolve => { written = resolve; }); stalledOperation = operation;
+    const installing = deployer().ensureAgent(client, owner.signal).then(value => { result = value; }, error => { result = error; });
+    try {
+      await stalled; await vi.advanceTimersByTimeAsync(30_001);
+      await vi.waitFor(() => expect(result).toMatchObject({ code: "DEPLOY_TIMED_OUT" }));
+      expect(await readdir(path.join(remote, ".crab/desktop/runtimes/2.0.0-alpha.1/darwin-arm64"))).toEqual([]);
+    } finally { owner.abort(new Error("Owned stall fixture retired")); vi.useRealTimers(); await installing; }
   });
+
+  it.skipIf(!process.env.CRAB_AGENT_LIVE_ROOT)("downloads, uploads and starts the built runtime through the real session owner", async () => {
+    native = true; const run = promisify(execFile);
+    const { version } = JSON.parse(await readFile(path.resolve("package.json"), "utf8")) as { version: string };
+    uname = `${(await run("uname", ["-s"])).stdout.trim()}\n${(await run("uname", ["-m"])).stdout.trim()}\n`;
+    const assets = path.resolve("release/remote-runtime"); const requests: string[] = [];
+    const store = new RemoteRuntimeStore({ packaged: true, appPath: directory, version, cacheDirectory: path.join(directory, "download-cache") }, async input => {
+      const name = new URL(String(input)).pathname.split("/").at(-1)!; requests.push(name);
+      const body = Readable.toWeb(fs.createReadStream(path.join(assets, name)));
+      return new Response(body as unknown as ReadableStream<Uint8Array>);
+    });
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("Owned fixture unavailable");
+    const identity = path.join(directory, "identity.pem"); await writeFile(identity, pem, { mode: 0o600 });
+    const hosts = new KnownHostsManager(path.join(directory, "manager-pins"), path.join(directory, "manager-user"), path.join(directory, "manager-global"));
+    hosts.accept("127.0.0.1", address.port, hostKey);
+    const manager = new SshSessionManager(createHostKeyVerifier(hosts, async () => false));
+    const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
+    const negotiator = new CapabilityNegotiator(router);
+    manager.setAgentDependencies({ createDeployer: () => new AgentDeployer(store.resolve.bind(store)), rpcRouter: router, capabilityNegotiator: negotiator });
+    let completedWithCapabilities = false;
+    manager.on("ssh:deploy-progress", value => { if (value.stage === "starting" && value.percent === 100) completedWithCapabilities = Boolean(negotiator.getCached("runtime")); });
+    try {
+      await manager.connect({ id: "runtime", label: "Owned native runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
+      expect({ status: manager.getStatus("runtime"), version: negotiator.getCached("runtime")?.version, downloads: requests.length, uploads, completedWithCapabilities }).toEqual({ status: "connected", version, downloads: 3, uploads: 2, completedWithCapabilities: true });
+      const repo = path.join(remote, "repo"); const worktree = path.join(remote, "task-worktree"); await mkdir(repo);
+      const env = { HOME: remote, PATH: process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+      await run("git", ["init", "--template="], { cwd: repo, env }); await writeFile(path.join(repo, "tracked.txt"), "before\n");
+      await run("git", ["add", "tracked.txt"], { cwd: repo, env });
+      await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo, env });
+      await router.sendToRemoteAgent("runtime", "open_local", { repo_id: "owned", path: repo });
+      const created = await router.sendToRemoteAgent("runtime", "git_worktree_add", { repo_id: "owned", path: worktree, branch: "owned-task", create_branch: true }) as { created: boolean; path: string };
+      await writeFile(path.join(worktree, "tracked.txt"), "after-native-deployment\n");
+      const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
+      expect({ created: created.created, path: created.path, content: await readFile(path.join(worktree, "tracked.txt"), "utf8"), diff: comparison.diff }).toEqual({ created: true, path: await realpath(worktree), content: "after-native-deployment\n", diff: expect.stringContaining("+after-native-deployment") });
+      await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, status: manager.getStatus("runtime") }));
+    } finally { await manager.disconnect("runtime"); }
+    await vi.waitFor(() => expect(children.size).toBe(0), { timeout: 10_000 });
+    expect(exits.every(code => code === 0)).toBe(true);
+  }, 120_000);
+
 });

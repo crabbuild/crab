@@ -69,7 +69,7 @@ async function sidecarChannel(startChild: () => ChildProcess, autoReconnect: boo
   const manager = new SshSessionManager(createHostKeyVerifier(hosts, async () => true));
   const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
   const negotiator = new CapabilityNegotiator(router);
-  manager.setAgentDependencies({ createDeployer: () => new FixtureDeployer(), capabilityNegotiator: negotiator, rpcRouter: router });
+  manager.setAgentDependencies({ createDeployer: () => new FixtureDeployer(async () => { throw new Error("Fixture uses its already-built sidecar"); }), capabilityNegotiator: negotiator, rpcRouter: router });
   const close = async () => {
     await manager.disconnect("fixture");
     if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));

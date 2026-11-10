@@ -1,3 +1,4 @@
+import type { DeployProgress } from "../electron/ssh-deployer";
 import type { KnownHost } from "../electron/ssh-known-hosts";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
 // Typed wrapper around the `window.crab` bridge exposed by
@@ -1292,11 +1293,11 @@ declare global {
         offSyncProgress: (listener: (payload: unknown) => void) => void;
         onSyncError: (listener: (payload: unknown) => void) => () => void;
         offSyncError: (listener: (payload: unknown) => void) => void;
-        onDeployProgress: (listener: (payload: unknown) => void) => () => void;
+        onDeployProgress: (listener: (payload: DeployProgress & { profileId: string }) => void) => () => void;
         offDeployProgress: (listener: (payload: unknown) => void) => void;
         onAgentCapabilities: (listener: (payload: unknown) => void) => () => void;
         offAgentCapabilities: (listener: (payload: unknown) => void) => void;
-        onAgentUnavailable: (listener: (payload: unknown) => void) => () => void;
+        onAgentUnavailable: (listener: (payload: { profileId: string; reason: string; message: string }) => void) => () => void;
         offAgentUnavailable: (listener: (payload: unknown) => void) => void;
         onTransferProgress: (listener: (payload: unknown) => void) => () => void;
         onTransferStatusChanged: (listener: (payload: unknown) => void) => () => void;

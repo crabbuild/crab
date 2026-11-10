@@ -7,7 +7,9 @@ with at least one remote repository containing uncommitted changes.
 ## Prerequisites
 
 - [ ] SSH profile configured and connected in Crab Desktop
-- [ ] Remote host has `crab-desktop-agent` deployed and running
+- [ ] Exact-release Crab CLI/sidecar pair deployed; capability handshake completes before connected readiness
+- [ ] Fresh deployment and verified reuse both succeed; cancelling an upload removes its own temporary directory
+- [ ] Release assets exist for the remote target; Linux ABI/minimum-distro compatibility is qualified
 - [ ] Remote directory contains at least 2 git repositories
 - [ ] At least one remote repo has uncommitted changes (dirty state)
 - [ ] At least one remote repo has a merge conflict prepared

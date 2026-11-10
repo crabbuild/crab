@@ -70,6 +70,28 @@ for (const platform of platforms) {
   channels.push(metadata);
 }
 
+// SSH uses release-specific CLI/sidecar pairs, independent of the signed
+// Electron bundle. Every advertised remote target must be complete before publish.
+for (const platform of ['darwin', 'linux']) {
+  for (const arch of ['arm64', 'x64']) {
+    const prefix = `Crab-${version}-runtime-${platform}-${arch}`;
+    const directory = path.join(input, 'remote-runtimes');
+    const metadataName = `${prefix}.json`;
+    const metadataFile = path.join(directory, metadataName);
+    const metadataHashes = await digest(metadataFile);
+    if (metadataHashes.size > 64 * 1024) throw new Error(`Remote runtime manifest exceeds its size limit: ${prefix}`);
+    const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
+    if (metadata.version !== version || metadata.platform !== platform || metadata.arch !== arch) throw new Error(`Remote runtime identity mismatch: ${prefix}`);
+    for (const name of ['crab', 'crab-desktop-agent']) {
+      const filename = `${prefix}-${name}`;
+      const file = path.join(directory, filename); const hashes = await digest(file);
+      if (metadata.hashes?.[name] !== hashes.sha256 || hashes.size > 512 * 1024 * 1024) throw new Error(`Remote runtime checksum mismatch: ${filename}`);
+      assets.set(filename, { file, ...hashes });
+    }
+    assets.set(metadataName, { file: metadataFile, ...metadataHashes });
+  }
+}
+
 // Both Mac architectures use the same update channel, so retain their common
 // release policy while combining the architecture-specific installer records.
 const [arm, x64, windows, linux] = channels;

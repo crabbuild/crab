@@ -569,7 +569,7 @@ describe("SSH connection ownership", () => {
     let manager: SshSessionManager;
     const proxy = { getStatus: (id: string) => manager.getStatus(id), getConnection: (id: string) => manager.getConnection(id) } as SshSessionManager;
     const router = new RpcRouter(proxy, { request: async () => { throw new Error("Local fallback must not run"); } });
-    const deployer = new AgentDeployer(); const negotiator = new CapabilityNegotiator(router);
+    const deployer = new AgentDeployer(async () => { throw new Error("Fixture must supply its startup channel"); }); const negotiator = new CapabilityNegotiator(router);
     const channels: AgentChannel[] = [];
     const deploy = vi.spyOn(deployer, "ensureAgent").mockImplementation(async () => { const channel = new AgentChannel(); channels.push(channel); return channel.asChannel(); });
     manager = new SshSessionManager(async () => {});
@@ -589,6 +589,18 @@ describe("SSH connection ownership", () => {
     const before = { status: manager.getStatus("test-profile-1"), settled };
     starting.resolve(channel.asChannel()); await connected; await vi.advanceTimersByTimeAsync(0);
     expect({ before, after: manager.getStatus("test-profile-1"), capabilities: negotiator.getCached("test-profile-1") }).toEqual({ before: { status: "deploying", settled: false }, after: "connected", capabilities });
+  });
+
+  it("publishes deployment completion only after the capability handshake", async () => {
+    const { manager, negotiator } = fixture(); const handshake = pending<AgentCapabilities>();
+    vi.spyOn(negotiator, "negotiate").mockReturnValueOnce(handshake.promise);
+    const completed: unknown[] = [];
+    manager.on("ssh:deploy-progress", value => { if (value.stage === "starting" && value.percent === 100) completed.push(value); });
+    const connecting = manager.connect(makeProfile({ autoDeployAgent: true }));
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    expect({ completed: completed.length, status: manager.getStatus("test-profile-1") }).toEqual({ completed: 0, status: "deploying" });
+    handshake.resolve(capabilities); await connecting;
+    expect(completed).toEqual([{ profileId: "test-profile-1", stage: "starting", percent: 100 }]);
   });
 
   it("redeploys and actually executes the router's queued read after reconnect", async () => {
