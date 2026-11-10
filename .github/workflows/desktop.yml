@@ -215,6 +215,9 @@ jobs:
     timeout-minutes: 180
     env:
       CARGO_INCREMENTAL: 0
+      # The repository config names a cross linker; this runner builds natively.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: cc
+      CC_aarch64_unknown_linux_gnu: cc
     defaults:
       run:
         shell: bash

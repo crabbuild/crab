@@ -164,8 +164,7 @@ async fn main() -> std::io::Result<()> {
     // Spawn the background indexer. It opens its SlateDB instance and
     // waits for commands. The sender is stored in State so handlers
     // (indexer_status, open_local) can communicate with it.
-    let indexer_config = indexer::IndexerConfig::default();
-    let indexer_handle = indexer::Indexer::spawn(state.clone(), indexer_config);
+    let indexer_handle = indexer::Indexer::spawn().map_err(std::io::Error::other)?;
     state.set_indexer_tx(indexer_handle.tx_clone()).await;
 
     let mut requests = tokio::task::JoinSet::new();

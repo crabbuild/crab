@@ -26,7 +26,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   let directory: string; let remote: string; let local: string; let server: Server; let client: Client; let owner: AbortController;
   const connections = new Set<Connection>(); const children = new Set<ChildProcess>(); const descriptors = new Set<number>();
   let commands: string[]; let uploads: number; let acknowledged: number; let corrupt: boolean;
-  let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>;
+  let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>; let diagnostics: string[];
   beforeEach(async () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
     local = path.join(directory, "app", "resources", "native", "mac-arm64"); await mkdir(remote); await mkdir(local, { recursive: true });
@@ -34,7 +34,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const agent = Buffer.from('#!/bin/sh\n"$CRAB_BIN" --version\ngit-remote-crab --version\ncat\n');
     await writeFile(path.join(local, "crab"), cli); await writeFile(path.join(local, "crab-desktop-agent"), agent);
     await writeFile(path.join(local, "runtime.json"), JSON.stringify({ version: "2.0.0-alpha.1", platform: "darwin", arch: "arm64", hashes: { crab: digest(cli), "crab-desktop-agent": digest(agent) } }));
-    commands = []; native = false; stalledOperation = undefined; written = undefined; exits = []; abortOnWrite = false; uploads = 0; acknowledged = 0; corrupt = false; uname = "Darwin\narm64\n"; owner = new AbortController();
+    commands = []; diagnostics = []; native = false; stalledOperation = undefined; written = undefined; exits = []; abortOnWrite = false; uploads = 0; acknowledged = 0; corrupt = false; uname = "Darwin\narm64\n"; owner = new AbortController();
     server = new Server({ hostKeys: [pem] }, connection => {
       connections.add(connection); connection.on("error", () => {}); connection.once("close", () => connections.delete(connection));
       connection.on("authentication", context => {
@@ -50,7 +50,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
           if (info.command === "uname -s && uname -m") { channel.write(uname); channel.exit(0); channel.end(); return; }
           if (info.command.includes("shasum") && acknowledged !== uploads) throw new Error("Hash attempted before SFTP CLOSE acknowledgement");
           const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8" } });
-          children.add(child); channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
+          children.add(child); child.stderr.on("data", (chunk: Buffer) => { if (native) diagnostics.push(chunk.toString()); }); channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
           channel.once("close", () => {
             if (!children.has(child)) return;
             child.stdin.end(); child.stdout.resume(); child.stderr.resume();
@@ -176,7 +176,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   });
 
   it.skipIf(!process.env.CRAB_AGENT_LIVE_ROOT)("downloads, uploads and starts the built runtime through the real session owner", async () => {
-    native = true; const run = promisify(execFile);
+    native = true; const run = promisify(execFile); let cachePaths: string[] = [];
     const { version } = JSON.parse(await readFile(path.resolve("package.json"), "utf8")) as { version: string };
     uname = `${(await run("uname", ["-s"])).stdout.trim()}\n${(await run("uname", ["-m"])).stdout.trim()}\n`;
     const assets = path.resolve("release/remote-runtime"); const requests: string[] = [];
@@ -211,6 +211,16 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await writeFile(path.join(worktree, "tracked.txt"), "after-native-deployment\n");
       const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
       expect({ created: created.created, path: created.path, content: await readFile(path.join(worktree, "tracked.txt"), "utf8"), diff: comparison.diff }).toEqual({ created: true, path: await realpath(worktree), content: "after-native-deployment\n", diff: expect.stringContaining("+after-native-deployment") });
+      const profile = manager.getConnection("runtime")!.profile;
+      await manager.connect({ ...profile, id: "concurrent", autoReconnect: false });
+      try {
+        const first = await router.sendToRemoteAgent("runtime", "indexer_status", {}) as { db_path: string; running: boolean };
+        const second = await router.sendToRemoteAgent("concurrent", "indexer_status", {}) as { db_path: string; running: boolean };
+        cachePaths = [first.db_path, second.db_path];
+        expect({ distinct: first.db_path !== second.db_path, running: [first.running, second.running] }).toEqual({ distinct: true, running: [true, true] });
+      } finally { await manager.disconnect("concurrent"); }
+      const surviving = await router.sendToRemoteAgent("runtime", "indexer_status", {}) as { running: boolean };
+      expect(surviving.running).toBe(true);
       // A real transport loss must defer the supported read until the new
       // sidecar has attached and completed its own capability handshake.
       for (const connection of connections) connection.end();
@@ -220,7 +230,9 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, listing, status: manager.getStatus("runtime") }));
     } finally { await manager.disconnect("runtime"); }
     await vi.waitFor(() => expect(children.size).toBe(0), { timeout: 10_000 });
-    expect(exits.every(code => code === 0)).toBe(true);
+    const ownership = { cleanExits: exits.every(code => code === 0), errors: /\bERROR\b/.test(diagnostics.join("")), cachesRemoved: cachePaths.every(cache => !fs.existsSync(cache)) };
+    expect(ownership).toEqual({ cleanExits: true, errors: false, cachesRemoved: true });
+    await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "indexer-concurrent-ssh.json"), JSON.stringify({ cachePaths, ...ownership }));
   }, 120_000);
 
 });

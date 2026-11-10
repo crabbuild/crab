@@ -568,6 +568,44 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- The remaining seven-file CI scope reproduced 13 failing assertions and a
+  process mock that lacked Node's close lifecycle. The real routing and
+  readiness source fixes are retained. Fixtures now check typed reconnect
+  errors, capabilities only after negotiation, one NDJSON request per batch
+  member, queued startup acknowledgement after capacity is released, and
+  cancellation closure. Removed mock-only `crab_status` coverage and local-Git
+  checkpoint expectations for remote paths; neither establishes a sidecar
+  implementation. The corrected scope passes 170 tests, with no unhandled
+  rejections, and its strict fixture type probe passes after removing the stale
+  `isWriteMethod` import. Remote native dispatch and remote snapshot ownership
+  remain implementation gates. Evidence: `ssh-remaining-ci-before.json`,
+  `ssh-remaining-ci-final.json` and `ssh-ci-fixture-types-final.log`.
+- Linux ARM64 CI job `129658665861` failed at the first build-script link:
+  repository Cargo configuration names a cross linker that is absent on the
+  native runner. The desktop ARM64 job now uses the native compiler overrides
+  already used by the release job. [Cargo's configuration contract](https://doc.rust-lang.org/cargo/reference/config.html#environment-variables)
+  gives those environment settings precedence over TOML. YAML parsing passes;
+  the native ARM64 build and bootstrap rerun is still required.
+- A two-process native probe reproduced SlateDB writer fencing in the shared
+  account-wide indexer cache. Both processes reported the same database path;
+  closing the first emitted a `Fenced` background-task error. The actual SSH
+  fixture also fails its new independent-cache assertion on the prior binary.
+  The indexer now owns a private temporary derived cache, closes its database
+  before removing the directory, and retires the unused shared-path/default
+  configuration. Cache contents rebuild per sidecar lifetime. Its status wire
+  fields remain the same; the Health card displays the actual current path.
+  The focused Rust ownership/cleanup test passes. The rebuilt release pair
+  passes all ten deployment checks, including two native sidecars, retirement
+  of one while the other remains usable, and a replacement after reconnect.
+  Both recorded cache paths are removed after shutdown, all owned processes
+  exit cleanly, and the captured Rust diagnostics contain no errors. The four
+  real SSH task-view cases also pass with the new default cache owner.
+  Evidence: `indexer-concurrent-before.json`,
+  `indexer-concurrent-ssh-before.json`, `indexer-owner-rust-test.log`,
+  `indexer-concurrent-ssh-final.json`, `indexer-concurrent-ssh.json` and
+  `indexer-owner-diff-live.json`. The release build, strict fixture types,
+  workflow YAML parsing, Rust formatting and diff checks pass. Cross-platform
+  CI remains required.
 - SSH deployment now resolves a verified Crab CLI/sidecar pair for the exact app
   release and remote target. Development uses the real `resources/native` layout;
   packaged applications download dedicated release assets over approved HTTPS
@@ -1177,8 +1215,8 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   Production deployment now uses exact-release CLI/sidecar assets and immutable
   remote installs, with real native bootstrap proof. Cross-platform CI, Linux
   ABI/minimum-distro qualification, packaged bootstrap and published-asset checks
-  remain open. Concurrent real native sidecars still need indexer ownership
-  proof: both currently use the account-wide default cache. Manual deployment
+  remain open. Concurrent native sidecars now have private-cache ownership
+  and shutdown proof on macOS; cross-OS evidence is still required. Manual deployment
   sets the deploying state before its first await, so a concurrent call is
   rejected rather than starting a second channel. Host verification now has
   policy, real SSH and native-dialog proof; packaged/cross-OS qualification is

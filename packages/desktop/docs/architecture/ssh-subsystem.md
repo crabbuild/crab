@@ -74,6 +74,12 @@ to `PATH`. The session manager attaches its sole RPC reader, negotiates capabili
 restores its acknowledged repositories and then publishes connected readiness. A transport failure or cancellation
 retires the owned channel and capability cache before recovery.
 
+The background indexer owns a private derived cache per sidecar process. Its
+SlateDB instance closes before directory cleanup. Independent profiles and
+replacement sidecars therefore do not open the same writer path; cache contents
+rebuild for each process lifetime. `indexer_status.db_path` reports that current
+private location. The former account-wide cache is no longer opened.
+
 ## Limits and qualification
 
 The sidecar implements core repository RPCs and task comparison. Its capability
@@ -86,9 +92,10 @@ Real loopback SSH/SFTP proof covers immutable installation, reuse, checksum
 failure, owner cancellation and stalls, including quoted/Unicode home paths.
 The built release pair also creates a worktree through its uploaded CLI and
 returns native comparison bytes through the real session manager and router.
-A renderer fixture checks progress isolation between profiles. These checks do
-not qualify remote native chat, concurrent native indexer ownership, a published
-release endpoint, packaged main-process bootstrap or older Linux ABI support.
+A renderer fixture checks progress isolation between profiles. Native checks
+also prove concurrent indexer cache ownership and cleanup on macOS.
+Remote native chat, a published release endpoint, packaged main-process bootstrap,
+older Linux ABI support and cross-OS indexer ownership remain qualification gates.
 Cross-platform CI builds and bootstraps each remote target; its results must be
 reviewed before release. The [manual workspace checklist](../remote-workspace-smoke-test.md)
 tracks user-visible remote operations that need separate qualification.
