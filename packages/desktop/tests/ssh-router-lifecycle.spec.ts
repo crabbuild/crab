@@ -11,10 +11,10 @@ class Channel extends EventEmitter {
   reply(id: number, result: unknown): void { this.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n")); }
 }
 
-function fixture(timeoutMs = 30_000) {
+function fixture(timeoutMs = 30_000, status = "connected") {
   const channels = new Map<string, Channel>();
   const manager = {
-    getStatus: () => "connected",
+    getStatus: () => status,
     getConnection: (profile: string) => ({ channels: { agent: channels.get(profile)?.asChannel() }, profile: { operationTimeoutMs: timeoutMs } }),
   } as unknown as SshSessionManager;
   const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local request"); } });
@@ -131,6 +131,21 @@ describe("RPC channel lifecycle", () => {
     const error = { code: 1002, message: "Git failed", data: { status: 128, stderr: "missing base" } };
     channel.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, error }) + "\n"));
     expect(await results).toEqual([{ error }]);
+  });
+
+  it.each(["git_stash_apply", "task_spawn", "task_apply", "write_text", "unknown_operation"])("never defers %s through any remote entry point", async method => {
+    const { router, attach } = fixture(30_000, "reconnecting"); const channel = attach("profile");
+    const outcomes: string[] = [];
+    const failed = (reason: unknown) => { outcomes.push((reason as Error & { code?: string }).code ?? "other-error"); };
+    void router.route("ssh://profile/repo", method, {}).then(() => outcomes.push("routed"), failed);
+    void router.sendToRemoteAgent("profile", method, {}).then(() => outcomes.push("sent"), failed);
+    void router.batchRpc("ssh://profile/repo", [{ method, params: {} }]).then(result => outcomes.push(result[0].error ? "batch-rejected" : "batch-sent"));
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect({ outcomes: outcomes.sort(), writes: channel.writes }).toEqual({ outcomes: ["SSH_RECONNECTING", "SSH_RECONNECTING", "batch-rejected"].sort(), writes: [] });
+    } finally {
+      router.clearQueue("profile"); channel.emit("close");
+    }
   });
 
 });

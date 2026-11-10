@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, isWriteMethod, routeRpcCall } from "../electron/ssh-router";
+import { RpcRouter, parseRepoId, routeRpcCall } from "../electron/ssh-router";
 import type { RpcRouterOptions } from "../electron/ssh-router";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -113,34 +113,6 @@ describe("parseRepoId", () => {
   it("handles complex profile IDs", () => {
     const result = parseRepoId("ssh://my-gpu-server-123/data/models");
     expect(result).toEqual({ profileId: "my-gpu-server-123", remotePath: "/data/models" });
-  });
-});
-
-describe("isWriteMethod", () => {
-  it("identifies write methods", () => {
-    expect(isWriteMethod("git_commit")).toBe(true);
-    expect(isWriteMethod("git_stage")).toBe(true);
-    expect(isWriteMethod("git_checkout")).toBe(true);
-    expect(isWriteMethod("git_push")).toBe(true);
-    expect(isWriteMethod("git_pull")).toBe(true);
-    expect(isWriteMethod("git_stash_save")).toBe(true);
-    expect(isWriteMethod("git_branch_create")).toBe(true);
-    expect(isWriteMethod("git_branch_delete")).toBe(true);
-    expect(isWriteMethod("op_start")).toBe(true);
-    expect(isWriteMethod("op_continue")).toBe(true);
-  });
-
-  it("identifies read methods", () => {
-    expect(isWriteMethod("git_status_porcelain")).toBe(false);
-    expect(isWriteMethod("git_log")).toBe(false);
-    expect(isWriteMethod("git_diff_file")).toBe(false);
-    expect(isWriteMethod("list_refs")).toBe(false);
-    expect(isWriteMethod("repo_summary")).toBe(false);
-  });
-
-  it("matches prefixes for extended method names", () => {
-    expect(isWriteMethod("git_commit_amend")).toBe(true);
-    expect(isWriteMethod("git_push_force")).toBe(true);
   });
 });
 
@@ -337,7 +309,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     // This should be queued, not rejected
-    const promise = router.route("ssh://server/repo", "git_status", {});
+    const promise = router.route("ssh://server/repo", "git_status_porcelain", {});
 
     // Simulate reconnection success
     sm.setStatus("server", "connected");
@@ -363,7 +335,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     await expect(
       router.route("ssh://server/repo", "git_commit", { message: "test" }),
-    ).rejects.toThrow("Connection lost: write operations are unavailable during reconnection");
+    ).rejects.toThrow("Connection lost: mutating or unclassified operations are unavailable during reconnection");
   });
 
   it("drops oldest calls when queue overflows", async () => {
@@ -377,7 +349,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     // Queue 4 calls (max is 3, so first should be dropped)
     for (let i = 0; i < 4; i++) {
-      const p = router.route("ssh://server/repo", `method_${i}`, {});
+      const p = router.route("ssh://server/repo", "git_log", { i });
       p.catch((err) => rejections.push(err));
       promises.push(p);
     }
@@ -397,7 +369,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     const rejections: Error[] = [];
-    const p1 = router.route("ssh://server/repo", "git_status", {});
+    const p1 = router.route("ssh://server/repo", "git_status_porcelain", {});
     p1.catch((err) => rejections.push(err));
 
     router.clearQueue("server");

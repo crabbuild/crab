@@ -1,6 +1,6 @@
 # Agent chat compatibility
 
-Status: in progress. Base: `origin/crab-v2` at `2f6d36ec12a`.
+Status: in progress; [draft PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `2f6d36ec12a`.
 Compatibility is not yet fully qualified.
 
 Refreshed from `64b33b64cba`; the workflow-output update integrated without
@@ -150,6 +150,12 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Corrections implemented
 
+- Remote reconnect admission now defers only the six inspected cacheable reads
+  and `task_compute_diff`. Mutating and unclassified methods reject immediately
+  with `SSH_RECONNECTING`, including calls made directly by the orchestrator.
+  Repo routing, profile RPC and batch consumers share this owner boundary;
+  the mutation-prefix denylist and its classification-only tests are removed.
+  Replaying reads cannot execute an earlier rejected write.
 - Remote RPC pending calls now belong to their attached channel. EOF, close,
   error, or replacement immediately settles only that owner's calls and removes
   their deadlines. Old channel events cannot erase a replacement's partial
@@ -524,6 +530,16 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- Draft PR #670 contains the accumulated audit changes; responsive Changes-page
+  files remain outside it. The follow-up replay-admission run passes 104 tests
+  across six scoped files. Four regression cases first reproduced deferred
+  mutations and a direct-call bypass; current coverage adds the real file-write
+  method across all three RPC entry points. All three SSH/browser cases pass.
+  The built sidecar actually writes a fixture while connected; the next write
+  rejects during reconnect, and replaying a queued comparison leaves its bytes
+  unchanged. Types, strict fixture types, and the Electron build pass. Evidence:
+  `ssh-replay-admission-before.json`, `ssh-replay-admission-final.json`,
+  `ssh-replay-admission-live.json`, and `sidecar-ssh-replay-admission.json`.
 - Claude credit-restoration recheck uses installed Claude Code 2.1.319 and the
   existing CLI login: both selected live cases pass. One writes an exact file
   and derives a completed renderer turn; the other retains the same session
@@ -990,8 +1006,9 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   Manual deployment also discards the returned channel. Capabilities negotiation
   uses a missing sidecar method and routes while status is `deploying`, which the
   router currently rejects. Fix those owner/contract boundaries, cancellation
-  and late-client events, conservative replay admission (unknown mutations must
-  not queue), and Git-filter descendant cleanup before claiming remote support.
+  and late-client events, and Git-filter descendant cleanup before claiming
+  remote support. Router replay admission now rejects unclassified/mutating
+  calls; manager readiness and actual queue replay remain unfinished.
 - Finish live watch/command-control checks and the lifecycle/owner contract for
   extended controls that can execute or write outside ordinary chat submission.
 - Run appropriate scoped verification, build changed JavaScript bundles, inspect

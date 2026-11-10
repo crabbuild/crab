@@ -326,6 +326,10 @@ RPC deadline. Pending replies and UTF-8 decoding belong to the exact channel;
 replacement cannot accept old replies or erase the new channel's buffer. Batch
 consumers submit independent NDJSON requests through ordinary routing, matching
 the sidecar's one-request-per-line parser and preserving remote errors.
+Both repo routing and direct profile calls share reconnect admission. Only the
+six inspected cacheable reads and `task_compute_diff` can queue; mutations and
+unclassified operations fail immediately with `SSH_RECONNECTING`. Replaying
+reads never schedules an earlier rejected write.
 Physical SSH deployment, reconnect orchestration, remote native chat dispatch,
 and descendant-process ownership remain separate gates.
 

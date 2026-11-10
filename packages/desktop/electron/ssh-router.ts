@@ -69,26 +69,6 @@ interface JsonRpcNotification {
 
 type JsonRpcFrame = JsonRpcResponse | JsonRpcNotification;
 
-/** Methods that mutate state and must NOT be queued during reconnection. */
-const WRITE_METHODS = new Set([
-  "add",
-  "git_commit",
-  "git_stage",
-  "git_checkout",
-  "git_push",
-  "git_pull",
-  "git_stash_save",
-  "git_branch_create",
-  "git_branch_delete",
-  "hydrate",
-  "dehydrate",
-  "op_start",
-  "op_continue",
-  "push",
-  "worktree_create",
-  "worktree_destroy",
-]);
-
 /** Read-only methods eligible for stale cache fallback during reconnection. */
 const CACHEABLE_READ_METHODS = new Set([
   "git_status_porcelain",
@@ -98,6 +78,10 @@ const CACHEABLE_READ_METHODS = new Set([
   "repo_summary",
   "hydration_status",
 ]);
+
+// Only inspected read handlers may be deferred. A denylist would silently
+// queue new mutations and execute them after the user lost the connection.
+const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "task_compute_diff"]);
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -121,19 +105,6 @@ export function parseRepoId(repoId: string): { profileId: string; remotePath: st
   const profileId = withoutScheme.slice(0, slashIdx);
   const remotePath = withoutScheme.slice(slashIdx);
   return { profileId, remotePath };
-}
-
-/**
- * Determine whether a method is a write operation that should be
- * rejected immediately during reconnection.
- */
-export function isWriteMethod(method: string): boolean {
-  for (const prefix of WRITE_METHODS) {
-    if (method === prefix || method.startsWith(prefix)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -214,13 +185,13 @@ export class RpcRouter extends EventEmitter {
     // First, check if the repo_id has an ssh:// prefix
     const parsed = parseRepoId(repoId);
     if (parsed) {
-      return this.routeToRemote(parsed.profileId, method, params);
+      return this.sendToRemoteAgent(parsed.profileId, method, params);
     }
 
     // Check registered transports
     const transport = this.transports.get(repoId);
     if (transport && transport.type === "remote" && transport.profileId) {
-      return this.routeToRemote(transport.profileId, method, params);
+      return this.sendToRemoteAgent(transport.profileId, method, params);
     }
 
     // Default: local agent
@@ -339,15 +310,13 @@ export class RpcRouter extends EventEmitter {
     this.bandwidthCounters.set(profileId, { bytesIn: 0, bytesOut: 0 });
   }
 
-  // ── Private ────────────────────────────────────────────────────
-
-  private async routeToRemote(profileId: string, method: string, params: unknown): Promise<unknown> {
+  /** Sends a profile RPC through connection admission before writing to its channel. */
+  async sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
     const status = this.sessionManager.getStatus(profileId);
 
     if (status === "reconnecting") {
-      // Write operations are rejected immediately during reconnection
-      if (isWriteMethod(method)) {
-        const err = new Error("Connection lost: write operations are unavailable during reconnection");
+      if (!REPLAYABLE_READ_METHODS.has(method)) {
+        const err = new Error("Connection lost: mutating or unclassified operations are unavailable during reconnection");
         (err as Error & { code?: string }).code = "SSH_RECONNECTING";
         throw err;
       }
@@ -372,7 +341,7 @@ export class RpcRouter extends EventEmitter {
       throw new Error(`SSH connection not available (status: ${status})`);
     }
 
-    return this.sendToRemoteAgent(profileId, method, params);
+    return this.writeRequest(profileId, method, params);
   }
 
   /**
@@ -407,7 +376,7 @@ export class RpcRouter extends EventEmitter {
    * `operationTimeoutMs` setting, falling back to the router-level
    * `requestTimeoutMs` default.
    */
-  async sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+  private async writeRequest(profileId: string, method: string, params: unknown): Promise<unknown> {
     const owner = this.channels.get(profileId);
     if (!owner) throw new Error(`No active agent channel for profile: ${profileId}`);
     const timeoutMs = this.sessionManager.getConnection(profileId)?.profile?.operationTimeoutMs ?? this.requestTimeoutMs;

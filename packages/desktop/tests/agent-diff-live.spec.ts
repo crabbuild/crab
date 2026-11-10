@@ -117,7 +117,8 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
       ssh = await sidecarChannel(child);
       const { channel } = ssh;
-      const manager = { getStatus: () => "connected", getConnection: () => ({ channels: { agent: channel } }) } as unknown as SshSessionManager;
+      let status = "connected";
+      const manager = { getStatus: () => status, getConnection: () => ({ channels: { agent: channel } }) } as unknown as SshSessionManager;
       const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
       router.attachChannel("fixture", channel);
       const task: Task = {
@@ -205,6 +206,21 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       expect(await readFile(path.join(directory, ".git/index"))).toEqual(index);
       await page.screenshot({ path: path.join(liveRoot!, `sidecar-diff-ssh-${kind}.png`) });
       await writeFile(path.join(liveRoot!, `sidecar-diff-ssh-${kind}.json`), JSON.stringify({ result, stderr }, null, 2));
+      if (kind === "success") {
+        await router.sendToRemoteAgent("fixture", "open_local", { repo_id: "fixture", path: directory });
+        await router.sendToRemoteAgent("fixture", "write_text", { repo_id: "fixture", path: "tracked.txt", content: "connected-write\n" });
+        expect(await readFile(path.join(directory, "tracked.txt"), "utf8")).toBe("connected-write\n");
+        status = "reconnecting";
+        await expect(router.sendToRemoteAgent("fixture", "write_text", { repo_id: "fixture", path: "tracked.txt", content: "deferred-write\n" }))
+          .rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+        const queued = router.sendToRemoteAgent("fixture", "task_compute_diff", { worktree_path: directory, base_ref: "HEAD" });
+        status = "connected";
+        await router.replayQueue("fixture");
+        const comparison = await queued as { diff: string };
+        expect({ content: await readFile(path.join(directory, "tracked.txt"), "utf8"), diff: comparison.diff, index: await readFile(path.join(directory, ".git/index")) })
+          .toEqual({ content: "connected-write\n", diff: expect.stringContaining("+connected-write"), index });
+        await writeFile(path.join(liveRoot!, "sidecar-ssh-replay-admission.json"), JSON.stringify({ content: "connected-write\n", rejected: "SSH_RECONNECTING", readReplayed: true }));
+      }
       await browser.close(); browser = undefined;
       await vite.close(); vite = undefined;
       for (const client of clients) client.end();
