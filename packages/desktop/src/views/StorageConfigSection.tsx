@@ -126,7 +126,7 @@ export function StorageConfigSection({ repo, onSelect, selectedId }: Props = {})
             setMessage("Connection saved with operating system encryption.");
           } finally { await refresh(); }
         }); }}>
-          {editingId && <p className="text-xs text-gx-muted">Re-enter credentials to update this connection. Open repositories will reconnect.</p>}
+          {editingId && <p className="text-xs text-gx-muted">Re-enter credentials to update this connection. Open repositories reconnect when desktop services are available.</p>}
           {field("Connection name", "name")}
           <label className="block space-y-1 text-xs text-gx-muted"><span>Storage provider</span><select className={inputClass} value={form.provider} disabled={Boolean(busy)} onChange={event => { setForm({ ...EMPTY, name: form.name, provider: event.target.value as StorageCredentials["provider"] }); setResult(null); setError(null); }}><option value="s3">Amazon S3 / S3-compatible</option><option value="gcs">Google Cloud Storage</option><option value="azure">Azure Blob Storage</option></select></label>
           {field(form.provider === "azure" ? "Container" : "Bucket", "bucket")}

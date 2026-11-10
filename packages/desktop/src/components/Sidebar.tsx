@@ -22,6 +22,7 @@ import {
   Plus,
   Scissors,
   Search,
+  Settings,
   Trash2,
   X,
 } from "lucide-react";
@@ -54,6 +55,7 @@ import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
 interface Props {
   /** Invoked when the user hits the icon-only collapse button. */
   onCollapse: () => void;
+  onOpenSettings: () => void;
 }
 
 const LS_SIDEBAR_WIDTH = "crab.repoSidebarWidth";
@@ -63,7 +65,7 @@ const MIN_WIDTH = 220;
 const MAX_WIDTH = 480;
 const DEFAULT_WIDTH = 260;
 
-export function Sidebar({ onCollapse }: Props) {
+export function Sidebar({ onCollapse, onOpenSettings }: Props) {
   const { state, dispatch, addRepo, removeRepo, setActive, pinRepo, unpinRepo, reorderRepos } = useStore();
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
@@ -421,6 +423,10 @@ export function Sidebar({ onCollapse }: Props) {
                 }}
               >
                 <Cloud size={12} /> Connect to Remote Workspace
+              </button>
+              <div className="my-1 border-t border-gx-border" />
+              <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition" onClick={() => { setAddMenuOpen(false); onOpenSettings(); }}>
+                <Settings size={12} /> Settings
               </button>
             </div>
           )}

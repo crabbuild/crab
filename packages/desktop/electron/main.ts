@@ -2327,7 +2327,7 @@ app.whenReady().then(async () => {
     // Each application profile owns its SlateDB writer; parallel profiles must
     // not contend for the standalone sidecar's home-directory index.
     const indexerDirectory = path.join(app.getPath("userData"), "native", "indexer");
-    agent = new Agent(runtime.agent, agentEnvFor(mainSettings.agentLogLevel), ["--index-dir", indexerDirectory], storageConnections);
+    agent = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), ["--index-dir", indexerDirectory], storageConnections);
     if (logsDir) agent.on("stderr", (line: string) => {
       const day = new Date().toISOString().slice(0, 10);
       fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {

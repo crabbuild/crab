@@ -54,7 +54,7 @@ export class Agent extends EventEmitter {
   private static readonly CRASH_WINDOW_MS = 30_000;
   private static readonly MAX_AUTO_RESTARTS = 1;
 
-  constructor(private readonly binary: string, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections) { super(); }
+  constructor(private readonly binaries: { agent: string; crab: string }, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections) { super(); }
 
   async start(): Promise<void> {
     const existing = this.runtime;
@@ -65,7 +65,10 @@ export class Agent extends EventEmitter {
       return this.start();
     }
     this.stopping = false;
-    const child = spawn(this.binary, this.extraArgs, { stdio: ["pipe", "pipe", "pipe"], env: this.env });
+    for (const binary of [this.binaries.agent, this.binaries.crab]) {
+      if (!fs.existsSync(binary)) throw new Error(`Missing Crab v2 runtime: ${binary}. Run 'npm run build:agent'.`);
+    }
+    const child = spawn(this.binaries.agent, this.extraArgs, { stdio: ["pipe", "pipe", "pipe"], env: this.env });
     let closed!: () => void;
     const run: Runtime = {
       child, id: `local:${this.nextRuntime++}`, pending: new Map(), stopping: false, capabilities: null,
@@ -131,6 +134,7 @@ export class Agent extends EventEmitter {
           const capabilities = parseAgentCapabilities(await this.dispatch(run, "capabilities", {}));
           this.assertCurrent(run);
           run.capabilities = capabilities;
+          this.emit("notification", "agent/ready", {});
         })(),
         new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Native agent startup timed out after 10 s")), 10_000); }),
       ]);
@@ -150,6 +154,22 @@ export class Agent extends EventEmitter {
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
+    if (method.startsWith("storage_connections_") && this.storageConnections) {
+      // Device metadata must remain usable before native negotiation and after
+      // failure. Only a connection test or replacement of a live owner needs it.
+      return this.storageConnections.request(method, params, async (name, payload) => {
+        let run = this.runtime;
+        if (!run || run.failure || run.stopping) { await this.start(); run = this.runtime; }
+        if (!run) throw new Error("Native agent is not running");
+        await run.ready;
+        return this.sendRequest(run, name, payload);
+      }, async (keys, state) => {
+        const run = this.runtime;
+        // Before negotiation, replay will resolve the current saved binding.
+        // A failed or draining process has already revoked its reader identities.
+        if (run?.capabilities && !run.failure && !run.stopping) await this.storageIdentityChanged(run, keys, state);
+      });
+    }
     const payload = fields(params);
     const repoId = typeof payload?.repo_id === "string" ? payload.repo_id : null;
     if ((method === "open_local" || method === "open_url") && (!this.runtime || this.runtime.failure || this.runtime.stopping)) await this.start();
@@ -178,10 +198,9 @@ export class Agent extends EventEmitter {
       this.repositories.delete(repoId);
       return this.dispatch(run, method, params);
     });
-    if (repoId && method !== "rpc/cancel" && !method.startsWith("storage_connections_")) {
+    if (repoId && method !== "rpc/cancel") {
       // Cancellation must bypass repository setup; waiting for the operation
-      // being cancelled would deadlock its control request. Storage settings
-      // must also remain usable to repair a failed or removed binding.
+      // being cancelled would deadlock its control request.
       await this.repositoryWork.get(repoId);
       const failure = this.repositories.get(repoId)?.error;
       if (failure) throw failure;

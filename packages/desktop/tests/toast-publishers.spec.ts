@@ -1,0 +1,39 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { AgentEvent } from "../src/ipc";
+
+const fixture = vi.hoisted(() => ({
+  receive: (_event: AgentEvent) => {},
+  notifications: { doNotDisturb: false, doNotDisturbUntil: null as number | null, muteAgentErrors: false },
+  publish: vi.fn(() => "toast"),
+  dismiss: vi.fn(),
+}));
+vi.mock("../src/ipc", () => ({ onAgentEvent: (receive: typeof fixture.receive) => { fixture.receive = receive; return () => {}; } }));
+vi.mock("../src/settings", () => ({ getSettings: () => ({ notifications: fixture.notifications }) }));
+vi.mock("../src/lib/toasts", () => ({ publishToast: fixture.publish, dismissToast: fixture.dismiss }));
+import { setupAgentErrorPublisher } from "../src/lib/toast-publishers";
+
+let unsubscribe: () => void;
+beforeEach(() => {
+  vi.clearAllMocks();
+  fixture.notifications.doNotDisturb = false;
+  fixture.notifications.muteAgentErrors = false;
+  unsubscribe = setupAgentErrorPublisher();
+});
+afterEach(() => unsubscribe());
+
+it("negotiated local recovery clears the outage without dismissing unrelated errors", () => {
+  fixture.publish.mockReturnValueOnce("outage").mockReturnValueOnce("other-error");
+  fixture.receive({ method: "agent/failed", params: { message: "Execution denied" } });
+  fixture.receive({ method: "agent/error", params: { message: "Operation failed" } });
+  fixture.receive({ method: "agent/ready", params: {} });
+  expect(fixture.dismiss.mock.calls).toEqual([["outage"]]);
+});
+
+it("recovery retires a visible outage even after notifications are muted", () => {
+  fixture.publish.mockReturnValueOnce("outage");
+  fixture.receive({ method: "agent/failed", params: { message: "Missing runtime" } });
+  fixture.notifications.doNotDisturb = true;
+  fixture.notifications.muteAgentErrors = true;
+  fixture.receive({ method: "agent/ready", params: {} });
+  expect(fixture.dismiss.mock.calls).toEqual([["outage"]]);
+});

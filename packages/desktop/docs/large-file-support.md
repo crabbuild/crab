@@ -18,7 +18,7 @@ record historical evidence rather than separate work queues.
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
-| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK identity replacement, removal and cold bindings have real two-store proof. SDK GUI opening, separate same-URL identities, active/deferred restart and cancellation while storage remains blocked are now qualified. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
+| Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK identity replacement, removal and cold bindings have real two-store proof. SDK GUI opening, separate same-URL identities, active/deferred restart and cancellation while storage remains blocked are qualified. Device connection editing survives missing native binaries and denied execution. Selected device-vault authentication for SSH cloud reads, complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. `Agent` owns local/SDK identity replacement; the encrypted vault owns credentials and bindings. | Packaged local/SSH recovery, local/direct-SDK storage replacement, SDK bookmark restore and blocked SDK cancellation have bounded proof below. Remaining: Settings without native startup, queued metadata/UI state recovery and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. `Agent` owns local/SDK identity replacement; the encrypted vault owns credentials and bindings. | Packaged local/SSH recovery, local/direct-SDK storage replacement, SDK bookmark restore, blocked SDK cancellation and Settings without native startup have bounded proof below. Remaining: selected storage authentication over SSH, queued metadata/UI state recovery and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -48,8 +48,16 @@ implied by a working read/materialization smoke.
    storage rebind, profile replacement and removal now revoke captures through
    the repository owner. SDK snapshots now persist logical IDs separately from
    native sessions; startup and deferred selection use `open_url` with the saved
-   encrypted binding. Keep Settings usable when native startup itself fails. Use the existing
-   session identity to refresh dashboard/cached metadata and notebook reads,
+   encrypted binding. Device connection settings now remain usable when native
+   startup fails. Extend saved storage identity through the SSH transport owner
+   before claiming profile parity: `main.ts` sends connection settings to the
+   local `Agent`, while `SshSessionManager.openRepositorySession` and
+   `RemoteProvider.request` send remote calls directly through `RpcRouter`.
+   Those paths currently have no device-vault binding or authentication injection.
+   Reuse the encrypted vault and the native per-request `__storage_auth` contract;
+   prove a cold remote cloud read with invalid ambient credentials, then edit,
+   remove and reselect the profile while rejecting old captures.
+   Use the existing session identity to refresh dashboard/cached metadata and notebook reads,
    preserve pending editor saves and restore media playback deliberately.
    Dashboard effects currently depend on repository ID/deferred state, so a
    same-ID retry can retain a previous loading error. Queued reconnect metadata
@@ -83,6 +91,39 @@ its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
 
 ## Storage identity checkpoint
+
+### Device settings during native failure
+
+Settings is reachable through More actions and Cmd/Ctrl+, before opening any
+repository. The app shell owns that navigation; the workspace shell retains
+only its sidebar shortcut. Connection metadata uses the existing encrypted
+vault before native negotiation. Missing agent/CLI files and execution failure
+cannot prevent save, edit, forget or cold restoration. Connection testing still
+starts and negotiates the paired native runtime and reports its actual failure.
+
+`nativeBinaries` locates the pair; `Agent.start` validates its presence before
+spawning. Packaging continues to verify version, target, hashes and SSH archives.
+Live storage identity edits retain the existing per-repository replacement
+owner. Offline edits persist the desired binding for replay rather than opening
+another reader. Successful local negotiation clears the service-outage toast;
+repository failures and unrelated operation errors retain their own reporting.
+
+Previously, binary lookup could fail before the vault/LocalProvider existed,
+and `Agent.request` waited for native readiness before connection metadata.
+Focused regressions cover absent services, blocked handshake, denied execution,
+offline selection/replay and recovery notices. There are 73 passing cases in
+the four touched owner/vault/locator/publisher suites; project and focused strict
+spec types pass. Packaged macOS arm64 tests independently remove the agent,
+remove the CLI and deny execution. Each saves/edits/removes encrypted profiles,
+restarts while the fault remains, shows a connection-test error, repairs the
+runtime and opens a real Safetensors preview. The shortcut also works with an
+active repository, and the obsolete outage notice disappears after repair.
+
+This closes those native-binary failure cases. An unlocked OS keyring remains
+required for credential persistence; cross-platform qualification and the
+remaining recovery, workflow, transfer and inspection scopes stay open.
+
+### Reader identity replacement
 
 Settings can edit a saved connection without closing repositories manually.
 Secret fields start empty and require complete replacement credentials. The

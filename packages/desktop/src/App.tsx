@@ -18,6 +18,7 @@ import { WorkspaceThemeEffect } from "./components/WorkspaceThemeEffect";
 import { Welcome } from "./components/Welcome";
 import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
 import { SshView } from "./views/SshView";
+import { SettingsView } from "./views/SettingsView";
 import { TerminalKeepAlive, TerminalKeepAliveHandle } from "./components/TerminalKeepAlive";
 import { useTabBarShortcuts } from "./components/workspace/TabBar";
 import { FuzzySwitcher } from "./components/workspace/FuzzySwitcher";
@@ -531,11 +532,12 @@ function Shell() {
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
         if (e.key === "[") { e.preventDefault(); handleBack(); }
         else if (e.key === "]") { e.preventDefault(); handleForward(); }
+        else if (e.key === ",") { e.preventDefault(); handleNavigate({ view: "settings" }); }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleBack, handleForward]);
+  }, [handleBack, handleForward, handleNavigate]);
 
   const handleSpawnAgentTerminal = useCallback((command: StartupCommand) => {
     window.dispatchEvent(new CustomEvent("crab:spawn-agent-terminal", { detail: command }));
@@ -566,7 +568,7 @@ function Shell() {
           recently accessed repos for ⌘1–⌘9 shortcuts. */}
       <div className="flex min-h-0 flex-1">
         {repoSidebarOpen && (
-          <Sidebar onCollapse={() => setRepoSidebarOpen(false)} />
+          <Sidebar onCollapse={() => setRepoSidebarOpen(false)} onOpenSettings={() => handleNavigate({ view: "settings" })} />
         )}
         <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           {active ? (
@@ -578,6 +580,8 @@ function Shell() {
               activityDrawerOpen={drawerOpen}
               onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
             />
+          ) : nav.current?.view === "settings" ? (
+            <SettingsView />
           ) : nav.current?.view === "ssh" ? (
             <SshView />
           ) : state.workspaces.length > 0 ? (

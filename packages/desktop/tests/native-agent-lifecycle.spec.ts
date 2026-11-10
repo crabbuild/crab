@@ -71,12 +71,13 @@ class NativeProcess extends EventEmitter {
 
 const children: NativeProcess[] = [];
 let configure: (child: NativeProcess) => void;
+let missingBinary: string | undefined;
 vi.mock("node:child_process", () => ({ spawn: () => {
   const child = new NativeProcess(); configure?.(child); children.push(child);
   return child as unknown as ChildProcessWithoutNullStreams;
 } }));
 vi.mock("electron", () => ({ app: { getPath: () => "/native-test-profile", quit: vi.fn() }, dialog: { showMessageBox: vi.fn(async () => ({ response: 0 })) } }));
-vi.mock("node:fs", () => ({ existsSync: () => true, mkdirSync: vi.fn(), writeFileSync: vi.fn() }));
+vi.mock("node:fs", () => ({ existsSync: (file: string) => file !== missingBinary, mkdirSync: vi.fn(), writeFileSync: vi.fn() }));
 
 import { Agent } from "../electron/agent";
 import { LocalProvider } from "../electron/local-provider";
@@ -84,7 +85,7 @@ import { LocalProvider } from "../electron/local-provider";
 describe("native agent process ownership", () => {
   let agent: Agent;
   let vaultDirectory: string | undefined;
-  beforeEach(() => { children.length = 0; configure = () => {}; agent = new Agent("fixture"); });
+  beforeEach(() => { children.length = 0; configure = () => {}; missingBinary = undefined; agent = new Agent({ agent: "fixture", crab: "fixture-cli" }); });
   afterEach(async () => {
     const stopped = agent.shutdown();
     for (const child of children) { if (!child.ended) child.exit(0, null); child.close(); }
@@ -92,7 +93,7 @@ describe("native agent process ownership", () => {
     if (vaultDirectory) { await rm(vaultDirectory, { recursive: true, force: true }); vaultDirectory = undefined; }
   });
 
-  async function storageAgent() {
+  async function storageAgent(start = true) {
     vaultDirectory = await mkdtemp(path.join(tmpdir(), "crab-agent-storage-"));
     // This fixture exercises lifecycle routing; vault encryption has its own
     // authenticated-encryption tests in storage-connections.spec.ts.
@@ -102,13 +103,63 @@ describe("native agent process ownership", () => {
     };
     const vault = path.join(vaultDirectory, "connections.enc");
     const store = new StorageConnections(vault, encryption, "darwin");
-    agent = new Agent("fixture", process.env, [], store);
-    await agent.start();
+    agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], store);
+    if (start) await agent.start();
     const profile = (name: string): StorageConnectionInput => ({ name, provider: "s3", bucket: "fixture-bucket", region: "fixture-region", endpoint: `https://${name}.invalid`, credentials: { provider: "s3", access_key_id: `fixture-${name}`, secret_access_key: `fixture-secret-${name}` } });
     const first = await agent.request("storage_connections_save", { connection: profile("first") }) as StorageConnectionInfo;
     const second = await agent.request("storage_connections_save", { connection: profile("second") }) as StorageConnectionInfo;
     return { first, second, profile, vault, encryption };
   }
+
+  it("device connection metadata remains editable without starting native services", async () => {
+    const { first, second, profile } = await storageAgent(false);
+    await agent.request("storage_connections_save", { connection: { ...profile("edited"), id: first.id } });
+    await agent.request("storage_connections_remove", { id: second.id });
+    const status = await agent.request("storage_connections_list", {}) as { connections: StorageConnectionInfo[] };
+    expect(status.connections.map(connection => [connection.id, connection.name])).toEqual([[first.id, "edited"]]);
+    expect(children).toHaveLength(0);
+  });
+
+  it("connection metadata does not wait for a blocked native handshake", async () => {
+    const { first, profile } = await storageAgent(false);
+    configure = child => { child.holdPing = true; };
+    const starting = agent.start();
+    void starting.catch(() => {});
+    await vi.waitFor(() => expect(children[0]?.frames.some(frame => frame.method === "ping")).toBe(true));
+    let saved = false;
+    const saving = agent.request("storage_connections_save", { connection: { ...profile("edited"), id: first.id } }).then(() => { saved = true; });
+    void saving.catch(() => {});
+    try { await vi.waitFor(() => expect(saved).toBe(true)); }
+    finally {
+      children[0].holdPing = false;
+      children[0].answer(children[0].frames.find(frame => frame.method === "ping")!);
+      await Promise.all([starting, saving]);
+    }
+  });
+
+  it("offline selection is persisted and the next native owner uses that binding", async () => {
+    const { first, second } = await storageAgent();
+    await agent.request("open_url", { repo_id: "snapshot", url: "crab://fixture-bucket/one", storage_connection_id: first.id });
+    await agent.shutdown();
+    await agent.request("storage_connections_bind", { repo_id: "snapshot", id: second.id });
+    await agent.start();
+    expect(children[1].frames.find(frame => frame.method === "open_url")?.params.__storage_auth).toMatchObject({ id: second.id });
+  });
+
+  it("native startup failure does not prevent encrypted connection edits", async () => {
+    const { first, profile } = await storageAgent(false);
+    configure = child => queueMicrotask(() => child.emit("error", Object.assign(new Error("Native execution denied"), { code: "EACCES" })));
+    await expect(agent.start()).rejects.toThrow("Native execution denied");
+    await agent.request("storage_connections_save", { connection: { ...profile("edited"), id: first.id } });
+    await expect(agent.request("storage_connections_list", {})).resolves.toMatchObject({ connections: expect.arrayContaining([expect.objectContaining({ id: first.id, name: "edited" })]) });
+    await expect(agent.request("storage_connections_test", { id: first.id })).rejects.toThrow("Native execution denied");
+  });
+
+  it.each(["fixture", "fixture-cli"])("requires the paired runtime at native start when %s is missing", async file => {
+    missingBinary = file;
+    await expect(agent.start()).rejects.toThrow("Missing Crab v2 runtime");
+    expect(children).toHaveLength(0);
+  });
 
   it.each(["open_local", "open_url"] as const)("%s storage rebinding revokes the old epoch and publishes the replacement", async method => {
     const { first, second } = await storageAgent();
@@ -157,7 +208,7 @@ describe("native agent process ownership", () => {
     const { first, vault, encryption } = await storageAgent();
     await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id });
     await agent.shutdown();
-    agent = new Agent("fixture", process.env, [], new StorageConnections(vault, encryption, "darwin"));
+    agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], new StorageConnections(vault, encryption, "darwin"));
     await agent.start();
     await agent.request("open_local", { repo_id: "restored", path: "/one" });
     await agent.request("file_open", { repo_id: "restored", path: "weights.bin" });
@@ -263,13 +314,17 @@ describe("native agent process ownership", () => {
   });
 
   it("an explicit repository retry starts a fresh process after failed startup", async () => {
+    const notifications = vi.fn();
+    agent.on("notification", notifications);
     configure = child => { child.holdPing = true; };
     const failed = expect(agent.start()).rejects.toThrow("Native agent exited");
     await new Promise<void>(resolve => setImmediate(resolve));
     children[0].kill("SIGKILL");
     await failed;
+    expect(notifications).not.toHaveBeenCalledWith("agent/ready", expect.anything());
     configure = () => {};
     await expect(agent.request("open_local", { repo_id: "one", path: "/one" })).resolves.toMatchObject({ repo_id: "one", native_session_id: expect.any(String) });
+    expect(notifications).toHaveBeenCalledWith("agent/ready", {});
   });
 
   it("signal crash restores repository identity before later reads", async () => {
