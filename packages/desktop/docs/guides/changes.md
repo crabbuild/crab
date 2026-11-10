@@ -32,6 +32,10 @@ level, and compose commits — all without leaving the app.
 └─────────────────────────┴────────────────────────────────┘
 ```
 
+Drag the divider beside the diff to resize the file list. Staging-zone
+descriptions sit below their headings. Commit options and actions wrap
+as the file list narrows, keeping the Commit button visible.
+
 ## Features
 
 ### File Status List

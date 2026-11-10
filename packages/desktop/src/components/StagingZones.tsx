@@ -300,20 +300,21 @@ function ZoneSection({
       <button
         type="button"
         onClick={onToggleCollapse}
-        className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-left hover:bg-gx-surface-hover transition"
+        aria-expanded={!collapsed}
+        className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left hover:bg-gx-surface-hover transition"
       >
         {collapsed ? (
           <ChevronRight size={12} className="text-gx-muted" />
         ) : (
           <ChevronDown size={12} className="text-gx-muted" />
         )}
-        <span className={clsx("text-[11px] font-semibold", accentColor)}>
+        <span className={clsx("min-w-0 text-[11px] font-semibold leading-4", accentColor)}>
           {title}
         </span>
-        <span className="rounded-full bg-gx-surface-hover px-1.5 text-[10px] text-gx-muted">
+        <span className="rounded-full bg-gx-surface-hover px-1.5 text-[10px] tabular-nums text-gx-muted">
           {count}
         </span>
-        <span className="ml-auto text-[10px] text-gx-muted">{subtitle}</span>
+        <span className="col-span-2 col-start-2 text-[10px] leading-snug text-gx-muted">{subtitle}</span>
       </button>
       {!collapsed && <div className="min-h-0 flex-1 overflow-auto">{children}</div>}
     </div>
