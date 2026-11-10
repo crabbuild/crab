@@ -139,17 +139,28 @@ describe("Prefetch on repo open", () => {
     await new Promise((r) => setTimeout(r, 10));
   });
 
-  it("works without a cache (backward compatible)", async () => {
+  it("opens the canonical remote repository identity without a cache", async () => {
     const browser = new RemoteFileBrowser(router as any, sessionManager as any);
 
     const result = await browser.openAsRepo("prof1", "/home/user/ml-repo");
 
     expect(result).toBeDefined();
     expect(router.sendToRemoteAgent).toHaveBeenCalledWith("prof1", "open_local", {
-      path: "/home/user/ml-repo",
+      repo_id: "ssh://prof1/home/user/ml-repo", path: "/home/user/ml-repo",
     });
     // batchRpc should NOT be called when no cache is provided
     expect(router.batchRpc).not.toHaveBeenCalled();
+  });
+
+  it("projects a server-local workspace as remote for renderer worktree routing", async () => {
+    const repoId = "ssh://prof1/home/user/ml-repo";
+    router.sendToRemoteAgent.mockResolvedValueOnce({ repo_id: repoId, is_remote: false, path: "/home/user/ml-repo" });
+    const browser = new RemoteFileBrowser(
+      router as unknown as ConstructorParameters<typeof RemoteFileBrowser>[0],
+      sessionManager as unknown as ConstructorParameters<typeof RemoteFileBrowser>[1],
+    );
+    const opened = await browser.openAsRepo("prof1", "/home/user/ml-repo");
+    expect(opened).toEqual({ repo_id: repoId, is_remote: true, path: "/home/user/ml-repo" });
   });
 
   it("constructs the correct repo ID from profileId and path", async () => {

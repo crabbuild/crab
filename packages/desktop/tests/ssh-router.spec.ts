@@ -327,6 +327,24 @@ describe("RpcRouter — call queuing during reconnection", () => {
     expect(result).toEqual({ status: "clean" });
   });
 
+  it.each(["git_worktree_list", "staging_stats", "pointer_info", "pointer_top", "forge_list_prs"].flatMap(method => ["repo", "profile", "batch"].map(entry => ({ method, entry }))))("replays supported $method reads through $entry admission", async ({ method, entry }) => {
+    const sm = new MockSessionManager(); const channel = new MockChannel();
+    const { router } = createRouter(sm); sm.setStatus("server", "reconnecting");
+    const repo = "ssh://server/repo"; const params = { repo_id: repo }; const response = { observed: method };
+    const pending = entry === "profile" ? router.sendToRemoteAgent("server", method, params)
+      : entry === "batch" ? router.batchRpc(repo, [{ method, params }]) : router.route(repo, method, params);
+    // Consume rejection immediately so a broken admission rule is a test failure,
+    // not an unhandled promise left behind while replay is inspected.
+    const result = pending.then(value => ({ value }), error => ({ error }));
+    const before = channel.written.length;
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel); router.attachChannel("server", channel.asChannel());
+    const replay = router.replayQueue("server");
+    const request = channel.written[0] ? JSON.parse(channel.written[0]) as { id: number; method: string; params: unknown } : undefined;
+    if (request) simulateResponse(channel, request.id, response);
+    await replay;
+    expect({ before, request: request && { method: request.method, params: request.params }, result: await result }).toEqual({ before: 0, request: { method, params }, result: { value: entry === "batch" ? [{ result: response }] : response } });
+  });
+
   it("rejects write operations immediately during reconnection", async () => {
     const sm = new MockSessionManager();
     sm.setStatus("server", "reconnecting");
@@ -377,6 +395,47 @@ describe("RpcRouter — call queuing during reconnection", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(rejections).toHaveLength(1);
     expect(rejections[0].message).toContain("Connection lost permanently");
+  });
+});
+
+describe("RpcRouter — repository ownership across channels", () => {
+  it("reopens acknowledged repos but excludes failed and closed opens", async () => {
+    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
+    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
+    async function request(method: string, params: Record<string, string>, error = false) {
+      const pending = router.sendToRemoteAgent("server", method, params).catch((failure: unknown) => failure);
+      const frame = JSON.parse(first.written.at(-1)!) as { id: number };
+      if (error) simulateErrorResponse(first, frame.id, -32000, "Open failed"); else simulateResponse(first, frame.id, { repo_id: params.repo_id });
+      await pending;
+    }
+    await request("open_local", { repo_id: "kept", path: "/repo" });
+    await request("open_local", { repo_id: "another", path: "/another" });
+    await request("open_local", { repo_id: "failed", path: "/missing" }, true);
+    await request("open_local", { repo_id: "closed", path: "/closed" }); await request("close", { repo_id: "closed" });
+    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
+    const restored = router.restoreRepositories("server");
+    for (let i = 0; i < 2; i++) {
+      await vi.waitFor(() => expect(second.written.length).toBe(i + 1));
+      const frame = JSON.parse(second.written[i]) as { id: number }; simulateResponse(second, frame.id, {});
+    }
+    await restored;
+    expect(second.written.map(frame => { const { method, params } = JSON.parse(frame) as { method: string; params: unknown }; return { method, params }; })).toEqual([
+      { method: "open_local", params: { repo_id: "kept", path: "/repo" } }, { method: "open_local", params: { repo_id: "another", path: "/another" } },
+    ]);
+  });
+
+  it("rejects a retired restore and never writes its next open into the newer channel", async () => {
+    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
+    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
+    for (const id of ["first", "second"]) {
+      const opening = router.sendToRemoteAgent("server", "open_local", { repo_id: id, path: `/${id}` });
+      const request = JSON.parse(first.written.at(-1)!) as { id: number }; simulateResponse(first, request.id, {}); await opening;
+    }
+    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
+    const restoring = router.restoreRepositories("server").catch((error: unknown) => error);
+    const third = new MockChannel(); router.attachChannel("server", third.asChannel());
+    expect({ result: await restoring, writes: third.written }).toEqual({ result: expect.objectContaining({ message: expect.stringContaining("replaced") }), writes: [] });
+    router.forgetRepositories("server"); await router.restoreRepositories("server"); expect(third.written).toEqual([]);
   });
 });
 

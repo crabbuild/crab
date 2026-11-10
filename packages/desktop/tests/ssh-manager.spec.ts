@@ -603,6 +603,31 @@ describe("SSH connection ownership", () => {
     expect(completed).toEqual([{ profileId: "test-profile-1", stage: "starting", percent: 100 }]);
   });
 
+  it("waits for repository restoration before publishing connected readiness", async () => {
+    const { manager, router } = fixture(); const reopened = pending<void>();
+    const restore = vi.spyOn(router, "restoreRepositories").mockReturnValueOnce(reopened.promise);
+    const connecting = manager.connect(makeProfile({ autoDeployAgent: true }));
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    expect({ restoring: restore.mock.calls, status: manager.getStatus("test-profile-1") }).toEqual({ restoring: [["test-profile-1"]], status: "deploying" });
+    reopened.resolve(undefined); await connecting; expect(manager.getStatus("test-profile-1")).toBe("connected");
+  });
+
+  it("cannot publish a late repository restore after disconnect", async () => {
+    const { manager, router } = fixture(); const reopened = pending<void>();
+    vi.spyOn(router, "restoreRepositories").mockReturnValueOnce(reopened.promise);
+    const connecting = manager.connect(makeProfile({ autoDeployAgent: true })).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    await manager.disconnect("test-profile-1"); reopened.resolve(undefined); await connecting; await vi.advanceTimersByTimeAsync(0);
+    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
+  });
+
+  it.each([{ host: "new.example.invalid" }, { port: 2222 }, { username: "another" }])("forgets repository identities when the endpoint changes: %j", async endpoint => {
+    const { manager, router } = fixture(); await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
+    const forget = vi.spyOn(router, "forgetRepositories");
+    await connectProfile(manager, makeProfile({ autoDeployAgent: true, ...endpoint }));
+    expect(forget.mock.calls).toEqual([["test-profile-1"]]);
+  });
+
   it("redeploys and actually executes the router's queued read after reconnect", async () => {
     const { manager, router, deploy, channels } = fixture(); const client = await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
     await vi.advanceTimersByTimeAsync(0); client.emit("end");

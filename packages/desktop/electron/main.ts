@@ -26,6 +26,7 @@ import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
 import { SshSessionManager } from "./ssh-manager";
 import { RemoteRuntimeStore } from "./ssh-runtime";
+import { RemoteFileBrowser } from "./ssh-file-browser";
 import { KnownHostsManager, createHostKeyVerifier } from "./ssh-known-hosts";
 import { confirmSshHostKey } from "./ssh-host-key-dialog";
 import { registerSshIpcHandlers } from "./ssh-ipc";
@@ -1906,59 +1907,13 @@ app.whenReady().then(async () => {
       });
     });
 
-    // Register the ssh:open-as-repo IPC handler with provider registration.
-    // This replaces the stub handler (if any) and ensures the RemoteProvider
-    // is registered for the repo_id before the handle is returned to the renderer.
-    try { ipcMain.removeHandler("ssh:open-as-repo"); } catch { /* no existing handler */ }
-    ipcMain.handle(
-      "ssh:open-as-repo",
-      async (_event: unknown, profileId: string, remotePath: string) => {
-        const status = sshSessionManager.getStatus(profileId);
-        if (status !== "connected") {
-          throw new Error(`SSH connection not available (status: ${status})`);
-        }
-
-        const result = await rpcRouter.sendToRemoteAgent(profileId, "open_local", {
-          path: remotePath,
-        });
-
-        // Register the RemoteProvider for this repo_id BEFORE returning
-        // the handle to the renderer (prevents race conditions).
-        const repoId = `ssh://${profileId}${remotePath}`;
-        if (!registry.has(repoId)) {
-          registry.register(repoId, remoteProvider);
-        }
-
-        // Populate forge_provider on the RepoHandle if the remote agent
-        // didn't return it (older agent versions or detection failure).
-        const handle = result as Record<string, unknown> | null;
-        if (handle && !handle.forge_provider) {
-          const { detectForgeFromUrl } = await import("./forge-detect.js");
-          try {
-            const configResult = await rpcRouter.sendToRemoteAgent(
-              profileId,
-              "git_config_get",
-              { repo_id: repoId, keys: ["remote.origin.url"] },
-            ) as { values?: Record<string, string | null> };
-            const remoteUrl = configResult?.values?.["remote.origin.url"];
-            if (remoteUrl) {
-              const forgeProvider = detectForgeFromUrl(remoteUrl);
-              if (forgeProvider) {
-                handle.forge_provider = forgeProvider;
-              }
-            }
-          } catch {
-            // Forge detection is best-effort — don't block repo open.
-          }
-        }
-
-        // Start remote file watching automatically when a remote repo
-        // is opened. Fire-and-forget — watching is a UX enhancement.
-        void remoteProvider.watchStart(repoId);
-
-        return result;
-      },
-    );
+    const remoteFileBrowser = new RemoteFileBrowser(rpcRouter, sshSessionManager, undefined, registry, remoteProvider);
+    ipcMain.handle("ssh:open-as-repo", async (_event: unknown, profileId: string, remotePath: string) => {
+      const handle = await remoteFileBrowser.openAsRepo(profileId, remotePath);
+      const repoId = `ssh://${profileId}${remotePath}`;
+      void remoteProvider.watchStart(repoId);
+      return handle;
+    });
 
     wireEnhancedIpcHandlers({
       fileTransferManager,

@@ -14,6 +14,7 @@ import { Client, Server, utils, type Connection, type SFTPWrapper, type Stats } 
 import { AgentDeployer } from "../electron/ssh-deployer";
 import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
 import { RemoteRuntimeStore } from "../electron/ssh-runtime";
+import { RemoteFileBrowser } from "../electron/ssh-file-browser";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
 const key = utils.parseKey(pem);
@@ -195,19 +196,28 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     let completedWithCapabilities = false;
     manager.on("ssh:deploy-progress", value => { if (value.stage === "starting" && value.percent === 100) completedWithCapabilities = Boolean(negotiator.getCached("runtime")); });
     try {
-      await manager.connect({ id: "runtime", label: "Owned native runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
+      await manager.connect({ id: "runtime", label: "Owned native runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: true, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
       expect({ status: manager.getStatus("runtime"), version: negotiator.getCached("runtime")?.version, downloads: requests.length, uploads, completedWithCapabilities }).toEqual({ status: "connected", version, downloads: 3, uploads: 2, completedWithCapabilities: true });
       const repo = path.join(remote, "repo"); const worktree = path.join(remote, "task-worktree"); await mkdir(repo);
       const env = { HOME: remote, PATH: process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
       await run("git", ["init", "--template="], { cwd: repo, env }); await writeFile(path.join(repo, "tracked.txt"), "before\n");
       await run("git", ["add", "tracked.txt"], { cwd: repo, env });
       await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo, env });
-      await router.sendToRemoteAgent("runtime", "open_local", { repo_id: "owned", path: repo });
-      const created = await router.sendToRemoteAgent("runtime", "git_worktree_add", { repo_id: "owned", path: worktree, branch: "owned-task", create_branch: true }) as { created: boolean; path: string };
+      const browser = new RemoteFileBrowser(router, manager);
+      const opened = await browser.openAsRepo("runtime", repo) as { repo_id: string; is_remote: boolean };
+      const repoId = `ssh://runtime${repo}`;
+      expect({ id: opened.repo_id, remote: opened.is_remote }).toEqual({ id: repoId, remote: true });
+      const created = await router.sendToRemoteAgent("runtime", "git_worktree_add", { repo_id: repoId, path: worktree, branch: "owned-task", create_branch: true }) as { created: boolean; path: string };
       await writeFile(path.join(worktree, "tracked.txt"), "after-native-deployment\n");
       const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
       expect({ created: created.created, path: created.path, content: await readFile(path.join(worktree, "tracked.txt"), "utf8"), diff: comparison.diff }).toEqual({ created: true, path: await realpath(worktree), content: "after-native-deployment\n", diff: expect.stringContaining("+after-native-deployment") });
-      await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, status: manager.getStatus("runtime") }));
+      // A real transport loss must defer the supported read until the new
+      // sidecar has attached and completed its own capability handshake.
+      for (const connection of connections) connection.end();
+      await vi.waitFor(() => expect(manager.getStatus("runtime")).toBe("reconnecting"));
+      const listing = await router.sendToRemoteAgent("runtime", "git_worktree_list", { repo_id: repoId });
+      expect({ listing, status: manager.getStatus("runtime"), uploads }).toEqual({ listing: { worktrees: expect.arrayContaining([expect.objectContaining({ path: await realpath(worktree) })]) }, status: "connected", uploads: 2 });
+      await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, listing, status: manager.getStatus("runtime") }));
     } finally { await manager.disconnect("runtime"); }
     await vi.waitFor(() => expect(children.size).toBe(0), { timeout: 10_000 });
     expect(exits.every(code => code === 0)).toBe(true);

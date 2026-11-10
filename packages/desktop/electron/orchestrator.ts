@@ -949,10 +949,8 @@ export class Orchestrator extends EventEmitter {
     if (task.status !== "running") throw new Error("Task startup was cancelled");
     await this.persistTasks();
     if (task.status !== "running") throw new Error("Task startup was cancelled");
-    this.emit("orchestrator:task-status", { taskId: task.id, status: task.status });
-
-    // Set up timeout (same as local tasks).
-    this.setupTimeout(task.id);
+    // launchTask owns the running transition and timeout before remote setup.
+    // Publishing them again duplicates renderer transitions and resets its budget.
 
     // Send the task_spawn RPC to the remote agent. The remote agent
     // spawns the CLI and streams events back as notifications.

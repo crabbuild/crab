@@ -616,6 +616,34 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   `42752026672` builds and smokes the Linux package but reports 21 regression
   failures (routing, capability defaults and remote task lifecycle); these
   remain under investigation and must not be reported as a green gate.
+- Broad CI exposed two source regressions: the reconnect allowlist omitted
+  supported worktree/staging/pointer/forge reads, and remote startup repeated
+  its running transition and reset the timeout already owned by `launchTask`.
+  Fifteen new repo/profile/batch read cases fail on the prior source, then pass
+  after inspecting the Rust handlers, read-only staging CLI, worktree list path
+  and all four forge providers' HTTP GET implementations. Mutation and unknown
+  methods retain immediate rejection; unsupported `crab_status`, cancellation
+  replay and array-batch transport are not restored to satisfy older mocks.
+  Five existing routing/lifecycle suites pass after the source corrections.
+  The native reconnect case then reproduced `repository not open` on a new
+  sidecar. The router now retains only acknowledged local workspace opens, drops
+  acknowledged closes, and restores that session state before readiness and
+  queued reads. Endpoint changes forget old identities; late restores cannot
+  write into a replacement channel. The production open handler delegates to
+  the existing file browser, supplies Rust's required `repo_id`, and returns
+  an SSH handle so renderer worktree opens stay remote. The real fixture uses
+  this same open path, creates a worktree, drops the transport, reuses verified
+  binaries and receives the queued worktree list from a replacement sidecar.
+  This remains session-state restoration, not replay of uncertain mutations.
+  Evidence: `ssh-read-siblings-before.json`, `ssh-read-siblings-final.json`,
+  `ssh-repository-reopen-before.json`, `ssh-repository-reopen-native-final.json`
+  `ssh-reopen-exact-source-native.json` and `ssh-reopen-final.json`. The final
+  seven-file scope passes 178 tests;
+  ten real SSH/SFTP native cases pass, including reconnect. Production and
+  fixture types, the Electron build, Rust formatting and diff checks pass. Broader CI is still a release gate; older
+  mocks asserting optimistic capabilities, unsupported remote checkpointing,
+  cancellation replay, array-batch transport and pre-owner admission timing
+  need contract review alongside the remaining source gaps.
 - Test Connection now owns its authenticated command until channel closure.
   Its five-second deadline includes opening the exec channel; timeout, transport
   loss, stream errors, failed exit/signal and excessive output fail the test and

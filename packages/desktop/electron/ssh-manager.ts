@@ -435,6 +435,9 @@ export class SshSessionManager extends EventEmitter {
   private async openConnection(profile: SshProfile, status: "connecting" | "reconnecting"): Promise<OwnedConnection> {
     const previous = this.connections.get(profile.id);
     if (previous) {
+      if (previous.profile.host !== profile.host || previous.profile.port !== profile.port || previous.profile.username !== profile.username) {
+        this.agentDeps?.rpcRouter.forgetRepositories(profile.id);
+      }
       previous.lifetime.abort(new Error("SSH connection replaced"));
       this.closeConnection(previous);
     }
@@ -661,6 +664,8 @@ export class SshSessionManager extends EventEmitter {
       };
       channel.once("end", lost); channel.once("close", lost); channel.once("error", lost);
       await this.owned(connection, deps.capabilityNegotiator.negotiate(profileId));
+      this.assertCurrent(connection);
+      await this.owned(connection, deps.rpcRouter.restoreRepositories(profileId));
       this.assertCurrent(connection);
       this.emit("ssh:deploy-progress", { profileId, stage: "starting", percent: 100 });
     } catch (reason: unknown) {

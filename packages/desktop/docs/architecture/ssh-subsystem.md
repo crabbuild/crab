@@ -11,17 +11,24 @@ local native-provider proof does not establish remote chat support. See
 | Surface | Owner | Contract |
 | --- | --- | --- |
 | Authentication and host trust | `electron/ssh-manager.ts`, `ssh-known-hosts.ts` | Verify every direct/jump host before authentication; disconnect cancels pending trust decisions and opening work |
-| Initial/manual/reconnect bootstrap | `electron/ssh-manager.ts` | One connection owns its deployment, channel, capability handshake and readiness publication |
+| Initial/manual/reconnect bootstrap | `electron/ssh-manager.ts` | One connection owns deployment, channel, capability handshake, repository restoration and readiness publication |
 | Runtime acquisition | `electron/ssh-runtime.ts` | Exact app version and remote target; verified private cache; concurrent borrowers share downloads without sharing cancellation |
 | Remote installation | `electron/ssh-deployer.ts` | Matching CLI/sidecar, private staging, acknowledged writes, remote hashes, atomic publication and owned cleanup |
 | Repository RPC | `electron/ssh-router.ts` | Local requests use the local agent; `ssh://profileId/path` requests use that profile's channel; batches become independent NDJSON requests |
 | Capability negotiation | `electron/ssh-capabilities.ts` | Read actual capabilities after channel attachment; clear stale results when the owner changes |
 | Progress UI | `src/components/ssh/DeployProgressIndicator.tsx` | Typed, profile-scoped events; starting completes only after the capability handshake |
 
+The production open handler uses `RemoteFileBrowser.openAsRepo`, which supplies
+the required `repo_id`, registers the provider before returning, and projects
+the server-local workspace as an SSH handle for renderer worktree routing.
+
 The router owns UTF-8 framing and outstanding requests per exact channel. EOF,
 error or close retires that channel's requests. Reconnect queues only inspected
 reads; writes and unclassified calls fail immediately, so uncertain writes are
-never replayed. A connected SSH transport without an attached sidecar advertises
+never replayed. Acknowledged repository opens are retained in memory; successful
+closes remove them. Each new sidecar reopens those repositories before readiness
+and queued reads. Failed or uncertain opens cannot enter this set, and changing
+the profile host, port or username drops the old endpoint's identities. A connected SSH transport without an attached sidecar advertises
 no repository RPC capabilities.
 
 ## Runtime acquisition and installation
@@ -63,8 +70,8 @@ executables again; deployment never replaces a running session's binary or kills
 another session by process name.
 
 The sidecar starts with `CRAB_BIN` pointing to this CLI and its runtime prepended
-to `PATH`. The session manager attaches its sole RPC reader, negotiates capabilities
-and then publishes connected readiness. A transport failure or cancellation
+to `PATH`. The session manager attaches its sole RPC reader, negotiates capabilities,
+restores its acknowledged repositories and then publishes connected readiness. A transport failure or cancellation
 retires the owned channel and capability cache before recovery.
 
 ## Limits and qualification

@@ -81,7 +81,12 @@ const CACHEABLE_READ_METHODS = new Set([
 
 // Only inspected read handlers may be deferred. A denylist would silently
 // queue new mutations and execute them after the user lost the connection.
-const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "task_compute_diff", "git_stash_list", "git_blame"]);
+const REPLAYABLE_READ_METHODS = new Set([
+  ...CACHEABLE_READ_METHODS, "task_compute_diff", "git_stash_list", "git_blame",
+  // These handlers only inspect Git/pointer/staging metadata or list forge PRs
+  // through HTTP GET. Their mutation counterparts must never enter this queue.
+  "git_worktree_list", "staging_stats", "pointer_info", "pointer_top", "forge_list_prs",
+]);
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -130,6 +135,7 @@ export class RpcRouter extends EventEmitter {
   private transports = new Map<string, RepoTransport>();
   private channels = new Map<string, ChannelState>();
   private queues = new Map<string, QueuedCall[]>();
+  private repositories = new Map<string, Map<string, { repo_id: string; path: string }>>();
   private nextId = 1;
   /** Cumulative bandwidth counters per profile (bytes in/out since connection). */
   private bandwidthCounters = new Map<string, BandwidthStats>();
@@ -266,6 +272,21 @@ export class RpcRouter extends EventEmitter {
     this.channels.get(profileId)?.stop(new Error("Remote agent disconnected before its RPC completed; outcome is unknown"));
   }
 
+  /** Reopens acknowledged repositories on this channel before queued reads run. */
+  async restoreRepositories(profileId: string): Promise<void> {
+    const owner = this.channels.get(profileId);
+    if (!owner) throw new Error(`No active agent channel for profile: ${profileId}`);
+    const repositories = [...(this.repositories.get(profileId)?.values() ?? [])];
+    for (const repository of repositories) {
+      // A late restore must never write its next open into a replacement owner.
+      if (this.channels.get(profileId) !== owner) throw new Error("SSH repository restoration was replaced");
+      await this.writeRequest(profileId, "open_local", repository);
+    }
+  }
+
+  /** Drops repository identities when a profile changes its remote endpoint. */
+  forgetRepositories(profileId: string): void { this.repositories.delete(profileId); }
+
   /**
    * Replay queued calls after a successful reconnection.
    * Called by the session manager when a connection is re-established.
@@ -389,6 +410,10 @@ export class RpcRouter extends EventEmitter {
     // Serialize before registering callbacks. A circular input must not leave
     // a pending entry or timer after rejecting without writing any bytes.
     const frame = JSON.stringify(request) + "\n";
+    const repoId = this.extractRepoIdFromParams(params);
+    const fields = params && typeof params === "object" ? params as Record<string, unknown> : {};
+    const repository = method === "open_local" && repoId && typeof fields.path === "string"
+      ? { repo_id: repoId, path: fields.path } : undefined;
     return new Promise((resolve, reject) => {
       let settled = false;
       const cleanup = () => { clearTimeout(timer); owner.pending.delete(request.id); };
@@ -403,6 +428,13 @@ export class RpcRouter extends EventEmitter {
           fail(Object.assign(new Error(response.error.message), { code: response.error.code, data: response.error.data }));
           return;
         }
+        // Only a successful reply from this owner establishes a reopen intent.
+        // Failed/uncertain opens and acknowledged closes must not resurrect repos.
+        if (repository && repoId) {
+          let opened = this.repositories.get(profileId);
+          if (!opened) { opened = new Map(); this.repositories.set(profileId, opened); }
+          opened.set(repoId, repository);
+        } else if (method === "close" && repoId) this.repositories.get(profileId)?.delete(repoId);
         settled = true; cleanup(); resolve(response.result);
       };
       owner.pending.set(request.id, { accept, fail });

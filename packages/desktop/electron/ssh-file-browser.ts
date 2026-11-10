@@ -109,13 +109,13 @@ export class RemoteFileBrowser {
       throw new Error(`SSH connection not available (status: ${status})`);
     }
 
+    const repoId = `ssh://${profileId}${remotePath}`;
     const result = await this.router.sendToRemoteAgent(profileId, "open_local", {
-      path: remotePath,
+      repo_id: repoId, path: remotePath,
     });
 
     // Register the RemoteProvider for this repo_id in the ProviderRegistry
     // BEFORE returning the result to the renderer (prevents race conditions).
-    const repoId = `ssh://${profileId}${remotePath}`;
     if (this.registry && this.remoteProvider && !this.registry.has(repoId)) {
       this.registry.register(repoId, this.remoteProvider);
     }
@@ -151,6 +151,8 @@ export class RemoteFileBrowser {
       });
     }
 
-    return result;
+    // The sidecar describes a workspace local to its server. The renderer's
+    // handle describes SSH transport, so worktree opens must remain remote.
+    return { ...handle, is_remote: true };
   }
 }
