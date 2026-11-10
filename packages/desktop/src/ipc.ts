@@ -1280,7 +1280,7 @@ declare global {
         transferSetCompression: (enabled: boolean) => Promise<void>;
         transferSetAdaptive: (enabled: boolean) => Promise<void>;
         queueDropUpload: (params: { profileId: string; remoteDir: string; files: Array<{ localPath: string; relativePath: string }> }) => Promise<{ error?: string } | undefined>;
-        testConnection: (profileData: unknown) => Promise<unknown>;
+        testConnection: (profileData: unknown) => Promise<{ ok: boolean; error?: string }>;
         // Event listeners
         onSyncStatus: (listener: (payload: unknown) => void) => () => void;
         offSyncStatus: (listener: (payload: unknown) => void) => void;

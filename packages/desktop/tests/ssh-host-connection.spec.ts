@@ -1,7 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect as connectSocket, type Socket } from "node:net";
+import { createServer } from "node:http";
+import { chromium, expect as browserExpect, type Browser } from "@playwright/test";
+import { createServer as createViteServer } from "vite";
+import type { IpcMainInvokeEvent } from "electron";
+import { SshProfileManager } from "../electron/ssh-profiles";
+import { registerSshIpcHandlers } from "../electron/ssh-ipc";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Server, utils, type Connection } from "ssh2";
@@ -15,6 +21,8 @@ function identity() {
   return { pem, key: key.getPublicSSH(), parsed: key };
 }
 const first = identity(); const second = identity();
+const { ipcHandlers } = vi.hoisted(() => ({ ipcHandlers: new Map<string, (...args: unknown[]) => unknown>() }));
+vi.mock("electron", () => ({ ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => ipcHandlers.set(name, handler) }, BrowserWindow: { getAllWindows: () => [] }, powerMonitor: { on: () => {} } }));
 function pending<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -35,12 +43,13 @@ describe("real SSH host verification", () => {
     for (const socket of sockets) socket.destroy(); sockets.clear();
     for (const connection of connections) connection.end(); connections.clear();
     await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+    ipcHandlers.clear();
     await rm(directory, { recursive: true, force: true });
   });
-  async function server(key = first.pem, forwarding = false) {
-    let authentications = 0;
+  async function server(key = first.pem, forwarding = false, commandMode: "ok" | "hang" | "fail" = "ok") {
+    let authentications = 0; let commands = 0; let closed = 0;
     const instance = new Server({ hostKeys: [key] }, connection => {
-      connections.add(connection); connection.on("error", () => {}); connection.once("close", () => connections.delete(connection));
+      connections.add(connection); connection.on("error", () => {}); connection.once("close", () => { connections.delete(connection); closed += 1; });
       connection.on("authentication", context => {
         authentications += 1;
         if (context.method === "none" && forwarding) context.accept();
@@ -50,7 +59,9 @@ describe("real SSH host verification", () => {
       connection.on("ready", () => {
         connection.on("session", accept => accept().on("exec", (acceptCommand, reject, info) => {
           if (info.command !== "echo ok") { reject(); return; }
-          const channel = acceptCommand(); channel.write("ok\n"); channel.exit(0); channel.end();
+          commands += 1; const channel = acceptCommand();
+          if (commandMode === "hang") return;
+          channel.write("ok\n"); channel.exit(commandMode === "fail" ? 1 : 0); channel.end();
         }));
         if (forwarding) connection.on("tcpip", (accept, reject, info) => {
           // This owned server forwards only to owned loopback fixtures.
@@ -65,7 +76,7 @@ describe("real SSH host verification", () => {
     await new Promise<void>((resolve, reject) => { instance.once("error", reject); instance.listen(0, "127.0.0.1", resolve); });
     const address = instance.address();
     if (!address || typeof address === "string") throw new Error("Owned server did not bind");
-    return { port: address.port, authentications: () => authentications };
+    return { port: address.port, authentications: () => authentications, commands: () => commands, closed: () => closed, commandMode: (mode: "ok" | "hang" | "fail") => { commandMode = mode; } };
   }
   function profile(port: number, jumpHost?: string): SshProfile {
     return { id: "fixture", label: "Owned fixture", host: "127.0.0.1", port, username: "fixture", authMethod: { type: "key", keyPath }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: false, tags: [], portForwards: [], createdAt: Date.now(), jumpHost };
@@ -107,4 +118,50 @@ describe("real SSH host verification", () => {
     const result = await owner.testConnection(profile(remote.port, `127.0.0.1:${jump1.port},127.0.0.1:${jump2.port}`));
     expect({ result, approved, pins: hosts.list().map(pin => pin.port) }).toEqual({ result: { ok: true }, approved: [jump1.port, jump2.port, remote.port], pins: [jump1.port, jump2.port, remote.port] });
   });
+  it("fails a remote command with a nonzero status even when it prints ok", async () => {
+    const remote = await server(first.pem, false, "fail"); const owner = manager(async () => true);
+    expect(await owner.testConnection(profile(remote.port))).toEqual({ ok: false, error: "Remote connection test exited with status 1" });
+  });
+
+  it.skipIf(!process.env.CRAB_AGENT_LIVE_ROOT)("shows command timeout, closes SSH, and recovers on Retry in the real form", async () => {
+    const remote = await server(first.pem, false, "hang"); const owner = manager(async () => true);
+    registerSshIpcHandlers(new SshProfileManager(path.join(directory, "profiles.json")), owner, hosts);
+    const handler = ipcHandlers.get("ssh:test-connection");
+    if (!handler) throw new Error("Connection test IPC not registered");
+    const operations = new Set<Promise<void>>();
+    const bridge = createServer((request, response) => {
+      const operation = (async () => {
+        response.setHeader("Access-Control-Allow-Origin", "*"); response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        if (request.method === "OPTIONS") { response.end(); return; }
+        if (request.url === "/profile") { response.end(JSON.stringify(profile(remote.port))); return; }
+        const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const result = await handler({} as IpcMainInvokeEvent, JSON.parse(Buffer.concat(chunks).toString()));
+        response.end(JSON.stringify(result));
+      })().catch((reason: unknown) => { response.end(JSON.stringify({ ok: false, error: String(reason) })); });
+      operations.add(operation); void operation.finally(() => operations.delete(operation));
+    });
+    const vite = await createViteServer({ cacheDir: `${directory}-vite-cache`, server: { host: "127.0.0.1", port: 0, strictPort: false }, clearScreen: false });
+    let browser: Browser | undefined;
+    try {
+      browser = await chromium.launch({ channel: "chrome" });
+      await new Promise<void>(resolve => bridge.listen(0, "127.0.0.1", resolve)); await vite.listen();
+      const api = bridge.address(); const ui = vite.httpServer?.address();
+      if (!api || typeof api === "string" || !ui || typeof ui === "string") throw new Error("Fixture bridge unavailable");
+      const page = await browser.newPage();
+      page.on("pageerror", error => { console.error("Connection fixture renderer:", error.message); });
+      await page.goto(`http://127.0.0.1:${ui.port}/tests/fixtures/ssh-connection-form.html?api=${encodeURIComponent(`http://127.0.0.1:${api.port}`)}`);
+      const test = page.getByRole("button", { name: "Test SSH connection", exact: true });
+      await test.click({ timeout: 10_000 }); await browserExpect(page.getByRole("alert")).toHaveText("Connection timed out", { timeout: 10_000 });
+      await vi.waitFor(() => expect(remote.closed()).toBe(1));
+      await page.screenshot({ path: path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-test-command-timeout.png") });
+      await browserExpect(test).toBeEnabled(); remote.commandMode("ok");
+      await test.click(); await browserExpect(page.getByRole("alert")).toContainText("Connection successful");
+      await vi.waitFor(() => expect(remote.closed()).toBe(2)); expect(remote.commands()).toBe(2);
+      await page.screenshot({ path: path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-test-command-recovery.png") });
+    } finally {
+      await browser?.close(); await vite.close(); bridge.closeAllConnections();
+      await new Promise<void>(resolve => bridge.close(() => resolve())); await Promise.allSettled([...operations]);
+      await rm(`${directory}-vite-cache`, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

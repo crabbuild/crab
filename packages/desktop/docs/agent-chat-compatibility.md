@@ -568,6 +568,23 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- Test Connection now owns its authenticated command until channel closure.
+  Its five-second deadline includes opening the exec channel; timeout, transport
+  loss, stream errors, failed exit/signal and excessive output fail the test and
+  close its transport. A late channel is retired. Success requires an exact
+  `ok` output line; SSH2's optional exit status remains optional, while a reported
+  failure cannot be overridden by stdout. Five regressions fail before the fix.
+  The form/preload/type bridge now consumes the backend's single `{ ok, error }`
+  result contract. The only reachable renderer bridge caller is ConnectionForm;
+  the pre-existing QuickStartWizard has no callers and remains outside this path.
+  Real SSH and registered IPC feed the actual form: a hung remote command renders
+  timeout, closes its connection, re-enables Test Connection, then a second test
+  renders success and closes its new transport. Scoped command/SSH tests and the
+  separate live form case pass. The bounded command owner adds source lines to
+  replace the previously unbounded callback; no helper, setting or fallback is
+  introduced. Evidence: `ssh-test-command-before.json`,
+  `ssh-test-command-final.json`, `ssh-test-command-live.json`, and the timeout/
+  recovery screenshots in the owned qualification output.
 - SSH host verification now runs before authentication for direct connections,
   every ProxyJump hop, reconnect and Test Connection. A connection-owned native
   Electron dialog rejects by default; replacing a changed key also requires
@@ -1085,9 +1102,9 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   use `resources/native` and packaged `agent` layouts; remote-target binaries,
   upload and version/hash policy need qualification. Host verification now has
   policy, real SSH and native-dialog proof; packaged/cross-OS qualification is
-  still open. Test Connection also needs bounded remote-command failure
-  handling after its authenticated handshake. Do not claim production SSH
-  readiness from the owned loopback fixture. Remote file editing/status consumers and their sidecar
+  still open. Test Connection now has bounded remote-command ownership and
+  live form failure/retry proof. Do not claim production SSH readiness from the
+  owned loopback fixture. Remote file editing/status consumers and their sidecar
   parameter/result contracts, remote Apply/Discard safety, native task dispatch,
   and Git-filter descendant cleanup remain open.
 - Finish live watch/command-control checks and the lifecycle/owner contract for

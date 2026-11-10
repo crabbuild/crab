@@ -604,8 +604,8 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("ssh:connect", profileId),
     disconnect: (profileId: string) =>
       ipcRenderer.invoke("ssh:disconnect", profileId),
-    testConnection: (profileId: string) =>
-      ipcRenderer.invoke("ssh:test-connection", profileId),
+    testConnection: (profile: unknown) =>
+      ipcRenderer.invoke("ssh:test-connection", profile) as Promise<{ ok: boolean; error?: string }>,
     getStatus: (profileId: string) =>
       ipcRenderer.invoke("ssh:get-status", profileId),
     listKnownHosts: () => ipcRenderer.invoke("ssh:list-known-hosts") as Promise<KnownHost[]>,

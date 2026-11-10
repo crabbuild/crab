@@ -296,25 +296,56 @@ export class SshSessionManager extends EventEmitter {
 
       await this.connectClient(client, config, profile.host, profile.port, lifetime);
 
-      // Run `echo ok` and verify output
+      const testingClient = client;
       const output = await new Promise<string>((resolve, reject) => {
-        client!.exec("echo ok", (err, stream) => {
-          if (err) {
-            reject(err);
+        let settled = false;
+        let channel: ClientChannel | undefined;
+        let data = "";
+        let received = 0;
+        const cleanup = () => {
+          settled = true; clearTimeout(timer);
+          testingClient.removeListener("close", disconnected);
+          testingClient.removeListener("error", failed);
+          channel?.removeListener("data", collect);
+          channel?.removeListener("close", completed);
+          channel?.stderr.removeListener("data", drain);
+        };
+        const failed = (reason: unknown) => {
+          if (settled) return;
+          cleanup(); reject(reason); channel?.destroy();
+        };
+        const disconnected = () => failed(new Error("SSH connection closed during connection test"));
+        const completed = (code?: number | null, signal?: string) => {
+          if (code !== undefined && code !== 0) {
+            failed(new Error(signal ? `Remote connection test ended with signal ${signal}` : `Remote connection test exited with status ${code}`));
             return;
           }
-          let data = "";
-          stream.on("data", (chunk: Buffer) => {
-            data += chunk.toString();
+          cleanup(); resolve(data);
+        };
+        const collect = (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > 64 * 1024) { failed(new Error("Remote connection test output exceeded 64 KiB")); return; }
+          data += chunk.toString();
+        };
+        const drain = () => {};
+        // Authentication alone does not prove an exec channel will open or close.
+        // Bound the whole command, including its callback, and retire late channels.
+        const timer = setTimeout(() => failed(new Error("Remote connection test command timed out")), 5000);
+        testingClient.once("close", disconnected); testingClient.once("error", failed);
+        try {
+          testingClient.exec("echo ok", (error, stream) => {
+            if (error) { failed(error); return; }
+            // Consume errors until physical close even if the test already ended.
+            stream.on("error", failed);
+            stream.once("close", () => stream.removeListener("error", failed));
+            if (settled) { stream.destroy(); return; }
+            channel = stream;
+            stream.on("data", collect); stream.once("close", completed); stream.stderr.on("data", drain);
           });
-          stream.on("close", () => resolve(data));
-          stream.stderr.on("data", () => {
-            // Ignore stderr — some shells emit login messages
-          });
-        });
+        } catch (reason: unknown) { failed(reason); }
       });
 
-      if (!output.includes("ok")) {
+      if (!output.split(/\r?\n/).includes("ok")) {
         return { ok: false, error: "Remote command did not return expected output" };
       }
 

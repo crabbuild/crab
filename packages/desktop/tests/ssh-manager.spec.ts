@@ -733,3 +733,54 @@ describe("SSH host verification ownership", () => {
     expect({ status: manager.getStatus("test-profile-1"), attempts: mockClientInstances.length, destroyed: client.destroy.mock.calls.length }).toEqual({ status: "error", attempts: 1, destroyed: 1 });
   });
 });
+
+describe("SSH connection test command ownership", () => {
+  beforeEach(() => { vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock"; });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+  async function testing() {
+    const manager = new SshSessionManager(async () => {});
+    let result: { ok: boolean; error?: string } | undefined;
+    const done = manager.testConnection(makeProfile()).then(value => { result = value; });
+    await vi.waitFor(() => expect(mockClientInstances[0]?.connect).toHaveBeenCalled());
+    const client = mockClientInstances[0]; const channel = Object.assign(new MockClientChannel(), { destroy: vi.fn() });
+    client.exec.mockImplementation((_command: string, callback: (error: null, stream: typeof channel) => void) => callback(null, channel));
+    client.emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    return { client, channel, done, result: () => result };
+  }
+  it("bounds a command that never closes and retires its transport", async () => {
+    const test = await testing(); await vi.advanceTimersByTimeAsync(5001);
+    try { expect({ result: test.result(), closed: test.client.destroy.mock.calls.length > 0 }).toEqual({ result: { ok: false, error: "Connection timed out" }, closed: true }); }
+    finally { test.channel.emit("close", 0); await test.done; }
+  });
+  it("fails immediately if the transport closes before the command", async () => {
+    const test = await testing(); test.client.emit("close"); await vi.advanceTimersByTimeAsync(0);
+    try { expect(test.result()).toEqual({ ok: false, error: "SSH connection closed during connection test" }); }
+    finally { test.channel.emit("close", 0); await test.done; }
+  });
+  it.each([[1, undefined], [null, "TERM"]])("does not accept expected output with failed exit %s/%s", async (code, signal) => {
+    const test = await testing(); test.channel.emit("data", Buffer.from("ok\n")); test.channel.emit("close", code, signal); await test.done;
+    expect(test.result()?.ok).toBe(false);
+  });
+  it("does not treat an unrelated word containing ok as success", async () => {
+    const test = await testing(); test.channel.emit("data", Buffer.from("broken\n")); test.channel.emit("close", 0); await test.done;
+    expect(test.result()).toEqual({ ok: false, error: "Remote command did not return expected output" });
+  });
+  it("handles command stream errors without an unhandled event", async () => {
+    const test = await testing(); test.channel.emit("error", new Error("Remote channel failed")); await test.done;
+    expect(test.result()).toEqual({ ok: false, error: "Remote channel failed" }); test.channel.emit("close");
+  });
+  it("bounds output from a command that floods stdout", async () => {
+    const test = await testing(); test.channel.emit("data", Buffer.alloc(70 * 1024)); await test.done;
+    expect(test.result()).toEqual({ ok: false, error: "Remote connection test output exceeded 64 KiB" }); test.channel.emit("close");
+  });
+  it("retires an exec channel delivered after the command deadline", async () => {
+    const manager = new SshSessionManager(async () => {}); const done = manager.testConnection(makeProfile());
+    await vi.waitFor(() => expect(mockClientInstances[0]?.connect).toHaveBeenCalled()); const client = mockClientInstances[0];
+    let callback!: (error: null, stream: MockClientChannel & { destroy: ReturnType<typeof vi.fn> }) => void;
+    client.exec.mockImplementation((_command: string, ready: typeof callback) => { callback = ready; });
+    client.emit("ready"); await vi.advanceTimersByTimeAsync(5001); await done;
+    const late = Object.assign(new MockClientChannel(), { destroy: vi.fn() }); callback(null, late);
+    expect({ destroyed: late.destroy.mock.calls.length, readers: late.listenerCount("data") }).toEqual({ destroyed: 1, readers: 0 }); late.emit("close");
+  });
+
+});
