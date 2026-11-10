@@ -1,6 +1,6 @@
 # Agent chat compatibility
 
-Status: in progress; [draft PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `54e5120f134`.
+Status: in progress; [PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `e60de177853`.
 Compatibility is not yet fully qualified.
 
 Refreshed from `64b33b64cba`; the workflow-output update integrated without
@@ -21,6 +21,24 @@ That update touches only its guide, StagingZones and CommitComposer. The two
 published audit commits rebased without conflicts; all 14 in-flight SSH-owner
 files matched their preserved hashes after restoring the patch. Responsive
 Changes-page edits enter through the base branch, not the audit commits.
+
+The audit is now rebased onto `e60de177853`, integrating terminal persistence
+and desktop CI fixes (#672 and #669). Three conflicts were resolved by keeping
+shared settings read/write helpers, the terminal resume/detach bridge and CI
+failure artifacts alongside native conversation ownership, host trust and the
+remote runtime job. Of the 182 preserved audit file hashes, 174 remain exact;
+the eight changed files incorporate those inspected upstream paths. Native
+runtime and frontend builds were repeated because the base changes Rust storage,
+repository initialization and terminal composition. All 372 scoped checks across
+17 files pass, including settings and terminal ownership. The terminal lifecycle
+fixture now owns its shell home: personal startup files produced an NVM warning
+and prevented its foreground marker; the controlled-home rerun passes. The
+rebuilt pair passes ten real SSH/SFTP cases and four SSH task-view cases, and
+the focused Rust cache ownership test passes on the integrated source. Production
+types, Electron/renderer/native builds, workflow parsing, Rust formatting and
+diff checks pass. Evidence: `e60-scoped-final.json`, `e60-native-ssh.json`,
+`e60-diff-live.json`, `e60-indexer-rust-test.log`, `e60-native-build.log` and
+`e60-terminal-owned-home.json`. Broad/cross-OS CI is still required.
 
 ## Contracts checked
 
@@ -584,7 +602,7 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   repository Cargo configuration names a cross linker that is absent on the
   native runner. The desktop ARM64 job now uses the native compiler overrides
   already used by the release job. [Cargo's configuration contract](https://doc.rust-lang.org/cargo/reference/config.html#environment-variables)
-  gives those environment settings precedence over TOML. YAML parsing passes;
+  gives the linker environment override precedence over TOML. YAML parsing passes;
   the native ARM64 build and bootstrap rerun is still required.
 - A two-process native probe reproduced SlateDB writer fencing in the shared
   account-wide indexer cache. Both processes reported the same database path;
@@ -1193,6 +1211,13 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   unchanged, but native Retry returned `no rollout found`. Claude's equivalent
   checkpoint-failure run passes. Rollout existence, follow-up cancellation, and
   request traces are retained alongside browser traces for diagnosis.
+- Bring single-file Revert under the workspace writer/backup owner. The current
+  `orchestrator:revert-file` handler runs Git directly; DiffTab discards the row
+  after any resolved IPC response, including `{ success: false }`. The preload
+  method exists, but the renderer bridge lacks its type. Capture a real failure
+  and active-writer case, then align it with hunk/full-file restoration ownership
+  and visible failure handling. [Git's path checkout](https://git-scm.com/docs/git-checkout)
+  modifies index and working-tree content, so it is not a read-only preview.
 - Finish native recovery semantics. Saved-file restoration and text-hunk ownership
   now have real file/browser proof. Turn-summary Undo still
   needs native provider-shape qualification: Codex unified diffs and Claude

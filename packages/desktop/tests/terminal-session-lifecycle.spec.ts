@@ -48,7 +48,9 @@ it("keeps an interactive foreground process when the app disconnects and reconne
     await server.start();
     await client.ensureConnected();
     router.register();
-    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root }) as TermSpawnResult;
+    // User startup files can consume terminal input while loading. The fixture
+    // owns its shell home so foreground-process survival is deterministic.
+    const spawned = await handlers.get("crab:term-spawn")!(null, { cwd: root, env: { HOME: root, ZDOTDIR: root } }) as TermSpawnResult;
     expect(spawned.resolvedSessionType).toBe("daemon");
     await bridge.handleWrite(spawned.id, `${JSON.stringify(process.execPath)} agent.cjs\r`);
     await vi.waitFor(() => expect(output).toMatch(/agent-ready:(\d+)/), { timeout: 5000 });
