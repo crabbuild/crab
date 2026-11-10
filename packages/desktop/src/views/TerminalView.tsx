@@ -91,10 +91,11 @@ import {
 import { publishToast } from "../lib/toasts";
 import { TerminalBreadcrumbBar } from "../components/TerminalBreadcrumbBar";
 import {
-  serializeLayout,
+  captureLayout,
+  restoreLayoutTree,
   deserializeLayout,
-  type TerminalViewState,
   type SaveStateRequest,
+  type PersistedSession,
 } from "../lib/terminal-persistence";
 import {
   queueRestoreSnapshot,
@@ -110,6 +111,7 @@ import {
   splitLeafInPlace,
   removeLeaf,
   updateLeaf,
+  updateBranchSizes,
   findLeaf,
   findLeafByTab,
   getAllLeaves,
@@ -182,9 +184,8 @@ interface Props {
    */
   visible?: boolean;
   /**
-   * Default backend for newly spawned local terminals. Normal repo terminals
-   * remain in-process by default; agent-task terminals opt into daemon mode so
-   * the PTY survives view unmount/remount cycles.
+   * Default backend for newly spawned terminals. Daemon ownership keeps
+   * shells and agents alive across renderer eviction and application restarts.
    */
   defaultSessionType?: "daemon" | "in-process";
 }
@@ -193,6 +194,7 @@ interface TermTab {
   id: string;
   title: string;
   shell: string;
+  cwd?: string;
   /** When set, indicates this tab was spawned with a startup command
    *  and is waiting for the agent to produce output. Used to show
    *  a loading indicator in the viewport. */
@@ -249,17 +251,19 @@ const MAX_HISTORY = 50;
 // --- IPC ---
 
 const sshTermIpc = {
-  openTerminal: (profileId: string, cols: number, rows: number, cwd?: string) =>
-    (window.crab as any).ssh.openTerminal(profileId, cols, rows, cwd) as Promise<{ terminalId: string }>,
+  openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) =>
+    window.crab.ssh.openTerminal(profileId, cols, rows, cwd, resumeId, ownerPath),
   closeTerminal: (terminalId: string) =>
     (window.crab as any).ssh.closeTerminal(terminalId) as Promise<void>,
+  detachTerminal: (terminalId: string) =>
+    window.crab.ssh.detachTerminal(terminalId),
   resize: (terminalId: string, cols: number, rows: number) =>
     (window.crab as any).ssh.terminalResize(terminalId, cols, rows) as Promise<void>,
   write: (terminalId: string, data: string) =>
     (window.crab as any).ssh.terminalWrite(terminalId, data) as Promise<void>,
   reconnect: (terminalId: string) =>
     (window.crab as any).ssh.terminalReconnect(terminalId) as Promise<string>,
-  onData: (listener: (evt: { terminalId: string; data: string }) => void) =>
+  onData: (listener: (evt: { terminalId: string; data: string; ownerPath?: string }) => void) =>
     (window.crab as any).ssh.onTerminalData(listener) as () => void,
   onClosed: (listener: (evt: { terminalId: string; profileId: string }) => void) =>
     (window.crab as any).ssh.onTerminalClosed(listener) as () => void,
@@ -304,8 +308,6 @@ interface DaemonAttachResult {
 
 interface TerminalWorkspaceStateV1 {
   version: 1;
-  openSessionIds: string[];
-  activeSessionId: string | null;
   pinnedSessionIds: string[];
   hiddenSessionIds: string[];
   sessionSidebarSide: TerminalSessionSidebarSide;
@@ -323,15 +325,15 @@ const ptyIpc = {
     startupCommand?: string,
     agentMeta?: AgentMeta,
     sessionType?: "daemon" | "in-process",
+    ownerPath?: string,
   ) =>
     (window.crab as any).termSpawn({
       cwd,
       shell,
       env: extraEnv,
       startupCommand,
-      // Agent sessions use daemon mode for durability (survive app restarts).
-      // User terminals use in-process mode — ephemeral, no session leak risk.
-      sessionType: sessionType ?? (agentMeta != null ? "daemon" : "in-process"),
+      ownerPath,
+      sessionType: sessionType ?? "daemon",
       ...(agentMeta != null ? { agentMeta } : {}),
     }) as Promise<{ id: string; resolvedSessionType?: "daemon" | "in-process" }>,
   write: (id: string, data: string) =>
@@ -352,7 +354,7 @@ const ptyIpc = {
     (window.crab as any).termListShells() as Promise<string[]>,
   poolHint: (cwd: string) =>
     (window.crab as any).termPoolHint(cwd) as Promise<void>,
-  onData: (listener: (evt: { id: string; data: string }) => void) =>
+  onData: (listener: (evt: { id: string; data: string; ownerPath?: string }) => void) =>
     (window.crab as any).onTermData(listener) as () => void,
   onExit: (listener: (evt: { id: string; exitCode: number }) => void) =>
     (window.crab as any).onTermExit(listener) as () => void,
@@ -421,8 +423,6 @@ function loadWorkspaceState(persistenceKey: string): TerminalWorkspaceStateV1 | 
     if (parsed.version !== 1) return null;
     return {
       version: 1,
-      openSessionIds: Array.isArray(parsed.openSessionIds) ? parsed.openSessionIds.filter((id): id is string => typeof id === "string") : [],
-      activeSessionId: typeof parsed.activeSessionId === "string" ? parsed.activeSessionId : null,
       pinnedSessionIds: Array.isArray(parsed.pinnedSessionIds) ? parsed.pinnedSessionIds.filter((id): id is string => typeof id === "string") : [],
       hiddenSessionIds: Array.isArray(parsed.hiddenSessionIds) ? parsed.hiddenSessionIds.filter((id): id is string => typeof id === "string") : [],
       sessionSidebarSide: parsed.sessionSidebarSide === "right" ? "right" : "left",
@@ -634,7 +634,10 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   });
 
   /** Whether the PTY daemon is ready and circuit breaker state — from PtyModeContext. */
-  const { daemonReady, breakerOpen } = usePtyMode();
+  const { daemonReady, breakerOpen, configuredMode, loading: ptyModeLoading } = usePtyMode();
+  const requestedSessionType = defaultSessionType ?? (configuredMode === "in-process" ? "in-process" : "daemon");
+  const requestedSessionTypeRef = useRef(requestedSessionType);
+  requestedSessionTypeRef.current = requestedSessionType;
   const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const pendingRestoreSnapshotsRef = useRef<PendingRestoreSnapshotMap>(new Map());
@@ -723,14 +726,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       return [];
     }
     try {
-      const sessions = await ptyIpc.listDaemonSessions(repo.path);
+      const sessions = await ptyIpc.listDaemonSessions(persistenceKey);
       setDaemonSessions(sessions);
       return sessions;
     } catch {
       setDaemonSessions([]);
       return [];
     }
-  }, [repo.path]);
+  }, [repo.path, persistenceKey]);
 
   // ─── Session persistence: save on app close ─────────────────────
   //
@@ -741,202 +744,172 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   const activePaneIdRef = useRef(activePaneId);
   useEffect(() => { activePaneIdRef.current = activePaneId; }, [activePaneId]);
 
-  useEffect(() => {
-    const off = ptyIpc.onSaveRequest(() => {
-      const currentTree = splitTreeRef.current;
-      const allLeaves = getAllLeaves(currentTree);
-      const allTabs = allLeaves.flatMap((l) => l.tabs);
-      if (allTabs.length === 0) return;
+  const failedRestoreTabsRef = useRef(new Map<string, PersistedSession>());
+  const retryingRestoreRef = useRef(new Set<string>());
+  const persistenceReadyRef = useRef(false);
 
-      // Build the view state for serialization.
-      const activeLeaf = findLeaf(currentTree, activePaneIdRef.current) ?? allLeaves[0];
-      const activeTabIdx = activeLeaf
-        ? allTabs.findIndex((t) => t.id === activeLeaf.activeTab)
-        : 0;
+  async function restoreTab(saved: PersistedSession, live?: DaemonSessionSummary): Promise<TermTab> {
+    let tab: TermTab;
+    const cwd = saved.cwd || repo.path || "";
+    if (saved.sshRemote) {
+      const { terminalId } = await sshTermIpc.openTerminal(saved.sshRemote.profileId, 80, 24, saved.cwd || undefined, saved.id, persistenceKey);
+      tab = { id: terminalId, title: saved.title, shell: "ssh", cwd: saved.cwd, sshRemote: saved.sshRemote };
+    } else if (live) {
+      const attached = await ptyIpc.attachDaemonSession(live.daemonSessionId, persistenceKey);
+      tab = { id: attached.id, title: saved.title, shell: saved.shell, cwd: attached.cwd || cwd, resolvedSessionType: "daemon" };
+      queueRestoreSnapshot(pendingRestoreSnapshotsRef.current, attached.id, attached.snapshot);
+    } else {
+      // A dead process cannot be resumed. Reopen its shell without rerunning
+      // a saved agent command or persisting its credentials.
+      const spawned = await ptyIpc.spawn(cwd, saved.shell || undefined, undefined, undefined, undefined, requestedSessionTypeRef.current, persistenceKey);
+      tab = { id: spawned.id, title: saved.title, shell: saved.shell, cwd, resolvedSessionType: spawned.resolvedSessionType };
+    }
+    if (!restoreMountedRef.current) {
+      if (tab.sshRemote) void sshTermIpc.detachTerminal(tab.id);
+      else if (tab.resolvedSessionType === "daemon") void ptyIpc.detachDaemonSession(tab.id);
+      else void ptyIpc.kill(tab.id);
+      return tab;
+    }
+    registerTerminal({ id: tab.id, label: `${repo.label ? repo.label + " · " : ""}${tab.title}`, cwd: tab.cwd || cwd });
+    return tab;
+  }
 
-      const viewState: TerminalViewState = {
-        tabs: allTabs.map((tab) => {
-          const si = shellIntegrationRef.current.get(tab.id);
-          return {
-            id: tab.id,
-            title: tab.title,
-            shell: tab.shell,
-            cwd: si?.state.cwd ?? repo.path ?? "",
-          };
-        }),
-        splits: [],
-        activeTabIndex: Math.max(0, activeTabIdx),
-      };
-
-      const layout = serializeLayout(viewState);
-
-      // Collect scrollback data from each terminal's SerializeAddon.
-      const scrollbackData: Record<string, string> = {};
-      for (const tab of allTabs) {
-        const inst = terminalsRef.current.get(tab.id);
+  async function retryRestore(id: string) {
+    const saved = failedRestoreTabsRef.current.get(id);
+    if (!saved || retryingRestoreRef.current.has(id)) return;
+    retryingRestoreRef.current.add(id);
+    terminalsRef.current.get(id)?.xterm.reset();
+    try {
+      const sessions = saved.sshRemote ? [] : await ptyIpc.listDaemonSessions(persistenceKey);
+      const tab = await restoreTab(saved, sessions.find(session => session.id === id));
+      if (!restoreMountedRef.current) return;
+      failedRestoreTabsRef.current.delete(id);
+      const leaf = findLeafByTab(splitTreeRef.current, id);
+      if (!leaf) return;
+      if (tab.id !== id) disposeTabView(id);
+      else {
+        const inst = terminalsRef.current.get(id);
         if (inst) {
-          try {
-            scrollbackData[tab.id] = inst.serialize.serialize();
-          } catch {
-            // Non-fatal — skip terminals that can't be serialized.
-          }
+          replayQueuedRestoreSnapshot(pendingRestoreSnapshotsRef.current, id, inst.xterm);
+          const pending = pendingDataRef.current.get(id);
+          if (pending) { inst.xterm.write(pending.join("")); pendingDataRef.current.delete(id); }
         }
       }
+      setSplitTree(tree => updateLeaf(tree, leaf.id, pane => ({ ...pane,
+        tabs: pane.tabs.map(item => item.id === id ? tab : item),
+        activeTab: pane.activeTab === id ? tab.id : pane.activeTab,
+      })));
+    } catch (error) {
+      terminalsRef.current.get(id)?.xterm.write(`\r\n[Cannot resume terminal: ${error instanceof Error ? error.message : String(error)}. Press Enter to retry.]\r\n`);
+    } finally { retryingRestoreRef.current.delete(id); }
+  }
 
-      void ptyIpc.saveState({ persistenceKey, layout, scrollbackData });
-    });
-    return off;
-  }, [repo.path, persistenceKey]);
+  const writeTerminal = useCallback((id: string, data: string) => {
+    if (failedRestoreTabsRef.current.has(id)) return data === "\r" || data === "\n" ? retryRestore(id) : Promise.resolve();
+    const tab = findLeafByTab(splitTreeRef.current, id)?.tabs.find(tab => tab.id === id);
+    return tab?.sshRemote ? sshTermIpc.write(id, data) : ptyIpc.write(id, data);
+  }, []);
 
-  // ─── Session persistence: restore on app start ──────────────────
-  //
-  // On mount, first try to reattach to existing daemon sessions (they
-  // survive app restarts). If no daemon sessions exist, fall back to
-  // restoring from saved state (spawns fresh terminals).
+  const saveLayout = useCallback((includeScrollback = false) => {
+    const currentTree = splitTreeRef.current;
+    const layout = captureLayout(currentTree, activePaneIdRef.current,
+      (tab) => shellIntegrationRef.current.get(tab.id)?.state.cwd ?? tab.cwd ?? (tab.sshRemote ? "" : repo.path ?? ""));
+    const scrollbackData: Record<string, string> = {};
+    if (includeScrollback) {
+      for (const [id, inst] of terminalsRef.current) {
+        scrollbackData[id] = inst.serialize.serialize();
+      }
+    }
+    return ptyIpc.saveState({ persistenceKey, layout, scrollbackData });
+  }, [persistenceKey, repo.path]);
+
   const restoredRef = useRef(false);
   const restoreMountedRef = useRef(false);
   const [initialRestoreComplete, setInitialRestoreComplete] = useState(false);
   useEffect(() => {
     restoreMountedRef.current = true;
-    if (restoredRef.current) {
-      return () => { restoreMountedRef.current = false; };
-    }
+    if (ptyModeLoading) return () => { restoreMountedRef.current = false; };
+    if (restoredRef.current) return () => { restoreMountedRef.current = false; };
     restoredRef.current = true;
-
     void (async () => {
       try {
-        // Step 1: Discover daemon sessions for this repo without turning
-        // every persistent PTY into a visible tab.
-        try {
-          const crab = window.crab as any;
-          if (typeof crab?.termListDaemonSessions === "function" && typeof crab?.termAttachDaemonSession === "function") {
-            const repoPath = repo.path || "";
-            const sessions = await ptyIpc.listDaemonSessions(repoPath);
+        const [saved, daemon] = await Promise.all([
+          ptyIpc.restoreState(persistenceKey),
+          ptyIpc.listDaemonSessions(persistenceKey).then(
+            sessions => ({ sessions, error: null }),
+            (error: unknown) => ({ sessions: [] as DaemonSessionSummary[], error }),
+          ),
+        ]);
+        if (!restoreMountedRef.current) return;
+        persistenceReadyRef.current = true;
+        const layout = deserializeLayout(saved.layout);
+        const sessions = daemon.sessions;
+        setDaemonSessions(sessions);
+        const sessionById = new Map(sessions.map(session => [session.id, session]));
+        // A saved empty layout is intentional (e.g. all tabs hidden). Discovery
+        // is only used on first open, when this owner has no saved layout.
+        const wanted: PersistedSession[] = layout?.tabs ?? sessions.slice(0, 1).map(session => ({
+          id: session.id, title: daemonSessionTitle(session, 1), shell: "", cwd: session.cwd ?? repo.path ?? "",
+        }));
+        const tabs = new Map<string, TermTab>();
+        for (const savedTab of wanted) {
+          try {
+            if (!savedTab.sshRemote && daemon.error) throw daemon.error;
+            const tab = await restoreTab(savedTab, sessionById.get(savedTab.id));
             if (!restoreMountedRef.current) return;
-            setDaemonSessions(sessions);
-
-            if (sessions.length > 0) {
-              const savedWorkspaceState = restoredWorkspaceStateRef.current;
-              const sessionById = new Map(sessions.map((session) => [session.id, session]));
-              const openIds = savedWorkspaceState
-                ? [...savedWorkspaceState.openSessionIds, ...savedWorkspaceState.pinnedSessionIds]
-                : [sessions[0].id];
-              const uniqueOpenIds = [...new Set(openIds)];
-              const sessionsToAttach = uniqueOpenIds
-                .map((id) => sessionById.get(id))
-                .filter((session): session is DaemonSessionSummary => Boolean(session));
-              const reattachedTabs: TermTab[] = [];
-
-              for (const session of sessionsToAttach) {
-                const attached = await ptyIpc.attachDaemonSession(session.daemonSessionId, repoPath);
-                if (!restoreMountedRef.current) return;
-                tabCounter.current++;
-                const tab: TermTab = {
-                  id: attached.id,
-                  title: savedWorkspaceState?.titles?.[attached.id] ?? daemonSessionTitle(attached.summary ?? session, tabCounter.current),
-                  shell: "",
-                  resolvedSessionType: "daemon",
-                };
-                reattachedTabs.push(tab);
-
-                // Register with the global terminal registry.
-                registerTerminal({
-                  id: attached.id,
-                  label: `${repo.label ? repo.label + " · " : ""}${tab.title}`,
-                  cwd: attached.cwd || session.cwd || session.initialCwd || repo.path || "",
-                });
-
-                queueRestoreSnapshot(pendingRestoreSnapshotsRef.current, attached.id, attached.snapshot);
-              }
-
-              if (reattachedTabs.length > 0) {
-                const activeId = savedWorkspaceState?.activeSessionId && reattachedTabs.some((tab) => tab.id === savedWorkspaceState.activeSessionId)
-                  ? savedWorkspaceState.activeSessionId
-                  : reattachedTabs[0].id;
-                const restoredLeaf: LeafNode = {
-                  type: "leaf",
-                  id: "restored-pane",
-                  tabs: reattachedTabs as LeafTab[],
-                  activeTab: activeId,
-                };
-                setSplitTree(restoredLeaf);
-                setActivePaneId(restoredLeaf.id);
-
-                return; // Successfully attached visible daemon tabs — skip saved state restore.
-              }
-            }
+            tabCounter.current++;
+            tabs.set(savedTab.id, tab);
+          } catch (error) {
+            if (!restoreMountedRef.current) return;
+            // Offline owners keep their identities and pane membership. A
+            // retry must not overwrite the saved layout with empty panes.
+            failedRestoreTabsRef.current.set(savedTab.id, savedTab);
+            tabs.set(savedTab.id, { ...savedTab, resolvedSessionType: savedTab.sshRemote ? undefined : "daemon" });
+            queueRestoreSnapshot(pendingRestoreSnapshotsRef.current, savedTab.id, `\r\n[Cannot resume terminal: ${error instanceof Error ? error.message : String(error)}. Press Enter to retry.]\r\n`);
           }
-        } catch {
-          // Reattach failed — fall through to saved state restore.
         }
-
-        // Step 2: Fall back to restoring from saved state (spawns fresh terminals).
-        try {
-          const { layout: rawLayout } = await ptyIpc.restoreState(persistenceKey);
-          const layout = deserializeLayout(rawLayout);
-          if (!restoreMountedRef.current) return;
-          if (!layout || layout.tabs.length === 0) return;
-
-          // This layout belongs only to this terminal owner. Live daemon
-          // selection is separate; fresh shell IDs cannot match those old IDs.
-          const restoredTabs: TermTab[] = [];
-          for (const session of layout.tabs) {
-            try {
-              const cwd = session.cwd || repo.path || "";
-              const { id } = await ptyIpc.spawn(
-                cwd,
-                session.shell || undefined,
-                session.env,
-                session.startupCommand,
-                undefined,
-                defaultSessionType,
-              );
-              if (!restoreMountedRef.current) return;
-              tabCounter.current++;
-              const tab: TermTab = {
-                id,
-                title: session.title || `shell ${tabCounter.current}`,
-                shell: session.shell,
-              };
-              restoredTabs.push(tab);
-
-              // Register with the global terminal registry.
-              registerTerminal({
-                id,
-                label: `${repo.label ? repo.label + " · " : ""}${tab.title}`,
-                cwd,
-              });
-            } catch {
-              // Skip sessions that fail to spawn.
-            }
-          }
-
-          if (restoredTabs.length > 0) {
-            const activeIdx = Math.min(layout.activeTabIndex, restoredTabs.length - 1);
-            const restoredLeaf: LeafNode = {
-              type: "leaf",
-              id: "restored-pane",
-              tabs: restoredTabs as LeafTab[],
-              activeTab: restoredTabs[activeIdx]?.id ?? restoredTabs[0].id,
-            };
-            setSplitTree(restoredLeaf);
-            setActivePaneId(restoredLeaf.id);
-
-            // Session restored — fresh shells are spawned so there's no
-            // stale scrollback to replay. Skip the indicator entirely for
-            // a clean terminal experience.
-          }
-        } catch {
-          // Restore failed — fall through to default auto-spawn behavior.
+        if (!restoreMountedRef.current) return;
+        if (layout) {
+          const restored = restoreLayoutTree(layout, tabs);
+          setSplitTree(restored.tree);
+          setActivePaneId(restored.activePaneId);
+          if (layout.tabs.length === 0) suppressNextAutoSpawnRef.current = true;
+        } else if (tabs.size > 0) {
+          const restored = createLeaf([...tabs.values()], [...tabs.values()][0].id);
+          setSplitTree(restored);
+          setActivePaneId(restored.id);
         }
+      } catch (error) {
+        suppressNextAutoSpawnRef.current = true;
+        publishToast({ kind: "error", title: "Cannot restore terminals", body: error instanceof Error ? error.message : String(error), duration: 5000 });
       } finally {
-        if (restoreMountedRef.current) {
-          setInitialRestoreComplete(true);
-        }
+        if (restoreMountedRef.current) setInitialRestoreComplete(true);
       }
     })();
     return () => { restoreMountedRef.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ptyModeLoading]);
+
+  // Save layout changes before any close/upgrade event can destroy the renderer.
+  // Scrollback remains daemon-owned; the quit request only adds a disk checkpoint.
+  useEffect(() => {
+    if (!initialRestoreComplete || !persistenceReadyRef.current) return;
+    void saveLayout().then(result => {
+      if (!result.success) publishToast({ kind: "error", title: "Cannot save terminal layout", body: result.error, duration: 5000 });
+    }).catch(error => console.error("Failed to save terminal layout:", error));
+  }, [splitTree, activePaneId, initialRestoreComplete, saveLayout]);
+
+  useEffect(() => ptyIpc.onSaveRequest(() => { if (persistenceReadyRef.current) void saveLayout(true); }), [saveLayout]);
+
+  useEffect(() => () => {
+    // Evicting a renderer releases UI resources and subscriptions, never a
+    // durable PTY. Its saved tree reattaches when the owner is opened again.
+    for (const tab of getAllLeaves(splitTreeRef.current).flatMap(leaf => leaf.tabs as TermTab[])) {
+      if (tab.sshRemote) void sshTermIpc.detachTerminal(tab.id);
+      else if (tab.resolvedSessionType === "daemon") void ptyIpc.detachDaemonSession(tab.id);
+      else void ptyIpc.kill(tab.id);
+      disposeTabView(tab.id);
+    }
   }, []);
 
   // Persist the visible terminal tab layout separately from daemon lifetime.
@@ -946,15 +919,12 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     if (!initialRestoreComplete) return;
     const allLeaves = getAllLeaves(splitTree);
     const allTabs = allLeaves.flatMap((leaf) => leaf.tabs as TermTab[]);
-    const activeLeaf = findLeaf(splitTree, activePaneId) ?? allLeaves[0];
     const titles: Record<string, string> = {};
     for (const tab of allTabs) {
       titles[tab.id] = tab.title;
     }
     const state: TerminalWorkspaceStateV1 = {
       version: 1,
-      openSessionIds: allTabs.map((tab) => tab.id),
-      activeSessionId: activeLeaf?.activeTab ?? null,
       pinnedSessionIds: [...pinnedDaemonSessionIds],
       hiddenSessionIds: [...hiddenDaemonSessionIds],
       sessionSidebarSide,
@@ -1069,12 +1039,13 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       ...(profile?.env || {}),
     };
     try {
-      const result = await ptyIpc.spawn(cwd, shellPath, extraEnv, profile?.startupCommand, profile?.agentMeta, sessionTypeOverride ?? defaultSessionType);
+      const result = await ptyIpc.spawn(cwd, shellPath, extraEnv, profile?.startupCommand, profile?.agentMeta, sessionTypeOverride ?? (profile?.agentMeta ? "daemon" : requestedSessionType), persistenceKey);
       const { id, resolvedSessionType } = result;
+      persistenceReadyRef.current = true;
       tabCounter.current++;
       const shellName = profile?.name || (shellPath ? shellPath.split("/").pop() ?? "shell" : "zsh");
       const title = profile?.name || `${shellName} ${tabCounter.current}`;
-      const tab: TermTab = { id, title, shell: shellPath ?? "", startupCommand: profile?.startupCommand, resolvedSessionType };
+      const tab: TermTab = { id, title, shell: shellPath ?? "", cwd, startupCommand: profile?.startupCommand, resolvedSessionType };
       // Mark this terminal as pending startup so the first data clears the loading indicator.
       if (profile?.startupCommand) {
         startupPendingRef.current.add(id);
@@ -1098,7 +1069,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       tabMruRef.current.set(paneId, [id, ...mru.filter((x) => x !== id)]);
       setActivePaneId(paneId);
     } catch (e) {
-      console.error("Failed to spawn terminal:", e);
+      publishToast({ kind: "error", title: "Cannot start terminal", body: e instanceof Error ? e.message : String(e), duration: 5000 });
     }
   }
 
@@ -1111,13 +1082,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     if (!activeLeaf) return;
 
     try {
-      const { terminalId } = await sshTermIpc.openTerminal(profileId, 80, 24, cwd);
+      const { terminalId } = await sshTermIpc.openTerminal(profileId, 80, 24, cwd, undefined, persistenceKey);
       tabCounter.current++;
       const title = `ssh ${tabCounter.current}`;
       const tab: TermTab = {
         id: terminalId,
         title,
         shell: "ssh",
+        cwd,
         sshRemote: { profileId, hostname, colour },
       };
       setSplitTree((prev) =>
@@ -1132,7 +1104,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       tabMruRef.current.set(activeLeaf.id, [terminalId, ...mru.filter((x) => x !== terminalId)]);
       setActivePaneId(activeLeaf.id);
     } catch (e) {
-      console.error("Failed to spawn SSH terminal:", e);
+      publishToast({ kind: "error", title: "Cannot start remote terminal", body: e instanceof Error ? e.message : String(e), duration: 5000 });
     }
   }
 
@@ -1146,7 +1118,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     }
 
     try {
-      const attached = await ptyIpc.attachDaemonSession(session.daemonSessionId, repo.path || "");
+      const attached = await ptyIpc.attachDaemonSession(session.daemonSessionId, persistenceKey);
       const summary = attached.summary ?? session;
       tabCounter.current++;
       const title = restoredWorkspaceStateRef.current?.titles?.[attached.id] ?? daemonSessionTitle(summary, tabCounter.current);
@@ -1231,7 +1203,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     if (leaf) {
       killTabImmediate(leaf.id, session.id);
     } else {
-      void ptyIpc.killDaemonSession(session.daemonSessionId, repo.path || "");
+      void ptyIpc.killDaemonSession(session.daemonSessionId, persistenceKey);
       setPinnedDaemonSessionIds((prev) => {
         const next = new Set(prev);
         next.delete(session.id);
@@ -1248,6 +1220,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
   function disposeTabView(tabId: string) {
     pendingDataRef.current.delete(tabId);
+    failedRestoreTabsRef.current.delete(tabId);
     pendingRestoreSnapshotsRef.current.delete(tabId);
     // Dispose shell integration for this terminal.
     const si = shellIntegrationRef.current.get(tabId);
@@ -1308,8 +1281,15 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   }
 
   /** Unconditionally kill a terminal tab (no confirmation). */
-  function killTabImmediate(paneId: string, tabId: string) {
-    void ptyIpc.kill(tabId);
+  async function killTabImmediate(paneId: string, tabId: string) {
+    const tab = findLeafByTab(splitTreeRef.current, tabId)?.tabs.find(tab => tab.id === tabId);
+    try {
+      if (tab?.sshRemote) await sshTermIpc.closeTerminal(tabId);
+      else await ptyIpc.kill(tabId);
+    } catch (error) {
+      publishToast({ kind: "error", title: "Cannot close terminal", body: error instanceof Error ? error.message : String(error), duration: 5000 });
+      return false;
+    }
     disposeTabView(tabId);
     setPinnedDaemonSessionIds((prev) => {
       const next = new Set(prev);
@@ -1323,6 +1303,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     });
     setDaemonSessions((prev) => prev.filter((session) => session.id !== tabId));
     removeTabFromLayout(paneId, tabId);
+    return true;
   }
 
   function closeTabFromTabStrip(paneId: string, tabId: string) {
@@ -1424,23 +1405,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     }
   }
 
-  function removePane(paneId: string) {
-    const leaf = findLeaf(splitTree, paneId);
-    if (leaf) {
-      for (const tab of leaf.tabs) {
-        if ((tab as TermTab).resolvedSessionType === "daemon") {
-          void ptyIpc.detachDaemonSession(tab.id);
-          disposeTabView(tab.id);
-          setHiddenDaemonSessionIds((prev) => {
-            const next = new Set(prev);
-            next.add(tab.id);
-            return next;
-          });
-        } else {
-          void ptyIpc.kill(tab.id);
-          disposeTabView(tab.id);
-        }
-      }
+  async function removePane(paneId: string) {
+    const leaf = findLeaf(splitTreeRef.current, paneId);
+    if (!leaf) return;
+    // Each successful close leaves the layout immediately. A failed SSH
+    // termination keeps its tab visible and recoverable, as tab close does.
+    for (const tab of leaf.tabs) {
+      if ((tab as TermTab).resolvedSessionType === "daemon") hideTabImmediate(paneId, tab.id);
+      else if (!await killTabImmediate(paneId, tab.id)) return;
     }
     // Clean up MRU history for this pane.
     tabMruRef.current.delete(paneId);
@@ -1519,7 +1491,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   function runQuickCommand(cmd: string) {
     const pane = getActivePane();
     if (!pane?.activeTab) return;
-    void ptyIpc.write(pane.activeTab, cmd + "\r");
+    void writeTerminal(pane.activeTab, cmd + "\r");
     // Add to history (deduplicate).
     setCmdHistory((prev) => {
       const next = [cmd, ...prev.filter((c) => c !== cmd)].slice(0, MAX_HISTORY);
@@ -1725,21 +1697,21 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     const config = pasteGuardConfigRef.current;
     if (!config.enabled) {
       // Paste protection disabled — write directly to PTY.
-      void ptyIpc.write(termId, content);
+      void writeTerminal(termId, content);
       return;
     }
     const analysis = analyzePaste(content, config);
     if (analysis.requiresConfirmation) {
       setPasteDialogState({ analysis, content, termId });
     } else {
-      void ptyIpc.write(termId, content);
+      void writeTerminal(termId, content);
     }
   }
 
   function confirmPaste() {
     if (!pasteDialogState) return;
     const { content, termId } = pasteDialogState;
-    void ptyIpc.write(termId, wrapBracketedPaste(content));
+    void writeTerminal(termId, wrapBracketedPaste(content));
     setPasteDialogState(null);
   }
 
@@ -1851,7 +1823,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
    *  the loading indicator from the xterm buffer. */
   const startupPendingRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const off = ptyIpc.onData(({ id, data }) => {
+    const off = ptyIpc.onData(({ id, data, ownerPath }) => {
+      if (ownerPath && ownerPath !== persistenceKey) return;
+      if (!ownerPath && !findLeafByTab(splitTreeRef.current, id)) return;
       const t = terminalsRef.current.get(id);
       if (t) {
         // If this is the first data for a startup-command tab, clear the
@@ -1882,11 +1856,13 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       }
     });
     return off;
-  }, []);
+  }, [persistenceKey]);
 
   // SSH remote terminal data listener
   useEffect(() => {
-    const off = sshTermIpc.onData(({ terminalId, data }) => {
+    const off = sshTermIpc.onData(({ terminalId, data, ownerPath }) => {
+      if (ownerPath && ownerPath !== persistenceKey) return;
+      if (!ownerPath && !findLeafByTab(splitTreeRef.current, terminalId)) return;
       const t = terminalsRef.current.get(terminalId);
       if (t) {
         // Strip ED 3 to preserve scrollback (same as local PTY handler).
@@ -1898,14 +1874,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
       }
     });
     return off;
-  }, []);
+  }, [persistenceKey]);
 
   // SSH terminal session ended (channel died unexpectedly)
   useEffect(() => {
     const off = sshTermIpc.onSessionEnded(({ terminalId }) => {
       const t = terminalsRef.current.get(terminalId);
       if (t) {
-        t.xterm.write("\r\n\x1b[90m[Session ended — press Enter to reconnect]\x1b[0m\r\n");
+        t.xterm.write("\r\n\x1b[90m[SSH disconnected — press Enter to resume the remote session]\x1b[0m\r\n");
       }
     });
     return off;
@@ -2480,6 +2456,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         {/* Split pane layout — recursive tree renderer */}
         <div className="min-h-0 min-w-0 flex-1">
           <SplitTreeRenderer
+            onResize={(id, sizes) => setSplitTree(tree => updateBranchSizes(tree, id, sizes))}
             root={splitTree}
             renderLeaf={(leaf) => {
               // Build a map of tab ID → resolvedSessionType for this leaf's tabs.
@@ -2525,7 +2502,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                 onShellMenuToggle={(open) => { setShellMenuOpen(open); setActivePaneId(leaf.id); }}
                 cmdHistory={cmdHistory}
                 onAddHistory={(cmd) => setCmdHistory((prev) => { const next = [cmd, ...prev.filter((c) => c !== cmd)].slice(0, MAX_HISTORY); saveHistory(next); return next; })}
-                repoCwd={repo.path || ""}
+                repoCwd={leaf.tabs.find(tab => tab.id === leaf.activeTab)?.cwd ?? repo.path ?? ""}
+                writeTerminal={writeTerminal}
                 onUpdateTabTitle={(tabId, title) => { const tabLeaf = findLeafByTab(splitTree, tabId); if (tabLeaf) setSplitTree((prev) => updateLeaf(prev, tabLeaf.id, (l) => ({ ...l, tabs: l.tabs.map((t) => t.id === tabId ? { ...t, title } : t) }))); }}
                 onPaste={handlePasteWithGuard}
                 tabBadges={tabBadges}
@@ -2683,6 +2661,7 @@ interface TerminalPaneProps {
   cmdHistory: string[];
   onAddHistory: (cmd: string) => void;
   repoCwd: string;
+  writeTerminal: (id: string, data: string) => Promise<void>;
   onUpdateTabTitle: (tabId: string, title: string) => void;
   onPaste: (termId: string, content: string) => void;
   tabBadges: Map<string, "success" | "error">;
@@ -2707,13 +2686,15 @@ function TerminalPane({
   onSetActiveTab, onRenameTab, renamingTab, setRenamingTab,
   containerRefs, terminalsRef, pendingRestoreSnapshotsRef, shellIntegrationRef, pendingDataRef, bookmarkManagersRef, onContextMenu,
   availableShells, shellMenuOpen, onShellMenuToggle,
-  onAddHistory, repoCwd, onUpdateTabTitle, onPaste, tabBadges, onCommandComplete,
+  onAddHistory, repoCwd, writeTerminal, onUpdateTabTitle, onPaste, tabBadges, onCommandComplete,
   breadcrumbDefault, breadcrumbPerTab, onToggleBreadcrumb, fontConfig, sessionTypes,
   visible, backgroundSessionCount, onOpenSessionManager,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const currentLineRef = useRef("");
+  const writeTerminalRef = useRef(writeTerminal);
+  writeTerminalRef.current = writeTerminal;
 
   // Tracked cwd for the active tab (used by breadcrumb bar).
   const [trackedCwd, setTrackedCwd] = useState<string | null>(repoCwd || null);
@@ -2948,13 +2929,9 @@ function TerminalPane({
           // Now send Ctrl+L to the shell so it redraws the prompt at the top.
           // The shell's \x1b[3J response is stripped by our onData handler,
           // and \x1b[2J will just clear the (now empty) viewport.
-          if (activeTabObj?.sshRemote) {
-            void sshTermIpc.write(id, "\x0c");
-          } else if (broadcastRef.current) {
-            for (const tid of allTermIdsRef.current) { void ptyIpc.write(tid, "\x0c"); }
-          } else {
-            void ptyIpc.write(id, "\x0c");
-          }
+          if (broadcastRef.current) {
+            for (const tid of allTermIdsRef.current) void writeTerminalRef.current(tid, "\x0c");
+          } else void writeTerminalRef.current(id, "\x0c");
           return false; // Suppress xterm's default handling of Ctrl+L
         }
 
@@ -3021,15 +2998,9 @@ function TerminalPane({
           currentLineRef.current += data;
         }
 
-        if (activeTabObj?.sshRemote) {
-          // SSH remote terminal — route through SSH IPC
-          void sshTermIpc.write(id, data);
-        } else if (broadcastRef.current) {
-          // Send to ALL terminals
-          for (const tid of allTermIdsRef.current) { void ptyIpc.write(tid, data); }
-        } else {
-          void ptyIpc.write(id, data);
-        }
+        if (broadcastRef.current) {
+          for (const tid of allTermIdsRef.current) void writeTerminalRef.current(tid, data);
+        } else void writeTerminalRef.current(id, data);
       });
       xterm.onResize(({ cols, rows }) => {
         if (activeTabObj?.sshRemote) {
@@ -3093,7 +3064,7 @@ function TerminalPane({
           const arrowKey = diff > 0 ? "\x1b[C" : "\x1b[D"; // Right : Left
           const count = Math.abs(diff);
           const sequence = arrowKey.repeat(count);
-          void ptyIpc.write(id, sequence);
+          void writeTerminalRef.current(id, sequence);
         }, 50);
       });
 
@@ -3103,14 +3074,15 @@ function TerminalPane({
     // Without this, the previously focused xterm's hidden textarea still
     // captures input even when its wrapper is display:none.
     const activeInst = terminalsRef.current.get(pane.activeTab);
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
     if (activeInst) {
       // Blur all other terminals first to ensure clean focus transfer.
-      for (const [tid, t] of terminalsRef.current.entries()) {
-        if (tid !== pane.activeTab) {
-          t.xterm.blur();
+      if (isActive && visible) {
+        for (const [tid, t] of terminalsRef.current.entries()) {
+          if (tid !== pane.activeTab) t.xterm.blur();
         }
+        focusTimer = setTimeout(() => activeInst.xterm.focus(), 0);
       }
-      setTimeout(() => activeInst.xterm.focus(), 0);
       requestAnimationFrame(() => {
         if (!visibleRef.current) return;
         if (container.offsetWidth <= 0 || container.offsetHeight <= 0) return;
@@ -3121,9 +3093,9 @@ function TerminalPane({
 
     const obs = new ResizeObserver(() => { if (!visibleRef.current) return; if (!pane.activeTab) return; const t = terminalsRef.current.get(pane.activeTab); if (t && container.offsetWidth > 0 && container.offsetHeight > 0) t.fit.fit(); });
     obs.observe(container);
-    return () => obs.disconnect();
+    return () => { obs.disconnect(); clearTimeout(focusTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pane.activeTab, theme]);
+  }, [pane.activeTab, theme, isActive, visible]);
 
   // Reapply the chosen scheme whenever the user switches it or the app's
   // light/dark mode flips. xterm merges whatever keys we pass, so we hand
@@ -3232,7 +3204,7 @@ function TerminalPane({
     // Use enhanced path extraction with proper quoting.
     const paths = extractDropPaths(e.nativeEvent as DragEvent);
     if (paths) {
-      void ptyIpc.write(pane.activeTab, paths + " ");
+      void writeTerminalRef.current(pane.activeTab, paths + " ");
     }
   }
 
@@ -3313,7 +3285,7 @@ function TerminalPane({
             const term = terminalsRef.current.get(pane.activeTab);
             if (!si || !term) return;
             const cmd = getLastCommand(term.xterm, si.state.marks);
-            if (cmd) void ptyIpc.write(pane.activeTab, cmd + "\r");
+            if (cmd) void writeTerminalRef.current(pane.activeTab, cmd + "\r");
           }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Retry last command">
             <RotateCcw size={10} />
           </button>
@@ -3389,7 +3361,7 @@ function TerminalPane({
             cwd={trackedCwd}
             onNavigate={(path) => {
               if (pane.activeTab) {
-                void ptyIpc.write(pane.activeTab, `cd ${path.includes(" ") ? `"${path}"` : path}\n`);
+                void writeTerminalRef.current(pane.activeTab, `cd ${path.includes(" ") ? `"${path}"` : path}\n`);
               }
             }}
           />
@@ -3513,7 +3485,7 @@ function TerminalPane({
         onCwdClick={(cwd) => {
           // Navigate to cwd in file tree (placeholder — emits to parent).
           if (pane.activeTab) {
-            void ptyIpc.write(pane.activeTab, `cd "${cwd}"\n`);
+            void writeTerminalRef.current(pane.activeTab, `cd "${cwd}"\n`);
           }
         }}
         onShellClick={() => onShellMenuToggle(!shellMenuOpen)}

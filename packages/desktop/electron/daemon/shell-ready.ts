@@ -247,6 +247,7 @@ elif [[ -f "$HOME/.bash_login" ]]; then
 elif [[ -f "$HOME/.profile" ]]; then
   source "$HOME/.profile"
 fi
+[[ -f "$CRAB_SHELL_INTEGRATION_DIR/crab.bash" ]] && source "$CRAB_SHELL_INTEGRATION_DIR/crab.bash"
 # Emit shell-ready marker via PROMPT_COMMAND so it fires after login
 # startup files have rebuilt the prompt.
 __crab_prompt_mark() {
@@ -275,6 +276,7 @@ _crab_home="\${CRAB_ORIG_ZDOTDIR:-$HOME}"
 if [[ "$_crab_home" != "$ZDOTDIR" && -o interactive && -f "$_crab_home/.zshrc" ]]; then
   source "$_crab_home/.zshrc"
 fi
+[[ -f "$CRAB_SHELL_INTEGRATION_DIR/crab.zsh" ]] && source "$CRAB_SHELL_INTEGRATION_DIR/crab.zsh"
 # Emit shell-ready marker via precmd_functions so it fires before the
 # prompt is drawn. Keep our hook LAST so it fires after direnv and other
 # precmd hooks complete.

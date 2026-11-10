@@ -67,6 +67,7 @@ export interface InProcessBridgeOptions {
 
 export interface SpawnOptions {
   cwd: string;
+  ownerPath?: string;
   shell?: string;
   env?: Record<string, string>;
   startupCommand?: string;
@@ -130,8 +131,8 @@ export class InProcessBridge {
    * has fired so callers get a typed error rather than a half-initialised
    * terminal.
    */
-  async handleSpawn(opts: SpawnOptions): Promise<SpawnResult> {
-    const id = `term-l-${++this.termCounter}`;
+  async handleSpawn(opts: SpawnOptions, rendererId?: string): Promise<SpawnResult> {
+    const id = rendererId ?? `term-l-${++this.termCounter}`;
     const requestedShell = opts.shell ?? this.getDefaultShell();
     const requestedCwd = opts.cwd || process.env.HOME || "/";
 
@@ -195,7 +196,7 @@ export class InProcessBridge {
           const remainder = data.slice(newlineIdx + 1);
           const win = this.getMainWindow();
           if (win && !win.isDestroyed()) {
-            win.webContents.send("crab:term-data", { id, data: remainder });
+            win.webContents.send("crab:term-data", { id, data: remainder, ownerPath: opts.ownerPath });
           }
           this.writeSessionLog(id, remainder);
         }
@@ -203,7 +204,7 @@ export class InProcessBridge {
       }
       const win = this.getMainWindow();
       if (win && !win.isDestroyed()) {
-        win.webContents.send("crab:term-data", { id, data });
+        win.webContents.send("crab:term-data", { id, data, ownerPath: opts.ownerPath });
       }
       this.writeSessionLog(id, data);
     });

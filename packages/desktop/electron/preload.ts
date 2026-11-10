@@ -347,7 +347,7 @@ contextBridge.exposeInMainWorld("crab", {
   //
   // New object-based API:
   //   termSpawn({ cwd, sessionType?, shell?, env?, startupCommand?, agentMeta? })
-  //   → Promise<{ id: string; resolvedSessionType: "daemon" | "in-process"; fellBack?: { reason: string } }>
+  //   → Promise<{ id: string; resolvedSessionType: "daemon" | "in-process" }>
   //
   // Legacy positional shim (kept until all call sites migrate):
   //   termSpawn(cwd, shell?, extraEnv?, startupCommand?)
@@ -357,6 +357,7 @@ contextBridge.exposeInMainWorld("crab", {
       | string
       | {
           cwd: string;
+          ownerPath?: string;
           sessionType?: "daemon" | "in-process";
           shell?: string;
           env?: Record<string, string>;
@@ -366,21 +367,14 @@ contextBridge.exposeInMainWorld("crab", {
     shell?: string,
     extraEnv?: Record<string, string>,
     startupCommand?: string,
-  ): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process"; fellBack?: { reason: string } }> => {
-    if (typeof cwdOrOpts === "string") {
-      // Positional shim — build the payload object from legacy arguments.
-      return ipcRenderer.invoke("crab:term-spawn", {
-        cwd: cwdOrOpts,
-        shell,
-        env: extraEnv,
-        startupCommand,
-      }) as Promise<{ id: string; resolvedSessionType: "daemon" | "in-process"; fellBack?: { reason: string } }>;
-    }
-    return ipcRenderer.invoke("crab:term-spawn", cwdOrOpts) as Promise<{
-      id: string;
-      resolvedSessionType: "daemon" | "in-process";
-      fellBack?: { reason: string };
-    }>;
+  ): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process" }> => {
+    const payload = typeof cwdOrOpts === "string"
+      ? { cwd: cwdOrOpts, shell, env: extraEnv, startupCommand }
+      : cwdOrOpts;
+    return ipcRenderer.invoke("crab:term-spawn", payload).then(result => {
+      if (result?.ok === false) throw new Error(result.message);
+      return result;
+    });
   },
   termWrite: (id: string, data: string) => ipcRenderer.invoke("crab:term-write", id, data),
   termResize: (id: string, cols: number, rows: number) => ipcRenderer.invoke("crab:term-resize", id, cols, rows),
@@ -614,10 +608,11 @@ contextBridge.exposeInMainWorld("crab", {
     getStatus: (profileId: string) =>
       ipcRenderer.invoke("ssh:get-status", profileId),
     // Remote terminal
-    openTerminal: (profileId: string, cols: number, rows: number, cwd?: string) =>
-      ipcRenderer.invoke("ssh:open-terminal", profileId, cols, rows, cwd) as Promise<{ terminalId: string }>,
+    openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) =>
+      ipcRenderer.invoke("ssh:open-terminal", profileId, cols, rows, cwd, resumeId, ownerPath) as Promise<{ terminalId: string }>,
     closeTerminal: (terminalId: string) =>
       ipcRenderer.invoke("ssh:close-terminal", terminalId),
+    detachTerminal: (terminalId: string) => ipcRenderer.invoke("ssh:detach-terminal", terminalId),
     terminalResize: (terminalId: string, cols: number, rows: number) =>
       ipcRenderer.invoke("ssh:terminal-resize", terminalId, cols, rows),
     terminalWrite: (terminalId: string, data: string) =>

@@ -16,20 +16,23 @@ export interface SplitTreeRendererProps {
   root: SplitNode;
   /** Render function for leaf nodes — the parent provides the TerminalPane. */
   renderLeaf: (leaf: LeafNode) => React.ReactNode;
+  onResize: (branchId: string, sizes: number[]) => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function SplitTreeRenderer({ root, renderLeaf }: SplitTreeRendererProps) {
-  return <NodeRenderer node={root} renderLeaf={renderLeaf} />;
+export function SplitTreeRenderer({ root, renderLeaf, onResize }: SplitTreeRendererProps) {
+  return <NodeRenderer node={root} renderLeaf={renderLeaf} onResize={onResize} />;
 }
 
 function NodeRenderer({
   node,
   renderLeaf,
+  onResize,
 }: {
   node: SplitNode;
   renderLeaf: (leaf: LeafNode) => React.ReactNode;
+  onResize: SplitTreeRendererProps["onResize"];
 }) {
   if (node.type === "leaf") {
     return <>{renderLeaf(node)}</>;
@@ -39,6 +42,7 @@ function NodeRenderer({
     <BranchRenderer
       branch={node}
       renderLeaf={renderLeaf}
+      onResize={onResize}
     />
   );
 }
@@ -46,13 +50,16 @@ function NodeRenderer({
 function BranchRenderer({
   branch,
   renderLeaf,
+  onResize,
 }: {
   branch: BranchNode;
   renderLeaf: (leaf: LeafNode) => React.ReactNode;
+  onResize: SplitTreeRendererProps["onResize"];
 }) {
   return (
     <PanelGroup
       direction={branch.direction}
+      onLayout={sizes => onResize(branch.id, sizes)}
       className="min-h-0 min-w-0 w-full h-full flex-1"
     >
       {branch.children.map((child, idx) => (
@@ -66,6 +73,7 @@ function BranchRenderer({
           <NodeRenderer
             node={child}
             renderLeaf={renderLeaf}
+            onResize={onResize}
           />
         </ChildWithHandle>
       ))}

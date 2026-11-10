@@ -52,11 +52,12 @@ spawn want daemon?) become independent axes.
   `crab:term-resize`, and `crab:term-kill` **once** for the lifetime of the
   app. Both backends (`DaemonBridge` and `InProcessBridge`) stay registered
   permanently — no `removeHandler` race.
-- `resolveSessionType(payload, modeResolution)` defaults spawns that carry
-  `agentMeta` to `"daemon"` and all others to `"in-process"`. An explicit
-  `sessionType` from the renderer overrides the default.
-- Renderer IDs are partitioned: `term-d-N` for daemon sessions, `term-l-N`
-  for local sessions. This makes routing visible in logs and crash dumps.
+- `resolveSessionType(payload, modeResolution)` defaults all spawns to
+  `"daemon"`: an agent can be started interactively after shell creation.
+  An explicit `"in-process"` request creates an ephemeral terminal.
+- Renderer IDs are partitioned: `term-d-UUID` for daemon sessions, `term-l-UUID`
+  for local sessions. IDs remain unique across app restarts, preventing a new
+  terminal from accidentally attaching to a surviving background process.
 - When `sessionType: "daemon"` is requested but the daemon is unavailable or
   the circuit breaker is open, the router returns a typed error
   (`"daemon-unavailable"` / `"daemon-circuit-open"`) rather than silently
@@ -269,3 +270,20 @@ option for future versions if the daemon needs to run outside Electron.
 - `crab-desktop/electron/daemon/daemon-server.ts` — hooks contract
 - `crab-desktop/docs/architecture/terminal-subsystem.md` — terminal architecture overview
 - `.kiro/specs/pty-daemon-completion/design.md` — full design document
+
+## Session recovery ownership
+
+The repository or task persistence key owns the daemon session prefix and saved
+layout. Repository paths, rather than transient repository IDs, key kept-alive
+renderers. Layout writes happen on changes and use atomic replacement; recovery
+does not depend on Electron delivering a quit event before closing its windows.
+
+Warm attach enters an alternate screen before painting its snapshot. Normal
+and cold replay use the same snapshot composer, so mode restoration cannot erase
+the recovered agent display. Shell selection, login environment and startup
+commands flow through the daemon; shell-ready wrappers gate initial input.
+
+SSH channels attach to remote tmux sessions on a separate Crab socket. A saved
+SSH identity is checked and attached, never recreated implicitly. Renderer
+cleanup detaches; explicit SSH tab termination destroys that session. Missing
+tmux is a visible failure rather than a fallback to a shell with weaker lifetime.

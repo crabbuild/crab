@@ -18,6 +18,11 @@ function session(overrides: Partial<ReattachCandidateSession>): ReattachCandidat
 }
 
 describe("terminal reattach matching", () => {
+  it("keeps UUID sessions with their owner after cd into another repository", () => {
+    const candidate = session({ sessionId: "/repo/a@@term-d-809d1364-c7a8-4ede-823b-cb25fcb86692", initialCwd: "/repo/a", cwd: "/repo/b" });
+    expect(sessionBelongsToRepoPath(candidate, "/repo/b")).toBe(false);
+    expect(sessionBelongsToRepoPath(candidate, "/repo/a")).toBe(true);
+  });
   it("matches sessions by renderer session id prefix", () => {
     expect(sessionBelongsToRepoPath(
       session({ sessionId: "/repo/work@@term-d-3" }),

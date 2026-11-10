@@ -179,15 +179,16 @@ export function registerSshIpcHandlers(
   if (terminalManager) {
     ipcMain.handle(
       "ssh:open-terminal",
-      async (_event, profileId: string, cols: number, rows: number, cwd?: string) => {
-        const terminalId = await terminalManager.openTerminal(profileId, cols, rows, cwd);
+      async (_event, profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => {
+        const terminalId = await terminalManager.openTerminal(profileId, cols, rows, cwd, resumeId, ownerPath);
         return { terminalId };
       },
     );
 
     ipcMain.handle("ssh:close-terminal", async (_event, terminalId: string) => {
-      terminalManager.closeTerminal(terminalId);
+      await terminalManager.closeTerminal(terminalId);
     });
+    ipcMain.handle("ssh:detach-terminal", (_event, terminalId: string) => terminalManager.detachTerminal(terminalId));
 
     ipcMain.handle(
       "ssh:terminal-resize",

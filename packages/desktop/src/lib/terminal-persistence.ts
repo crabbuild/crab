@@ -6,6 +6,8 @@
  * the app profile by repository or task identity via IPC to the main process.
  */
 
+import { createLeaf, deserializeTree, findLeaf, getAllLeaves, serializeTree, type LeafTab, type SplitNode } from "./terminal-split-tree";
+
 // ── Types ───────────────────────────────────────────────────────────
 
 export interface PersistedSession {
@@ -17,6 +19,7 @@ export interface PersistedSession {
   title: string;
   /** Path to serialized scrollback file (from SerializeAddon). */
   scrollbackPath?: string;
+  sshRemote?: LeafTab["sshRemote"];
 }
 
 export interface PersistedLayout {
@@ -25,6 +28,8 @@ export interface PersistedLayout {
   splits: SplitArrangement[];
   activeTabIndex: number;
   quickTerminal?: PersistedSession;
+  panes?: Array<{ id: string; tabIds: string[]; activeTab: string | null }>;
+  activePaneId?: string;
 }
 
 export interface SplitArrangement {
@@ -135,7 +140,7 @@ export function deserializeLayout(data: unknown): PersistedLayout | null {
   }
 
   // Tabs validation
-  if (!Array.isArray(obj.tabs) || obj.tabs.length === 0) {
+  if (!Array.isArray(obj.tabs)) {
     return null;
   }
 
@@ -145,11 +150,7 @@ export function deserializeLayout(data: unknown): PersistedLayout | null {
     if (!session) return null;
     tabs.push(session);
   }
-
-  // Limit to 12 tabs max
-  if (tabs.length > 12) {
-    return null;
-  }
+  if (new Set(tabs.map(tab => tab.id)).size !== tabs.length) return null;
 
   // Splits validation
   if (!Array.isArray(obj.splits)) {
@@ -164,10 +165,34 @@ export function deserializeLayout(data: unknown): PersistedLayout | null {
   }
 
   // Active tab index validation
-  if (typeof obj.activeTabIndex !== "number") {
+  if (typeof obj.activeTabIndex !== "number" || !Number.isFinite(obj.activeTabIndex)) {
     return null;
   }
   const activeTabIndex = Math.max(0, Math.min(Math.floor(obj.activeTabIndex), tabs.length - 1));
+
+  let panes: PersistedLayout["panes"];
+  if (obj.panes !== undefined) {
+    if (!Array.isArray(obj.panes)) return null;
+    const tabIds = new Set(tabs.map(tab => tab.id));
+    const seen = new Set<string>();
+    const paneIds = new Set<string>();
+    panes = [];
+    for (const pane of obj.panes) {
+      if (!pane || typeof pane.id !== "string" || paneIds.has(pane.id) || !Array.isArray(pane.tabIds)) return null;
+      paneIds.add(pane.id);
+      for (const id of pane.tabIds) {
+        if (typeof id !== "string" || !tabIds.has(id) || seen.has(id)) return null;
+        seen.add(id);
+      }
+      if (pane.activeTab !== null && !pane.tabIds.includes(pane.activeTab)) return null;
+      panes.push({ id: pane.id, tabIds: pane.tabIds, activeTab: pane.activeTab });
+    }
+    if (seen.size !== tabs.length || typeof obj.activePaneId !== "string" || !paneIds.has(obj.activePaneId)) return null;
+    const references = (split: SplitArrangement): string[] => split.children.flatMap(child => typeof child === "string" ? [child] : references(child));
+    const leafIds = splits.flatMap(references);
+    if (panes.length === 1 ? splits.length !== 0 : splits.length !== 1) return null;
+    if (panes.length > 1 && (leafIds.length !== paneIds.size || new Set(leafIds).size !== leafIds.length || leafIds.some(id => !paneIds.has(id)))) return null;
+  }
 
   // Quick terminal (optional)
   let quickTerminal: PersistedSession | undefined;
@@ -182,6 +207,7 @@ export function deserializeLayout(data: unknown): PersistedLayout | null {
     tabs,
     splits,
     activeTabIndex,
+    ...(panes ? { panes, activePaneId: obj.activePaneId as string } : {}),
     ...(quickTerminal ? { quickTerminal } : {}),
   };
 }
@@ -227,6 +253,13 @@ function validateSession(data: unknown): PersistedSession | null {
     if (typeof obj.scrollbackPath !== "string") return null;
     session.scrollbackPath = obj.scrollbackPath;
   }
+  if (obj.sshRemote !== undefined) {
+    if (!obj.sshRemote || typeof obj.sshRemote !== "object") return null;
+    const remote = obj.sshRemote as Record<string, unknown>;
+    if (typeof remote.profileId !== "string" || typeof remote.hostname !== "string") return null;
+    if (remote.colour !== undefined && typeof remote.colour !== "string") return null;
+    session.sshRemote = { profileId: remote.profileId, hostname: remote.hostname, ...(remote.colour ? { colour: remote.colour as string } : {}) };
+  }
 
   return session;
 }
@@ -244,11 +277,12 @@ function validateSplitArrangement(data: unknown): SplitArrangement | null {
 
   if (!Array.isArray(obj.sizes)) return null;
   for (const size of obj.sizes) {
-    if (typeof size !== "number" || size < 0) return null;
+    if (typeof size !== "number" || !Number.isFinite(size) || size < 0) return null;
   }
 
   if (!Array.isArray(obj.children)) return null;
   if (obj.children.length !== obj.sizes.length) return null;
+  if (obj.children.length < 2 || obj.sizes.reduce((total, size) => total + size, 0) <= 0) return null;
 
   const children: (string | SplitArrangement)[] = [];
   for (const child of obj.children) {
@@ -268,4 +302,38 @@ function validateSplitArrangement(data: unknown): SplitArrangement | null {
     sizes: obj.sizes as number[],
     children,
   };
+}
+
+export function captureLayout(tree: SplitNode, activePaneId: string, cwd: (tab: LeafTab) => string): PersistedLayout {
+  const leaves = getAllLeaves(tree);
+  const tabs = leaves.flatMap(leaf => leaf.tabs);
+  const active = findLeaf(tree, activePaneId) ?? leaves[0];
+  const arrangement = serializeTree(tree);
+  const layout = {
+    ...serializeLayout({
+      tabs: tabs.map(tab => ({ id: tab.id, title: tab.title, shell: tab.shell, cwd: cwd(tab) })),
+      splits: arrangement ? [arrangement] : [],
+      activeTabIndex: Math.max(0, tabs.findIndex(tab => tab.id === active?.activeTab)),
+    }),
+    panes: leaves.map(leaf => ({ id: leaf.id, tabIds: leaf.tabs.map(tab => tab.id), activeTab: leaf.activeTab })),
+    activePaneId: active.id,
+  };
+  layout.tabs.forEach((tab, index) => { if (tabs[index].sshRemote) tab.sshRemote = tabs[index].sshRemote; });
+  return layout;
+}
+
+export function restoreLayoutTree(layout: PersistedLayout, tabs: Map<string, LeafTab>): { tree: SplitNode; activePaneId: string } {
+  if (!layout.panes) {
+    const restored = layout.tabs.flatMap(tab => tabs.get(tab.id) ?? []);
+    const active = tabs.get(layout.tabs[layout.activeTabIndex]?.id)?.id ?? restored[0]?.id ?? null;
+    const tree = createLeaf(restored, active);
+    return { tree, activePaneId: tree.id };
+  }
+  const leaves = new Map(layout.panes.map(pane => {
+    const restored = pane.tabIds.flatMap(id => tabs.get(id) ?? []);
+    return [pane.id, { tabs: restored, activeTab: tabs.get(pane.activeTab ?? "")?.id ?? restored[0]?.id ?? null }];
+  }));
+  const tree = deserializeTree(layout.splits[0] ?? null, leaves);
+  const activePaneId = findLeaf(tree, layout.activePaneId ?? "")?.id ?? getAllLeaves(tree)[0].id;
+  return { tree, activePaneId };
 }

@@ -70,7 +70,38 @@ Configurable scrollback buffer:
 - Default: 10,000 lines
 - Configurable: 1,000 – 100,000 lines
 - Memory estimate shown in settings
-- Scrollback persists across view switches (not app restarts)
+- Local daemon scrollback and the active agent screen survive app close and reopen while the daemon remains alive
+
+### Session Recovery
+
+Ordinary local terminals run in the PTY daemon. A command or agent started in
+one of these shells continues when the app closes or updates. Reopening the
+repository attaches to the same process. **New local terminal** in the context
+menu explicitly creates an ephemeral terminal; its process ends with the app.
+
+Crab saves tab order, pane splits and proportions, each pane's active tab, and
+the focused pane as they change. Repository paths own this state, so switching
+repositories or reopening a workspace with new repository IDs restores its
+layout. Evicting a hidden terminal renderer releases its UI resources and
+leaves durable processes running.
+
+SSH terminals require **tmux on the remote Unix host**, available in the SSH
+command path. Crab uses a separate `crab-desktop` tmux socket and named sessions;
+it does not use your default tmux server. App close, workspace switching and SSH
+transport loss detach the client while the remote shell and agent continue.
+Reopening reattaches to the saved profile and remote session. Closing an SSH
+terminal tab explicitly terminates that remote session.
+
+If the remote host is unavailable, the saved SSH tab stays visible with a retry
+message. Press Enter after reconnecting to retry the same session. Crab does not
+replace a missing remote session with a fresh shell or rerun an agent command.
+SSH terminals created before durable tmux ownership cannot recover a process
+that already ended with its original SSH channel.
+
+An OS reboot, remote reboot, explicit process termination, or daemon failure
+can end a process. Layout recovery does not recreate that process's memory or
+resume its work automatically. If a saved local process is gone, reopening its tab starts a fresh shell; saved
+agent commands are not rerun. Checkpoint recovery is a separate confirmation flow.
 
 ### Paste Guard
 

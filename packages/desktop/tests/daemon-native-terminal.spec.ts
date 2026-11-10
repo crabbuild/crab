@@ -6,6 +6,7 @@ import { DaemonClient } from "../electron/daemon/daemon-client";
 import { DaemonServer } from "../electron/daemon/daemon-server";
 import { PROTOCOL_VERSION } from "../electron/daemon/protocol";
 import { createNodePtySpawner } from "../electron/daemon/subprocess-handle";
+import { TerminalHost } from "../electron/daemon/terminal-host";
 
 it("executes a real shell command through authenticated daemon connections", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-pty-"));
@@ -41,3 +42,19 @@ it("executes a real shell command through authenticated daemon connections", asy
     fs.rmSync(root, { recursive: true, force: true });
   }
 }, 20_000);
+
+it.skipIf(process.platform === "win32" || !fs.existsSync("/bin/bash"))("honors the selected shell and runs a command line after shell readiness", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-shell-profile-"));
+  const host = new TerminalHost({ spawnSubprocess: createNodePtySpawner() });
+  let output = "";
+  try {
+    host.createOrAttach({
+      sessionId: "selected-shell", cwd: root, cols: 100, rows: 30,
+      shell: "/bin/bash", shellReadySupported: true,
+      startupCommand: "printf 'selected-%s:%s\\n' \"$BASH_VERSION\" \"$CRAB_PROFILE_PROOF\"",
+      env: { ...process.env, HOME: root, CRAB_PROFILE_PROOF: "argument with spaces" } as Record<string, string>,
+      streamClient: { id: "profile-client", sendData: (_id, data) => { output += data.toString("utf8"); }, sendExit: () => {}, sendStateChanged: () => {} },
+    });
+    await vi.waitFor(() => expect(output).toMatch(/selected-\d[^\r\n]*:argument with spaces/), { timeout: 5000 });
+  } finally { host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});

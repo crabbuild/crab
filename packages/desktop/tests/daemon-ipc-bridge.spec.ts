@@ -169,7 +169,7 @@ describe("IPC Bridge", () => {
         cols: 120,
         rows: 30,
         cwd: "/home/user",
-        shellReadySupported: false,
+        shellReadySupported: true,
       }));
     });
 
@@ -181,7 +181,8 @@ describe("IPC Bridge", () => {
 
       expect(client.request).toHaveBeenCalledWith("createOrAttach", expect.objectContaining({
         env: { FOO: "bar" },
-        command: "ls -la",
+        startupCommand: "ls -la",
+        shell: "zsh",
       }));
     });
 
@@ -385,7 +386,7 @@ describe("IPC Bridge", () => {
         m.channel === "crab:term-data" && (m.args[0] as { data: string }).data === "output text",
       );
       expect(dataMsg).toBeDefined();
-      expect(dataMsg!.args[0]).toEqual({ id: "term-1", data: "output text" });
+      expect(dataMsg!.args[0]).toEqual({ id: "term-1", data: "output text", ownerPath: "/workspace/project" });
     });
 
     it("forwards session exit to renderer as crab:term-exit", async () => {
@@ -729,7 +730,7 @@ describe("IPC Bridge", () => {
       await ipc2.invoke("crab:term-spawn", "/home");
       bridge2.handleSessionData("/workspace/project@@term-1", "test");
 
-      expect(window.sentMessages[0].args[0]).toEqual({ id: "term-1", data: "test" });
+      expect(window.sentMessages[0].args[0]).toEqual({ id: "term-1", data: "test", ownerPath: "/workspace/project" });
     });
   });
 

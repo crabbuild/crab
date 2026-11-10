@@ -1,22 +1,10 @@
-/**
- * Remote terminal management over SSH.
- *
- * Manages interactive shell channels (PTY-allocated) over existing SSH
- * connections. Each terminal gets a unique ID and supports bidirectional
- * data flow, resize, and session persistence across reconnections.
- */
-
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import type { ClientChannel } from "ssh2";
-import type { SshSessionManager } from "./ssh-manager";
+import type { Client, ClientChannel } from "ssh2";
+import type { SshProfile, SshSessionManager } from "./ssh-manager";
 
-// ── Constants ────────────────────────────────────────────────────
-
-/** Timeout (ms) for probing whether a shell channel is still alive. */
-const PROBE_TIMEOUT_MS = 2000;
-
-// ── Types ────────────────────────────────────────────────────────
+const TMUX = "tmux -L crab-desktop -f /dev/null";
+const OPERATION_TIMEOUT_MS = 10_000;
 
 export interface RemoteTerminalSession {
   terminalId: string;
@@ -25,408 +13,233 @@ export interface RemoteTerminalSession {
   cols: number;
   rows: number;
   cwd?: string;
+  ownerPath?: string;
   alive: boolean;
-  /** Set to true when the session has ended and is awaiting user action. */
   awaitingReconnect: boolean;
 }
 
-export interface RemoteTerminalManagerEvents {
-  "ssh:terminal-data": (payload: { terminalId: string; data: string }) => void;
-  "ssh:terminal-closed": (payload: { terminalId: string; profileId: string }) => void;
-  "ssh:terminal-session-ended": (payload: { terminalId: string; profileId: string }) => void;
-  "ssh:terminal-resumed": (payload: { terminalId: string; profileId: string }) => void;
-}
-
-// ── Manager ──────────────────────────────────────────────────────
-
-/**
- * Manages interactive SSH shell channels. Each terminal is a PTY-allocated
- * shell channel on an existing SSH connection.
- *
- * Events:
- * - "ssh:terminal-data" ({ terminalId, data }) — output from the remote shell
- * - "ssh:terminal-closed" ({ terminalId, profileId }) — terminal explicitly closed
- * - "ssh:terminal-session-ended" ({ terminalId, profileId }) — channel died unexpectedly
- * - "ssh:terminal-resumed" ({ terminalId, profileId }) — session resumed after reconnection
- */
+/** Remote PTYs live in tmux; SSH channels only attach clients to them. */
 export class RemoteTerminalManager extends EventEmitter {
   private sessions = new Map<string, RemoteTerminalSession>();
+  private connecting = new Map<string, Promise<void>>();
+  private attaching = new Map<string, Promise<string>>();
 
-  constructor(private sessionManager: SshSessionManager) {
+  constructor(
+    private sessionManager: SshSessionManager,
+    private profileForId?: (id: string) => SshProfile | undefined,
+  ) {
     super();
-    this.attachReconnectionListener();
-  }
-
-  /**
-   * Listen for SSH connection status changes. When a connection transitions
-   * back to "connected", probe all terminal sessions for that profile to
-   * determine if their shell channels are still alive.
-   */
-  private attachReconnectionListener(): void {
-    this.sessionManager.on("ssh:status-changed", (payload: {
-      profileId: string;
-      status: string;
-      error?: string;
-    }) => {
-      if (payload.status === "connected") {
-        void this.handleReconnection(payload.profileId);
-      }
+    sessionManager.on("ssh:status-changed", ({ profileId, status }: { profileId: string; status: string }) => {
+      if (status === "connected") void this.handleReconnection(profileId);
     });
   }
 
-  /**
-   * After SSH reconnection succeeds for a profile, probe each terminal
-   * session to determine if the remote shell is still alive.
-   *
-   * - If alive: resume seamlessly (no user-visible interruption).
-   * - If dead: emit "ssh:terminal-session-ended" so the renderer can
-   *   show "Session ended" and offer to open a new terminal.
-   */
   async handleReconnection(profileId: string): Promise<void> {
-    const sessions = this.getSessionsForProfile(profileId);
-    if (sessions.length === 0) return;
-
-    const probeResults = await Promise.allSettled(
-      sessions.map((session) => this.probeTerminalSession(session)),
-    );
-
-    for (let i = 0; i < sessions.length; i++) {
-      const session = sessions[i];
-      const result = probeResults[i];
-      const isAlive = result.status === "fulfilled" && result.value === true;
-
-      if (isAlive) {
-        // Shell is still alive — resume seamlessly
-        this.emit("ssh:terminal-resumed", {
-          terminalId: session.terminalId,
-          profileId: session.profileId,
-        });
-      } else if (!session.awaitingReconnect) {
-        // Shell is dead and wasn't already marked by the channel close handler.
-        // Mark session and notify renderer.
-        session.alive = false;
-        session.channel = null;
-        session.awaitingReconnect = true;
-        this.emit("ssh:terminal-session-ended", {
-          terminalId: session.terminalId,
-          profileId: session.profileId,
-        });
-      }
-      // If session.awaitingReconnect is already true, the channel close
-      // handler already emitted the event — no need to emit again.
-    }
+    await Promise.allSettled(this.getSessionsForProfile(profileId)
+      .filter(session => session.awaitingReconnect)
+      .map(session => this.reconnectTerminal(session.terminalId)));
   }
 
-  /**
-   * Probe a terminal session's shell channel to detect if it's still alive.
-   * Sends a null byte (\x00) and waits for any response within the timeout.
-   *
-   * Returns `true` if the shell responds, `false` if it's dead or unresponsive.
-   */
-  async probeTerminalSession(session: RemoteTerminalSession): Promise<boolean> {
-    const { channel } = session;
-
-    // If the channel reference is already null, the session is dead
-    if (!channel || !session.alive) {
-      return false;
-    }
-
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolve(false);
-      }, PROBE_TIMEOUT_MS);
-
-      function onData() {
-        cleanup();
-        resolve(true);
-      }
-
-      function onClose() {
-        cleanup();
-        resolve(false);
-      }
-
-      function onError() {
-        cleanup();
-        resolve(false);
-      }
-
-      function cleanup() {
-        clearTimeout(timeout);
-        channel!.removeListener("data", onData);
-        channel!.removeListener("close", onClose);
-        channel!.removeListener("error", onError);
-      }
-
-      channel.on("data", onData);
-      channel.on("close", onClose);
-      channel.on("error", onError);
-
-      // Send a null byte as a probe — most shells ignore it but the
-      // channel will error or close if the remote process is gone.
-      try {
-        channel.write("\x00");
-      } catch {
-        cleanup();
-        resolve(false);
-      }
-    });
-  }
-
-  /**
-   * Open a new interactive shell channel on the given SSH connection.
-   * Allocates a PTY with xterm-256color and the specified dimensions.
-   *
-   * If `cwd` is provided, sends `cd <cwd>` as the first command after
-   * the shell is ready.
-   *
-   * Returns the terminal ID for subsequent operations.
-   */
-  async openTerminal(
-    profileId: string,
-    cols: number,
-    rows: number,
-    cwd?: string,
-  ): Promise<string> {
-    const connection = this.sessionManager.getConnection(profileId);
-    if (!connection || connection.status !== "connected") {
-      throw new Error(
-        `Cannot open terminal: SSH connection for profile "${profileId}" is not active.`,
-      );
-    }
-
-    const { client } = connection;
-    const terminalId = randomUUID();
-
-    const channel = await new Promise<ClientChannel>((resolve, reject) => {
-      client.shell(
-        { term: "xterm-256color", cols, rows },
-        (err, stream) => {
-          if (err) reject(err);
-          else resolve(stream);
-        },
-      );
-    });
-
-    const session: RemoteTerminalSession = {
-      terminalId,
-      profileId,
-      channel,
-      cols,
-      rows,
-      cwd,
-      alive: true,
-      awaitingReconnect: false,
-    };
-
+  async openTerminal(profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string): Promise<string> {
+    const terminalId = resumeId ?? randomUUID();
+    if (!/^[0-9a-f-]{36}$/.test(terminalId)) throw new Error("Invalid remote terminal identity");
+    const existing = this.sessions.get(terminalId);
+    if (existing && existing.profileId !== profileId) throw new Error("Remote terminal belongs to a different SSH profile");
+    const session = existing ?? { terminalId, profileId, cols, rows, cwd, ownerPath, channel: null, alive: false, awaitingReconnect: false };
     this.sessions.set(terminalId, session);
-
-    // Forward shell output to listeners
-    channel.on("data", (data: Buffer) => {
-      this.emit("ssh:terminal-data", { terminalId, data: data.toString("utf-8") });
-    });
-
-    // Handle channel close (unexpected death or remote exit)
-    channel.on("close", () => {
-      const s = this.sessions.get(terminalId);
-      if (s) {
-        s.alive = false;
-        s.channel = null;
-        s.awaitingReconnect = true;
-        this.emit("ssh:terminal-session-ended", { terminalId, profileId });
-      }
-    });
-
-    channel.on("error", () => {
-      const s = this.sessions.get(terminalId);
-      if (s) {
-        s.alive = false;
-        s.channel = null;
-      }
-    });
-
-    // If a working directory was specified, cd into it
-    if (cwd) {
-      channel.write(`cd ${this.shellEscape(cwd)}\n`);
+    try {
+      return await this.attach(session, resumeId !== undefined);
+    } catch (error) {
+      session.awaitingReconnect = true;
+      if (!resumeId) this.sessions.delete(terminalId);
+      throw error;
     }
-
-    return terminalId;
   }
 
-  /**
-   * Write data (user input) to the terminal's SSH channel.
-   *
-   * If the session is in "awaiting reconnect" state (dead shell, user
-   * pressed Enter), this triggers a new terminal session instead of
-   * writing to the dead channel.
-   */
-  writeToTerminal(terminalId: string, data: string): void {
-    const session = this.sessions.get(terminalId);
-    if (!session) {
-      throw new Error(`Terminal not found: ${terminalId}`);
+  private async connectedClient(profileId: string): Promise<Client> {
+    const active = this.sessionManager.getConnection(profileId);
+    if (active?.status === "connected" || active?.status === "deploying") return active.client;
+    let pending = this.connecting.get(profileId);
+    if (!pending) {
+      const profile = this.profileForId?.(profileId) ?? active?.profile;
+      if (!profile) throw new Error("SSH profile is not available. Reconnect the profile and retry.");
+      // A profile may already be connecting during app restoration. Wait for
+      // that owner instead of disconnecting its transport to start another.
+      const connection = active?.status === "connecting" || active?.status === "reconnecting"
+        ? new Promise<void>((resolve, reject) => {
+          const changed = (event: { profileId: string; status: string; error?: string }) => {
+            if (event.profileId !== profileId) return;
+            if (event.status === "connected" || event.status === "deploying") finish();
+            else if (event.status === "error" || event.status === "disconnected") finish(new Error(event.error ?? "SSH connection ended"));
+          };
+          const finish = (error?: Error) => {
+            clearTimeout(timer);
+            this.sessionManager.removeListener("ssh:status-changed", changed);
+            if (error) reject(error); else resolve();
+          };
+          const timer = setTimeout(() => finish(new Error("SSH connection timed out")), profile.connectionTimeoutMs ?? OPERATION_TIMEOUT_MS);
+          this.sessionManager.on("ssh:status-changed", changed);
+        })
+        : this.sessionManager.connect(profile);
+      pending = connection.finally(() => this.connecting.delete(profileId));
+      this.connecting.set(profileId, pending);
     }
-
-    // If the session is awaiting reconnect and user presses Enter,
-    // trigger reconnection (open a new shell on the same connection).
-    if (session.awaitingReconnect) {
-      if (data === "\r" || data === "\n") {
-        void this.reconnectTerminal(terminalId);
-      }
-      // Swallow all other input while awaiting reconnect
-      return;
-    }
-
-    if (!session.channel || !session.alive) {
-      throw new Error(`Terminal session is no longer active: ${terminalId}`);
-    }
-    session.channel.write(data);
+    await pending;
+    const connection = this.sessionManager.getConnection(profileId);
+    if (connection?.status !== "connected" && connection?.status !== "deploying") throw new Error("SSH connection is not active");
+    return connection.client;
   }
 
-  /**
-   * Resize the terminal's PTY dimensions. Sends SIGWINCH equivalent
-   * to the remote shell.
-   */
-  resizeTerminal(terminalId: string, cols: number, rows: number): void {
-    const session = this.sessions.get(terminalId);
-    if (!session) {
-      throw new Error(`Terminal not found: ${terminalId}`);
-    }
-    if (!session.channel || !session.alive) {
-      return; // Silently ignore resize on dead sessions
-    }
-    session.channel.setWindow(rows, cols, 0, 0);
-    session.cols = cols;
-    session.rows = rows;
+  private attach(session: RemoteTerminalSession, resume: boolean): Promise<string> {
+    const pending = this.attaching.get(session.terminalId);
+    if (pending) return pending;
+    const operation = this.attachChannel(session, resume).finally(() => this.attaching.delete(session.terminalId));
+    this.attaching.set(session.terminalId, operation);
+    return operation;
   }
 
-  /**
-   * Close a terminal session. Ends the SSH channel and removes the
-   * session from the map.
-   */
-  closeTerminal(terminalId: string): void {
-    const session = this.sessions.get(terminalId);
-    if (!session) {
-      return; // Already closed
-    }
-
-    if (session.channel) {
-      try {
-        session.channel.end();
-      } catch {
-        // Channel may already be closed
-      }
-    }
-
-    session.alive = false;
-    session.channel = null;
-    this.sessions.delete(terminalId);
-    this.emit("ssh:terminal-closed", { terminalId, profileId: session.profileId });
-  }
-
-  /**
-   * Attempt to reconnect a dead terminal session. Opens a new shell
-   * channel on the same profile with the same dimensions and cwd.
-   *
-   * Returns the same terminal ID on success (the session is reused).
-   * Throws if the SSH connection is not available.
-   */
-  async reconnectTerminal(terminalId: string): Promise<string> {
-    const session = this.sessions.get(terminalId);
-    if (!session) {
-      throw new Error(`Terminal not found: ${terminalId}`);
-    }
-
-    const connection = this.sessionManager.getConnection(session.profileId);
-    if (!connection || connection.status !== "connected") {
-      throw new Error(
-        `Cannot reconnect terminal: SSH connection for profile "${session.profileId}" is not active.`,
-      );
-    }
-
-    const { client } = connection;
-
+  private async attachChannel(session: RemoteTerminalSession, resume: boolean): Promise<string> {
+    const client = await this.connectedClient(session.profileId);
+    const name = `crab-${session.terminalId}`;
+    const target = this.shellEscape(`=${name}`);
+    const check = "command -v tmux >/dev/null 2>&1 || { printf '%s\\n' 'Durable SSH terminals require tmux on the remote host. Install tmux and retry.' >&2; exit 127; }; ";
+    // Restore never creates a replacement shell: that would misrepresent an
+    // ended agent as resumed. New tabs alone may create a remote session.
+    const prepare = resume
+      ? `${TMUX} has-session -t ${target}`
+      : `${TMUX} new-session -d -s ${this.shellEscape(name)} -x ${session.cols} -y ${session.rows}${session.cwd ? ` -c ${this.shellEscape(session.cwd)}` : ""} \\; set-option -t ${this.shellEscape(name)} status off \\; set-option -t ${this.shellEscape(name)} prefix None \\; set-option -t ${this.shellEscape(name)} destroy-unattached off`;
+    await this.run(client, check + prepare);
+    if (this.sessions.get(session.terminalId) !== session) throw new Error("Terminal was closed while connecting");
     const channel = await new Promise<ClientChannel>((resolve, reject) => {
-      client.shell(
-        { term: "xterm-256color", cols: session.cols, rows: session.rows },
-        (err, stream) => {
-          if (err) reject(err);
-          else resolve(stream);
-        },
-      );
+      let settled = false;
+      const timer = setTimeout(() => { settled = true; reject(new Error("Remote terminal attachment timed out")); }, OPERATION_TIMEOUT_MS);
+      client.exec(`${TMUX} attach-session -d -t ${target}`, { pty: { term: "xterm-256color", cols: session.cols, rows: session.rows } },
+        (error, stream) => {
+          // SSH can deliver a channel after the request timed out. Release
+          // that attachment so a failed tab cannot retain an unseen client.
+          if (settled) { stream?.close(); return; }
+          settled = true;
+          clearTimeout(timer);
+          if (error) reject(error); else resolve(stream);
+        });
     });
-
-    // Update the session with the new channel
+    if (this.sessions.get(session.terminalId) !== session) { channel.end(); throw new Error("Terminal was closed while connecting"); }
+    const previous = session.channel;
     session.channel = channel;
     session.alive = true;
     session.awaitingReconnect = false;
-
-    // Re-attach data forwarding
+    previous?.end();
     channel.on("data", (data: Buffer) => {
-      this.emit("ssh:terminal-data", { terminalId, data: data.toString("utf-8") });
+      if (session.channel === channel) this.emit("ssh:terminal-data", { terminalId: session.terminalId, data: data.toString("utf8"), ownerPath: session.ownerPath });
     });
-
-    channel.on("close", () => {
-      const s = this.sessions.get(terminalId);
-      if (s) {
-        s.alive = false;
-        s.channel = null;
-        s.awaitingReconnect = true;
-        this.emit("ssh:terminal-session-ended", { terminalId, profileId: session.profileId });
-      }
+    const ended = () => {
+      // An old channel may close after its replacement has attached.
+      if (this.sessions.get(session.terminalId) !== session || session.channel !== channel) return;
+      session.channel = null;
+      session.alive = false;
+      session.awaitingReconnect = true;
+      this.emit("ssh:terminal-session-ended", { terminalId: session.terminalId, profileId: session.profileId });
+    };
+    channel.on("close", ended);
+    channel.on("error", ended);
+    channel.stderr.on("data", (data: Buffer) => this.emit("ssh:terminal-data", { terminalId: session.terminalId, data: data.toString("utf8"), ownerPath: session.ownerPath }));
+    // tmux configures its terminal before drawing the first screen. Returning
+    // earlier can flush user input while the SSH PTY is still being initialized.
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        channel.removeListener("data", ready);
+        channel.removeListener("close", closed);
+        channel.removeListener("error", failed);
+        if (error) reject(error); else resolve();
+      };
+      const ready = () => finish();
+      const closed = () => finish(new Error("Remote terminal closed before attachment completed"));
+      const failed = (error: Error) => finish(error);
+      const timer = setTimeout(() => { channel.close(); finish(new Error("Remote terminal attachment timed out")); }, OPERATION_TIMEOUT_MS);
+      channel.once("data", ready).once("close", closed).once("error", failed);
     });
+    return session.terminalId;
+  }
 
-    channel.on("error", () => {
-      const s = this.sessions.get(terminalId);
-      if (s) {
-        s.alive = false;
-        s.channel = null;
-      }
+  private run(client: Client, command: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let channel: ClientChannel | undefined;
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const timer = setTimeout(() => { channel?.close(); finish(new Error("Remote terminal operation timed out")); }, OPERATION_TIMEOUT_MS);
+      client.exec(command, (error, stream) => {
+        if (error) { finish(error); return; }
+        if (settled) { stream.close(); return; }
+        channel = stream;
+        let message = "";
+        stream.stderr.on("data", (data: Buffer) => { message = (message + data.toString("utf8")).slice(-4096); });
+        stream.on("error", finish);
+        stream.on("close", (code: number) => finish(code === 0 ? undefined : new Error(message.trim() || "Remote terminal has ended or could not be attached")));
+        stream.resume();
+      });
     });
+  }
 
-    // cd back to the original working directory
-    if (session.cwd) {
-      channel.write(`cd ${this.shellEscape(session.cwd)}\n`);
+  writeToTerminal(terminalId: string, data: string): void {
+    const session = this.sessions.get(terminalId);
+    if (!session) throw new Error(`Terminal not found: ${terminalId}`);
+    if (session.awaitingReconnect) {
+      if (data === "\r" || data === "\n") void this.reconnectTerminal(terminalId).catch(() => {});
+      return;
     }
-
-    return terminalId;
+    if (!session.channel) throw new Error("Remote terminal is disconnected");
+    session.channel.write(data);
   }
 
-  /**
-   * Get a terminal session by ID.
-   */
-  getSession(terminalId: string): RemoteTerminalSession | undefined {
-    return this.sessions.get(terminalId);
+  resizeTerminal(terminalId: string, cols: number, rows: number): void {
+    const session = this.sessions.get(terminalId);
+    if (!session) throw new Error(`Terminal not found: ${terminalId}`);
+    session.cols = Math.max(1, Math.floor(cols));
+    session.rows = Math.max(1, Math.floor(rows));
+    session.channel?.setWindow(session.rows, session.cols, 0, 0);
   }
 
-  /**
-   * Get all terminal sessions for a given profile.
-   */
-  getSessionsForProfile(profileId: string): RemoteTerminalSession[] {
-    const result: RemoteTerminalSession[] = [];
-    for (const session of this.sessions.values()) {
-      if (session.profileId === profileId) {
-        result.push(session);
-      }
+  /** Release this attachment; the remote shell and foreground process continue. */
+  detachTerminal(terminalId: string): void {
+    const session = this.sessions.get(terminalId);
+    if (!session) return;
+    this.sessions.delete(terminalId);
+    session.channel?.end();
+    session.channel = null;
+    session.alive = false;
+  }
+
+  /** Explicit user termination destroys only this terminal's remote PTY. */
+  async closeTerminal(terminalId: string): Promise<void> {
+    const session = this.sessions.get(terminalId);
+    if (!session) return;
+    const client = await this.connectedClient(session.profileId);
+    await this.run(client, `if ${TMUX} has-session -t ${this.shellEscape(`=crab-${terminalId}`)}; then ${TMUX} kill-session -t ${this.shellEscape(`=crab-${terminalId}`)}; fi`);
+    this.detachTerminal(terminalId);
+    this.emit("ssh:terminal-closed", { terminalId, profileId: session.profileId });
+  }
+
+  async reconnectTerminal(terminalId: string): Promise<string> {
+    const session = this.sessions.get(terminalId);
+    if (!session) throw new Error(`Terminal not found: ${terminalId}`);
+    try {
+      const id = await this.attach(session, true);
+      this.emit("ssh:terminal-resumed", { terminalId: id, profileId: session.profileId });
+      return id;
+    } catch (error) {
+      this.emit("ssh:terminal-data", { terminalId, ownerPath: session.ownerPath, data: `\r\n[Cannot resume remote terminal: ${error instanceof Error ? error.message : String(error)}]\r\n` });
+      throw error;
     }
-    return result;
   }
 
-  /**
-   * Close all terminals for a given profile (e.g., on disconnect).
-   */
-  closeAllForProfile(profileId: string): void {
-    for (const session of this.sessions.values()) {
-      if (session.profileId === profileId) {
-        this.closeTerminal(session.terminalId);
-      }
-    }
-  }
-
-  /**
-   * Escape a path for safe use in a shell command.
-   */
-  private shellEscape(s: string): string {
-    return `'${s.replace(/'/g, "'\\''")}'`;
-  }
+  getSession(terminalId: string): RemoteTerminalSession | undefined { return this.sessions.get(terminalId); }
+  getSessionsForProfile(profileId: string): RemoteTerminalSession[] { return [...this.sessions.values()].filter(session => session.profileId === profileId); }
+  async closeAllForProfile(profileId: string): Promise<void> { await Promise.all(this.getSessionsForProfile(profileId).map(session => this.closeTerminal(session.terminalId))); }
+  private shellEscape(value: string): string { return `'${value.replace(/'/g, "'\\''")}'`; }
 }

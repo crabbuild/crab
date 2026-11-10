@@ -16,7 +16,7 @@ import { DaemonClient } from "./daemon-client";
 import { CircuitBreaker } from "./circuit-breaker";
 import { AutoRespawn } from "./auto-respawn";
 import { createDaemonBridge } from "./daemon-bridge";
-import { initializePtyMode } from "./mode-selection";
+import { initializePtyMode, parsePtyMode } from "./mode-selection";
 import { detectAndHandlePathMismatch, type PathMismatchResult } from "./path-mismatch-detection";
 import { resolveDaemonEntryPath } from "./resolve-daemon-path";
 import { registerAgentDashboardIpc } from "./agent-dashboard-ipc";
@@ -122,8 +122,7 @@ export async function initializeDaemonSubsystem(
 
     // resolveDaemonEntryPath throws if no candidate exists on disk.
     // In development mode this is expected — the daemon binary may not be
-    // built yet. User-invoked terminals work fine without the daemon; only
-    // agent sessions (which require durability) are affected.
+    // built yet. Only explicitly ephemeral terminals can run without it.
     try {
       const resolved = resolveDaemonEntryPath(
         appIsPackaged,
@@ -138,16 +137,16 @@ export async function initializeDaemonSubsystem(
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log("warn", `PTY daemon binary not found — agent sessions will not be durable (user terminals unaffected): ${msg}`);
+      log("warn", `PTY daemon binary not found — durable terminals unavailable: ${msg}`);
       // Return a minimal subsystem with daemonReady=false. The TermRouter
-      // will route user terminals to in-process and refuse daemon-typed
-      // spawns with a typed error.
+      // refuses durable spawns with a typed error; explicit ephemeral
+      // terminals remain available.
 
       // Register fallback IPC handlers so the renderer doesn't get
       // "No handler registered" errors.
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: "auto",
+        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
         fallback: { reason: "Daemon binary not found", error: msg, timestamp: Date.now() },
       }));
       ipcMain.handle("crab:agent-sessions", () => []);
@@ -399,9 +398,9 @@ export async function initializeDaemonSubsystem(
     runtimeDaemonReady = daemonReady;
 
     if (daemonReady) {
-      log("info", "Daemon subsystem ready — agent sessions will be durable");
+      log("info", "Daemon subsystem ready — terminals will be durable");
     } else {
-      log("info", "Daemon unavailable — user terminals use in-process mode, agent sessions will not persist across restarts");
+      log("info", "Daemon unavailable — open an explicit local terminal or retry durable sessions");
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -412,7 +411,7 @@ export async function initializeDaemonSubsystem(
     try {
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: "auto",
+        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
         fallback: { reason: "Daemon initialization failed", error: msg, timestamp: Date.now() },
       }));
     } catch {
@@ -460,6 +459,12 @@ export async function initializeDaemonSubsystem(
     ): Promise<{ success: boolean; error?: string }> => {
       const successorPath = payload?.successorPath ?? resolvedEntryPath;
       try {
+        // v2.0.0-alpha.1 daemons lack the live-replacement guard. Apply it
+        // at the app boundary too when upgrading from that tagged version.
+        const sessions = await daemonClient.request<import("./types").SessionInfo[]>("listSessions");
+        if (sessions.some(session => session.isAlive)) {
+          return { success: false, error: "Daemon replacement is deferred while terminals are running. Application updates preserve these sessions; end the terminals before replacing their daemon." };
+        }
         const result = await daemonClient.request<{ success: boolean; error?: string }>(
           "prepare-upgrade",
           { successorPath },
