@@ -6,6 +6,19 @@
  * quality monitoring, bookmarks, and agent capability negotiation.
  */
 
+/** The authenticated destination of a durable remote operation. */
+export interface RemoteEndpoint {
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly hostKey: string;
+}
+
+/** Compares authenticated destinations independently of editable profile IDs. */
+export function sameRemoteEndpoint(left: RemoteEndpoint, right: RemoteEndpoint): boolean {
+  return left.host === right.host && left.port === right.port && left.username === right.username && left.hostKey === right.hostKey;
+}
+
 // ── Transfer Types ───────────────────────────────────────────────
 
 export type TransferDirection = "upload" | "download";

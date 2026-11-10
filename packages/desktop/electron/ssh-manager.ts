@@ -9,7 +9,8 @@ import type { AgentDeployer, DeployProgress } from "./ssh-deployer";
 import { DeployError } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { RpcRouter } from "./ssh-router";
-import { HostKeyError, type HostKeyVerifier } from "./ssh-known-hosts";
+import { HostKeyError, hostKeyFingerprint, type HostKeyVerifier } from "./ssh-known-hosts";
+import type { RemoteEndpoint } from "./ssh-types";
 
 // ── Connection status ────────────────────────────────────────────
 
@@ -85,6 +86,7 @@ export interface SshServerInfo {
 
 export interface SshConnection {
   profile: SshProfile;
+  endpoint?: RemoteEndpoint;
   client: Client;
   status: SshConnectionStatus;
   error?: string;
@@ -432,7 +434,9 @@ export class SshSessionManager extends EventEmitter {
     }, delay);
   }
 
-  private async openConnection(profile: SshProfile, status: "connecting" | "reconnecting"): Promise<OwnedConnection> {
+  private async openConnection(requested: SshProfile, status: "connecting" | "reconnecting"): Promise<OwnedConnection> {
+    // Profile edits cannot change an in-flight handshake or its reconnect owner.
+    const profile = structuredClone(requested);
     const previous = this.connections.get(profile.id);
     if (previous) {
       if (previous.profile.host !== profile.host || previous.profile.port !== profile.port || previous.profile.username !== profile.username) {
@@ -482,7 +486,10 @@ export class SshSessionManager extends EventEmitter {
       const configuration = this.buildConnectConfig(profile, { readyTimeout: profile.connectionTimeoutMs ?? 10_000 }, connection.jumpClients, connection.lifetime);
       const config = await this.owned(connection, configuration);
       this.assertCurrent(connection);
-      await this.connectClient(connection.client, config, profile.host, profile.port, connection.lifetime);
+      const { host, port, username } = profile;
+      await this.connectClient(connection.client, config, host, port, connection.lifetime, key => {
+        connection.endpoint = { host: host.toLowerCase(), port, username, hostKey: hostKeyFingerprint(key) };
+      });
       this.assertCurrent(connection);
       if (profile.autoDeployAgent) await this.attachAgent(connection);
       return connection;
@@ -519,7 +526,7 @@ export class SshSessionManager extends EventEmitter {
     finally { signal.removeEventListener("abort", cancel); }
   }
 
-  private connectClient(client: Client, config: ConnectConfig, hostname: string, port: number, lifetime: AbortController): Promise<void> {
+  private connectClient(client: Client, config: ConnectConfig, hostname: string, port: number, lifetime: AbortController, onHostKey?: (key: Buffer) => void): Promise<void> {
     const { signal } = lifetime;
     return new Promise((resolve, reject) => {
       let pending = true;
@@ -568,6 +575,7 @@ export class SshSessionManager extends EventEmitter {
             pause();
             void this.verifyHostKey(hostname, port, key, signal).then(() => {
               if (signal.aborted) return;
+              onHostKey?.(key);
               resume(); callback(true);
             }, (cause: unknown) => {
               if (signal.aborted) return;

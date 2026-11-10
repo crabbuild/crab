@@ -2036,3 +2036,63 @@ Dependency contracts reviewed for this batch: [Vite 8 migration](https://vite.de
 [Vitest 4 removed APIs and constructor mocks](https://v4.vitest.dev/guide/migration.html),
 [minimatch 11 matching contract](https://github.com/isaacs/minimatch/blob/v11.0.6/README.md),
 and the [updater redirect advisory](https://github.com/advisories/GHSA-p2f4-r6v6-j797).
+
+## Durable SSH task destination (2026-11-10)
+
+A task previously saved only its editable SSH profile ID. Four warm/cold
+Apply/Discard regressions demonstrate that reconnecting that profile to a
+different destination redirects the task. Two additional regressions replace
+the channel while workspace writers are closing. A real two-server regression
+uses different server keys and ports with the same synthetic repository visible
+to both: the old controller merges through the replacement server and removes
+the task worktree. Backend UUID checks alone cannot establish host ownership
+when the metadata is accessible on both servers.
+
+New tasks persist the verified host, port, account and public-key fingerprint.
+The session manager snapshots profiles before connection and automatic reconnect;
+the router accepts an endpoint only from the connection owning its attached
+agent channel. Start, checkpoint queries/writes, diff, Apply and disposable
+Discard verify that saved destination. Apply/Discard capture the channel before
+awaiting writer closure. The dependency contract is ssh2 1.17.0's hostVerifier:
+without hostHash it receives the raw public-key Buffer, and an asynchronous
+true callback accepts the handshake. Fingerprints retain the existing SHA256
+public-key format; no credential is stored in the task binding.
+
+Workspace conversations share ownership by authenticated endpoint and path.
+Different profile aliases for the same endpoint share the owning task UUID;
+different endpoints with the same path cannot borrow that UUID or retire each
+other's writers. The real SQLite migration preserves old paths, branches and
+native session IDs but leaves missing endpoint bindings unset. The tagged
+v2.0.0-alpha.1 task schema stored no verified endpoint, so inferring one from
+today's editable profile would redirect old work. Explicit recovery of those
+bindings remains a production release gate.
+
+The touched task family passes 268 cases; the session manager passes 55,
+including profile mutation during connection/reconnect. Production and touched
+fixture types, renderer/Electron builds and Rust formatting pass. Real SSH
+checkpoint and availability siblings pass without provider inference. The fixed
+two-server test refuses warm and restarted operations with zero task RPCs to
+the replacement, then reconnects the original endpoint and applies the exact
+file bytes. All fixture sidecars exit before successful fixture deletion.
+The same real test is included in Unix desktop CI. Evidence:
+`remote-endpoint-before.json`, `remote-endpoint-inflight-before.json`,
+`remote-endpoint-shared-before.json`, `remote-endpoint-native-before.json`,
+`remote-endpoint-native-before-effect.json`, `remote-endpoint-task-regression.json`,
+`remote-endpoint-profile-owner.json`, `remote-endpoint-native-final.json` and
+`remote-endpoint-native-siblings.json`.
+
+The rebuilt unsigned macOS package passes all five enabled combined smoke cases;
+storage is skipped without an isolated bucket. All three owned daemons are
+confirmed gone. Evidence: `remote-endpoint-packaged.json` and
+`remote-endpoint-packaged-home.json`. Production code grows to store and enforce
+the previously absent destination contract; the existing router, SSH types and
+task database own it without a new production adapter or file.
+
+At the preceding ecd117bd7c4 head, Linux ARM64 CI passes all runtime/ABI/distro
+steps, 272 native tests (one isolated-storage case ignored), and 11 real SSH
+upload/startup cases. Windows passes its application build, native integration,
+installer packaging and packaged storage qualification, but its broad suite
+reports 62 failures across seven files. Those failures remain release blockers;
+this endpoint batch does not claim cross-platform completion. Captured Git
+Apply-target identity, explicit old-task recovery and the remaining lifecycle
+and workflow gates above are still open. The PR remains unmerged.

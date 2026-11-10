@@ -733,6 +733,23 @@ describe("SSH host verification ownership", () => {
     const hostVerifier = config.hostVerifier as import("ssh2").HostVerifier;
     return { client, config, hostVerifier, outcome };
   }
+  it("keeps the verified account and reconnect destination when the caller edits its profile", async () => {
+    const profile = makeProfile();
+    const connecting = manager.connect(profile);
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled());
+    const client = mockClientInstances[0];
+    const verifier = client.connect.mock.calls[0][0].hostVerifier as import("ssh2").HostVerifier;
+    profile.host = "replacement.example.invalid";
+    const key = Buffer.from("fixture-host-public-key");
+    const { hostKeyFingerprint } = await import("../electron/ssh-known-hosts");
+    verifier(key, vi.fn()); await vi.advanceTimersByTimeAsync(0);
+    client.emit("ready"); await connecting;
+    const endpoint = manager.getConnection(profile.id)?.endpoint;
+    client.emit("end"); await vi.advanceTimersByTimeAsync(1000);
+    expect({ endpoint, reconnectHost: mockClientInstances.at(-1)!.connect.mock.calls[0][0].host }).toEqual({
+      endpoint: { host: "test.example.com", port: 22, username: "testuser", hostKey: hostKeyFingerprint(key) }, reconnectHost: "test.example.com",
+    });
+  });
   it("pauses the network deadline while the owner reviews the fingerprint", async () => {
     let approve!: () => void; verify.mockImplementation(() => new Promise<void>(resolve => { approve = resolve; }));
     const { client, config, hostVerifier, outcome } = await start(); const callback = vi.fn(); const key = Buffer.from("fixture");

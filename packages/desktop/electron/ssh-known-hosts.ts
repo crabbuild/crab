@@ -81,7 +81,7 @@ export class KnownHostsManager {
     const host = endpoint(hostname, port);
     const parsed = utils.parseKey(key);
     if (parsed instanceof Error || Array.isArray(parsed)) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Server presented an invalid SSH host key");
-    const keyType = parsed.type; const fingerprint = this.computeFingerprint(parsed.getPublicSSH());
+    const keyType = parsed.type; const fingerprint = hostKeyFingerprint(parsed.getPublicSSH());
     const pins = this.load().filter(pin => pin.hostname === hostname.toLowerCase() && pin.port === port && pin.keyType === keyType);
     const previous = new Set(pins.map(pin => pin.fingerprint));
     let revoked = false;
@@ -98,7 +98,7 @@ export class KnownHostsManager {
         if (fields.length < 3) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Incomplete SSH trust record");
         const saved = utils.parseKey(decode(fields[2]));
         if (saved instanceof Error || Array.isArray(saved) || saved.type !== fields[1]) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Invalid SSH trust record");
-        const savedFingerprint = this.computeFingerprint(saved.getPublicSSH());
+        const savedFingerprint = hostKeyFingerprint(saved.getPublicSSH());
         if (marker === "@revoked") {
           if (savedFingerprint === fingerprint) revoked = true;
         } else if (saved.type === keyType) previous.add(savedFingerprint);
@@ -127,10 +127,6 @@ export class KnownHostsManager {
   }
 
   list(): KnownHost[] { return this.load(); }
-
-  computeFingerprint(key: Buffer): string {
-    return `SHA256:${crypto.createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
-  }
 
   private read(file: string): string {
     try { return fs.readFileSync(file, "utf8"); }
@@ -180,6 +176,11 @@ export class KnownHostsManager {
       try { fs.rmSync(temporary, { force: true }); } catch { /* Preserve the source error. */ }
     }
   }
+}
+
+/** Formats the SHA256 fingerprint of an SSH public key blob. */
+export function hostKeyFingerprint(key: Buffer): string {
+  return `SHA256:${crypto.createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
 }
 
 /** Holds an exact presented key through user verification and persists approval before authentication. */

@@ -12,6 +12,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "./ssh-manager";
 import type { RemoteCache } from "./ssh-cache";
+import { sameRemoteEndpoint, type RemoteEndpoint } from "./ssh-types";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -275,6 +276,25 @@ export class RpcRouter extends EventEmitter {
 
   /** Captures the channel identity for a native process's entire lifetime. */
   remoteChannelOwner(profileId: string): object | undefined { return this.channels.get(profileId); }
+
+  /** Captures the verified destination of the currently attached agent. */
+  remoteEndpoint(profileId: string): RemoteEndpoint {
+    const connection = this.sessionManager.getConnection(profileId);
+    const channel = this.channels.get(profileId)?.channel;
+    if (!channel || connection?.channels.agent !== channel || !connection.endpoint) {
+      throw new Error("Remote endpoint requires an attached, authenticated SSH agent");
+    }
+    return { ...connection.endpoint };
+  }
+
+  /** Refuses to infer a durable task's destination from an editable profile. */
+  assertRemoteEndpoint(profileId: string, expected: RemoteEndpoint | undefined): void {
+    if (!expected) throw new Error("Remote task endpoint was not recorded. Recover its host binding explicitly before continuing.");
+    const current = this.remoteEndpoint(profileId);
+    if (!sameRemoteEndpoint(current, expected)) {
+      throw new Error("SSH profile endpoint changed. Restore the task's original host, account and host key before continuing.");
+    }
+  }
 
   /** Sends only on the captured channel; a replacement cannot inherit process writes. */
   requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {

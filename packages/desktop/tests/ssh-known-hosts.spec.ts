@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { utils } from "ssh2";
-import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
+import { KnownHostsManager, createHostKeyVerifier, hostKeyFingerprint } from "../electron/ssh-known-hosts";
 
 function publicKey(): Buffer {
   const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -38,7 +38,7 @@ describe("application host trust", () => {
   it("replaces only the approved key at the same endpoint and algorithm", () => {
     hosts.accept("fixture.invalid", 22, key); hosts.accept("fixture.invalid", 2222, key);
     hosts.accept("fixture.invalid", 22, changed);
-    expect(hosts.list().map(pin => [pin.port, pin.fingerprint])).toEqual([[2222, hosts.computeFingerprint(key)], [22, hosts.computeFingerprint(changed)]]);
+    expect(hosts.list().map(pin => [pin.port, pin.fingerprint])).toEqual([[2222, hostKeyFingerprint(key)], [22, hostKeyFingerprint(changed)]]);
   });
   it("reloads application pins changed by another owner", () => {
     const other = new KnownHostsManager(store, user, global);

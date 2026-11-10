@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { Orchestrator, Task } from "../electron/orchestrator";
+import { RpcRouter } from "../electron/ssh-router";
 import { CheckpointManager } from "../electron/orchestrator-checkpoints";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
@@ -57,7 +58,18 @@ vi.mock("node:util", async (importOriginal) => {
 
 // ─── Mock RPC Router ─────────────────────────────────────────────────────────
 
+const fixtureEndpoint = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:fixture" };
+
 class MockRpcRouter extends EventEmitter {
+  private readonly owner = {};
+  remoteEndpoint(_profileId: string) { return { ...fixtureEndpoint }; }
+  assertRemoteEndpoint = RpcRouter.prototype.assertRemoteEndpoint;
+  remoteChannelOwner(_profileId: string) { return this.owner; }
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (owner !== this.owner) return Promise.reject(new Error("Fixture channel changed"));
+    return this.sendToRemoteAgent(profileId, method, params);
+  }
+
   calls: Array<{ profileId: string; method: string; params: unknown }> = [];
   nextResult: unknown = {};
   shouldFail = false;
@@ -120,6 +132,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     todos: [],
     isRemote: true,
     remoteProfileId: "gpu-server",
+    remoteEndpoint: fixtureEndpoint,
     ...overrides,
   };
 
@@ -261,7 +274,7 @@ describe("Remote Apply/Discard", () => {
       const task = injectRemoteTask(orchestrator);
       if (missing === "profile") delete task.remoteProfileId;
       else (orchestrator as unknown as { rpcRouter: undefined }).rpcRouter = undefined;
-      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("Remote discard requires a connected remote agent");
+      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("Remote task repository endpoint is unavailable");
       expect(task.status).not.toBe("discarded");
     });
 

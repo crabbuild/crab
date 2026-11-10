@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
+import type { RemoteEndpoint } from "../electron/ssh-types";
 
 class Channel extends EventEmitter {
   writes: string[] = [];
@@ -13,20 +14,41 @@ class Channel extends EventEmitter {
 
 function fixture(timeoutMs = 30_000, status = "connected") {
   const channels = new Map<string, Channel>();
+  const endpoints = new Map<string, RemoteEndpoint>();
   const manager = {
     getStatus: () => status,
-    getConnection: (profile: string) => ({ channels: { agent: channels.get(profile)?.asChannel() }, profile: { operationTimeoutMs: timeoutMs } }),
+    getConnection: (profile: string) => ({ endpoint: endpoints.get(profile), channels: { agent: channels.get(profile)?.asChannel() }, profile: { operationTimeoutMs: timeoutMs } }),
   } as unknown as SshSessionManager;
   const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local request"); } });
   const attach = (profile: string) => {
     const channel = new Channel(); channels.set(profile, channel); router.attachChannel(profile, channel.asChannel()); return channel;
   };
-  return { router, attach };
+  return { router, attach, endpoints };
 }
 
 describe("RPC channel lifecycle", () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it.each([
+    { field: "host", value: "other.example.invalid" }, { field: "port", value: 2222 },
+    { field: "username", value: "another-account" }, { field: "hostKey", value: "SHA256:replacement" },
+  ])("rejects a changed verified $field before issuing a task request", ({ field, value }) => {
+    const { router, attach, endpoints } = fixture(); const channel = attach("profile");
+    const original = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:original" };
+    endpoints.set("profile", original);
+    const saved = router.remoteEndpoint("profile");
+    endpoints.set("profile", { ...original, [field]: value });
+    expect(() => router.assertRemoteEndpoint("profile", saved)).toThrow("endpoint changed");
+    expect(channel.writes).toEqual([]);
+  });
+
+  it("does not label a replacement channel with another connection's endpoint", () => {
+    const { router, attach, endpoints } = fixture(); attach("profile");
+    endpoints.set("profile", { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:original" });
+    router.attachChannel("profile", new Channel().asChannel());
+    expect(() => router.remoteEndpoint("profile")).toThrow("authenticated SSH agent");
+  });
 
   it.each(["end", "close", "error"])("settles only the owning calls immediately on %s", async event => {
     const { router, attach } = fixture();

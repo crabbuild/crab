@@ -138,7 +138,7 @@ App Shutdown
 |-------|-----------|---------|
 | Renderer | React 18 | UI framework |
 | Renderer | Tailwind CSS 3 | Styling |
-| Renderer | Vite 5 | Build tool + HMR |
+| Renderer | Vite 8 | Build tool + HMR |
 | Renderer | TypeScript 5.9 | Type safety |
 | Renderer | @tanstack/react-virtual | Virtual scrolling |
 | Renderer | @xyflow/react | Workflow DAG editor |

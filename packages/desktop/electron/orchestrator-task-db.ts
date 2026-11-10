@@ -41,6 +41,7 @@ type TaskRow = {
   pr_number: number | null;
   is_remote: number;
   remote_profile_id: string | null;
+  remote_endpoint_json: string | null;
   codex_thread_id: string | null;
   claude_session_id: string | null;
   ui_state_json: string | null;
@@ -203,6 +204,7 @@ export class OrchestratorTaskDatabase {
       prNumber: row.pr_number ?? undefined,
       isRemote: row.is_remote === 1 || undefined,
       remoteProfileId: row.remote_profile_id ?? undefined,
+      remoteEndpoint: decodeJson<PersistedTask["remoteEndpoint"]>(row.remote_endpoint_json, undefined),
       codexThreadId: row.codex_thread_id ?? undefined,
       claudeSessionId: row.claude_session_id ?? undefined,
       uiState: decodeJson<PersistedTask["uiState"]>(row.ui_state_json, undefined),
@@ -228,7 +230,7 @@ export class OrchestratorTaskDatabase {
         id, title, prompt, agent_type, status, branch, worktree_path,
         worktree_mode, base_ref, base_branch, repo_path, created_at,
         started_at, completed_at, exit_code, pr_url, pr_number, is_remote,
-        remote_profile_id, codex_thread_id, claude_session_id, ui_state_json,
+        remote_profile_id, remote_endpoint_json, codex_thread_id, claude_session_id, ui_state_json,
         workflow_run_id, workflow_node_run_id, plan_first, model,
         reasoning_level, pinned_at, parent_task_id, root_task_id,
         spawned_by_agent_id, spawned_role, last_activity_at, sidebar_label,
@@ -237,7 +239,7 @@ export class OrchestratorTaskDatabase {
         @id, @title, @prompt, @agent_type, @status, @branch,
         @worktree_path, @worktree_mode, @base_ref, @base_branch, @repo_path,
         @created_at, @started_at, @completed_at, @exit_code, @pr_url,
-        @pr_number, @is_remote, @remote_profile_id, @codex_thread_id, @claude_session_id,
+        @pr_number, @is_remote, @remote_profile_id, @remote_endpoint_json, @codex_thread_id, @claude_session_id,
         @ui_state_json, @workflow_run_id,
         @workflow_node_run_id, @plan_first, @model, @reasoning_level,
         @pinned_at, @parent_task_id, @root_task_id, @spawned_by_agent_id,
@@ -263,6 +265,7 @@ export class OrchestratorTaskDatabase {
         pr_number = excluded.pr_number,
         is_remote = excluded.is_remote,
         remote_profile_id = excluded.remote_profile_id,
+        remote_endpoint_json = excluded.remote_endpoint_json,
         codex_thread_id = excluded.codex_thread_id,
         claude_session_id = excluded.claude_session_id,
         ui_state_json = excluded.ui_state_json,
@@ -325,6 +328,7 @@ export class OrchestratorTaskDatabase {
           pr_number: task.prNumber ?? null,
           is_remote: task.isRemote ? 1 : 0,
           remote_profile_id: task.remoteProfileId ?? null,
+          remote_endpoint_json: encodeJson(task.remoteEndpoint),
           codex_thread_id: task.codexThreadId ?? null,
           claude_session_id: task.claudeSessionId ?? null,
           ui_state_json: encodeJson(task.uiState),
@@ -399,6 +403,7 @@ export class OrchestratorTaskDatabase {
         pr_number INTEGER,
         is_remote INTEGER NOT NULL DEFAULT 0,
         remote_profile_id TEXT,
+        remote_endpoint_json TEXT,
         codex_thread_id TEXT,
         claude_session_id TEXT,
         ui_state_json TEXT,
@@ -467,6 +472,9 @@ export class OrchestratorTaskDatabase {
     this.ensureColumn("tasks", "pr_number", "INTEGER");
     this.ensureColumn("tasks", "is_remote", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tasks", "remote_profile_id", "TEXT");
+    // Older rows never captured a verified destination. Inferring one from
+    // an editable profile could redirect their saved work to another host.
+    this.ensureColumn("tasks", "remote_endpoint_json", "TEXT");
     this.ensureColumn("tasks", "codex_thread_id", "TEXT");
     this.ensureColumn("tasks", "claude_session_id", "TEXT");
     this.ensureColumn("tasks", "ui_state_json", "TEXT");

@@ -126,6 +126,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/crab-native-task"
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-native-task-live.spec.ts -t 'checkpoint|availability'
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-endpoint-live.spec.ts --maxWorkers 1
       - name: Build installers and unpacked application
         env:
           CSC_LINK: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}

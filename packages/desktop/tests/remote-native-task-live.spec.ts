@@ -48,7 +48,9 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     const channel = await new Promise<ClientChannel>((resolve, reject) => client.exec(`exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
     let diagnostics = ""; channel.stderr.on("data", (bytes: Buffer) => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
     const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
-    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {} }) } as unknown as SshSessionManager;
+    const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
+      hostKey: `SHA256:${Buffer.from(server.connection.fingerprint, "hex").toString("base64").replace(/=+$/, "")}` };
+    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, endpoint, channels: { agent: channel } }) } as unknown as SshSessionManager;
     const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } });
     router.attachChannel("fixture", channel);
     const repoId = `ssh://fixture${repo}`;

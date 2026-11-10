@@ -419,6 +419,8 @@ export async function computeRemoteDiff(
     );
   }
 
+  rpcRouter.assertRemoteEndpoint(task.remoteProfileId, task.remoteEndpoint);
+
   const result = await rpcRouter.sendToRemoteAgent(
     task.remoteProfileId,
     "task_compute_diff",

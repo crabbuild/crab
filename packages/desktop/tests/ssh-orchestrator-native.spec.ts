@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import Sqlite from "better-sqlite3";
 import { AgentAdapter, createAdapter, type AgentEvent } from "../electron/orchestrator-adapters";
 import { CheckpointManager } from "../electron/orchestrator-checkpoints";
 import { Orchestrator } from "../electron/orchestrator";
 import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
-import type { RpcRouter } from "../electron/ssh-router";
+import { RpcRouter } from "../electron/ssh-router";
 import * as settings from "../electron/orchestrator-settings";
 import { AgentProcessClosureError } from "../electron/agent-process";
 import { EventEmitter } from "node:events";
@@ -31,21 +32,33 @@ describe("remote tasks through the shared native pipeline", () => {
   let orchestrator: Orchestrator;
   let adapters: NativeAdapter[];
   let unknownCheckpoint: boolean;
+  let endpoint: { host: string; port: number; username: string; hostKey: string };
+  let channelOwner: object;
   const sha = "a".repeat(40);
   const remoteFactory = () => { throw new Error("The native adapter owns protocol I/O"); };
   const router = {
+    remoteEndpoint: vi.fn(() => ({ ...endpoint })),
+    assertRemoteEndpoint: RpcRouter.prototype.assertRemoteEndpoint,
+    remoteChannelOwner: vi.fn(() => channelOwner),
+    requestOnRemoteChannel: vi.fn(async (profile: string, owner: object, method: string, _params: unknown) => {
+      if (owner !== channelOwner) throw new Error("Remote channel changed");
+      return method === "worktree_create" ? router.route() : router.sendToRemoteAgent(profile, method);
+    }),
     route: vi.fn(async () => ({ path: "/server/worktree", branch: "agent/fixture", base_ref: sha })),
     sendToRemoteAgent: vi.fn(async (_profile: string, method: string) => method === "task_apply" ? { applied: true } : { discarded: true }),
   };
 
   beforeEach(async () => {
     vi.clearAllMocks(); adapters = []; unknownCheckpoint = false;
+    endpoint = { host: "original.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:original" };
+    channelOwner = {};
     directory = await mkdtemp(path.join(tmpdir(), "crab-remote-native-"));
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     vi.mocked(remoteAgentProcessFactory).mockReturnValue(remoteFactory);
     vi.mocked(createAdapter).mockImplementation(() => { const adapter = new NativeAdapter(); adapters.push(adapter); return adapter; });
     vi.spyOn(settings, "loadAgentConfig").mockReturnValue({ binaryPath: "/client-only/provider", extraArgs: ["--client-only"], env: { CLIENT_ONLY_CREDENTIAL: "fixture-value" } });
     vi.spyOn(CheckpointManager.prototype, "pinBase").mockResolvedValue(sha);
+    vi.spyOn(CheckpointManager.prototype, "captureBase").mockResolvedValue(sha);
     vi.spyOn(CheckpointManager.prototype, "createLightweightCheckpoint").mockResolvedValue({ sha, ref: "refs/crab/checkpoints/fixture/0" });
     vi.spyOn(CheckpointManager.prototype, "snapshotHead").mockResolvedValue(sha);
     vi.spyOn(CheckpointManager.prototype, "holdCheckpoint").mockResolvedValue();
@@ -63,6 +76,68 @@ describe("remote tasks through the shared native pipeline", () => {
   });
   const create = () => orchestrator.createTask("Native remote prompt", "claude-code", "ssh://server/repo");
   const complete = () => adapters[0].notify({ type: "done", timestamp: Date.now(), outcome: "completed", content: "Done" });
+
+  it.each(["warm", "cold"].flatMap(recovery => ["apply", "discard"].map(operation => ({ recovery, operation }))))(
+    "refuses $operation on a retargeted profile after $recovery recovery", async ({ recovery, operation }) => {
+      const task = await create(); await orchestrator.startTask(task.id); complete();
+      await vi.waitFor(() => expect(task.status).toBe("reviewing"));
+      if (recovery === "cold") {
+        await orchestrator.shutdown();
+        orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite"), rpcRouter: router as unknown as RpcRouter });
+      }
+      endpoint = { ...endpoint, host: "replacement.example.invalid", hostKey: "SHA256:replacement" };
+      const action = operation === "apply" ? orchestrator.applyTask(task.id) : orchestrator.discardTask(task.id);
+      await expect(action).rejects.toThrow(/endpoint/i);
+      expect(router.sendToRemoteAgent.mock.calls).toEqual([]);
+    },
+  );
+
+  it.each(["apply", "discard"])("refuses remote %s when its channel changes while writers close", async operation => {
+    const task = await create(); await orchestrator.startTask(task.id); complete();
+    let release!: () => void;
+    adapters[0].closure = new Promise(resolve => { release = resolve; });
+    const result = (operation === "apply" ? orchestrator.applyTask(task.id) : orchestrator.discardTask(task.id)).catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() => expect(adapters[0].cancel).toHaveBeenCalled());
+      channelOwner = {};
+    } finally { release(); }
+    const outcome = await result;
+    expect({ message: outcome instanceof Error ? outcome.message : undefined, writes: router.sendToRemoteAgent.mock.calls }).toEqual({ message: expect.stringMatching(/channel/i), writes: [] });
+  });
+
+  it("does not borrow a disposable workspace owner from another endpoint at the same path", async () => {
+    const original = await create();
+    endpoint = { ...endpoint, host: "replacement.example.invalid", hostKey: "SHA256:replacement" };
+    const borrowed = await orchestrator.createTask("Borrowed on another host", "claude-code", "ssh://server/repo", "HEAD", { worktreeMode: "existing", worktreePath: original.worktreePath });
+    await orchestrator.startTask(borrowed.id);
+    expect(vi.mocked(remoteAgentProcessFactory).mock.calls.at(-1)?.[2]).toBeUndefined();
+  });
+
+  it("shares a workspace owner across profile aliases of the same verified endpoint", async () => {
+    const original = await create();
+    const borrowed = await orchestrator.createTask("Borrowed through an alias", "claude-code", "ssh://alias/repo", "HEAD", { worktreeMode: "existing", worktreePath: original.worktreePath });
+    await orchestrator.startTask(borrowed.id);
+    expect(vi.mocked(remoteAgentProcessFactory).mock.calls.at(-1)?.[2]).toBe(original.id);
+  });
+
+  it("preserves an older task without inferring its missing endpoint on restart", async () => {
+    const task = await create();
+    task.remoteEndpoint = undefined;
+    task.claudeSessionId = "saved-native-session";
+    await orchestrator.shutdown();
+    const oldDatabase = new Sqlite(path.join(directory, "tasks.sqlite"));
+    try { oldDatabase.exec("ALTER TABLE tasks DROP COLUMN remote_endpoint_json"); }
+    finally { oldDatabase.close(); }
+    orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite"), rpcRouter: router as unknown as RpcRouter });
+    const saved = orchestrator.getTask(task.id)!;
+    const count = router.requestOnRemoteChannel.mock.calls.length;
+    await expect(orchestrator.startTask(saved.id)).rejects.toThrow("endpoint was not recorded");
+    await expect(orchestrator.applyTask(saved.id)).rejects.toThrow("endpoint was not recorded");
+    await expect(orchestrator.discardTask(saved.id)).rejects.toThrow("endpoint was not recorded");
+    expect({ endpoint: saved.remoteEndpoint, session: saved.claudeSessionId, path: saved.worktreePath, branch: saved.branch, sent: router.requestOnRemoteChannel.mock.calls.length }).toEqual({
+      endpoint: undefined, session: "saved-native-session", path: task.worktreePath, branch: task.branch, sent: count,
+    });
+  });
 
   it("uses native controls, approvals and checkpoint receipts without client configuration", async () => {
     const task = await create(); await orchestrator.startTask(task.id); complete();

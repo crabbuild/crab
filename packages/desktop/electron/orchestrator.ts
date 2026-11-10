@@ -39,6 +39,7 @@ import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migr
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
 import { parseRepoId } from "./ssh-router";
 import type { RpcRouter } from "./ssh-router";
+import { sameRemoteEndpoint, type RemoteEndpoint } from "./ssh-types";
 import { confirmRemoteTaskOperation } from "./ssh-task-outcome";
 import {
   RemoteScriptRunner,
@@ -133,6 +134,8 @@ export interface Task {
   isRemote?: boolean;
   /** SSH profile ID for remote tasks. */
   remoteProfileId?: string;
+  /** Verified destination; absent on older tasks until explicit host recovery. */
+  remoteEndpoint?: RemoteEndpoint;
   /** Durable native thread identity used by app-server resume. */
   codexThreadId?: string;
   claudeSessionId?: string;
@@ -197,6 +200,7 @@ export interface PersistedTask {
   goal?: CodexGoal | null;
   isRemote?: boolean;
   remoteProfileId?: string;
+  remoteEndpoint?: RemoteEndpoint;
   codexThreadId?: string;
   claudeSessionId?: string;
   uiState?: PersistedChatUIState;
@@ -213,6 +217,19 @@ export interface PersistedTask {
   lastActivityAt?: number;
   sidebarLabel?: string;
   sidebarGroup?: string;
+}
+
+function sameTaskHost(left: Task, right: Task): boolean {
+  if (Boolean(left.isRemote) !== Boolean(right.isRemote)) return false;
+  if (!left.isRemote) return true;
+  // A legacy task without a verified destination cannot grant another task
+  // a writer lease merely because its path and editable profile ID match.
+  if (!left.remoteEndpoint || !right.remoteEndpoint) return left.id === right.id && left.remoteProfileId === right.remoteProfileId && left.remoteEndpoint === right.remoteEndpoint;
+  return sameRemoteEndpoint(left.remoteEndpoint, right.remoteEndpoint);
+}
+
+function sameWorkspace(left: Task, right: Task): boolean {
+  return left.worktreePath === right.worktreePath && sameTaskHost(left, right);
 }
 
 function branchNameFromBaseRef(baseRef: string): string | undefined {
@@ -448,6 +465,10 @@ export class Orchestrator extends EventEmitter {
       );
     }
 
+    const router = this.rpcRouter;
+    const remoteEndpoint = router.remoteEndpoint(remoteInfo.profileId);
+    const owner = router.remoteChannelOwner(remoteInfo.profileId);
+    if (!owner) throw new Error("Remote task requires an attached SSH agent");
     let base = baseRef ?? "HEAD";
     const worktreeMode = options.worktreeMode ?? "auto";
     let branch = `agent/${id}`;
@@ -465,7 +486,7 @@ export class Orchestrator extends EventEmitter {
     } else {
       // Route worktree creation to the remote agent.
       try {
-        const result = await this.rpcRouter.route(repoPath, "worktree_create", {
+        const result = await router.requestOnRemoteChannel(remoteInfo.profileId, owner, "worktree_create", {
           repo_id: repoPath,
           branch,
           base_ref: base,
@@ -507,6 +528,7 @@ export class Orchestrator extends EventEmitter {
       todos: [],
       isRemote: true,
       remoteProfileId: remoteInfo.profileId,
+      remoteEndpoint,
     };
 
     if (worktreeMode !== "auto") task.baseRef = await this.checkpointOperation(task, manager => manager.captureBase(task));
@@ -585,8 +607,20 @@ export class Orchestrator extends EventEmitter {
   /** Captures the task's host and disposable workspace owner for native I/O. */
   agentProcessFactory(task: Task): AgentProcessFactory | undefined {
     if (!task.isRemote) return undefined;
-    if (!this.rpcRouter || !task.remoteProfileId) throw new Error("Native process requires a connected remote agent");
-    return remoteAgentProcessFactory(this.rpcRouter, task.remoteProfileId, this.ownedWorkspaceTask(task)?.id);
+    const host = this.remoteTaskHost(task);
+    return remoteAgentProcessFactory(host.router, host.profileId, this.ownedWorkspaceTask(task)?.id);
+  }
+
+  private remoteTaskHost(task: Task): { router: RpcRouter; profileId: string; owner: object } {
+    const router = this.rpcRouter;
+    const profileId = task.remoteProfileId;
+    if (!router || !profileId || parseRepoId(task.repoPath)?.profileId !== profileId) throw new Error("Remote task repository endpoint is unavailable");
+    router.assertRemoteEndpoint(profileId, task.remoteEndpoint);
+    // Capture before awaiting writer shutdown. A reconnect cannot redirect
+    // an accepted Apply or Discard to a replacement agent channel.
+    const owner = router.remoteChannelOwner(profileId);
+    if (!owner) throw new Error("Remote task requires an attached SSH agent");
+    return { router, profileId, owner };
   }
 
   /** Binds checkpoint I/O to the saved workspace and current SSH channel. */
@@ -1499,11 +1533,11 @@ export class Orchestrator extends EventEmitter {
     try {
       if (task.isRemote) {
         if (files) throw new Error("Selective apply requires a local workspace");
-        if (!task.remoteProfileId || !this.rpcRouter) throw new Error("Remote apply requires a connected remote agent");
+        const host = this.remoteTaskHost(task);
         await this.closeWorkspaceConversations(task);
         if (this.ownsTaskWorktree(task)) {
           try {
-            const result = await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_apply", {
+            const result = await host.router.requestOnRemoteChannel(host.profileId, host.owner, "task_apply", {
               repo_id: task.repoPath, task_id: taskId, branch: task.branch,
               base_ref: task.baseRef, base_branch: task.baseBranch, worktree_path: task.worktreePath,
             });
@@ -1672,13 +1706,13 @@ export class Orchestrator extends EventEmitter {
     this.workspaceTransitions.set(task, ownsWorktree ? "removed" : "closed");
     let cleanupWarning: string | undefined;
     try {
+      const host = task.isRemote && ownsWorktree ? this.remoteTaskHost(task) : undefined;
       await this.closeWorkspaceConversations(task);
 
       // Remote tasks: route discard to the remote agent when Crab created
       // the disposable worktree. Primary/existing workspaces are user-owned.
-      if (task.isRemote && ownsWorktree) {
-        if (!task.remoteProfileId || !this.rpcRouter) throw new Error("Remote discard requires a connected remote agent");
-        const result = await this.rpcRouter.sendToRemoteAgent(task.remoteProfileId, "task_discard", {
+      if (host) {
+        const result = await host.router.requestOnRemoteChannel(host.profileId, host.owner, "task_discard", {
           repo_id: task.repoPath,
           task_id: taskId,
           branch: task.branch,
@@ -1695,8 +1729,12 @@ export class Orchestrator extends EventEmitter {
       // Failed removal must leave recovery refs intact. Once the workspace
       // is gone, ref cleanup failures are retained work, not a failed discard.
       try {
-        const keepBase = [...this.tasks.values()].some(candidate => candidate.id !== task.id && candidate.status !== "discarded"
-          && candidate.repoPath === task.repoPath && candidate.baseRef === task.baseRef);
+        const repositoryPath = task.isRemote ? parseRepoId(task.repoPath)?.remotePath : task.repoPath;
+        const keepBase = [...this.tasks.values()].some(candidate => {
+          if (candidate.id === task.id || candidate.status === "discarded" || !sameTaskHost(candidate, task)) return false;
+          const candidatePath = candidate.isRemote ? parseRepoId(candidate.repoPath)?.remotePath : candidate.repoPath;
+          return candidatePath === repositoryPath && candidate.baseRef === task.baseRef;
+        });
         await this.checkpointOperation(task, manager => manager.cleanup(task, keepBase));
       } catch (error: unknown) {
         const warning = `Conversation discarded; snapshot cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
@@ -1721,11 +1759,10 @@ export class Orchestrator extends EventEmitter {
     this.assertWorkspaceAvailable(task);
     if (["archived", "applied", "discarded"].includes(task.status)) throw new Error("Reopen this conversation before applying changes");
     const parent = task.parentTaskId ? this.tasks.get(task.parentTaskId) : undefined;
-    if (parent?.worktreePath === task.worktreePath && parent.remoteProfileId === task.remoteProfileId) {
+    if (parent && sameWorkspace(parent, task)) {
       throw new Error("Review and apply shared workspace changes from the parent conversation.");
     }
-    const active = [...this.tasks.values()].find(candidate => candidate.worktreePath === task.worktreePath
-      && candidate.remoteProfileId === task.remoteProfileId && ["running", "iterating", "queued"].includes(candidate.status));
+    const active = [...this.tasks.values()].find(candidate => sameWorkspace(candidate, task) && ["running", "iterating", "queued"].includes(candidate.status));
     if (active) throw new Error("Wait for all conversations in this workspace to finish before applying changes.");
   }
 
@@ -1925,6 +1962,7 @@ export class Orchestrator extends EventEmitter {
       sidebarLabel: role ? `${role} sub-agent` : undefined,
       isRemote: parent.isRemote,
       remoteProfileId: parent.remoteProfileId,
+      remoteEndpoint: parent.remoteEndpoint,
     };
     parent.lastActivityAt = now;
     this.tasks.set(child.id, child);
@@ -2523,7 +2561,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.ownsTaskWorktree(task)) return;
     // Child conversations share files, not turn boundaries. Committing while
     // another chat is working would stage that chat's unfinished edits.
-    if ([...this.tasks.values()].some(candidate => candidate.id !== taskId && candidate.worktreePath === task.worktreePath && candidate.remoteProfileId === task.remoteProfileId
+    if ([...this.tasks.values()].some(candidate => candidate.id !== taskId && sameWorkspace(candidate, task)
       && ["running", "iterating"].includes(candidate.status))) return;
 
     const turnNum = task.pendingInput?.turnNumber ?? task.turnNumber ?? 0;
@@ -2674,6 +2712,7 @@ export class Orchestrator extends EventEmitter {
       prNumber: task.prNumber,
       isRemote: task.isRemote,
       remoteProfileId: task.remoteProfileId,
+      remoteEndpoint: task.remoteEndpoint,
       codexThreadId: task.codexThreadId,
       claudeSessionId: task.claudeSessionId,
       uiState: task.uiState,
@@ -2883,9 +2922,9 @@ export class Orchestrator extends EventEmitter {
 
   private assertWorkspaceAvailable(task: Task): void {
     this.assertAcceptingWork();
-    const failed = [...this.checkpointJobs].find(job => job.kind === "write" && job.failure && job.task.worktreePath === task.worktreePath && job.task.remoteProfileId === task.remoteProfileId);
+    const failed = [...this.checkpointJobs].find(job => job.kind === "write" && job.failure && sameWorkspace(job.task, task));
     if (failed) throw new Error("Workspace command closure is unconfirmed", { cause: failed.failure });
-    const transition = [...this.workspaceTransitions].find(([owner]) => owner.worktreePath === task.worktreePath && owner.remoteProfileId === task.remoteProfileId);
+    const transition = [...this.workspaceTransitions].find(([owner]) => sameWorkspace(owner, task));
     if (transition) {
       throw new Error(`This workspace is being ${transition[1]}. Wait for the operation to finish.`);
     }
@@ -2962,7 +3001,7 @@ export class Orchestrator extends EventEmitter {
 
   private workspaceConversations(task: Task, entireWorkspace = false): Task[] {
     return entireWorkspace || this.ownsTaskWorktree(task)
-      ? [...this.tasks.values()].filter(candidate => candidate.worktreePath === task.worktreePath && candidate.remoteProfileId === task.remoteProfileId)
+      ? [...this.tasks.values()].filter(candidate => sameWorkspace(candidate, task))
       : [task];
   }
 
@@ -3012,7 +3051,7 @@ export class Orchestrator extends EventEmitter {
 
   private ownedWorkspaceTask(task: Task): Task | undefined {
     return this.ownsTaskWorktree(task) ? task : [...this.tasks.values()].find(candidate =>
-      this.ownsTaskWorktree(candidate) && candidate.worktreePath === task.worktreePath && candidate.remoteProfileId === task.remoteProfileId);
+      this.ownsTaskWorktree(candidate) && sameWorkspace(candidate, task));
   }
 
   private ownsTaskWorktree(task: Task): boolean {
