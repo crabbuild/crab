@@ -2195,7 +2195,56 @@ runtime. The SSH fixture supplies the Apply-specific proof.
 
 A separate forced-exit probe confirms the pending record survives sidecar death
 and blocks Apply, Discard and native writer opens. It also confirms that an
-existing hook can survive a hard crash and write afterward. An independent
-process owner, escaped-session and Windows descendant coverage, and durable
-mutation recovery remain release gates. Evidence is recorded in
-`apply-hard-exit-probe.json`.
+existing hook survived a hard crash in the first shutdown implementation and
+wrote afterward. Evidence is recorded in `apply-hard-exit-probe.json`.
+
+## SSH Apply after sidecar death (2026-11-10)
+
+Apply now runs in a Unix worker with its own process group and workspace lease.
+The sidecar passes one request through a private pipe and keeps its write end
+open until shutdown. The worker observes EOF after a sidecar kill, cancels its
+Git process group and keeps the interrupted Apply record. The sidecar waits for
+the worker on graceful shutdown and forwards its structured receipt during
+normal operation.
+
+The direct forced-kill probe confirmed that Git and its hook exited, both refs
+stayed unchanged and a replacement sidecar rejected Apply, Discard and native
+writer opens. Evidence is recorded in `apply-sidecar-kill-direct-after.json`.
+A hook that ignored SIGTERM also held off Discard through the surviving worker
+lease until escalation stopped the group. The real SSH regression failed with
+the old sidecar and passed with the rebuilt runtime. Its replacement verified
+the managed recovery error through the worker's structured reply. Evidence is
+recorded in `apply-sidecar-kill-resistant-after.json`,
+`apply-sidecar-kill-ssh-before.json` and `apply-sidecar-kill-ssh-after.json`.
+
+Eleven distinct live SSH checks and eight scoped Rust tests passed. The unsigned
+macOS package passed four smoke cases and skipped isolated storage. The sidebar
+Recent assertion failed in both the combined smoke and a traced rerun, although
+the sidecar logged the second repository open in both cases. An instrumented
+package probe recorded the second open returning in 68 ms and the renderer
+showing it in Recent 6 ms later. The inconsistent activation remains open.
+Evidence is recorded in `apply-sidecar-kill-packaged.json`,
+`apply-sidecar-kill-sidebar-repro.json` and `sidebar-activation-timing.json`.
+
+Worker death, descendants that leave the command group, Windows descendant
+ownership and automatic recovery from an interrupted publication still need
+qualification. The concurrent checkout race also reproduces with the worker in
+place. Replacing the captured branch with a symbolic ref also redirects the
+inactive merge to its referent. A prepared `update-ref` transaction with
+`option no-deref` locked the exact target in the local probe and allowed the
+caller to reject a symbolic target while the lock was held. Evidence is
+recorded in `apply-branch-race-worker.json`, `apply-target-alias-worker.json`
+and `apply-noderef-transaction-probe.json`.
+
+## Native rewind contract check (2026-11-10)
+
+Codex CLI 0.163.0 exports bounded `thread/fork`. The official App Server contract
+documents `lastTurnId` as the last completed turn included in the new thread.
+Crab's existing fork copies history without a turn boundary. Native rewind needs
+the saved provider turn ID and a durable binding for the returned thread.
+[Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
+
+The Claude Agent SDK exposes `rewindFiles` for tracked file edits. It needs a
+replayed user message UUID and file checkpointing enabled. Conversation rewind
+uses a separate bounded resume. The tracked-file scope and shell edits require
+different recovery evidence. [Claude file checkpointing documentation](https://code.claude.com/docs/en/agent-sdk/file-checkpointing).

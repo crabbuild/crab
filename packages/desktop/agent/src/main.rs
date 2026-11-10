@@ -136,6 +136,10 @@ pub enum AgentError {
 
     #[error("{0}")]
     Other(String),
+
+    #[cfg(unix)]
+    #[error("{}", .0.message)]
+    ApplyWorker(RpcError),
 }
 
 pub type Result<T> = std::result::Result<T, AgentError>;
@@ -145,14 +149,24 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 /// when a `hydrate` notification races with a `list` response.
 pub type SharedStdout = Arc<Mutex<tokio::io::Stdout>>;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(native_process::mutation::worker::ARG))
+    {
+        init_tracing(None);
+        return native_process::mutation::worker::serve();
+    }
     // Handle --version early, before any other initialization.
     if std::env::args().any(|a| a == "--version") {
         println!("crab-desktop-agent {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    run_sidecar()
+}
 
+#[tokio::main]
+async fn run_sidecar() -> std::io::Result<()> {
     let log_file = parse_log_file_arg();
     init_tracing(log_file.as_deref());
     info!(

@@ -464,10 +464,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: TaskApplyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             #[cfg(unix)]
-            return state
-                .native_processes
-                .run_mutation(async move { task_apply(&work_dir, p).await })
-                .await;
+            return state.native_processes.apply(work_dir, p).await;
             #[cfg(not(unix))]
             task_apply(&work_dir, p).await
         }
@@ -1825,7 +1822,8 @@ async fn worktree_destroy(work_dir: &Path, p: WorktreeDestroyParams) -> Result<V
 // ─── Task Apply ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct TaskApplyParams {
+#[cfg_attr(unix, derive(serde::Serialize))]
+pub(crate) struct TaskApplyParams {
     repo_id: String,
     task_id: String,
     /// Branch name of the task to merge.
@@ -1847,7 +1845,7 @@ struct TaskApplyParams {
 ///    create the merge commit and update the target ref without checkout.
 /// 4. Remove the worktree.
 /// 5. Delete the task branch.
-async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
+pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
     let workspace = crate::task_workspace::TaskWorkspace::open(
         repo_dir,
         Path::new(&p.worktree_path),

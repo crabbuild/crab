@@ -159,18 +159,18 @@ fails: `cleanup_error` and removal flags describe the retained resources. Both
 Electron callers report that warning, and only acknowledged mutations change
 task status. Discard failures and missing remote ownership reach the caller.
 
-The Unix sidecar registers Apply before starting its Git commands. Closing the
-RPC stream cancels the operation and waits for its command group and output
-pipes before releasing the workspace lease. Git hooks inherit the command group
-and are included in shutdown. Apply creates `crab-desktop-task-apply.pending`
-in the task's private Git directory before staging. It removes that file after
-a completed operation with confirmed writer closure. If the operation is
+The Unix sidecar starts an independent worker for each accepted Apply. The
+worker owns the workspace lease and supervises the Git command group, including
+hooks. Graceful shutdown closes the worker's lifetime pipe and waits for it to
+exit. Killing the sidecar also closes that pipe, so the worker can stop Git
+while it still holds the lease. Apply creates `crab-desktop-task-apply.pending`
+in the task's private Git directory before staging and clears it after a
+completed operation with confirmed writer closure. If the operation is
 interrupted or closure is uncertain, a replacement sidecar rejects Apply,
 Discard, Destroy and native writer opens for that workspace. To recover it,
 confirm its Git writers have stopped, inspect both refs and the source and target
 indexes, then remove the pending file from the task's verified private Git
-directory. Reconnecting alone cannot determine whether Git already published a
-ref update.
+directory. Recovery must determine whether Git already published a ref update.
 
 Real SSH proof covers unrelated directories, wrong task/branch/root identities,
 two sidecars competing with a native writer, a recreated directory's rejected

@@ -26,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-deleted", "apply-target-detached", "apply-eof", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-deleted", "apply-target-detached", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -47,8 +47,9 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
       CODEX_HOME: process.env.CODEX_HOME ?? path.join(homedir(), ".codex"), CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude") });
     const client = await server.connect();
-    const openAgent = () => new Promise<ClientChannel>((resolve, reject) => client.exec(`exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
-    const channel = await openAgent();
+    const sidecarPidFile = path.join(root, "first-sidecar-pid");
+    const openAgent = (recordPid = false) => new Promise<ClientChannel>((resolve, reject) => client.exec(`${recordPid ? `printf '%s\\n' "$$" > ${quote(sidecarPidFile)}; ` : ""}exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
+    const channel = await openAgent(mode === "apply-sidecar-kill");
     let diagnostics = ""; channel.stderr.on("data", (bytes: Buffer) => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
     const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
     const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
@@ -100,14 +101,16 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
         const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
         const originalIndex = await readFile(path.resolve(task.worktreePath, index));
         await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
-        await run("git", ["checkout", "-b", "other"], { cwd: repo });
+        if (mode !== "apply-target-active") await run("git", ["checkout", "-b", "other"], { cwd: repo });
         if (mode === "apply-target-deleted") await run("git", ["branch", "-D", "main"], { cwd: repo });
-        if (mode === "apply-target") {
+        if (mode === "apply-target" || mode === "apply-target-active") {
           await orchestrator.applyTask(task.id);
+          const active = mode === "apply-target-active";
           expect({ captured: task.baseBranch, active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
             target: (await run("git", ["show", "main:apply-target.txt"], { cwd: repo })).stdout,
             activeFiles: (await run("git", ["ls-tree", "--name-only", "HEAD", "apply-target.txt"], { cwd: repo })).stdout.trim(),
-            status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: "other", target: "captured target bytes\n", activeFiles: "", status: "applied", worktree: false });
+            checkout: active ? await readFile(path.join(repo, "apply-target.txt"), "utf8") : existsSync(path.join(repo, "apply-target.txt")),
+            status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: active ? "main" : "other", target: "captured target bytes\n", activeFiles: active ? "apply-target.txt" : "", checkout: active ? "captured target bytes\n" : false, status: "applied", worktree: false });
         } else {
           await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target/i);
           // Apply drains a created conversation before backend validation;
@@ -119,7 +122,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
             captured: mode === "apply-target-deleted" ? "main" : undefined, status: "stopped" });
           await orchestrator.discardTask(task.id);
         }
-      } else if (mode === "apply-eof") {
+      } else if (mode === "apply-eof" || mode === "apply-sidecar-kill") {
         const worktree = task.worktreePath;
         const head = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
         const started = path.join(root, "hook-pid");
@@ -152,8 +155,18 @@ exit 1
           }, { timeout: 15_000 });
           const discard = { repo_id: repoId, task_id: task.id, branch: task.branch, worktree_path: worktree };
           await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_workspace_busy" } });
-          channel.end();
+          if (mode === "apply-sidecar-kill") {
+            const sidecarPid = Number((await readFile(sidecarPidFile, "utf8")).trim());
+            expect(sidecarPid).toBeGreaterThan(1);
+            expect((await run("ps", ["-p", String(sidecarPid), "-o", "args="])).stdout.trim()).toBe(path.join(runtime, "crab-desktop-agent"));
+            process.kill(sidecarPid, "SIGKILL");
+          } else {
+            channel.end();
+          }
           await closed;
+          // A separate worker can finish retiring Git after its RPC parent is
+          // killed. Graceful EOF must confirm closure before the channel ends.
+          if (mode === "apply-sidecar-kill") await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
           expect({ reportedApplied: await apply, writerAlive: hookAlive(),
             source: (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout,
             target: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
@@ -165,7 +178,8 @@ exit 1
           try {
             router.attachChannel("fixture", replacement);
             await router.restoreRepositories("fixture");
-            await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+            await vi.waitFor(() => expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } }), { timeout: 10_000 });
+            await expect(router.sendToRemoteAgent("fixture", "task_apply", { ...discard, base_branch: task.baseBranch })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
             await expect(router.sendToRemoteAgent("fixture", "native_process_open", {
               process_id: randomUUID(), task_id: task.id, executable: "/bin/true", args: [], cwd: worktree,
             })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
@@ -322,7 +336,7 @@ wait "$child"
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-eof") expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode === "apply-eof" || mode === "apply-sidecar-kill") expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

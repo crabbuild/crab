@@ -1,7 +1,6 @@
 //! Owned native stdio processes. Provider protocol policy stays in Electron.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -128,9 +127,10 @@ pub(crate) struct NativeProcesses {
 }
 
 impl NativeProcesses {
-    pub(crate) async fn run_mutation(
+    pub(crate) async fn apply(
         &self,
-        operation: impl Future<Output = Result<Value>> + Send + 'static,
+        repo: PathBuf,
+        params: crate::handlers::TaskApplyParams,
     ) -> Result<Value> {
         let (send, receive) = oneshot::channel();
         {
@@ -141,11 +141,11 @@ impl NativeProcesses {
             while let Some(result) = registry.tasks.try_join_next() {
                 result.map_err(io::Error::other)?;
             }
-            // The reply can disappear on EOF. The registry still owns the
-            // operation and its workspace lease until its writer closes.
+            // The registry owns the worker past RPC cancellation. On hard
+            // sidecar death, the worker observes its lifetime pipe closing.
             let stop = registry.stop_mutations.child_token();
             registry.tasks.spawn(async move {
-                let _ = send.send(mutation::scope(stop, operation).await);
+                let _ = send.send(mutation::worker::run(stop, repo, params).await);
             });
         }
         receive.await.map_err(io::Error::other)?

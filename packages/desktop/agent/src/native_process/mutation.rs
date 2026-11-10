@@ -9,6 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::group::{GRACE, supervise};
 
+pub(crate) mod worker;
+
 struct Mutation {
     stop: CancellationToken,
     unconfirmed: AtomicBool,
@@ -18,7 +20,7 @@ tokio::task_local! {
     static MUTATION: Mutation;
 }
 
-pub(super) async fn scope<T>(stop: CancellationToken, operation: impl Future<Output = T>) -> T {
+async fn scope<T>(stop: CancellationToken, operation: impl Future<Output = T>) -> T {
     MUTATION
         .scope(
             Mutation {
