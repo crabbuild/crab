@@ -15,10 +15,20 @@ fn main() {
 
 fn run() -> io::Result<i32> {
     let crab = sibling_crab_path()?;
-    let status = Command::new(crab)
-        .args(std::env::args_os().skip(1))
-        .status()?;
-    Ok(status.code().unwrap_or(1))
+    let mut command = Command::new(crab);
+    command.args(std::env::args_os().skip(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // The launcher signals and registers the serving owner by PID.
+        // Replacing this wrapper keeps that identity through delegation.
+        Err(command.exec())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 fn sibling_crab_path() -> io::Result<PathBuf> {

@@ -1611,11 +1611,15 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
             result = async {
                 while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
                     if crate::vfs::nfs_mount::is_mounted(&mountpoint)?
-                        && nfs_background_control_ready(control_endpoint.as_deref()).await
+                        && let Some(owner_pid) = nfs_background_owner_pid(
+                            &mountpoint,
+                            pid,
+                            control_endpoint.as_deref(),
+                        ).await
                         && attach_nfs_helper_log(
                             &registry_path,
                             &mountpoint,
-                            pid,
+                            owner_pid,
                             control_endpoint.as_deref(),
                             &log_path,
                         )?
@@ -1623,7 +1627,7 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
                         println!(
                             "Mounted via NFS at {} (pid {}). Logs: {}",
                             mountpoint.display(),
-                            pid,
+                            owner_pid,
                             log_path.display()
                         );
                         return Ok(());
@@ -1650,7 +1654,7 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
             } => result,
         };
         if startup.is_err() {
-            stop_failed_nfs_helper(&mut child, control_endpoint.as_deref()).await?;
+            stop_failed_nfs_helper(&mut child, &mountpoint, control_endpoint.as_deref()).await?;
         }
         startup
     });
@@ -1690,12 +1694,15 @@ fn attach_nfs_helper_log(
 #[cfg(feature = "nfs")]
 async fn stop_failed_nfs_helper(
     child: &mut std::process::Child,
+    mountpoint: &Path,
     endpoint: Option<&str>,
 ) -> Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
     }
     let pid = child.id();
+    #[cfg(unix)]
+    let _ = mountpoint;
     #[cfg(unix)]
     {
         // This unreaped child retains its PID. SIGINT lets the serving owner
@@ -1720,8 +1727,9 @@ async fn stop_failed_nfs_helper(
         #[cfg(not(unix))]
         if !shutdown_requested
             && let Some(endpoint) = endpoint
-            && let Ok(status) = crate::vfs::nfs_control::status(endpoint).await
-            && status.pid == pid
+            && nfs_background_owner_pid(mountpoint, pid, Some(endpoint))
+                .await
+                .is_some()
         {
             shutdown_requested = crate::vfs::nfs_control::shutdown(endpoint).await.is_ok();
         }
@@ -1815,11 +1823,25 @@ fn nfs_helper_configuration_error(
 }
 
 #[cfg(feature = "nfs")]
-async fn nfs_background_control_ready(control_endpoint: Option<&str>) -> bool {
-    let Some(endpoint) = control_endpoint else {
-        return true;
-    };
-    crate::vfs::nfs_control::ping(endpoint).await.is_ok()
+async fn nfs_background_owner_pid(
+    mountpoint: &Path,
+    child_pid: u32,
+    control_endpoint: Option<&str>,
+) -> Option<u32> {
+    let endpoint = control_endpoint?;
+    let status = crate::vfs::nfs_control::status(endpoint).await.ok()?;
+    if Path::new(&status.mountpoint) != mountpoint {
+        return None;
+    }
+    #[cfg(unix)]
+    if status.pid != child_pid {
+        return None;
+    }
+    // Windows cannot exec the sibling CLI in place. Its fresh TCP endpoint
+    // authenticates this launch's serving child; the wrapper PID is not its owner.
+    #[cfg(not(unix))]
+    let _ = child_pid;
+    Some(status.pid)
 }
 
 #[cfg(feature = "nfs")]
@@ -1989,6 +2011,9 @@ async fn build_local_pipeline_config(
 
     // Validate the local repo — ensures .git exists.
     let git_dir = MountSource::validate_local(repo_path)?;
+    // Canonical local sources carry Windows verbatim prefixes. Native Git
+    // rejects those paths even when Rust can read their refs successfully.
+    let git_dir = dunce::simplified(&git_dir).to_path_buf();
 
     info!(
         repo_path = %repo_path.display(),
@@ -5538,6 +5563,66 @@ mod nfs_tests {
     use super::*;
     use crate::vfs::nfs_mount::{NfsPreflightMessage, NfsPreflightReport};
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_pipeline_config_resolves_canonical_source_with_native_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let repo = tmp.path().join("source");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec![
+                "-c",
+                "user.name=Mount test",
+                "-c",
+                "user.email=mount@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let source =
+            crate::vfs::source::MountSource::canonical_input(repo.to_str().unwrap()).unwrap();
+        let (config, _, _lock) = build_local_pipeline_config(
+            Path::new(&source),
+            &tmp.path().join("view"),
+            None,
+            false,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "refs/heads/main^{commit}"])
+            .env("GIT_DIR", &config.git_dir)
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn ready_nfs_report() -> NfsPreflightReport {
         NfsPreflightReport {
             backend_available: true,
@@ -6860,7 +6945,7 @@ mod unmount_tests {
 
     #[test]
     #[cfg(feature = "nfs")]
-    fn background_nfs_readiness_waits_for_control_endpoint() {
+    fn background_nfs_readiness_requires_the_serving_owner() {
         let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6873,8 +6958,12 @@ mod unmount_tests {
             .unwrap();
 
         runtime.block_on(async {
-            assert!(nfs_background_control_ready(None).await);
-            assert!(!nfs_background_control_ready(Some(&endpoint)).await);
+            let pid = std::process::id();
+            assert_eq!(nfs_background_owner_pid(&mountpoint, pid, None).await, None);
+            assert_eq!(
+                nfs_background_owner_pid(&mountpoint, pid, Some(&endpoint)).await,
+                None
+            );
 
             let cancel = tokio_util::sync::CancellationToken::new();
             let state = nfs_control_state(&mountpoint, cancel.clone());
@@ -6884,7 +6973,25 @@ mod unmount_tests {
                 .unwrap()
                 .spawn(state, cancel.clone());
 
-            assert!(nfs_background_control_ready(Some(&endpoint)).await);
+            assert_eq!(
+                nfs_background_owner_pid(&mountpoint, pid, Some(&endpoint)).await,
+                Some(pid)
+            );
+            assert_eq!(
+                nfs_background_owner_pid(&tmp.path().join("other"), pid, Some(&endpoint)).await,
+                None
+            );
+            let wrong_token = format!("{}?token=wrong", endpoint.split_once('?').unwrap().0);
+            assert_eq!(
+                nfs_background_owner_pid(&mountpoint, pid, Some(&wrong_token)).await,
+                None
+            );
+            let wrapper_owner =
+                nfs_background_owner_pid(&mountpoint, u32::MAX, Some(&endpoint)).await;
+            #[cfg(unix)]
+            assert_eq!(wrapper_owner, None);
+            #[cfg(not(unix))]
+            assert_eq!(wrapper_owner, Some(pid));
 
             crate::vfs::nfs_control::shutdown(&endpoint).await.unwrap();
             handle.await.unwrap().unwrap();

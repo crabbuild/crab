@@ -2,7 +2,7 @@ name: Replica Enterprise Gates
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/replica-enterprise.yml"
       - ".github/workflows/replica-live-evidence.yml"

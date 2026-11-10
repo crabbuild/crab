@@ -10,6 +10,10 @@ S3, S3-compatible, GCS, Azure Blob, and local object stores into one `Store`
 facade with stable paths, retries, conditional writes, range reads, and
 integrity-aware errors.
 
+`build_probe_store` uses explicit credentials and disables transport retries for
+interactive connection tests. Normal store construction keeps its retry policy;
+callers still own the probe's overall deadline and credential-safe diagnostics.
+
 ## Why it exists
 
 Every higher layer needs object storage, but none should duplicate provider

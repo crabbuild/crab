@@ -2,7 +2,7 @@ name: NFS Mount Evidence
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/nfs-mount.yml"
       - "Cargo.lock"

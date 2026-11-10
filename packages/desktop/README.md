@@ -16,6 +16,8 @@ History, Branches, Worktrees, and Pull Requests (when a forge is detected),
 in that order. Branches and Worktrees each have their own sidebar and selection.
 Settings stays at the bottom. Click the repository name in the title bar for
 its Overview; the adjacent arrow switches workspace repositories.
+Forge discovery probes Git network remotes; local paths, file URLs, and
+object-store remotes open without forge network requests.
 
 Skills live inside Chat. Health & Diagnostics lives in Settings → Diagnostics.
 Terminal opens as a full page from its rail entry or the title-bar control.
@@ -31,6 +33,10 @@ and close. Pin repositories from their row or context menu. Pinned repositories
 appear first, followed by five recent repositories and the alphabetical remainder;
 worktrees stay nested. Workspace collapse, recent access, pins, and sidebar scroll
 survive restarts. Changed-file badges are neutral counts; errors retain error color.
+
+Repository-local desktop state lives under `.crab/desktop/` at Git's worktree
+root, including when opening a subdirectory. Its scoped ignore file keeps
+generated state out of Git changes; existing tracked files and ignore rules remain.
 
 ## Build
 
@@ -143,10 +149,11 @@ update can require an administrator authorization prompt.
 
 Open **Settings → Storage & Cache → Storage connections**. Add a named connection,
 choose its provider, enter credentials, and select **Test connection**. The test
-performs a real, read-only bucket/container listing with a 30-second deadline;
-it verifies read/list access, not write permission. Save the connection, then
-choose **Use connection** for the open repository. Clone and Crab setup use the
-same picker and connection test.
+performs one real, read-only bucket/container listing with a 30-second deadline;
+it reports provider failures without retrying and verifies read/list access,
+not write permission. Ordinary data operations retain retries. Save the
+connection, then choose **Use connection** for the open repository. Clone and Crab
+setup use the same picker and connection test.
 
 | Provider | Built-in credentials | Repository URL |
 | --- | --- | --- |

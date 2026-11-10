@@ -2,7 +2,7 @@ name: Git protocol v2 partial-clone qualification
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/git-protocol-v2-partial-clone.yml"
       - ".github/workflows/release.yml"

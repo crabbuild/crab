@@ -35,7 +35,7 @@ on:
       - "crates/crab-coordination/src/read_admission.rs"
       - "plans/001-large-repository-scale-roadmap.md"
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/large-repository-rustfs.yml"
       - "crab/scripts/e2e/run_large_repo_rustfs.py"

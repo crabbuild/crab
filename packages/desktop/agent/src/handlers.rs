@@ -790,33 +790,35 @@ async fn open_local(state: &State, p: OpenLocalParams) -> Result<Value> {
     state.remove(&p.repo_id).await?;
     let repo = BrowseSession::open_local(&p.path).await?;
     let url = repo.url.clone();
-    let is_remote = repo.work_dir.is_none();
     let cache_dir = "";
-    let work_dir = repo.work_dir.clone();
+    let work_dir = repo
+        .work_dir
+        .clone()
+        .ok_or_else(|| AgentError::Other("local repository has no working directory".into()))?;
     state
-        .insert(p.repo_id.clone(), repo, work_dir.clone())
+        .insert(p.repo_id.clone(), repo, Some(work_dir.clone()))
         .await;
 
     // Ensure the .crab/desktop/ on-disk layout exists with all
-    // expected files (ops/, worktrees.json, etc.).
-    ensure_desktop_layout(&p.path).await;
+    // expected files at Git's worktree root, even when opened from a subdirectory.
+    ensure_desktop_layout(&work_dir).await;
 
     // Crash-resume: check for any in-flight ops so the renderer can
     // show a resume banner immediately without a second RPC.
-    let active_op = find_active_op(&p.path);
+    let active_op = find_active_op(&work_dir);
 
     // Forge provider detection: manual override or auto-detect from
     // remote URL. Runs async (may probe self-hosted instances).
     // Also persists provider/owner/name to settings.json so that
     // subsequent forge RPCs (list_prs, create_pr, etc.) can read them.
-    let detected_forge = crate::forge::detect::detect_and_persist(&p.path).await;
+    let detected_forge = crate::forge::detect::detect_and_persist(&work_dir).await;
     let forge_provider = detected_forge.as_ref().map(|f| f.provider);
 
     info!(repo_id = %p.repo_id, path = %p.path.display(), forge = ?forge_provider, "opened local repo");
     Ok(json!({
         "repo_id": p.repo_id,
         "url": url,
-        "is_remote": is_remote,
+        "is_remote": false,
         "cache_dir": cache_dir,
         "work_dir": work_dir,
         "active_op": active_op,
@@ -855,6 +857,8 @@ fn find_active_op(work_dir: &std::path::Path) -> Value {
 ///
 /// This is best-effort: failures are logged but don't block repo open.
 async fn ensure_desktop_layout(work_dir: &std::path::Path) {
+    use tokio::io::AsyncWriteExt as _;
+
     let desktop_dir = work_dir.join(".crab").join("desktop");
 
     // Create the directory tree (ops/ is created lazily by the driver,
@@ -862,6 +866,27 @@ async fn ensure_desktop_layout(work_dir: &std::path::Path) {
     if let Err(e) = tokio::fs::create_dir_all(&desktop_dir).await {
         tracing::warn!(error = %e, "failed to create .crab/desktop/ directory");
         return;
+    }
+
+    // Plain Git repositories have no Crab ignore rules. Keep generated local
+    // state out of their changes; Git still reports any already-tracked files.
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(desktop_dir.join(".gitignore"))
+        .await
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(b"*\n").await {
+                tracing::warn!(%error, "failed to ignore desktop state");
+                return;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            tracing::warn!(%error, "failed to create desktop state ignore file");
+            return;
+        }
     }
 
     // Seed worktrees.json with an empty array if it doesn't exist.
@@ -5893,6 +5918,87 @@ mod tests {
     #[test]
     fn parse_track_info_both() {
         assert_eq!(parse_track_info("ahead 5, behind 2"), (Some(5), Some(2)));
+    }
+
+    #[tokio::test]
+    async fn open_local_initializes_private_state_at_git_root() {
+        let (_td, root) = git_init_repo();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let state = State::new();
+        let opened = open_local(
+            &state,
+            OpenLocalParams {
+                repo_id: "local-root".into(),
+                path: nested.clone(),
+            },
+        )
+        .await;
+        state.shutdown().await.unwrap();
+        opened.unwrap();
+        assert_eq!(
+            (
+                root.join(".crab/desktop/worktrees.json").is_file(),
+                nested.join(".crab").exists()
+            ),
+            (true, false),
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_layout_does_not_add_untracked_changes() {
+        for linked in [false, true] {
+            let (td, repo) = git_init_repo();
+            std::fs::write(repo.join("file.txt"), "original\n").unwrap();
+            assert!(sh(&repo, &["add", "file.txt"]).status.success());
+            assert!(
+                sh(
+                    &repo,
+                    &["-c", "commit.gpgsign=false", "commit", "-m", "seed"]
+                )
+                .status
+                .success()
+            );
+            let root = if linked {
+                let worktree = td.path().join("linked");
+                assert!(
+                    sh(
+                        &repo,
+                        &[
+                            "worktree",
+                            "add",
+                            "-b",
+                            "linked",
+                            worktree.to_str().unwrap()
+                        ]
+                    )
+                    .status
+                    .success()
+                );
+                worktree
+            } else {
+                repo
+            };
+            std::fs::write(root.join("file.txt"), "modified\n").unwrap();
+            ensure_desktop_layout(&root).await;
+            let status = sh(&root, &["status", "--porcelain"]);
+            assert_eq!(
+                String::from_utf8(status.stdout).unwrap().trim_end(),
+                " M file.txt",
+                "linked={linked}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_layout_preserves_existing_ignore_rules() {
+        let td = tempfile::tempdir().unwrap();
+        let desktop = td.path().join(".crab/desktop");
+        std::fs::create_dir_all(&desktop).unwrap();
+        let ignore = desktop.join(".gitignore");
+        std::fs::write(&ignore, "settings.json\n").unwrap();
+        ensure_desktop_layout(td.path()).await;
+        assert_eq!(std::fs::read_to_string(ignore).unwrap(), "settings.json\n");
     }
 
     #[tokio::test]

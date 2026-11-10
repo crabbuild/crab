@@ -211,7 +211,7 @@ impl Connection {
             }
         };
         let endpoint = (!self.endpoint.is_empty()).then_some(self.endpoint.as_str());
-        let store = crab_storage::build_explicit_store(
+        let store = crab_storage::build_probe_store(
             &self.bucket,
             credentials,
             endpoint,

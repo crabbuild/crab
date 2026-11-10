@@ -199,7 +199,10 @@ async fn failed_startup_gracefully_stops_and_reaps_its_child() {
         .read_line(&mut ready)
         .unwrap();
     assert_eq!(ready, "ready\n");
-    stop_failed_nfs_helper(&mut child, None).await.unwrap();
+    let mountpoint = tempfile::tempdir().unwrap();
+    stop_failed_nfs_helper(&mut child, mountpoint.path(), None)
+        .await
+        .unwrap();
     assert!(child.try_wait().unwrap().unwrap().success());
 }
 
@@ -228,7 +231,7 @@ async fn failed_startup_retains_a_child_still_draining_after_ten_seconds() {
         .unwrap();
     assert_eq!(ready, "ready\n");
     let waited = {
-        let cleanup = stop_failed_nfs_helper(&mut child, None);
+        let cleanup = stop_failed_nfs_helper(&mut child, root.path(), None);
         tokio::pin!(cleanup);
         let early = tokio::time::timeout(Duration::from_secs(11), cleanup.as_mut()).await;
         std::fs::write(&release, b"release").unwrap();

@@ -2,7 +2,7 @@ name: Architecture Gates
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/architecture.yml"
       - ".github/workflows/nfs-mount.yml"
