@@ -26,7 +26,6 @@ import { ModelDiscoveryStatus } from "./ModelDiscoveryStatus";
 interface DetectedAgent {
   type: string;
   name: string;
-  command: string;
   version?: string;
   available: boolean;
 }

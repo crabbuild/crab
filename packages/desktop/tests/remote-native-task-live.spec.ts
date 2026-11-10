@@ -13,6 +13,7 @@ import { Orchestrator, type Task } from "../electron/orchestrator";
 import { ChatDatabase } from "../electron/orchestrator-chat-db";
 import { registerChatIpc } from "../electron/orchestrator-chat";
 import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
+import { AgentDetector, registerAgentDetectionIpc } from "../electron/ssh-agent-detection";
 import { getExpandedEnv, type AgentEvent, type AgentModel } from "../electron/orchestrator-adapters";
 import { terminalSshServer } from "./fixtures/ssh-terminal-server";
 
@@ -21,7 +22,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -31,6 +32,12 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     const platform = process.platform === "darwin" ? "mac" : "linux";
     const runtime = path.resolve(`resources/native/${platform}-${process.arch}`);
     const server = await terminalSshServer(root, getExpandedEnv().PATH);
+    const bin = path.join(root, "bin");
+    if (mode === "availability") {
+      await mkdir(bin);
+      for (const binary of ["claude", "codex"]) await writeFile(path.join(bin, binary), `#!/bin/sh\nprintf '${binary} server-fixture\\n'\n`, { mode: 0o755 });
+      server.env.PATH = `${bin}:/usr/bin:/bin`;
+    }
     // Keep temporary worktrees in this fixture; use the server account's
     // existing CLI configuration/login directories without copying credentials.
     Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
@@ -52,6 +59,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     const db = new ChatDatabase(path.join(root, "chat.sqlite"));
     const events: AgentEvent[] = [];
     const catalogs: Record<string, { repository: number; workspace: number }> = {};
+    let availability: unknown;
     let task: Task | undefined;
     const wire = () => orchestrator.on("orchestrator:event", ({ taskId, event }: { taskId: string; event: AgentEvent }) => {
       events.push(event);
@@ -101,7 +109,31 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
           await expect(checkpoints.createCheckpoint(task, 2)).rejects.toThrow();
           expect((await checkpoints.listCheckpoints(task)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
         } finally { await rm(lock); }
+      } else if (mode === "availability") {
+        type Handler = Parameters<IpcMain["handle"]>[1];
+        const handlers = new Map<string, Handler>();
+        const stop = registerAgentDetectionIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, () => router);
+        const detect = () => handlers.get("orchestrator:detect-agents")!({} as Parameters<Handler>[0], { repoId });
+        try {
+          availability = await detect();
+          expect(availability).toEqual({ success: true, agents: [
+            { type: "claude-code", name: "Claude Code", binary: "claude", path: path.join(bin, "claude"), version: "claude server-fixture", available: true },
+            { type: "codex", name: "Codex", binary: "codex", path: path.join(bin, "codex"), version: "codex server-fixture", available: true },
+          ] });
+          await rm(path.join(bin, "codex"));
+          expect(await detect()).toMatchObject({ success: true, agents: [{ available: true }, { available: false, path: "" }] });
+          await writeFile(path.join(bin, "claude"), "#!/bin/sh\nprintf 'Broken server executable' >&2\nexit 7\n", { mode: 0o755 });
+          expect(await detect()).toMatchObject({ success: false, error: expect.stringContaining("Broken server executable") });
+          expect(requests.mock.calls.some(call => ["detect_agents", "exec_command"].includes(call[2]))).toBe(false);
+        } finally { await stop(); }
       } else if (mode === "catalogs") {
+        const detector = new AgentDetector(() => router);
+        try {
+          availability = await detector.detect(repoId);
+          expect(availability).toEqual(expect.arrayContaining([
+            expect.objectContaining({ type: "codex", available: true }), expect.objectContaining({ type: "claude-code", available: true }),
+          ]));
+        } finally { await detector.shutdown(); }
         type Handler = Parameters<IpcMain["handle"]>[1];
         const handlers = new Map<string, Handler>();
         const stop = registerModelDiscoveryIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, orchestrator);
@@ -157,7 +189,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       channel.end(); timer = setTimeout(() => channel.destroy(), 15_000);
       try { await closed; } finally {
         clearTimeout(timer); db.close(); router.detachChannel("fixture"); client.end(); await server.close(); requests.mockRestore(); vi.unstubAllEnvs();
-        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, events, diagnostics }, null, 2));
+        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, availability, events, diagnostics }, null, 2));
         if (succeeded) await rm(root, { recursive: true, force: true });
       }
     }

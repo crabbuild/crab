@@ -44,20 +44,6 @@ import { rpc, type AgentWorkflowDefinition, type AgentWorkflowRun, type RefEntry
 
 type WorkspaceTab = "chat" | "diff" | "files" | "terminal" | "agents";
 
-interface DetectedAgent {
-  /** Registry identifier, e.g. "claude-code", "codex", "custom". */
-  type: string;
-  /** Display name, e.g. "Claude Code", "Codex". */
-  name: string;
-  /** Binary name (from IPC). */
-  binary?: string;
-  /** @deprecated Use `binary` — kept for interface compat. */
-  command: string;
-  version?: string;
-  available: boolean;
-  /** When true, spawn in a terminal instead of the headless orchestrator adapter. */
-  terminalOnly?: boolean;
-}
 
 interface Props {
   repo: OpenRepo;
@@ -138,6 +124,7 @@ function appendChatNote(taskId: string, content: string, kind: "text" | "error" 
 // when new models are released.
 
 import { modelOptions, useAgentModels } from "../components/orchestrator/model-catalog";
+import { useAgentAvailability } from "../components/orchestrator/agent-availability";
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -171,7 +158,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
       </nav>
       {/* Keep the chat mounted so Skills navigation preserves drafts and live sessions. */}
       <div data-chat-content className={section === "chats" ? "min-h-0 flex-1" : "hidden"}>
-        <AgentTasksWorkspace repo={repo} onOpenAgentManager={onOpenAgentManager} active={section === "chats"} />
+        <AgentTasksWorkspace repo={repo} onOpenAgentManager={repo.repo_id.startsWith("ssh://") ? undefined : onOpenAgentManager} active={section === "chats"} />
       </div>
       {section === "skills" && (
         <div className="min-h-0 flex-1">
@@ -210,7 +197,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     savedOrchestrator?.activeTab ?? "chat",
   );
   const [dialogOpen, setDialogOpen] = useState(false);
-  const LS_AGENTS = "crab.orchestrator.detectedAgents";
   const LS_TASK_SIDEBAR_COLLAPSED = "crab.orchestrator.taskSidebarCollapsed";
   const LS_TASK_SIDEBAR_WIDTH = "crab.orchestrator.taskSidebarWidth";
   const [taskSidebarCollapsed, setTaskSidebarCollapsed] = useState(() => {
@@ -221,39 +207,13 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     }
   });
 
-  // Hydrate last-known agents from localStorage so the UI doesn't block on
-  // first render while the cold-start agent probe runs in the main process.
-  // A fresh probe is kicked off in a useEffect and replaces this synchronously
-  // once it returns.
-  const [agents, setAgents] = useState<DetectedAgent[]>(() => {
-    try {
-      const raw = localStorage.getItem(LS_AGENTS);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as DetectedAgent[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const availability = useAgentAvailability(repo.repo_id);
+  const { agents, setupComplete } = availability;
   const [branches, setBranches] = useState<string[]>(["main"]);
   const [agentWorkflows, setAgentWorkflows] = useState<AgentWorkflowDefinition[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<AgentWorkflowRun[]>([]);
   const [workflowRunIdsByTask, setWorkflowRunIdsByTask] = useState<Record<string, Set<string>>>({});
   const [streamingTasks, setStreamingTasks] = useState<Set<string>>(new Set());
-  // null = checking, true = at least one agent available, false = show setup.
-  // Seeded optimistically from the cached agent list so we don't force the
-  // setup wizard on every app open while the probe runs.
-  const [setupComplete, setSetupComplete] = useState<boolean | null>(() => {
-    try {
-      const raw = localStorage.getItem(LS_AGENTS);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return null;
-      return (parsed as DetectedAgent[]).some((a) => a.available) ? true : null;
-    } catch {
-      return null;
-    }
-  });
 
   useEffect(() => {
     try {
@@ -939,48 +899,6 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       })
       .catch(() => {});
 
-    // Detect agents.
-    //
-    // Two-phase to keep the initial render instant:
-    //   1. Cached-only call returns immediately with whatever the main
-    //      process has cached (empty on true cold start, but main also
-    //      prewarms on startup so this is usually populated).
-    //   2. Full probe runs in the background and updates state + localStorage
-    //      when fresh results arrive. Only demotes `setupComplete` to `false`
-    //      when the fresh probe finds nothing — avoids flashing the setup
-    //      wizard when the cache is warmer than a cold probe.
-    const applyAgents = (detected: DetectedAgent[], { allowDemotion }: { allowDemotion: boolean }) => {
-      setAgents(detected);
-      try {
-        localStorage.setItem(LS_AGENTS, JSON.stringify(detected));
-      } catch {
-        // Quota or private mode — safe to ignore.
-      }
-      const hasAvailable = detected.some((a: DetectedAgent) => a.available);
-      if (hasAvailable) {
-        setSetupComplete(true);
-      } else if (allowDemotion) {
-        setSetupComplete(false);
-      }
-    };
-
-    (window as any).crab.orchestrator
-      ?.detectAgents({ cachedOnly: true })
-      .then((result: { success?: boolean; agents?: DetectedAgent[]; cached?: boolean }) => {
-        if (result?.cached && result.agents) {
-          // Don't demote setupComplete here — a fresh probe may still succeed.
-          applyAgents(result.agents, { allowDemotion: false });
-        }
-      })
-      .catch(() => {});
-
-    (window as any).crab.orchestrator
-      ?.detectAgents()
-      .then((result: { success?: boolean; agents?: DetectedAgent[] }) => {
-        applyAgents(result?.agents ?? [], { allowDemotion: true });
-      })
-      .catch(() => setSetupComplete((prev) => prev ?? false));
-
     // Fetch branches via the existing RPC (not orchestrator-specific).
     // Skip for deferred repos — the agent hasn't opened them yet and
     // would return "repository not open" errors.
@@ -1203,7 +1121,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
       const agent = agents.find((a) => a.type === data.agentName);
       if (agent?.terminalOnly) {
         // Build the CLI command with context.
-        const binary = agent.binary || agent.command || agent.type;
+        const binary = agent.binary;
         const parts: string[] = [binary];
 
         // Append context files as arguments if the agent supports them.
@@ -1663,15 +1581,24 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
   // ── Render ──────────────────────────────────────────────────────────
 
+  if (repo.repo_id.startsWith("ssh://") && tasks.length === 0 && setupComplete !== true) {
+    return <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+      <p role={availability.error ? "alert" : "status"} className="text-sm text-gx-text">
+        {setupComplete === null ? "Checking agents on this server…" : availability.error ?? "No Codex or Claude Code found on this server’s PATH."}
+      </p>
+      {setupComplete === false && <>
+        <p className="max-w-md text-xs text-gx-muted">{availability.error ? "Check this SSH account’s connection and agent installation, then retry." : "Install an agent for this SSH account and make it available on the server’s PATH."}</p>
+        <button type="button" onClick={availability.retry} className="rounded-md border border-gx-border px-3 py-1.5 text-sm hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent">Retry server detection</button>
+      </>}
+    </div>;
+  }
+
   // Show setup wizard when no agents are available.
   if (setupComplete === false && tasks.length === 0) {
     return (
       <AgentSetupWizard
-        onReady={(detected) => {
-          setAgents(detected as any);
-          setSetupComplete(true);
-        }}
-        onSkip={() => setSetupComplete(true)}
+        onReady={availability.ready}
+        onSkip={availability.skip}
       />
     );
   }

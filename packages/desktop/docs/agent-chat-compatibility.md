@@ -1455,6 +1455,32 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   remain separate release gates; these catalogs qualify the native IPC path on
   macOS loopback with the existing server login.
 
+- Agent availability now probes the selected SSH account through the same
+  captured native process factory as chat. `command -v` checks the inherited
+  server PATH, then the resolved executable supplies `--version`. Missing
+  binaries are distinct from executable/transport failures. Version commands
+  have bounded output/time and retain physical ownership through app quit;
+  unknown closure refuses a successful shutdown. The unused detector's
+  unsupported RPC/direct-exec fallback stack is removed.
+  The renderer binds availability to the repository host, ignores old replies,
+  clears it on disconnect and retries on reconnect. Local cached detection stays
+  in the main process; the duplicate localStorage cache and retired command-name
+  alias are removed. An SSH empty state names the server, surfaces errors and
+  retries without directing users into local installation settings.
+  The browser regression fails against the preceding view and passes after
+  restoration. All 417 scoped checks and eight selected browser checks pass.
+  Two real SSH/built-sidecar cases cover present/missing/broken server binaries,
+  actual Codex 0.163.0 and Claude Code 2.1.319 availability, and both native
+  catalogs in repository/task contexts. No unsupported detection RPC or client
+  launch settings enter the server probe. Production/native-fixture/renderer-
+  fixture types, Electron/renderer builds, Rust formatting and workflow parse
+  pass. CI adds the inference-free availability case alongside checkpoints.
+  Evidence: `remote-availability-scoped.json`, `remote-availability-broad.json`,
+  `remote-availability-browser-before.json`, `remote-availability-browser-final.json`,
+  `remote-availability-native-live.json` and matching native task artifacts.
+  This qualifies the inherited server environment on macOS loopback. Minimal
+  account/login-shell PATH setup and cross-platform deployment remain gates.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1492,7 +1518,7 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   claiming accurate resumed accounting for pre-fix histories.
 - Qualify pending checkpoint-command cancellation through direct Stop, channel
   loss and backend death, including retained private-index recovery.
-- Complete remote-agent availability, server PATH discovery, scripts,
+- Qualify server login/PATH setup and complete remote scripts,
   goals, file restore/Revert and historical comparisons. The main native task
   pipeline now has real SSH initial/follow-up/cold-resume and Apply/Discard proof.
   Remote comparison has compiled-sidecar, RPC and task-view proof over stdio;

@@ -18,7 +18,7 @@ import type { PersistedChatUIState } from "./orchestrator";
 import { ChatDatabase } from "./orchestrator-chat-db";
 import { registerChatIpc } from "./orchestrator-chat";
 import { registerDiffIpc } from "./orchestrator-diff";
-import { detectAgents, getCachedAgents, prewarmAgents, type AgentEvent, type AgentInputResponse } from "./orchestrator-adapters";
+import { detectAgents, type AgentEvent, type AgentInputResponse } from "./orchestrator-adapters";
 import { fetchGitHubIssues, fetchLinearIssues } from "./orchestrator-issues";
 import { CostTracker, TokenUsage } from "./orchestrator-cost";
 import { agentRegistry } from "./orchestrator-registry";
@@ -31,6 +31,7 @@ import type { SearchFilters } from "./orchestrator-search";
 import { CIAutoFixer } from "./orchestrator-autofix";
 import type { HunkPatch } from "./orchestrator-hunks";
 import { registerModelDiscoveryIpc } from "./orchestrator-models";
+import { registerAgentDetectionIpc } from "./ssh-agent-detection";
 import type { SkillManager } from "./skill-manager";
 
 /**
@@ -426,35 +427,8 @@ export function registerOrchestratorIpc(
     },
   );
 
-  ipcMain.handle(
-    "orchestrator:detect-agents",
-    async (_event, payload?: { force?: boolean; cachedOnly?: boolean }) => {
-      try {
-        // `cachedOnly` lets the UI grab whatever's already known without
-        // waiting for a probe — used for the initial render path where
-        // responsiveness trumps freshness.
-        if (payload?.cachedOnly) {
-          const cached = getCachedAgents();
-          return {
-            success: true,
-            agents: cached ?? [],
-            cached: cached !== null,
-          };
-        }
-        const agents = await detectAgents({ force: payload?.force });
-        return { success: true, agents };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
+  const stopAgentDetection = registerAgentDetectionIpc(ipcMain, () => orchestrator.getRpcRouter());
   const stopModelDiscovery = registerModelDiscoveryIpc(ipcMain, orchestrator);
-
-  // Fire off a probe in the background so the first UI request hits a
-  // warm cache. Any errors surface later through the regular handler.
-  prewarmAgents();
 
   ipcMain.handle("orchestrator:test-agent", async (_event, { agentType }: { agentType: string }) => {
     try {
@@ -2090,7 +2064,7 @@ export function registerOrchestratorIpc(
   return {
     orchestrator,
     shutdown: async () => {
-      const results = await Promise.allSettled([orchestrator.shutdown(), stopModelDiscovery()]);
+      const results = await Promise.allSettled([orchestrator.shutdown(), stopModelDiscovery(), stopAgentDetection()]);
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
       if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Agent services shutdown failed");
     },

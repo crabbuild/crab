@@ -1,340 +1,106 @@
-/**
- * Unit tests for the AgentDetector class.
- *
- * Tests detection of remote agent CLIs (claude, codex) via both
- * RPC router and SSH exec channel fallback paths.
- */
-
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { IpcMain } from "electron";
 
-// ─── Mocks ───────────────────────────────────────────────────────────────────
-
-// Mock electron (not used directly but imported transitively)
-vi.mock("electron", () => ({
-  powerMonitor: new EventEmitter(),
-}));
-
-// Mock keychain
-vi.mock("../electron/keychain", () => ({
-  getPassword: vi.fn(async () => null),
-}));
-
-// Mock fs
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    existsSync: vi.fn(() => true),
-    readFileSync: vi.fn(() => Buffer.from("mock")),
-  };
-});
-
-// Mock ssh2
-class MockClientChannel extends EventEmitter {
-  end = vi.fn();
-  write = vi.fn();
-  close = vi.fn();
-  stderr = new EventEmitter();
-}
-
-class MockClient extends EventEmitter {
-  connect = vi.fn();
-  end = vi.fn();
-  exec = vi.fn();
-}
-
-vi.mock("ssh2", () => ({
-  Client: vi.fn(() => new MockClient()),
-}));
-
-import { AgentDetector } from "../electron/ssh-agent-detection";
-import type { AgentDetectionResult } from "../electron/ssh-agent-detection";
-import type { SshSessionManager, SshConnection } from "../electron/ssh-manager";
+vi.mock("../electron/ssh-native-process", () => ({ remoteAgentProcessFactory: vi.fn() }));
+vi.mock("../electron/orchestrator-adapters", () => ({ detectAgents: vi.fn(), getCachedAgents: vi.fn(), prewarmAgents: vi.fn(), getExpandedEnv: (env: Record<string, string>) => ({ ...process.env, ...env }) }));
+import { spawnLocalAgent, type AgentProcessFactory } from "../electron/agent-process";
+import { detectAgents, getCachedAgents, prewarmAgents } from "../electron/orchestrator-adapters";
+import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
+import { AgentDetector, registerAgentDetectionIpc } from "../electron/ssh-agent-detection";
 import type { RpcRouter } from "../electron/ssh-router";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function createMockRouter(responses: Record<string, unknown>): RpcRouter {
-  return {
-    route: vi.fn(async (_repoId: string, method: string, params: unknown) => {
-      const command = (params as { command?: string }).command;
-      const key = command ?? method;
-      if (key in responses) {
-        return responses[key];
-      }
-      throw new Error(`Unhandled RPC: ${method} ${command ?? ""}`);
-    }),
-  } as unknown as RpcRouter;
-}
-
-function createMockSessionManager(conn?: Partial<SshConnection>): SshSessionManager {
-  const manager = new EventEmitter() as unknown as SshSessionManager;
-  (manager as any).getConnection = vi.fn(() => conn ?? undefined);
-  (manager as any).getStatus = vi.fn(() => conn?.status ?? "disconnected");
-  return manager;
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
-describe("AgentDetector", () => {
+describe.skipIf(process.platform === "win32")("owned server agent availability", () => {
+  let root: string;
+  let bin: string;
   let detector: AgentDetector;
-  let mockSessionManager: SshSessionManager;
+  const router = {} as RpcRouter;
+  const script = (name: string, body: string) => writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const repoId = () => `ssh://selected${root}`;
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    root = await mkdtemp(path.join(tmpdir(), "crab-agent-availability-"));
+    bin = path.join(root, "bin"); await mkdir(bin);
+    await script("claude", "printf 'Claude fixture\\n'");
+    await script("codex", "printf 'Codex fixture\\n'");
+    const source: AgentProcessFactory = (binary, args, options) => spawnLocalAgent(binary, args, { cwd: options.cwd, env: { PATH: `${bin}:/usr/bin:/bin`, CRAB_PROBE_MARKER: path.join(root, "started") } });
+    vi.mocked(remoteAgentProcessFactory).mockReturnValue(source);
+    detector = new AgentDetector(() => router);
+  });
+  afterEach(async () => { await detector.shutdown().catch(() => {}); await rm(root, { recursive: true, force: true }); });
 
-  beforeEach(() => {
-    mockSessionManager = createMockSessionManager();
+  it("probes the captured profile's PATH through owned native commands", async () => {
+    expect(await detector.detect(repoId())).toEqual([
+      { type: "claude-code", name: "Claude Code", binary: "claude", path: path.join(bin, "claude"), version: "Claude fixture", available: true },
+      { type: "codex", name: "Codex", binary: "codex", path: path.join(bin, "codex"), version: "Codex fixture", available: true },
+    ]);
+    expect(remoteAgentProcessFactory).toHaveBeenCalledWith(router, "selected");
+    expect(detectAgents).not.toHaveBeenCalled();
   });
 
-  describe("detect via RPC router", () => {
-    it("detects both claude and codex when available", async () => {
-      const router = createMockRouter({
-        detect_agents: {
-          agents: [
-            { name: "claude", path: "/usr/local/bin/claude", available: true, version: "1.2.0" },
-            { name: "codex", path: "/usr/local/bin/codex", available: true, version: "0.5.1" },
-          ],
-        },
-      });
-
-      detector = new AgentDetector(mockSessionManager, router);
-      const result = await detector.detect("profile-1");
-
-      expect(result.profileId).toBe("profile-1");
-      expect(result.agents).toHaveLength(2);
-      expect(result.agents[0]).toEqual({
-        name: "claude",
-        path: "/usr/local/bin/claude",
-        available: true,
-        version: "1.2.0",
-      });
-      expect(result.agents[1]).toEqual({
-        name: "codex",
-        path: "/usr/local/bin/codex",
-        available: true,
-        version: "0.5.1",
-      });
-      expect(result.detectedAt).toBeGreaterThan(0);
-    });
-
-    it("falls back to exec_command when detect_agents RPC is not supported", async () => {
-      const router = createMockRouter({
-        "which claude": { stdout: "/home/user/.local/bin/claude\n", exitCode: 0 },
-        "which codex": { stdout: "", exitCode: 1 },
-        "claude --version 2>/dev/null || true": { stdout: "claude 1.0.3\n", exitCode: 0 },
-      });
-
-      detector = new AgentDetector(mockSessionManager, router);
-      const result = await detector.detect("profile-2");
-
-      expect(result.agents).toHaveLength(2);
-      expect(result.agents[0]).toEqual({
-        name: "claude",
-        path: "/home/user/.local/bin/claude",
-        available: true,
-        version: "claude 1.0.3",
-      });
-      expect(result.agents[1]).toEqual({
-        name: "codex",
-        path: "",
-        available: false,
-        version: undefined,
-      });
-    });
-
-    it("handles RPC errors gracefully", async () => {
-      const router = {
-        route: vi.fn(async () => {
-          throw new Error("Connection lost");
-        }),
-      } as unknown as RpcRouter;
-
-      detector = new AgentDetector(mockSessionManager, router);
-      const result = await detector.detect("profile-3");
-
-      // All agents should be marked unavailable
-      expect(result.agents).toHaveLength(2);
-      expect(result.agents.every((a) => !a.available)).toBe(true);
-    });
-
-    it("handles partial failures (one CLI found, one errors)", async () => {
-      let callCount = 0;
-      const router = {
-        route: vi.fn(async (_repoId: string, method: string, params: unknown) => {
-          if (method === "detect_agents") throw new Error("not supported");
-          const command = (params as { command?: string }).command;
-          callCount++;
-          if (command === "which claude") {
-            return { stdout: "/usr/bin/claude\n", exitCode: 0 };
-          }
-          if (command === "which codex") {
-            throw new Error("timeout");
-          }
-          if (command === "claude --version 2>/dev/null || true") {
-            return { stdout: "", exitCode: 1 };
-          }
-          throw new Error("unexpected");
-        }),
-      } as unknown as RpcRouter;
-
-      detector = new AgentDetector(mockSessionManager, router);
-      const result = await detector.detect("profile-4");
-
-      expect(result.agents[0]).toEqual({
-        name: "claude",
-        path: "/usr/bin/claude",
-        available: true,
-        version: undefined,
-      });
-      expect(result.agents[1]).toEqual({
-        name: "codex",
-        path: "",
-        available: false,
-        version: undefined,
-      });
-    });
+  it("reports a missing binary only when command lookup confirms absence", async () => {
+    await rm(path.join(bin, "claude"));
+    expect((await detector.detect(repoId()))[0]).toEqual({ type: "claude-code", name: "Claude Code", binary: "claude", path: "", version: "", available: false });
   });
 
-  describe("detect via SSH exec channel (no router)", () => {
-    it("detects agents using SSH exec when no router is available", async () => {
-      const mockClient = new MockClient();
-      mockClient.exec = vi.fn((command: string, callback: Function) => {
-        const channel = new MockClientChannel();
-        callback(null, channel);
-
-        // Simulate async response
-        setTimeout(() => {
-          if (command === "which claude") {
-            channel.emit("data", Buffer.from("/usr/local/bin/claude\n"));
-            channel.emit("close", 0);
-          } else if (command === "which codex") {
-            channel.emit("data", Buffer.from(""));
-            channel.emit("close", 1);
-          } else if (command.includes("--version")) {
-            channel.emit("data", Buffer.from("claude v2.1.0\n"));
-            channel.emit("close", 0);
-          }
-        }, 10);
-      });
-
-      const conn: Partial<SshConnection> = {
-        client: mockClient as any,
-        status: "connected",
-      };
-
-      mockSessionManager = createMockSessionManager(conn);
-      detector = new AgentDetector(mockSessionManager);
-      const result = await detector.detect("profile-5");
-
-      expect(result.agents[0]).toEqual({
-        name: "claude",
-        path: "/usr/local/bin/claude",
-        available: true,
-        version: "claude v2.1.0",
-      });
-      expect(result.agents[1]).toEqual({
-        name: "codex",
-        path: "",
-        available: false,
-        version: undefined,
-      });
-    });
-
-    it("returns all unavailable when connection is not active", async () => {
-      mockSessionManager = createMockSessionManager(undefined);
-      detector = new AgentDetector(mockSessionManager);
-      const result = await detector.detect("profile-6");
-
-      expect(result.agents).toHaveLength(2);
-      expect(result.agents.every((a) => !a.available)).toBe(true);
-    });
+  it("surfaces a failed executable instead of marking it uninstalled", async () => {
+    await script("claude", "printf 'Broken server CLI' >&2; exit 7");
+    await expect(detector.detect(repoId())).rejects.toThrow("Broken server CLI");
   });
 
-  describe("caching", () => {
-    it("caches detection results", async () => {
-      const router = createMockRouter({
-        detect_agents: {
-          agents: [
-            { name: "claude", path: "/usr/bin/claude", available: true },
-            { name: "codex", path: "", available: false },
-          ],
-        },
-      });
-
-      detector = new AgentDetector(mockSessionManager, router);
-      await detector.detect("profile-7");
-
-      const cached = detector.getCached("profile-7");
-      expect(cached).toBeDefined();
-      expect(cached!.agents[0].available).toBe(true);
-    });
-
-    it("returns undefined for uncached profiles", () => {
-      detector = new AgentDetector(mockSessionManager);
-      expect(detector.getCached("nonexistent")).toBeUndefined();
-    });
-
-    it("clears cache on request", async () => {
-      const router = createMockRouter({
-        detect_agents: {
-          agents: [
-            { name: "claude", path: "/usr/bin/claude", available: true },
-            { name: "codex", path: "", available: false },
-          ],
-        },
-      });
-
-      detector = new AgentDetector(mockSessionManager, router);
-      await detector.detect("profile-8");
-      expect(detector.getCached("profile-8")).toBeDefined();
-
-      detector.clearCache("profile-8");
-      expect(detector.getCached("profile-8")).toBeUndefined();
-    });
+  it("joins an active version probe before shutdown and rejects later work", async () => {
+    await script("claude", 'printf started > "$CRAB_PROBE_MARKER"; sleep 30');
+    const request = expect(detector.detect(repoId())).rejects.toThrow("Server agent detection failed");
+    await vi.waitFor(() => expect(existsSync(path.join(root, "started"))).toBe(true));
+    await detector.shutdown(); await request;
+    await expect(detector.detect(repoId())).rejects.toThrow("shutting down");
   });
 
-  describe("events", () => {
-    it("emits ssh:agents-detected event on successful detection", async () => {
-      const router = createMockRouter({
-        detect_agents: {
-          agents: [
-            { name: "claude", path: "/usr/bin/claude", available: true },
-            { name: "codex", path: "/usr/bin/codex", available: true },
-          ],
-        },
-      });
-
-      detector = new AgentDetector(mockSessionManager, router);
-
-      const emitted: AgentDetectionResult[] = [];
-      detector.on("ssh:agents-detected", (result) => {
-        emitted.push(result);
-      });
-
-      await detector.detect("profile-9");
-
-      expect(emitted).toHaveLength(1);
-      expect(emitted[0].profileId).toBe("profile-9");
-      expect(emitted[0].agents).toHaveLength(2);
-    });
+  it("retains unknown process closure at the quit boundary", async () => {
+    const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true) });
+    vi.mocked(remoteAgentProcessFactory).mockReturnValue(() => ({ process, closed: Promise.reject(new Error("SSH channel changed")) }));
+    await expect(detector.detect(repoId())).rejects.toMatchObject({ errors: [{ cause: { message: "SSH channel changed" } }, { cause: { message: "SSH channel changed" } }] });
+    await expect(detector.shutdown()).rejects.toThrow("closure is unconfirmed");
+    expect(process.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
-  describe("setRouter", () => {
-    it("allows setting the router after construction", async () => {
-      detector = new AgentDetector(mockSessionManager);
+  it("refuses a disconnected server without using client detection", async () => {
+    detector = new AgentDetector(() => undefined);
+    await expect(detector.detect(repoId())).rejects.toThrow("requires a connected remote agent");
+    expect(detectAgents).not.toHaveBeenCalled();
+  });
 
-      const router = createMockRouter({
-        detect_agents: {
-          agents: [
-            { name: "claude", path: "/usr/bin/claude", available: true },
-            { name: "codex", path: "", available: false },
-          ],
-        },
-      });
+  it("routes the IPC request to the server without sharing local cached results", async () => {
+    type Handler = Parameters<IpcMain["handle"]>[1];
+    const handlers = new Map<string, Handler>();
+    const stop = registerAgentDetectionIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, () => router);
+    const invoke = (payload?: object) => handlers.get("orchestrator:detect-agents")!({} as Parameters<Handler>[0], payload);
+    try {
+      expect(await invoke({ repoId: repoId(), cachedOnly: true })).toEqual({ success: true, agents: [], cached: false });
+      expect(getCachedAgents).not.toHaveBeenCalled();
+      expect(remoteAgentProcessFactory).not.toHaveBeenCalled();
+      expect(await invoke({ repoId: repoId() })).toMatchObject({ success: true, agents: [{ type: "claude-code", available: true }, { type: "codex", available: true }] });
+      expect(detectAgents).not.toHaveBeenCalled();
+      expect(prewarmAgents).toHaveBeenCalledOnce();
+    } finally { await stop(); }
+  });
 
-      detector.setRouter(router);
-      const result = await detector.detect("profile-10");
-
-      expect(result.agents[0].available).toBe(true);
-    });
+  it("preserves the local cache and forced local probe contract", async () => {
+    type Handler = Parameters<IpcMain["handle"]>[1];
+    const handlers = new Map<string, Handler>();
+    const stop = registerAgentDetectionIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, () => undefined);
+    const invoke = (payload: object) => handlers.get("orchestrator:detect-agents")!({} as Parameters<Handler>[0], payload);
+    vi.mocked(getCachedAgents).mockReturnValue([]); vi.mocked(detectAgents).mockResolvedValue([]);
+    try {
+      expect(await invoke({ repoId: "/local", cachedOnly: true })).toEqual({ success: true, agents: [], cached: true });
+      expect(await invoke({ force: true })).toEqual({ success: true, agents: [] });
+      expect(detectAgents).toHaveBeenCalledWith({ force: true });
+      expect(remoteAgentProcessFactory).not.toHaveBeenCalled();
+    } finally { await stop(); }
   });
 });

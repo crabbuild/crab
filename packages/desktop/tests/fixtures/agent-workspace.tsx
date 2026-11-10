@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { StoreProvider } from "../../src/state";
 import { SessionProvider } from "../../src/lib/session-context";
@@ -8,6 +8,19 @@ import { ToastManager } from "../../src/components/ToastManager";
 import "../../src/index.css";
 
 const liveBridge = new URLSearchParams(location.search).get("liveWorkspace");
+const availabilityMode = new URLSearchParams(location.search).has("remoteAvailability");
+const serverAgent = { type: "codex", name: "Server Codex", binary: "codex", path: "/server/bin/codex", version: "fixture", available: true };
+type Detection = Awaited<ReturnType<Window["crab"]["orchestrator"]["detectAgents"]>>;
+type ConnectionEvent = Parameters<Parameters<Window["crab"]["ssh"]["onStatusChanged"]>[0]>[0];
+const connectionListeners = new Set<(event: ConnectionEvent) => void>();
+const availabilityFixture = {
+  calls: [] as string[],
+  result: { success: true, agents: [] } as Detection,
+  resolveFirst: undefined as ((result: Detection) => void) | undefined,
+  status: (event: ConnectionEvent) => connectionListeners.forEach(listener => listener(event)),
+};
+declare global { interface Window { availabilityFixture: typeof availabilityFixture } }
+window.availabilityFixture = availabilityFixture;
 const invoke = (operation: string, body: object = {}) => fetch(`${liveBridge}/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(response => response.json());
 const liveListeners = new Map<string, Set<(payload: unknown) => void>>();
 if (liveBridge) {
@@ -48,14 +61,20 @@ window.workspaceFixture = fixture;
 const subscribe = <T,>(listeners: Set<(payload: T) => void>, listener: (payload: T) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const idle = () => () => {};
 Object.defineProperty(window, "crab", { value: {
+  ssh: { onStatusChanged: (listener: (event: ConnectionEvent) => void) => { connectionListeners.add(listener); return () => { connectionListeners.delete(listener); }; } },
   onEvent: idle,
   updateMainSettings: async () => {},
   setDevtools: async () => {},
   agentSessions: async () => [],
   agentWorkflows: { listDefinitions: async () => ({ success: true, definitions: [] }), listRuns: async () => ({ success: true, runs: [] }) },
   orchestrator: {
-    listTasks: async () => { calls.push("list"); return { success: true, tasks: [{ ...task }] }; },
-    detectAgents: async () => ({ success: true, cached: true, agents: [{ type: "claude-code", name: "Claude Code", command: "claude", available: true }] }),
+    listTasks: async () => { calls.push("list"); return { success: true, tasks: availabilityMode ? [] : [{ ...task }] }; },
+    detectAgents: async (options?: { repoId?: string }): Promise<Detection> => {
+      if (!availabilityMode) return { success: true, cached: true, agents: [{ ...serverAgent, type: "claude-code", name: "Claude Code" }] };
+      availabilityFixture.calls.push(options?.repoId ?? "client");
+      if (options?.repoId === "ssh://first/repo") return new Promise(resolve => { availabilityFixture.resolveFirst = resolve; });
+      return availabilityFixture.result;
+    },
     loadChat: async () => ({ success: true, messages: [], revision: 0 }),
     onChatUpdate: idle, onError: idle, onEvent: idle,
     onTaskStatus: (listener: (payload: Status) => void) => subscribe(statuses, listener),
@@ -108,7 +127,14 @@ Object.defineProperty(window, "crab", { value: {
     } : {}),
   },
 } });
+function WorkspaceFixture() {
+  const [repoId, setRepoId] = useState(availabilityMode ? "ssh://first/repo" : "fixture-repo");
+  return <>
+    {availabilityMode && <button type="button" onClick={() => setRepoId("ssh://second/repo")}>Select second server</button>}
+    <AgentTasksView repo={{ repo_id: repoId, url: repoId, is_remote: availabilityMode, cache_dir: "", label: "Fixture", openedAt: 1, deferred: true }} />
+  </>;
+}
 createRoot(document.getElementById("root")!).render(<StoreProvider><SettingsProvider><SessionProvider>
   <ToastManager />
-  <AgentTasksView repo={{ repo_id: "fixture-repo", url: "fixture", is_remote: false, cache_dir: "", label: "Fixture", openedAt: 1, deferred: true }} />
+  <WorkspaceFixture />
 </SessionProvider></SettingsProvider></StoreProvider>);

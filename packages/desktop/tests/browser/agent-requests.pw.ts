@@ -55,6 +55,29 @@ test("restores an archived workspace without retrying inference and refreshes it
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
 });
 
+test("binds availability to the SSH server, ignores old replies and retries after reconnect", async ({ page }) => {
+  await page.goto("/tests/fixtures/agent-workspace.html?remoteAvailability");
+  await expect(page.getByRole("status")).toHaveText("Checking agents on this server…");
+  await expect.poll(() => page.evaluate(() => window.availabilityFixture.calls)).toEqual(["ssh://first/repo"]);
+  await page.getByRole("button", { name: "Select second server" }).click();
+  await expect(page.getByText("No Codex or Claude Code found on this server’s PATH.")).toBeVisible();
+  await page.evaluate(() => window.availabilityFixture.resolveFirst?.({ success: true, agents: [{ type: "claude-code", name: "Wrong server", binary: "claude", path: "/first/bin/claude", version: "fixture", available: true }] }));
+  await expect(page.getByText("No Codex or Claude Code found on this server’s PATH.")).toBeVisible();
+  await page.evaluate(() => { window.availabilityFixture.result = { success: false, error: "Server executable failed" }; });
+  await page.getByRole("button", { name: "Retry server detection" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Server executable failed");
+  await page.evaluate(() => { window.availabilityFixture.result = { success: true, agents: [{ type: "codex", name: "Server Codex", binary: "codex", path: "/second/bin/codex", version: "fixture", available: true }] }; });
+  await page.getByRole("button", { name: "Retry server detection" }).click();
+  await expect(page.getByRole("button", { name: "Select AI agent", exact: true })).toHaveAttribute("title", "Agent: Server Codex");
+  await page.evaluate(() => window.availabilityFixture.status({ profileId: "first", status: "disconnected" }));
+  await expect(page.getByRole("button", { name: "Select AI agent", exact: true })).toHaveAttribute("title", "Agent: Server Codex");
+  await page.evaluate(() => window.availabilityFixture.status({ profileId: "second", status: "disconnected" }));
+  await expect(page.getByRole("alert")).toHaveText("SSH connection disconnected");
+  await page.evaluate(() => window.availabilityFixture.status({ profileId: "second", status: "connected" }));
+  await expect(page.getByRole("button", { name: "Select AI agent", exact: true })).toHaveAttribute("title", "Agent: Server Codex");
+  expect(await page.evaluate(() => window.availabilityFixture.calls)).toEqual(["ssh://first/repo", ...Array(4).fill("ssh://second/repo")]);
+});
+
 test("consumes the preload's single payload for status, task switching, and budget notices", async ({ page }) => {
   await page.goto("/tests/fixtures/agent-workspace.html");
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeVisible();

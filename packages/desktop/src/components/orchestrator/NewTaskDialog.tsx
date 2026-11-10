@@ -13,7 +13,6 @@ interface DetectedAgent {
   type: string;
   /** Human-readable display name ("Claude Code", "Codex"). */
   name: string;
-  command: string;
   version?: string;
   available: boolean;
 }

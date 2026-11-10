@@ -226,7 +226,7 @@ function Fixture() {
       <section aria-label="Provider models">
         <button type="button" onClick={() => setShowModels(false)}>Hide model picker</button>
         <button type="button" onClick={() => window.resolveModels?.()}>Complete model discovery</button>
-        {showModels && <NewChatLanding repoName="Fixture" repoPath="/fixture" agents={[{ type: "codex", name: "Codex", command: "codex", available: true }]} branches={["main"]}
+        {showModels && <NewChatLanding repoName="Fixture" repoPath="/fixture" agents={[{ type: "codex", name: "Codex", available: true }]} branches={["main"]}
           onSubmit={submission => { window.modelSubmission = { model: submission.model, intelligence: submission.intelligence }; }} />}
       </section>
       <section aria-label="Active chat controls" className="h-[400px]">

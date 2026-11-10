@@ -1253,6 +1253,7 @@ declare global {
       };
       // SSH enhanced operations
       ssh: {
+        onStatusChanged: (listener: (event: { profileId: string; status: string; error?: string }) => void) => () => void;
         openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => Promise<{ terminalId: string }>;
         detachTerminal: (terminalId: string) => Promise<void>;
         listKnownHosts: () => Promise<KnownHost[]>;
@@ -1359,6 +1360,7 @@ declare global {
         onEvent: (listener: (payload: { taskId: string; event: import("../electron/orchestrator-adapters").AgentEvent }) => void) => () => void;
         onChatUpdate: (listener: (update: import("../electron/agent-chat-messages").ChatUpdate) => void) => () => void;
         onError: (listener: (payload: { taskId: string | null; message: string }) => void) => () => void;
+        detectAgents: (options?: { force?: boolean; cachedOnly?: boolean; repoId?: string }) => Promise<{ success: boolean; agents?: import("../electron/orchestrator-adapters").DetectedAgent[]; cached?: boolean; error?: string }>;
         listModels: (agentType: string, cwd: string, requestId: string, taskId?: string) => Promise<{ success: boolean; models?: import("../electron/orchestrator-adapters").AgentModel[]; error?: string }>;
         cancelModelDiscovery: (requestId: string) => Promise<void>;
         iterate: (taskId: string, feedback: string, options?: import("../electron/orchestrator-adapters").AgentTurnOptions, messageId?: string) => Promise<{ success: boolean; uncertain?: boolean; unsent?: boolean; error?: string }>;

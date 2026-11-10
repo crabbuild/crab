@@ -1032,7 +1032,7 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("orchestrator:revert-file", { taskId, filePath }),
     getCommits: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:get-commits", { taskId }),
-    detectAgents: (options?: { force?: boolean; cachedOnly?: boolean }) =>
+    detectAgents: (options?: { force?: boolean; cachedOnly?: boolean; repoId?: string }) =>
       ipcRenderer.invoke("orchestrator:detect-agents", options),
     testAgent: (agentType: string) =>
       ipcRenderer.invoke("orchestrator:test-agent", { agentType }),
