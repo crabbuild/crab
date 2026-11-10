@@ -3,7 +3,7 @@
  *
  * Verifies that setup/run/archive scripts execute on the remote machine
  * via the `task_run_script` RPC, that script output streams back as
- * notifications, and that setup script failures prevent task spawning.
+ * notifications. These mocks do not qualify native sidecar script execution.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -543,7 +543,7 @@ describe("buildRemoteWorkspaceEnv", () => {
 
 // ─── Tests: Orchestrator Integration ─────────────────────────────────────────
 
-describe("Orchestrator remote scripts integration", () => {
+describe("Orchestrator remote archive request mapping", () => {
   let persistPath: string;
   let orchestrator: Orchestrator;
   let mockRouter: MockRpcRouter;
@@ -551,6 +551,7 @@ describe("Orchestrator remote scripts integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     persistPath = createTempPersistPath();
+    vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(path.dirname(persistPath), "settings.json"));
     mockRouter = new MockRpcRouter();
     orchestrator = new Orchestrator({
       persistPath,
@@ -561,118 +562,8 @@ describe("Orchestrator remote scripts integration", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     cleanupPath(persistPath);
-  });
-
-  describe("setup script runs before task_spawn", () => {
-    it("runs setup script before sending task_spawn", async () => {
-      // Configure the remote to have a setup script.
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "pip install -r requirements.txt" },
-        }),
-      });
-      mockRouter.setResult("task_run_script", {
-        exit_code: 0,
-        output: "Successfully installed packages\n",
-      });
-
-      const task = injectRemoteTask(orchestrator);
-      await orchestrator.startTask(task.id);
-
-      // Verify the order: read_text (config) -> task_run_script (setup) -> task_spawn
-      const methods = mockRouter.calls.map((c) => c.method);
-      expect(methods).toContain("read_text");
-      expect(methods).toContain("task_run_script");
-      expect(methods).toContain("task_spawn");
-
-      const scriptIdx = methods.indexOf("task_run_script");
-      const spawnIdx = methods.indexOf("task_spawn");
-      expect(scriptIdx).toBeLessThan(spawnIdx);
-    });
-
-    it("prevents task_spawn when setup script fails", async () => {
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "pip install -r requirements.txt" },
-        }),
-      });
-      mockRouter.setResult("task_run_script", {
-        exit_code: 1,
-        output: "ERROR: No matching distribution found\n",
-        error: "pip install failed",
-      });
-
-      const task = injectRemoteTask(orchestrator);
-
-      await expect(orchestrator.startTask(task.id)).rejects.toThrow(
-        "Remote setup script failed",
-      );
-
-      // Task should be marked as failed.
-      expect(task.status).toBe("failed");
-      expect(task.completedAt).toBeGreaterThan(0);
-
-      // task_spawn should NOT have been called.
-      const methods = mockRouter.calls.map((c) => c.method);
-      expect(methods).not.toContain("task_spawn");
-    });
-
-    it("emits error event when setup script fails", async () => {
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "conda activate nonexistent" },
-        }),
-      });
-      mockRouter.setResult("task_run_script", {
-        exit_code: 127,
-        output: "conda: command not found\n",
-        error: "conda not found",
-      });
-
-      const task = injectRemoteTask(orchestrator);
-      const events: any[] = [];
-      orchestrator.on("orchestrator:event", (e) => events.push(e));
-
-      await expect(orchestrator.startTask(task.id)).rejects.toThrow();
-
-      const errorEvent = events.find((e) => e.event.type === "error");
-      expect(errorEvent).toBeDefined();
-      expect(errorEvent.event.error).toContain("Setup script failed");
-      expect(errorEvent.event.error).toContain("exit code 127");
-    });
-
-    it("skips setup script when none is configured", async () => {
-      // No config file on remote (read_text throws).
-      const task = injectRemoteTask(orchestrator);
-      await orchestrator.startTask(task.id);
-
-      // Should go straight to task_spawn without task_run_script.
-      const methods = mockRouter.calls.map((c) => c.method);
-      expect(methods).not.toContain("task_run_script");
-      expect(methods).toContain("task_spawn");
-      expect(task.status).toBe("running");
-    });
-
-    it("passes workspace env variables to setup script", async () => {
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "echo $CRAB_WORKSPACE_PATH" },
-        }),
-      });
-
-      const task = injectRemoteTask(orchestrator);
-      await orchestrator.startTask(task.id);
-
-      const scriptCall = mockRouter.calls.find((c) => c.method === "task_run_script");
-      expect(scriptCall).toBeDefined();
-
-      const params = scriptCall!.params as any;
-      expect(params.env.CRAB_WORKSPACE_PATH).toBe(task.worktreePath);
-      expect(params.env.CRAB_WORKSPACE_BRANCH).toBe(task.branch);
-      expect(params.env.CRAB_TASK_ID).toBe(task.id);
-      expect(params.env.CRAB_REMOTE).toBe("true");
-    });
   });
 
   describe("archive script", () => {
@@ -722,80 +613,4 @@ describe("Orchestrator remote scripts integration", () => {
     });
   });
 
-  describe("script output streaming via notifications", () => {
-    it("forwards task_script_output notifications to event system", async () => {
-      const task = injectRemoteTask(orchestrator, { status: "running" });
-      task.status = "running";
-
-      const events: any[] = [];
-      orchestrator.on("orchestrator:event", (e) => events.push(e));
-
-      await orchestrator.handleRemoteTaskNotification({
-        profileId: "gpu-server",
-        method: "task_script_output",
-        params: {
-          task_id: task.id,
-          script_type: "setup",
-          stream: "stdout",
-          data: "Installing torch...\n",
-        },
-      });
-
-      // The script runner emits script:output which the orchestrator
-      // forwards as orchestrator:event.
-      expect(events).toHaveLength(1);
-      expect(events[0].taskId).toBe(task.id);
-      expect(events[0].event.type).toBe("script_output");
-      expect(events[0].event.scriptType).toBe("setup");
-      expect(events[0].event.stream).toBe("stdout");
-      expect(events[0].event.data).toBe("Installing torch...\n");
-    });
-  });
-
-  describe("script events emitted to renderer", () => {
-    it("emits script_start event when setup script begins", async () => {
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "pip install torch" },
-        }),
-      });
-
-      const task = injectRemoteTask(orchestrator);
-      const events: any[] = [];
-      orchestrator.on("orchestrator:event", (e) => events.push(e));
-
-      await orchestrator.startTask(task.id);
-
-      const startEvent = events.find((e) => e.event.type === "script_start");
-      expect(startEvent).toBeDefined();
-      expect(startEvent.taskId).toBe(task.id);
-      expect(startEvent.event.scriptType).toBe("setup");
-      expect(startEvent.event.command).toBe("pip install torch");
-    });
-
-    it("emits script_complete event when setup script finishes", async () => {
-      mockRouter.setResult("read_text", {
-        content: JSON.stringify({
-          scripts: { setup: "pip install torch" },
-        }),
-      });
-      mockRouter.setResult("task_run_script", {
-        exit_code: 0,
-        output: "done\n",
-      });
-
-      const task = injectRemoteTask(orchestrator);
-      const events: any[] = [];
-      orchestrator.on("orchestrator:event", (e) => events.push(e));
-
-      await orchestrator.startTask(task.id);
-
-      const completeEvent = events.find((e) => e.event.type === "script_complete");
-      expect(completeEvent).toBeDefined();
-      expect(completeEvent.taskId).toBe(task.id);
-      expect(completeEvent.event.scriptType).toBe("setup");
-      expect(completeEvent.event.success).toBe(true);
-      expect(completeEvent.event.exitCode).toBe(0);
-    });
-  });
 });

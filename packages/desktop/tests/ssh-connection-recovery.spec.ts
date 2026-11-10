@@ -155,6 +155,7 @@ describe("SSH Connection Recovery", () => {
 
   beforeEach(() => {
     persistPath = createTempPersistPath();
+    vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(path.dirname(persistPath), "settings.json"));
     mockRouter = new MockRpcRouter();
     mockSessionManager = new MockSshSessionManager();
     orchestrator = new Orchestrator({
@@ -170,6 +171,7 @@ describe("SSH Connection Recovery", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     cleanupPath(persistPath);
   });
 
@@ -455,21 +457,18 @@ describe("SSH Connection Recovery", () => {
   });
 
   describe("resumeTask", () => {
-    it("re-spawns the agent in the existing worktree", async () => {
-      const task = injectRemoteTask(orchestrator, { status: "interrupted" });
-
-      await recovery.resumeTask(task.id);
-
-      expect(task.status).toBe("running");
-      // Should have sent task_spawn RPC
-      const spawnCall = mockRouter.calls.find((c) => c.method === "task_spawn");
-      expect(spawnCall).toBeDefined();
-      expect(spawnCall!.params).toEqual({
-        task_id: task.id,
-        prompt: task.prompt,
-        agent_type: task.agentType,
-        worktree_path: task.worktreePath,
-      });
+    it("resumes through the shared lifecycle with its saved workspace and native session", async () => {
+      const task = injectRemoteTask(orchestrator, { status: "interrupted", claudeSessionId: "saved-native-session" });
+      const workspace = task.worktreePath;
+      let admittedStatus: string | undefined;
+      const start = vi.spyOn(orchestrator, "startTask").mockImplementation(async id => { admittedStatus = orchestrator.getTask(id)?.status; });
+      try {
+        await recovery.resumeTask(task.id);
+        const saved = new Orchestrator({ persistPath }).getTask(task.id);
+        expect({ calls: start.mock.calls, admittedStatus, workspace: saved?.worktreePath, session: saved?.claudeSessionId, persistedStatus: saved?.status, remoteCalls: mockRouter.calls }).toEqual({
+          calls: [[task.id]], admittedStatus: "created", workspace, session: "saved-native-session", persistedStatus: "created", remoteCalls: [],
+        });
+      } finally { start.mockRestore(); }
     });
 
     it("throws if task is not in interrupted status", async () => {

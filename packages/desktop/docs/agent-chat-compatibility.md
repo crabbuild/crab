@@ -1500,6 +1500,22 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   output. This removes the fatal Clippy blocker, not the remaining warning debt
   or the desktop ESLint configuration gate.
 
+- The [d444f4061f2 desktop run](https://github.com/crabbuild/crab/actions/runs/42818674675)
+  passes Linux ARM64's 271 native tests and all eleven SSH runtime cases,
+  including both former timeouts. Linux x64 also passes 271 native tests, the
+  remote checkpoint case, packaged smoke and all eleven SSH cases. Its broad
+  run reaches 4042 passing checks but fails nine assertions in two old test
+  files. Eight exercise the deleted task-spawn/notification path; the sidecar
+  never implemented those task/script RPCs. Those obsolete integration tests
+  are removed, while the manual archive request-mapping checks remain. Resume
+  coverage now verifies persisted admission, saved workspace/session identity
+  and delegation to the shared lifecycle. Actual native initial/warm/cold turns
+  retain their separate SSH proof. All 47 remaining checks in those two files
+  pass. Evidence: `retired-remote-rpc-before.json` and
+  `retired-remote-rpc-final.json` in the owned output. Remote setup/Run/archive
+  execution remains a production gate; mock request mapping does not prove it.
+  No runtime shim, skipped gate, baseline or suppression was added.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
