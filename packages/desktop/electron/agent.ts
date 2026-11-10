@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { app, dialog } from "electron";
+import { app } from "electron";
 import { storageBindingKey, type StorageConnections } from "./storage-connections";
 import { parseAgentCapabilities, type AgentCapabilities } from "./ssh-types";
 import type { RepositoryRuntime } from "./repo-capabilities";
@@ -50,19 +50,27 @@ export class Agent extends EventEmitter {
   private nextRepositorySession = 1;
   private stopping = false;
   private crashTimestamps: number[] = [];
+  private restartBlocked: Error | null = null;
   private recentStderrLines: string[] = [];
   private static readonly CRASH_WINDOW_MS = 30_000;
   private static readonly MAX_AUTO_RESTARTS = 1;
 
   constructor(private readonly binaries: { agent: string; crab: string }, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections) { super(); }
 
-  async start(): Promise<void> {
+  async start(reopen = false): Promise<void> {
     const existing = this.runtime;
     if (existing) {
       if (!existing.failure && !existing.stopping) return existing.started;
       await existing.closed;
       if (this.stopping || existing.stopping) throw new Error("Native agent stopped during startup");
-      return this.start();
+      return this.start(reopen);
+    }
+    if (this.restartBlocked) {
+      // Explicit opens reset the budget after old pipes drain. Background
+      // starts must not turn a visible service failure into a crash loop.
+      if (!reopen) throw this.restartBlocked;
+      this.restartBlocked = null;
+      this.crashTimestamps = [];
     }
     this.stopping = false;
     for (const binary of [this.binaries.agent, this.binaries.crab]) {
@@ -172,13 +180,13 @@ export class Agent extends EventEmitter {
     }
     const payload = fields(params);
     const repoId = typeof payload?.repo_id === "string" ? payload.repo_id : null;
-    if ((method === "open_local" || method === "open_url") && (!this.runtime || this.runtime.failure || this.runtime.stopping)) await this.start();
+    if ((method === "open_local" || method === "open_url") && (!this.runtime || this.runtime.failure || this.runtime.stopping)) await this.start(true);
     if (method === "close" && repoId) this.repositories.delete(repoId);
     const run = this.runtime;
     // A revoked process retains ownership of draining its native repositories.
     // Revoke the desired open even when there is no transport to send close on.
     if (method === "close" && (!run || run.failure || run.stopping)) return {};
-    if (!run) throw new Error("Native agent is not running");
+    if (!run) throw this.restartBlocked ?? new Error("Native agent is not running");
     await run.ready;
     this.assertCurrent(run);
     if (repoId && payload && (method === "open_local" || method === "open_url")) {
@@ -381,10 +389,14 @@ export class Agent extends EventEmitter {
     this.crashTimestamps.push(now);
     this.writeCrashDump(code, signal, interrupted);
     if (this.crashTimestamps.length > Agent.MAX_AUTO_RESTARTS) {
-      const result = await dialog.showMessageBox({ type: "error", title: "Crab Desktop — Agent crashed repeatedly", message: `Desktop services stopped ${this.crashTimestamps.length} times in the last 30 seconds.`, buttons: ["Restart", "Quit"], defaultId: 0, cancelId: 1 });
-      if (this.stopping) return;
-      if (result.response !== 0) { app.quit(); return; }
-      this.crashTimestamps = [];
+      const error = new Error("Desktop services stopped repeatedly. Retry reopening the repository.");
+      this.restartBlocked = error;
+      for (const [repoId, repository] of this.repositories) {
+        repository.error = error;
+        this.publishRuntime(repoId, repository);
+      }
+      this.emit("notification", "agent/failed", { message: error.message, code, signal });
+      return;
     }
     this.emit("notification", "agent/crash_restart", { message: "Desktop services stopped — restarting.", code, signal });
     try {

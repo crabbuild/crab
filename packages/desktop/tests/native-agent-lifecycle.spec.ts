@@ -76,7 +76,7 @@ vi.mock("node:child_process", () => ({ spawn: () => {
   const child = new NativeProcess(); configure?.(child); children.push(child);
   return child as unknown as ChildProcessWithoutNullStreams;
 } }));
-vi.mock("electron", () => ({ app: { getPath: () => "/native-test-profile", quit: vi.fn() }, dialog: { showMessageBox: vi.fn(async () => ({ response: 0 })) } }));
+vi.mock("electron", () => ({ app: { getPath: () => "/native-test-profile" } }));
 vi.mock("node:fs", () => ({ existsSync: (file: string) => file !== missingBinary, mkdirSync: vi.fn(), writeFileSync: vi.fn() }));
 
 import { Agent } from "../electron/agent";
@@ -343,6 +343,39 @@ describe("native agent process ownership", () => {
     expect(children).toHaveLength(1);
     children[0].close();
     await vi.waitFor(() => expect(children).toHaveLength(2));
+  });
+
+  for (const [method, params] of [
+    ["open_local", { repo_id: "one", path: "/one" }],
+    ["open_url", { repo_id: "one", url: "s3://fixture/repository" }],
+  ] as const) it(`${method} explicitly recovers an exhausted automatic restart budget`, async () => {
+    const notifications = vi.fn(); agent.on("notification", notifications);
+    const first = await agent.request(method, params) as { native_session_id: string };
+    children[0].kill("SIGKILL");
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await agent.request("read_text", { repo_id: "one", path: "note.txt" });
+    children[1].kill("SIGKILL");
+    await expect(agent.start()).rejects.toThrow("stopped repeatedly");
+    await expect(agent.request("read_text", { repo_id: "one", path: "note.txt" })).rejects.toThrow("stopped repeatedly");
+    expect(children).toHaveLength(2);
+    expect(notifications).toHaveBeenCalledWith("agent/failed", expect.objectContaining({ message: expect.stringContaining("stopped repeatedly") }));
+    const replacement = await agent.request(method, params) as { native_session_id: string };
+    expect(replacement.native_session_id).not.toBe(first.native_session_id);
+    await expect(agent.request("read_text", { repo_id: "one", path: "note.txt" })).resolves.toEqual({ content: "Recovered native content" });
+  });
+
+  it("an explicit reopen waiting on old pipes can reset the restart budget after they close", async () => {
+    await agent.request("open_local", { repo_id: "one", path: "/one" });
+    children[0].kill("SIGKILL");
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await agent.request("read_text", { repo_id: "one", path: "note.txt" });
+    children[1].exit(null, "SIGKILL");
+    const reopening = agent.request("open_local", { repo_id: "one", path: "/one" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(children).toHaveLength(2);
+    children[1].close();
+    await expect(reopening).resolves.toMatchObject({ repo_id: "one", native_session_id: expect.any(String) });
+    expect(children).toHaveLength(3);
   });
 
   it("a closed repository is not restored on a later start", async () => {
