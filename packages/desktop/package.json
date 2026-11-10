@@ -29,7 +29,7 @@
     "package:win": "npm run build && node scripts/package.mjs --win",
     "dist": "npm run build:icons && npm run package",
     "start": "electron .",
-    "postinstall": "electron-rebuild",
+    "postinstall": "node scripts/install-native.mjs",
     "package:dir": "npm run build && node scripts/package.mjs --dir",
     "test:build": "node --test scripts/native-build.test.mjs scripts/assemble-release.test.mjs scripts/version-bump.test.mjs"
   },

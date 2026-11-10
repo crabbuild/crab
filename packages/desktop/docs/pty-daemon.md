@@ -122,8 +122,13 @@ CRAB_DAEMON_ENTRY=/path/to/daemon-main.js crab-desktop
 
 Resolution order when `CRAB_DAEMON_ENTRY` is not set:
 
-1. **Packaged app**: `<app>/Contents/Resources/daemon/daemon-main.js`
+1. **Packaged app**: `<resourcesPath>/app.asar/dist-electron/daemon/daemon-main.cjs`
 2. **Development**: `dist-electron/daemon/daemon-main.cjs`
+
+Packaged JavaScript must load through ASAR. Native modules and the terminal
+spawn helper remain in `app.asar.unpacked`; node-pty translates the ASAR path
+to that physical helper path. Starting JavaScript directly from the unpacked
+directory makes node-pty expand the path twice and prevents terminal startup.
 
 If the resolved path does not exist, the main process emits a fatal
 error that includes all searched paths and the `CRAB_DAEMON_ENTRY`

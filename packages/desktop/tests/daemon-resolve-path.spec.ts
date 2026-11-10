@@ -112,7 +112,7 @@ describe("resolveDaemonPath", () => {
     it("does not check resources path in dev mode", () => {
       // Even if the resources path has the file, dev mode only checks distDir
       const resourcesPath = path.join(tmpDir, "resources");
-      createFile(path.join(resourcesPath, "app.asar.unpacked", "dist-electron", "daemon", "daemon-main.cjs"));
+      createFile(path.join(resourcesPath, "app.asar", "dist-electron", "daemon", "daemon-main.cjs"));
 
       const distDir = path.join(tmpDir, "dist-electron", "daemon");
       // distDir does NOT have the file
@@ -128,9 +128,25 @@ describe("resolveDaemonPath", () => {
   });
 
   describe("production mode", () => {
-    it("resolves from resources/app.asar.unpacked/dist-electron/daemon/ in prod mode", () => {
+    it("loads packaged JavaScript through ASAR even when an unpacked copy exists", () => {
       const resourcesPath = path.join(tmpDir, "resources");
-      const entryPath = path.join(resourcesPath, "app.asar.unpacked", "dist-electron", "daemon", "daemon-main.cjs");
+      const daemon = path.join("dist-electron", "daemon", "daemon-main.cjs");
+      const entryPath = path.join(resourcesPath, "app.asar", daemon);
+      createFile(entryPath);
+      createFile(path.join(resourcesPath, "app.asar.unpacked", daemon));
+
+      const result = resolveDaemonPath({
+        isDev: false,
+        resourcesPath,
+        electronDistDir: "/fake/dist",
+      });
+
+      expect(result.entryPath).toBe(entryPath);
+    });
+
+    it("resolves from resources/app.asar/dist-electron/daemon/ in prod mode", () => {
+      const resourcesPath = path.join(tmpDir, "resources");
+      const entryPath = path.join(resourcesPath, "app.asar", "dist-electron", "daemon", "daemon-main.cjs");
       createFile(entryPath);
 
       const result = resolveDaemonPath({
@@ -236,7 +252,7 @@ describe("resolveDaemonEntryPath", () => {
 
   it("resolves prod path when isPackaged is true", () => {
     const resourcesPath = path.join(tmpDir, "resources");
-    const entryPath = path.join(resourcesPath, "app.asar.unpacked", "dist-electron", "daemon", "daemon-main.cjs");
+    const entryPath = path.join(resourcesPath, "app.asar", "dist-electron", "daemon", "daemon-main.cjs");
     createFile(entryPath);
 
     const result = resolveDaemonEntryPath(true, resourcesPath, "/fake/dist");

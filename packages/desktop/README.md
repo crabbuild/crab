@@ -46,6 +46,9 @@ native runner. The desktop CLI enables NFS and the release provider/workflow
 features; it does not require a FUSE driver.
 Windows native modules require Visual Studio 2022 with the C++ desktop workload;
 the current Electron rebuild tooling does not recognize Visual Studio 2026.
+Native installation rebuilds node-pty from source on macOS because its prebuilt
+spawn helper lacks executable permissions. The matching helper must be executable
+in development and in the packaged application.
 
 On macOS, mount the Workspace volume and give the **Codex process running the
 commands** access to it. Each checkout needs its own Cargo target directory.
@@ -92,7 +95,8 @@ npm run package:win    # NSIS installer on Windows
 
 Artifacts go to `release/`. Packaging checks the native runtime's version,
 platform, architecture, and SHA-256 hashes. Missing or mixed artifacts fail the
-build. The PTY daemon and its native dependencies ship together outside ASAR.
+build. The PTY daemon loads from ASAR; native terminal modules and helpers
+remain unpacked for execution.
 `build:electron` also copies the agent manifests and verifies the daemon entry.
 
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
