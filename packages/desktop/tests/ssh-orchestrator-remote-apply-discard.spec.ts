@@ -343,7 +343,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Fix the bug",
@@ -377,7 +377,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-xyz" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-xyz", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Add feature",
@@ -411,7 +411,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-fail" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-fail", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Risky change",
@@ -437,7 +437,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-disc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-disc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Experiment",

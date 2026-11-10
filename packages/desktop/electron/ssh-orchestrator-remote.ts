@@ -115,7 +115,7 @@ export class RemoteOrchestrator extends EventEmitter {
     }
 
     const taskId = crypto.randomUUID();
-    const branch = `task/${taskId.slice(0, 8)}`;
+    const branch = `task/${taskId}`;
     const baseRef = params.baseRef ?? "HEAD";
 
     const task: RemoteTask = {
@@ -143,9 +143,17 @@ export class RemoteOrchestrator extends EventEmitter {
         repo_id: params.repoId,
         branch,
         base_ref: task.baseRef,
-      }) as { path: string };
+        task_id: taskId,
+      }) as { path: string; branch: string; base_ref: string };
 
+      if (!worktreeResult || typeof worktreeResult.path !== "string" || !worktreeResult.path.startsWith("/")
+        || typeof worktreeResult.branch !== "string" || !worktreeResult.branch
+        || typeof worktreeResult.base_ref !== "string" || !/^[a-f0-9]{40}$/.test(worktreeResult.base_ref)) {
+        throw new Error("Remote workspace creation returned an invalid path, branch or baseline");
+      }
       task.worktreePath = worktreeResult.path;
+      task.branch = worktreeResult.branch;
+      task.baseRef = worktreeResult.base_ref;
     } catch (err) {
       task.status = "failed";
       this.emitStatusChange(task);

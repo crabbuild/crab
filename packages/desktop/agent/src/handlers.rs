@@ -1673,8 +1673,7 @@ struct WorktreeCreateParams {
     branch: String,
     /// Base ref to branch from (commit SHA, branch name, or "HEAD").
     base_ref: String,
-    /// Task UUID — the first 8 characters are used for the worktree
-    /// directory name under `~/.crab/worktrees/`.
+    /// Task UUID used as the worktree directory name.
     task_id: String,
 }
 
@@ -1682,81 +1681,61 @@ struct WorktreeCreateParams {
 ///
 /// This is the remote counterpart to the local `createWorktree()` in
 /// `orchestrator-worktree.ts`. The worktree is placed at
-/// `~/.crab/worktrees/<task_id_short>` and a new branch is created
+/// `~/.crab/worktrees/<task_id>` and a new branch is created
 /// through the core Crab worktree contract.
 ///
 /// Returns `{ path, branch, base_ref }` where `base_ref` is the
 /// resolved SHA of the starting point.
 async fn worktree_create(work_dir: &Path, p: WorktreeCreateParams) -> Result<Value> {
-    let task_id_short = &p.task_id[..p.task_id.len().min(8)];
-
-    // Resolve the worktree path under ~/.crab/worktrees/<task_id_short>.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let worktrees_dir = PathBuf::from(&home).join(".crab").join("worktrees");
-
-    // Ensure the worktrees directory exists.
-    tokio::fs::create_dir_all(&worktrees_dir)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let wt_path = worktrees_dir.join(task_id_short);
-
-    // Check if the worktree path already exists (stale from a previous run).
-    let mgr = crate::worktree::WorktreeManager::new(work_dir.to_path_buf());
-    if wt_path.exists() {
-        // Attempt to remove the stale worktree first.
-        let _ = mgr.worktree_remove(&wt_path, true).await;
-        // If the directory still exists (not a git worktree), remove it.
-        if wt_path.exists() {
-            tokio::fs::remove_dir_all(&wt_path)
-                .await
-                .map_err(AgentError::Io)?;
-        }
+    let task_id = uuid::Uuid::parse_str(&p.task_id).map_err(|source| AgentError::Managed {
+        kind: "task_identity".into(),
+        message: "Remote workspace creation requires a task UUID".into(),
+        remediation: "Start a new conversation with a new task identity".into(),
+        source: Some(Box::new(source)),
+    })?;
+    let baseline = format!("{}^{{commit}}", p.base_ref);
+    let resolved_base = run_git_worktree_cmd(
+        work_dir,
+        &["rev-parse", "--verify", "--end-of-options", &baseline],
+    )
+    .await?;
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .ok_or_else(|| AgentError::Other("Remote HOME is unavailable".into()))?;
+    let home = PathBuf::from(home);
+    if !home.is_absolute() {
+        return Err(AgentError::Other(
+            "Remote HOME must be an absolute path".into(),
+        ));
     }
-
-    // Resolve base_ref to a SHA before creating the worktree.
-    let resolved_base = resolve_ref_to_sha(work_dir, &p.base_ref).await?;
-
-    // Create the worktree through the core Crab worktree contract.
-    let wt_path_str = wt_path.to_string_lossy().to_string();
-    let result = mgr
+    let worktrees_dir = home.join(".crab").join("worktrees");
+    let wt_path = worktrees_dir.join(task_id.to_string());
+    // A new conversation cannot authorize cleanup of a stale or colliding
+    // directory. Full UUIDs isolate tasks; an existing path requires recovery.
+    tokio::fs::create_dir_all(&worktrees_dir).await?;
+    tokio::fs::create_dir(&wt_path)
+        .await
+        .map_err(|source| AgentError::Managed {
+            kind: "task_workspace".into(),
+            message: format!("Cannot reserve remote workspace: {}", wt_path.display()),
+            remediation:
+                "Recover an existing workspace or repair directory permissions before retrying"
+                    .into(),
+            source: Some(Box::new(source)),
+        })?;
+    let mgr = crate::worktree::WorktreeManager::new(work_dir.to_path_buf());
+    if let Err(error) = mgr
         .worktree_add(&wt_path, &p.branch, true, Some(&resolved_base))
-        .await;
-
-    match result {
-        Ok(_) => {}
-        Err(AgentError::Cli { status, ref stderr }) => {
-            // Map common git errors to descriptive messages.
-            let lower = stderr.to_lowercase();
-            if lower.contains("already exists") {
-                return Err(AgentError::Other(format!(
-                    "Branch '{}' already exists. Choose a different branch name.",
-                    p.branch
-                )));
-            }
-            if lower.contains("permission denied") {
-                return Err(AgentError::Other(format!(
-                    "Permission denied creating worktree at '{}'. Check filesystem permissions.",
-                    wt_path_str
-                )));
-            }
-            if lower.contains("no space left") || lower.contains("disk full") {
-                return Err(AgentError::Other(format!(
-                    "Disk full: cannot create worktree at '{}'. Free up space on the remote.",
-                    wt_path_str
-                )));
-            }
-            // Re-raise the original error for other cases.
-            return Err(AgentError::Cli {
-                status,
-                stderr: stderr.clone(),
-            });
-        }
-        Err(e) => return Err(e),
+        .await
+    {
+        // Release only our empty reservation. A post-create failure can leave
+        // a real checkout; non-recursive removal preserves its files for recovery.
+        let _ = tokio::fs::remove_dir(&wt_path).await;
+        return Err(error);
     }
 
     Ok(json!({
-        "path": wt_path_str,
+        "path": wt_path,
         "branch": p.branch,
         "base_ref": resolved_base,
     }))
@@ -2282,25 +2261,6 @@ async fn run_git_worktree_cmd(work_dir: &Path, args: &[&str]) -> Result<String> 
     }
 
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
-/// Resolve a ref (branch name, tag, "HEAD", or SHA) to a full commit SHA.
-async fn resolve_ref_to_sha(work_dir: &Path, refspec: &str) -> Result<String> {
-    // Try direct resolution first.
-    match run_git_worktree_cmd(work_dir, &["rev-parse", refspec]).await {
-        Ok(sha) => return Ok(sha),
-        Err(_) => {}
-    }
-
-    // Try with origin/ prefix for remote tracking branches.
-    let with_origin = format!("origin/{refspec}");
-    match run_git_worktree_cmd(work_dir, &["rev-parse", &with_origin]).await {
-        Ok(sha) => return Ok(sha),
-        Err(_) => {}
-    }
-
-    // Fall back to HEAD.
-    run_git_worktree_cmd(work_dir, &["rev-parse", "HEAD"]).await
 }
 
 // ─── Write text ─────────────────────────────────────────────────────

@@ -192,7 +192,7 @@ describe("SSH Orchestrator E2E — Full Lifecycle", () => {
     mockRouter.setMethodResult("worktree_create", {
       path: REMOTE_WORKTREE,
       branch: "agent/task-abc",
-      base_ref: "abc123def456789",
+      base_ref: "a".repeat(40),
     });
     mockRouter.setMethodResult("read_text", {}); // No remote scripts config
     mockRouter.setMethodResult("task_spawn", { started: true });

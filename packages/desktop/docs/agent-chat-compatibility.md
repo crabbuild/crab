@@ -1212,6 +1212,33 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   The path behavior follows [Git restore](https://git-scm.com/docs/git-restore)
   with [literal pathspecs](https://git-scm.com/docs/git#Documentation/git.txt---literal-pathspecs).
 
+- Remote task creation qualification reproduced deletion of unrelated bytes in
+  the old eight-character task directory through the real SSH/runtime owner.
+  Creation now validates UUIDs, resolves the requested commit strictly, reserves
+  a full-UUID path atomically, and never removes an existing path. It releases
+  only an empty reservation after failure; partially created checkouts remain
+  available for recovery. Missing HOME fails rather than using a shared temp
+  directory. Both Electron callers send full identities and retain the returned
+  branch/SHA; the original branch selection stays the Apply target. The branch
+  picker supplies local branch names, so removed origin/HEAD fallbacks are not
+  needed to resolve its selections. The tagged alpha's returned paths are opaque:
+  new paths can change without relocating old saved workspaces or adding readers.
+  All 234 scoped orchestration checks and ten real SSH/SFTP cases pass. The native
+  checks cover shared-prefix IDs, existing bytes, simultaneous duplicate requests,
+  invalid UUIDs/refs, failed-creation cleanup, and a real Orchestrator task whose
+  persisted baseline stays fixed after HEAD moves. Native/Electron builds,
+  production and touched-fixture types, Rust formatting and diff checks pass.
+  The fixture owns its settings path. Its log assertion reads the sidecar's
+  actual severity rather than treating a CLI ERROR serialized inside a WARN as
+  an indexer failure; root sidecar ERRORs still fail. Evidence:
+  `task-workspace-before.json`, `task-workspace-scoped.json`,
+  `task-workspace-native-final.json`, and `task-workspace-creation.json` in the
+  owned output. The creation handler exists in `v2.0.0-alpha.1`; missing native
+  dispatch is specifically `task_spawn`/`task_iterate`. Creation proof does not
+  qualify `worktree_destroy`, `task_discard`, Apply cleanup or process-name orphan
+  checks. Those sibling lifecycle paths require ownership before release.
+  Strict commit resolution follows [Git rev-parse](https://git-scm.com/docs/git-rev-parse).
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;

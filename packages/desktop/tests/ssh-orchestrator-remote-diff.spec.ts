@@ -333,7 +333,7 @@ describe("Remote Diff Computation", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task in the remote orchestrator.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Fix the bug",

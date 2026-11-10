@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
+import { Orchestrator } from "../electron/orchestrator";
 import { CapabilityNegotiator } from "../electron/ssh-capabilities";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -29,6 +30,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>; let diagnostics: string[];
   beforeEach(async () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
+    vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     local = path.join(directory, "app", "resources", "native", "mac-arm64"); await mkdir(remote); await mkdir(local, { recursive: true });
     const cli = Buffer.from("#!/bin/sh\nprintf 'owned-cli\\n'\n");
     const agent = Buffer.from('#!/bin/sh\n"$CRAB_BIN" --version\ngit-remote-crab --version\ncat\n');
@@ -79,6 +81,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const closed = [...children].map(child => new Promise<void>(resolve => { child.once("close", () => resolve()); try { process.kill(-child.pid!, "SIGTERM"); } catch { /* The owned group already exited. */ } })); await Promise.all(closed); children.clear();
     for (const descriptor of descriptors) { try { fs.closeSync(descriptor); } catch { /* Closed by the SFTP peer. */ } } descriptors.clear();
     if (server?.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    vi.unstubAllEnvs();
     await rm(directory, { recursive: true, force: true });
   });
   function bindSftp(sftp: SFTPWrapper) {
@@ -211,6 +214,41 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await writeFile(path.join(worktree, "tracked.txt"), "after-native-deployment\n");
       const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
       expect({ created: created.created, path: created.path, content: await readFile(path.join(worktree, "tracked.txt"), "utf8"), diff: comparison.diff }).toEqual({ created: true, path: await realpath(worktree), content: "after-native-deployment\n", diff: expect.stringContaining("+after-native-deployment") });
+      const taskIds = ["12345678-1111-4111-8111-111111111111", "12345678-2222-4222-8222-222222222222"];
+      const shortPath = path.join(remote, ".crab", "worktrees", "12345678");
+      await mkdir(shortPath, { recursive: true });
+      await writeFile(path.join(shortPath, "keep.txt"), "unrelated user bytes");
+      const taskWorktrees: Array<{ path: string; branch: string; base_ref: string }> = [];
+      for (const taskId of taskIds) {
+        const result = await router.route(repoId, "worktree_create", { repo_id: repoId, task_id: taskId, branch: `agent/${taskId}`, base_ref: "HEAD" }) as { path: string; branch: string; base_ref: string };
+        expect({ path: result.path, unrelated: await readFile(path.join(shortPath, "keep.txt"), "utf8") }).toEqual({ path: path.join(remote, ".crab", "worktrees", taskId), unrelated: "unrelated user bytes" });
+        taskWorktrees.push(result);
+      }
+      const firstTask = taskWorktrees[0];
+      await writeFile(path.join(firstTask.path, "unsaved.txt"), "task user bytes");
+      await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: taskIds[0], branch: firstTask.branch, base_ref: "HEAD" })).rejects.toThrow();
+      expect(await readFile(path.join(firstTask.path, "unsaved.txt"), "utf8")).toBe("task user bytes");
+      const invalidId = "12345678-3333-4333-8333-333333333333";
+      await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: invalidId, branch: `agent/${invalidId}`, base_ref: "refs/heads/missing-task-baseline" })).rejects.toThrow();
+      expect(fs.existsSync(path.join(remote, ".crab", "worktrees", invalidId))).toBe(false);
+      for (const taskId of ["../escape", "1234567雪"]) await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: taskId, branch: "agent/invalid", base_ref: "HEAD" })).rejects.toThrow("UUID");
+      const concurrentId = "12345678-4444-4444-8444-444444444444";
+      const attempts = await Promise.allSettled([0, 1].map(() => router.route(repoId, "worktree_create", { repo_id: repoId, task_id: concurrentId, branch: `agent/${concurrentId}`, base_ref: "HEAD" })));
+      expect(attempts.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+      const refusedId = "12345678-5555-4555-8555-555555555555";
+      await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: refusedId, branch: "owned-task", base_ref: "HEAD" })).rejects.toThrow();
+      expect({ reservation: fs.existsSync(path.join(remote, ".crab", "worktrees", refusedId)), original: await readFile(path.join(worktree, "tracked.txt"), "utf8") }).toEqual({ reservation: false, original: "after-native-deployment\n" });
+      const orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite"), rpcRouter: router });
+      try {
+        const task = await orchestrator.createTask("Remote baseline proof", "codex", repoId, "HEAD");
+        await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Move HEAD"], { cwd: repo, env });
+        const moved = (await run("git", ["rev-parse", "HEAD"], { cwd: repo, env })).stdout.trim();
+        const saved = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
+        try {
+          expect({ changed: task.baseRef !== moved, base: saved.getTask(task.id)?.baseRef, branch: task.branch, file: await readFile(path.join(task.worktreePath, "tracked.txt"), "utf8") }).toEqual({ changed: true, base: firstTask.base_ref, branch: `agent/${task.id}`, file: "before\n" });
+        } finally { await saved.shutdown(); }
+        await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-creation.json"), JSON.stringify({ taskWorktrees, task, moved, preserved: await readFile(path.join(shortPath, "keep.txt"), "utf8") }));
+      } finally { await orchestrator.shutdown(); }
       const profile = manager.getConnection("runtime")!.profile;
       await manager.connect({ ...profile, id: "concurrent", autoReconnect: false });
       try {
@@ -230,7 +268,11 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, listing, status: manager.getStatus("runtime") }));
     } finally { await manager.disconnect("runtime"); }
     await vi.waitFor(() => expect(children.size).toBe(0), { timeout: 10_000 });
-    const ownership = { cleanExits: exits.every(code => code === 0), errors: /\bERROR\b/.test(diagnostics.join("")), cachesRemoved: cachePaths.every(cache => !fs.existsSync(cache)) };
+    // Tracing's severity follows its timestamp. A WARN can contain the CLI's
+    // serialized ERROR for an intentionally rejected request inside its field.
+    const sidecarError = diagnostics.join("").replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line => line.trim().split(/\s+/, 2)[1] === "ERROR");
+    const ownership = { cleanExits: exits.every(code => code === 0), errors: sidecarError, cachesRemoved: cachePaths.every(cache => !fs.existsSync(cache)) };
+    await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-diagnostics.json"), JSON.stringify({ ownership, diagnostics }));
     expect(ownership).toEqual({ cleanExits: true, errors: false, cachesRemoved: true });
     await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "indexer-concurrent-ssh.json"), JSON.stringify({ cachePaths, ...ownership }));
   }, 120_000);

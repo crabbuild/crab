@@ -462,9 +462,9 @@ export class Orchestrator extends EventEmitter {
       );
     }
 
-    const base = baseRef ?? "HEAD";
+    let base = baseRef ?? "HEAD";
     const worktreeMode = options.worktreeMode ?? "auto";
-    let branch = `agent/${id.slice(0, 8)}`;
+    let branch = `agent/${id}`;
     let worktreePath: string;
 
     if (worktreeMode === "primary") {
@@ -484,9 +484,16 @@ export class Orchestrator extends EventEmitter {
           branch,
           base_ref: base,
           task_id: id,
-        }) as { path: string; branch?: string; base_ref?: string };
+        }) as { path: string; branch: string; base_ref: string };
 
+        if (!result || typeof result.path !== "string" || !result.path.startsWith("/")
+          || typeof result.branch !== "string" || !result.branch
+          || typeof result.base_ref !== "string" || !/^[a-f0-9]{40}$/.test(result.base_ref)) {
+          throw new Error("Remote workspace creation returned an invalid path, branch or baseline");
+        }
         worktreePath = result.path;
+        branch = result.branch;
+        base = result.base_ref;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -495,20 +502,17 @@ export class Orchestrator extends EventEmitter {
       }
     }
 
-    // Resolve the actual base ref from the remote response if available.
-    const resolvedBranch = branch;
-
     const now = Date.now();
     const task: Task = {
       id,
       prompt,
       agentType,
       status: "created",
-      branch: resolvedBranch,
+      branch,
       worktreePath,
       worktreeMode,
       baseRef: base,
-      baseBranch: branchNameFromBaseRef(base),
+      baseBranch: branchNameFromBaseRef(baseRef ?? "HEAD"),
       repoPath,
       createdAt: now,
       lastActivityAt: now,

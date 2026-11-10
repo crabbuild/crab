@@ -80,6 +80,25 @@ replacement sidecars therefore do not open the same writer path; cache contents
 rebuild for each process lifetime. `indexer_status.db_path` reports that current
 private location. The former account-wide cache is no longer opened.
 
+## Task workspace creation
+
+`worktree_create` validates a task UUID and resolves the requested baseline to a
+commit before changing the filesystem. New worktrees reserve
+`$HOME/.crab/worktrees/<full-task-uuid>` atomically; existing paths are rejected.
+Creation never removes another task's worktree or a directory that looks stale.
+The existing core `crab worktree add` contract creates the checkout and branch.
+Failure releases only an empty reservation; a partially created checkout remains
+available for recovery. Missing HOME or invalid refs fail without a fallback.
+
+Both Electron creation callers retain the returned commit SHA and branch. The
+original branch selection remains the Apply target; a moving branch or HEAD
+cannot change the saved comparison baseline. Existing saved paths stay opaque
+and are not relocated or read through a compatibility path.
+
+This creation boundary does not qualify the legacy `worktree_destroy`,
+`task_discard`, Apply cleanup or process-name orphan checks. Those paths still
+need explicit workspace/process ownership before production release.
+
 ## Limits and qualification
 
 The sidecar implements core repository RPCs and task comparison. Its capability

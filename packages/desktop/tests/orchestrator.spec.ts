@@ -2293,7 +2293,7 @@ describe("Orchestrator", () => {
     it("routes worktree creation to remote agent for ssh:// repos", async () => {
       const mockRouter = {
         route: vi.fn(async (_repoId: string, _method: string, _params: unknown) => {
-          return { path: "/home/user/.crab/worktrees/swift-falcon" };
+          return { path: "/home/user/.crab/worktrees/swift-falcon", branch: "agent/swift-falcon", base_ref: "a".repeat(40) };
         }),
       } as any;
 
@@ -2387,7 +2387,7 @@ describe("Orchestrator", () => {
 
     it("persists remote task fields to disk", async () => {
       const mockRouter = {
-        route: vi.fn(async () => ({ path: "/remote/worktree/path" })),
+        route: vi.fn(async () => ({ path: "/remote/worktree/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40) })),
       } as any;
 
       const remoteOrch = new Orchestrator({
@@ -2408,11 +2408,12 @@ describe("Orchestrator", () => {
       expect(persisted.isRemote).toBe(true);
       expect(persisted.remoteProfileId).toBe("build-box");
       expect(persisted.worktreePath).toBe("/remote/worktree/path");
+      expect({ base: persisted.baseRef, branch: persisted.branch }).toEqual({ base: "a".repeat(40), branch: "agent/remote-fixture" });
     });
 
     it("setRpcRouter allows setting the router after construction", async () => {
       const mockRouter = {
-        route: vi.fn(async () => ({ path: "/remote/path" })),
+        route: vi.fn(async () => ({ path: "/remote/path", branch: "agent/remote-fixture", base_ref: "a".repeat(40) })),
       } as any;
 
       // Start without a router.
@@ -2438,7 +2439,7 @@ describe("Orchestrator", () => {
 
     it("emits task-status event for remote task creation", async () => {
       const mockRouter = {
-        route: vi.fn(async () => ({ path: "/remote/worktree" })),
+        route: vi.fn(async () => ({ path: "/remote/worktree", branch: "agent/remote-fixture", base_ref: "a".repeat(40) })),
       } as any;
 
       const remoteOrch = new Orchestrator({
