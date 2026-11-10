@@ -6,7 +6,6 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
-import { Orchestrator } from "../electron/orchestrator";
 import { CapabilityNegotiator } from "../electron/ssh-capabilities";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,6 +15,7 @@ import { AgentDeployer } from "../electron/ssh-deployer";
 import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
 import { RemoteRuntimeStore } from "../electron/ssh-runtime";
 import { RemoteFileBrowser } from "../electron/ssh-file-browser";
+import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
 const key = utils.parseKey(pem);
@@ -210,6 +210,15 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       const opened = await browser.openAsRepo("runtime", repo) as { repo_id: string; is_remote: boolean };
       const repoId = `ssh://runtime${repo}`;
       expect({ id: opened.repo_id, remote: opened.is_remote }).toEqual({ id: repoId, remote: true });
+      const processFactory = remoteAgentProcessFactory(router, "runtime");
+      const nativeProcess = processFactory("/bin/sh", ["-c", "cat > native-stdin-proof.bin"], { cwd: repo });
+      const processErrors: string[] = [];
+      nativeProcess.process.on("error", (error: Error) => processErrors.push(error.message));
+      nativeProcess.process.stdout?.resume(); nativeProcess.process.stderr?.resume();
+      const nativeBytes = Buffer.from("雪🙂\u0000".repeat(10_000));
+      await new Promise<void>((resolve, reject) => nativeProcess.process.stdin!.end(nativeBytes, (error?: Error | null) => error ? reject(error) : resolve()));
+      await nativeProcess.closed;
+      expect({ bytes: await readFile(path.join(repo, "native-stdin-proof.bin")), errors: processErrors }).toEqual({ bytes: nativeBytes, errors: [] });
       const created = await router.sendToRemoteAgent("runtime", "git_worktree_add", { repo_id: repoId, path: worktree, branch: "owned-task", create_branch: true }) as { created: boolean; path: string };
       await writeFile(path.join(worktree, "tracked.txt"), "after-native-deployment\n");
       const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
@@ -238,17 +247,23 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       const refusedId = "12345678-5555-4555-8555-555555555555";
       await expect(router.route(repoId, "worktree_create", { repo_id: repoId, task_id: refusedId, branch: "owned-task", base_ref: "HEAD" })).rejects.toThrow();
       expect({ reservation: fs.existsSync(path.join(remote, ".crab", "worktrees", refusedId)), original: await readFile(path.join(worktree, "tracked.txt"), "utf8") }).toEqual({ reservation: false, original: "after-native-deployment\n" });
-      const orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite"), rpcRouter: router });
-      try {
-        const task = await orchestrator.createTask("Remote baseline proof", "codex", repoId, "HEAD");
-        await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Move HEAD"], { cwd: repo, env });
-        const moved = (await run("git", ["rev-parse", "HEAD"], { cwd: repo, env })).stdout.trim();
-        const saved = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
+      await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-creation.json"), JSON.stringify({ taskWorktrees, preserved: await readFile(path.join(shortPath, "keep.txt"), "utf8") }));
+      // ARM64 runtime production uses plain Node without Electron's SQLite ABI.
+      // Keep the Electron task/database probe on the matching Electron runner.
+      if (process.versions.electron) {
+        const { Orchestrator } = await import("../electron/orchestrator");
+        const orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite"), rpcRouter: router });
         try {
-          expect({ changed: task.baseRef !== moved, base: saved.getTask(task.id)?.baseRef, branch: task.branch, file: await readFile(path.join(task.worktreePath, "tracked.txt"), "utf8") }).toEqual({ changed: true, base: firstTask.base_ref, branch: `agent/${task.id}`, file: "before\n" });
-        } finally { await saved.shutdown(); }
-        await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-creation.json"), JSON.stringify({ taskWorktrees, task, moved, preserved: await readFile(path.join(shortPath, "keep.txt"), "utf8") }));
-      } finally { await orchestrator.shutdown(); }
+          const task = await orchestrator.createTask("Remote baseline proof", "codex", repoId, "HEAD");
+          await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Move HEAD"], { cwd: repo, env });
+          const moved = (await run("git", ["rev-parse", "HEAD"], { cwd: repo, env })).stdout.trim();
+          const saved = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
+          try {
+            expect({ changed: task.baseRef !== moved, base: saved.getTask(task.id)?.baseRef, branch: task.branch, file: await readFile(path.join(task.worktreePath, "tracked.txt"), "utf8") }).toEqual({ changed: true, base: firstTask.base_ref, branch: `agent/${task.id}`, file: "before\n" });
+          } finally { await saved.shutdown(); }
+          await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-creation.json"), JSON.stringify({ taskWorktrees, task, moved, preserved: await readFile(path.join(shortPath, "keep.txt"), "utf8") }));
+        } finally { await orchestrator.shutdown(); }
+      }
       const profile = manager.getConnection("runtime")!.profile;
       await manager.connect({ ...profile, id: "concurrent", autoReconnect: false });
       try {

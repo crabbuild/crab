@@ -42,9 +42,10 @@ export async function terminalSshServer(root: string, remotePath = process.env.P
         } else {
           const child = spawn("/bin/sh", ["-c", prefix + info.command], { cwd: root, env });
           children.add(child);
+          stream.pipe(child.stdin);
           child.stdout.pipe(stream, { end: false });
           child.stderr.pipe(stream.stderr, { end: false });
-          child.on("exit", code => { children.delete(child); stream.exit(code ?? 1); stream.end(); });
+          child.on("close", code => { children.delete(child); stream.exit(code ?? 1); stream.end(); });
           stream.on("close", () => child.kill());
         }
       });
@@ -61,7 +62,7 @@ export async function terminalSshServer(root: string, remotePath = process.env.P
       await new Promise<void>((resolve, reject) => {
         client.once("error", reject).once("ready", resolve).connect({
           host: "127.0.0.1", port: address.port, username: "fixture", password: "fixture-only",
-          hostHash: "sha256", hostVerifier: hash => hash === fingerprint,
+          hostHash: "sha256", hostVerifier: (hash: string) => hash === fingerprint,
         });
       });
       return client;

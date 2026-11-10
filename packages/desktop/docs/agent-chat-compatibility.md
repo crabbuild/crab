@@ -1239,6 +1239,44 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   checks. Those sibling lifecycle paths require ownership before release.
   Strict commit resolution follows [Git rev-parse](https://git-scm.com/docs/git-rev-parse).
 
+- Native process transport now reuses the existing Codex app-server and Claude
+  Code adapters over raw SSH stdio. A private Unix sidecar service owns UUIDs,
+  independent 16 KiB output credit, acknowledged chunked stdin, process groups,
+  physical stop receipts and release. Every process captures its exact channel;
+  channel replacement rejects unknown closure and cannot inherit old writes.
+  Server login supplies credentials and PATH; local environment overrides never
+  cross the transport. Local native adapters keep the existing spawn defaults.
+  EOF and TERM/HUP/INT retire supervisors before sidecar exit. SIGKILL/crashes,
+  session-detached descendants and persisted orphan ownership remain unqualified.
+  A live Codex turn first exposed macOS EPERM during group retirement. Apple's
+  [XNU signal implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c#L1612-L1621)
+  excludes zombies before checking permissions. A real zombie regression proves
+  bounded waiting for ESRCH; persistent permission errors still reject closure.
+  This follows Tokio 1.53.3's inspected `process_group`, `wait` and `kill_on_drop`
+  contracts; dropping a child alone cannot prove group closure. Transport frames
+  are never canceled halfway through the shared NDJSON writer.
+  All 182 scoped adapter/router/process tests, six focused Rust process tests,
+  ten real SSH/SFTP runtime cases, and two real SSH terminal cases pass. All
+  four opt-in native SSH cases pass with Codex 0.163.0 and Claude Code 2.1.319:
+  model catalogs, exact file-writing turns, native approval responses and
+  graceful owner termination. The existing Claude CLI login supplies its credit;
+  no credentials changed. The SFTP probe also round-trips Unicode/NUL stdin
+  through the actual deployed runtime. Native/Electron builds, production and
+  touched-fixture types, formatting and diff checks pass. The terminal fixture
+  forwards non-PTY stdin and publishes exit after stdio closure. Its regression
+  run uses the owned tmux bottle's libraries and terminfo database.
+  Evidence: `native-process-scoped-final.json`, `native-process-zombie-rust.log`,
+  `native-process-ssh-zombie-final.json`, `native-process-terminal-owned.json`,
+  `native-process-live-zombie-final.json`, and provider native-transport artifacts
+  in the owned output. This foundation is not wired into remote task UI yet:
+  `task_spawn`/`task_iterate` remain absent. Shared startup, snapshots, resume,
+  cancellation and Apply/Discard are the next integration gate. The unrelated
+  extended `processManagement` service capability remains disabled.
+  ARM64 CI on the preceding head passed native build/tests but timed out in
+  two SSH cases; that gate remains open. Its plain Node qualification no longer
+  imports Electron SQLite: the actual persisted-task probe remains on Electron,
+  while every remote runtime/workspace check runs on both runners.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1275,8 +1313,9 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 - Resolve historical cost files lacking provider session/model baselines before
   claiming accurate resumed accounting for pre-fix histories.
 - Resolve remote-agent availability. Electron sends `task_spawn`/`task_iterate`,
-  but the Rust sidecar dispatcher has no implementations. Local-provider proof
-  does not qualify SSH agent chats. Remote comparison now has compiled-sidecar,
+  but the Rust sidecar dispatcher has no implementations. The new owned stdio
+  factory has real native-provider SSH proof; it still needs shared task
+  lifecycle integration. Remote comparison now has compiled-sidecar,
   RPC, and task-view proof over stdio; physical SSH deployment and remote
   baseline ownership still need qualification. Session ownership, capability
   negotiation and actual queued-read replay now have real SSH/browser proof.

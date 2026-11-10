@@ -26,6 +26,8 @@ use crate::{
 /// repositories keyed by a desktop-assigned id.
 #[derive(Clone)]
 pub struct State {
+    #[cfg(unix)]
+    pub(crate) native_processes: crate::native_process::NativeProcesses,
     repos: Arc<RwLock<HashMap<String, OpenRepo>>>,
     /// Channel to the background indexer. `None` when the indexer is
     /// disabled or hasn't been spawned yet.
@@ -50,6 +52,8 @@ struct OpenRepo {
 impl State {
     pub fn new() -> Self {
         Self {
+            #[cfg(unix)]
+            native_processes: crate::native_process::NativeProcesses::default(),
             repos: Arc::new(RwLock::new(HashMap::new())),
             indexer_tx: Arc::new(RwLock::new(None)),
             cancel_registry: CancelRegistry::new(),
@@ -98,8 +102,12 @@ impl State {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let repos = std::mem::take(&mut *self.repos.write().await);
         let mut result = Ok(());
+        #[cfg(unix)]
+        if let Err(error) = self.native_processes.shutdown().await {
+            result = Err(error);
+        }
+        let repos = std::mem::take(&mut *self.repos.write().await);
         for repo in repos.into_values() {
             if let Err(error) = repo.handle.close().await {
                 result = Err(error);
@@ -138,6 +146,33 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
     let Request { method, params, .. } = req;
     crate::storage_auth::validate_target(state, &method, &params).await?;
     match method.as_str() {
+        #[cfg(unix)]
+        "native_process_open" => {
+            state
+                .native_processes
+                .open(decode(&method, params)?, out)
+                .await
+        }
+        #[cfg(unix)]
+        "native_process_write" => state.native_processes.write(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_close_input" => {
+            state
+                .native_processes
+                .close_input(decode(&method, params)?)
+                .await
+        }
+        #[cfg(unix)]
+        "native_process_ack" => state.native_processes.ack(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_stop" => state.native_processes.stop(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_release" => {
+            state
+                .native_processes
+                .release(decode(&method, params)?)
+                .await
+        }
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
         // These flags describe the extended SSH services, whose wire handlers
         // are not implemented yet. Basic repository RPCs remain available.

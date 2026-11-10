@@ -242,6 +242,7 @@ export class RpcRouter extends EventEmitter {
         owner.buffer = "";
         for (const pending of owner.pending.values()) pending.fail(reason);
         owner.pending.clear();
+        this.emit("remote-channel-retired", { profileId, owner, reason });
       },
     };
     const data = (chunk: Buffer) => {
@@ -270,6 +271,15 @@ export class RpcRouter extends EventEmitter {
   /** Retires sent calls without moving the unsent read queue to another channel. */
   detachChannel(profileId: string): void {
     this.channels.get(profileId)?.stop(new Error("Remote agent disconnected before its RPC completed; outcome is unknown"));
+  }
+
+  /** Captures the channel identity for a native process's entire lifetime. */
+  remoteChannelOwner(profileId: string): object | undefined { return this.channels.get(profileId); }
+
+  /** Sends only on the captured channel; a replacement cannot inherit process writes. */
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (this.channels.get(profileId) !== owner) return Promise.reject(new Error("Native process transport was replaced; remote closure is unconfirmed"));
+    return this.sendToRemoteAgent(profileId, method, params);
   }
 
   /** Reopens acknowledged repositories on this channel before queued reads run. */

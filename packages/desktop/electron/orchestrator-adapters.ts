@@ -8,7 +8,8 @@
  */
 
 import type { AgentElicitationInput, ElicitationResponse } from "./agent-elicitation";
-import { spawn, ChildProcess, execFile } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import type { AgentProcess, AgentProcessFactory } from "./agent-process";
 import * as readline from "node:readline";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -339,7 +340,7 @@ export abstract class AgentAdapter {
   abstract readonly name: string;
   abstract readonly binary: string;
 
-  protected proc: ChildProcess | null = null;
+  protected proc: AgentProcess | null = null;
   protected eventListeners: Set<EventListener> = new Set();
   protected exitListeners: Set<ExitListener> = new Set();
   /** Guards against emitting a second `done` event from the exit handler
@@ -732,6 +733,7 @@ interface RegistryLike {
     extraArgs?: string[];
     env?: Record<string, string>;
     optOutNotifications?: string[];
+    processFactory?: AgentProcessFactory;
   }): AgentAdapter;
   listRegistered(): Array<{
     type: string;
@@ -763,7 +765,7 @@ export function createAdapter(
   customBinary?: string,
   _customName?: string,
   customArgs?: string[],
-  config?: { env?: Record<string, string>; optOutNotifications?: string[] },
+  config?: { env?: Record<string, string>; optOutNotifications?: string[]; processFactory?: AgentProcessFactory },
 ): AgentAdapter {
   if (!_registry) {
     throw new Error("Agent registry not initialized. Ensure orchestrator-registry is imported.");
@@ -778,6 +780,7 @@ export function createAdapter(
       extraArgs: customArgs,
       env: config?.env,
       optOutNotifications: config?.optOutNotifications,
+      processFactory: config?.processFactory,
     });
   }
   return _registry.createAdapter(agentType, {
@@ -785,5 +788,6 @@ export function createAdapter(
     extraArgs: customArgs,
     env: config?.env,
     optOutNotifications: config?.optOutNotifications,
+    processFactory: config?.processFactory,
   });
 }

@@ -7,14 +7,13 @@
  * supports mid-turn steering, live approval responses, and thread resume.
  */
 
-import { spawn } from "node:child_process";
+import { spawnLocalAgent, type AgentProcessFactory } from "./agent-process";
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 
 import {
   AgentAdapter,
-  getExpandedEnv,
   type AgentEvent,
   type AgentQuestionInput,
   type AgentInputResponse,
@@ -126,6 +125,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
   private cwd?: string;
 
   private lastUsageSnapshot = "";
+  private processClosed: Promise<void> = Promise.resolve();
 
   /** Tracks active command/exec sessions (sessionId → metadata). */
   private commandSessions = new Map<string, { stdout: StringDecoder; stderr: StringDecoder }>();
@@ -133,7 +133,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
   private goalRevision = 0;
   private reviewTurn: { id?: string; runtimeTurnId?: string; started: boolean; children: Set<string>; pending: Array<() => void> } | null = null;
 
-  constructor(extraArgs?: string[], optOutNotifications?: string[], binary = "codex") {
+  constructor(extraArgs?: string[], optOutNotifications?: string[], binary = "codex", private readonly processFactory: AgentProcessFactory = spawnLocalAgent) {
     super();
     this.binary = binary;
     this.extraArgs = extraArgs ?? [];
@@ -263,7 +263,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
     if (this.cancelInProgress) return this.cancellation ?? Promise.resolve();
     this.cancelInProgress = true;
     const child = this.proc;
-    this.cancellation = child ? new Promise(resolve => { child.once("close", () => resolve()); }) : Promise.resolve();
+    this.cancellation = this.processClosed;
 
     void this.doCancel().catch(() => {
       child?.kill("SIGKILL");
@@ -279,11 +279,9 @@ export class CodexAppServerAdapter extends AgentAdapter {
     this.exitEmitted = false;
     const args = ["app-server", "--listen", "stdio://", ...this.extraArgs];
 
-    this.proc = spawn(this.binary, args, {
-      cwd,
-      env: getExpandedEnv(env),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const owner = this.processFactory(this.binary, args, { cwd, env });
+    this.proc = owner.process;
+    this.processClosed = owner.closed;
 
     // Construct RPC client over stdin/stdout.
     this.rpc = new CodexRpcClient(this.proc.stdin!, this.proc.stdout!, {

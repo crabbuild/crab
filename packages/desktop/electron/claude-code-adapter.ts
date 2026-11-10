@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawnLocalAgent, type AgentProcessFactory } from "./agent-process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { AgentAdapter, AgentSubmissionUncertainError, getExpandedEnv, type AgentQuestionInput, type AgentInputResponse, type AgentTurnOptions, type AgentModel } from "./orchestrator-adapters";
+import { AgentAdapter, AgentSubmissionUncertainError, type AgentQuestionInput, type AgentInputResponse, type AgentTurnOptions, type AgentModel } from "./orchestrator-adapters";
 import { elicitationRequest, type PendingElicitation } from "./agent-elicitation";
 import { ClaudeEventParser } from "./claude-code-events";
 
@@ -34,8 +34,9 @@ export class ClaudeCodeAdapter extends AgentAdapter {
   private seenRequests = new Set<string>();
   private initialOptions?: AgentTurnOptions;
   private mode?: AgentTurnOptions["mode"];
+  private processClosed: Promise<void> = Promise.resolve();
 
-  constructor(private readonly extraArgs: string[] = [], binary = "claude") { super(); this.binary = binary; }
+  constructor(private readonly extraArgs: string[] = [], binary = "claude", private readonly processFactory: AgentProcessFactory = spawnLocalAgent) { super(); this.binary = binary; }
 
   spawn(prompt: string, cwd: string, env?: Record<string, string>, options?: AgentTurnOptions): Promise<void> {
     this.initialOptions = options;
@@ -59,11 +60,13 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     this.prompts = prompt === undefined ? [] : [prompt];
     const parser = new ClaudeEventParser(cwd);
     const resumeArgs = this.resumeSessionId ? ["--resume", this.resumeSessionId] : [];
-    const child = spawn(this.binary, [
+    const owner = this.processFactory(this.binary, [
       "--print", "--verbose", "--output-format", "stream-json",
       "--input-format", "stream-json", "--include-partial-messages",
       "--permission-prompt-tool", "stdio", ...this.extraArgs, ...resumeArgs,
-    ], { cwd, env: getExpandedEnv(env), stdio: ["pipe", "pipe", "pipe"] });
+    ], { cwd, env });
+    const child = owner.process;
+    this.processClosed = owner.closed;
     this.proc = child;
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8192); });
@@ -230,7 +233,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     this.cancelled = true;
     const child = this.proc;
     if (!child) return Promise.resolve();
-    this.cancellation = new Promise(resolve => { child.once("close", () => resolve()); });
+    this.cancellation = this.processClosed;
     for (const requestId of this.approvals.keys()) this.respond(requestId, { behavior: "deny", message: "Conversation stopped", interrupt: true });
     for (const [requestId, pending] of this.inputs) this.respond(requestId, "request" in pending ? { action: "cancel" } : { behavior: "deny", message: "Conversation stopped", interrupt: true });
     this.clearRequests();

@@ -26,6 +26,8 @@ mod git_worktree;
 mod handlers;
 mod indexer;
 mod managed_service;
+#[cfg(unix)]
+mod native_process;
 mod notebook_strip;
 mod ops;
 mod preview;
@@ -169,8 +171,14 @@ async fn main() -> std::io::Result<()> {
 
     let mut requests = tokio::task::JoinSet::new();
     let mut reader = BufReader::new(stdin).lines();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     let read_result = loop {
-        let line = match reader.next_line().await {
+        let input = tokio::select! {
+            input = reader.next_line() => input,
+            result = &mut shutdown => break result,
+        };
+        let line = match input {
             Ok(Some(line)) => line,
             Ok(None) => break Ok(()),
             Err(error) => break Err(error),
@@ -192,18 +200,37 @@ async fn main() -> std::io::Result<()> {
         });
     };
 
-    info!("stdin closed; agent shutting down");
+    info!("agent shutting down");
     requests.abort_all();
     while let Some(result) = requests.join_next().await {
         if let Err(error) = result {
             error!(%error, "request task failed");
         }
     }
+    #[cfg(unix)]
+    if let Err(error) = state.native_processes.shutdown().await {
+        error!(%error, "native process shutdown failed");
+    }
     indexer_handle.shutdown().await;
     if let Err(error) = state.shutdown().await {
         error!(%error, "SDK shutdown failed");
     }
     read_result
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    tokio::select! { _ = term.recv() => {}, _ = hangup.recv() => {}, _ = interrupt.recv() => {} }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    std::future::pending().await
 }
 
 /// Parse one NDJSON line as a JSON-RPC request, dispatch it, and
