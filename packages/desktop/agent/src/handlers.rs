@@ -877,7 +877,13 @@ async fn ensure_desktop_layout(work_dir: &std::path::Path) {
         .await
     {
         Ok(mut file) => {
-            if let Err(error) = file.write_all(b"*\n").await {
+            // Await the queued write so subsequent Git status sees the ignore rule.
+            let written = async {
+                file.write_all(b"*\n").await?;
+                file.flush().await
+            }
+            .await;
+            if let Err(error) = written {
                 tracing::warn!(%error, "failed to ignore desktop state");
                 return;
             }
