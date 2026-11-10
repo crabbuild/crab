@@ -40,8 +40,12 @@ export function registerTerminalPersistence(ipcMain: IpcMainLike, stateDir: stri
       const scrollbackData: Record<string, string> = {};
       for (const tab of [...(layout?.tabs ?? []), ...(layout?.quickTerminal ? [layout.quickTerminal] : [])]) {
         if (typeof tab?.id !== "string") continue;
-        const file = scrollbackPath(scrollbackDir, tab.id);
-        if (fs.existsSync(file)) scrollbackData[tab.id] = fs.readFileSync(file, "utf8");
+        // Scrollback is an optional checkpoint. A failed read must not
+        // erase pane membership or prevent the live session from attaching.
+        try {
+          const file = scrollbackPath(scrollbackDir, tab.id);
+          if (fs.existsSync(file)) scrollbackData[tab.id] = fs.readFileSync(file, "utf8");
+        } catch { /* Keep the layout and any other readable checkpoints. */ }
       }
       return { layout: layout ?? null, scrollbackData };
     } catch {

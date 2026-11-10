@@ -1,7 +1,8 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { createServer } from "vite";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -52,6 +53,14 @@ test("real terminal components recover processes and nested layouts across owner
     await page.keyboard.press("Enter");
     await expect.poll(() => records().find(value => value.input === "after-workspace")?.pid).toBe(pid);
     await app.close();
+    const owner = createHash("sha256").update(`${root}/a/one`).digest("hex");
+    const stateDir = path.join(root, "profile/terminal/layouts", owner);
+    const { layout } = JSON.parse(readFileSync(path.join(stateDir, "state.json"), "utf8"));
+    // An unreadable optional checkpoint must not discard this layout or its
+    // live process identities when the upgraded app restores the profile.
+    const checkpoint = path.join(stateDir, "scrollback", `${layout.tabs[0].id}.bin`);
+    rmSync(checkpoint, { force: true });
+    mkdirSync(checkpoint);
     const entry = path.join(root, "upgraded-daemon.cjs");
     writeFileSync(entry, `require(${JSON.stringify(path.join(desktop, "dist-electron/daemon/daemon-main.cjs"))});`);
     app = await launch(["--daemon-entry", entry]);

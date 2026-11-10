@@ -47,6 +47,11 @@ retry message, remove that file, then press Enter to reattach the same PID.
 `--daemon-entry` accepts a replacement entry path for the app-upgrade case;
 `--renderer-url` lets CI use a Vite server on an ephemeral port.
 
+To verify checkpoint read failures, close the app and replace one saved
+`scrollback/<terminal-id>.bin` file in its isolated profile with a directory.
+Reopening must retain the panes and reattach the same foreground processes.
+The automated component smoke includes this failure during app replacement.
+
 The automated component smoke is `tests/e2e/terminal-recovery.spec.ts`. It uses
 real components and PTYs instead of a duplicate LRU model. Native transport
 regressions live in terminal-session-lifecycle, terminal-snapshot-replay,
