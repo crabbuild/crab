@@ -1784,6 +1784,13 @@ suppression was applied.
   23 architecture regression tests, production types, and Electron build pass.
   Evidence: `linux-portability-mac-native-rebased.log`,
   `linux-portability-mac-native-tests.log`, and `rebased-scoped.json`.
+- The rebuilt unsigned macOS directory package passes the complete repository,
+  chat/settings, Git/worktree, and cold/warm-terminal smoke case in a fresh
+  owned child home. Fixture terminal closure and the owned daemon's confirmed
+  disappearance precede cleanup. Evidence: `rebased-packaged-current.json`,
+  `rebased-packaged-home.json`, and `linux-portability-verification.json`.
+  This proves the current packaged path; profile/restart stability and the
+  pre-existing foreign-daemon upgrade path remain separate gates.
 - GNU release qualification still requires the full rebuilt pair and real
   repository RPCs on AlmaLinux 8, Debian 12, and Amazon Linux 2023. Alpine/musl,
   Electron/native Node module minimum distributions, Windows owner cleanup,
