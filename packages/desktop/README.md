@@ -149,10 +149,11 @@ update can require an administrator authorization prompt.
 
 Open **Settings → Storage & Cache → Storage connections**. Add a named connection,
 choose its provider, enter credentials, and select **Test connection**. The test
-performs a real, read-only bucket/container listing with a 30-second deadline;
-it verifies read/list access, not write permission. Save the connection, then
-choose **Use connection** for the open repository. Clone and Crab setup use the
-same picker and connection test.
+performs one real, read-only bucket/container listing with a 30-second deadline;
+it reports provider failures without retrying and verifies read/list access,
+not write permission. Ordinary data operations retain retries. Save the
+connection, then choose **Use connection** for the open repository. Clone and Crab
+setup use the same picker and connection test.
 
 | Provider | Built-in credentials | Repository URL |
 | --- | --- | --- |

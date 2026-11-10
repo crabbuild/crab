@@ -20,6 +20,9 @@ use crate::store::{ImmutableWriteVerification, Store};
 
 mod target;
 
+#[cfg(test)]
+mod probe_tests;
+
 pub const STATIC_ENV_PROVIDER_ENV: &str = "CRAB_STORAGE_PROVIDER";
 
 /// Provider credentials consumed by object-store builders.
@@ -323,12 +326,17 @@ fn build_gcs_object_store(
     bucket: &str,
     builder: GoogleCloudStorageBuilder,
     client_options: Option<object_store::ClientOptions>,
+    retry: Option<object_store::RetryConfig>,
 ) -> Result<BuiltObjectStore> {
     let provider = StorageProviderKind::Gcs;
     let builder = builder
         .with_bucket_name(bucket)
         .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
         .with_client_options(client_options.unwrap_or_else(default_client_options));
+    let builder = match retry {
+        Some(retry) => builder.with_retry(retry),
+        None => builder,
+    };
     let (builder, target_identity) = target::gcs(builder, bucket)?;
     let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
     let gcs = Arc::new(
@@ -355,7 +363,7 @@ pub fn build_object_store(
     bucket: &str,
     credentials: ObjectStoreCredentials,
 ) -> Result<BuiltObjectStore> {
-    build_object_store_inner(bucket, credentials, None, true, None)
+    build_object_store_inner(bucket, credentials, None, true, None, None)
 }
 
 /// Builds an S3 object store with a caller-supplied refreshable credential provider.
@@ -379,7 +387,7 @@ pub fn build_object_store_with_endpoint(
     credentials: ObjectStoreCredentials,
     endpoint: Option<&str>,
 ) -> Result<BuiltObjectStore> {
-    build_object_store_inner(bucket, credentials, endpoint, false, None)
+    build_object_store_inner(bucket, credentials, endpoint, false, None, None)
 }
 
 fn build_object_store_inner(
@@ -388,6 +396,7 @@ fn build_object_store_inner(
     endpoint: Option<&str>,
     allow_environment_overrides: bool,
     client_options: Option<object_store::ClientOptions>,
+    retry: Option<object_store::RetryConfig>,
 ) -> Result<BuiltObjectStore> {
     let provider = credentials.provider_kind();
     match credentials {
@@ -411,6 +420,10 @@ fn build_object_store_inner(
                 .with_secret_access_key(&secret_access_key)
                 .with_region(&region)
                 .with_client_options(client_options.unwrap_or_else(default_client_options));
+            let builder = match retry {
+                Some(retry) => builder.with_retry(retry),
+                None => builder,
+            };
             build_s3_object_store(
                 bucket,
                 builder,
@@ -433,6 +446,7 @@ fn build_object_store_inner(
                 bucket,
                 GoogleCloudStorageBuilder::new().with_credentials(credential_provider),
                 client_options,
+                retry,
             )
         }
         ObjectStoreCredentials::GcpServiceAccount {
@@ -448,6 +462,7 @@ fn build_object_store_inner(
                 bucket,
                 GoogleCloudStorageBuilder::new().with_service_account_key(service_account_key),
                 client_options,
+                retry,
             )
         }
         ObjectStoreCredentials::Azure { account, token } => {
@@ -458,6 +473,10 @@ fn build_object_store_inner(
                     crate::transport_read_admission::ReadAdmissionConnector::default(),
                 )
                 .with_client_options(client_options.unwrap_or_else(default_client_options));
+            let builder = match retry {
+                Some(retry) => builder.with_retry(retry),
+                None => builder,
+            };
             let builder = match endpoint {
                 Some(value) => builder.with_endpoint(value.to_owned()),
                 None => builder,
@@ -505,6 +524,33 @@ pub fn build_explicit_store(
     endpoint: Option<&str>,
     allow_http: bool,
 ) -> Result<Store> {
+    build_explicit_store_inner(bucket, credentials, endpoint, allow_http, None)
+}
+
+/// Build an explicit-credential store for one connection-validation request.
+///
+/// Disables transport retries so provider failures reach an interactive caller
+/// before its deadline. Ordinary stores retain their existing retry policy.
+pub fn build_probe_store(
+    bucket: &str,
+    credentials: ObjectStoreCredentials,
+    endpoint: Option<&str>,
+    allow_http: bool,
+) -> Result<Store> {
+    let retry = object_store::RetryConfig {
+        max_retries: 0,
+        ..Default::default()
+    };
+    build_explicit_store_inner(bucket, credentials, endpoint, allow_http, Some(retry))
+}
+
+fn build_explicit_store_inner(
+    bucket: &str,
+    credentials: ObjectStoreCredentials,
+    endpoint: Option<&str>,
+    allow_http: bool,
+    retry: Option<object_store::RetryConfig>,
+) -> Result<Store> {
     if matches!(credentials, ObjectStoreCredentials::StaticEnv { .. }) {
         return Err(StorageError::InvalidStaticEnvTarget {
             target: "explicit provider configuration".to_owned(),
@@ -517,7 +563,8 @@ pub fn build_explicit_store(
     };
     let identity = BucketIdentity::new(credentials.provider_kind(), host, bucket);
     let options = crate::provider_options::explicit_client_options(allow_http);
-    let built = build_object_store_inner(bucket, credentials, endpoint, false, Some(options))?;
+    let built =
+        build_object_store_inner(bucket, credentials, endpoint, false, Some(options), retry)?;
     Ok(store_from_built(identity, built))
 }
 
