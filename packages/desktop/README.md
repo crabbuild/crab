@@ -34,6 +34,10 @@ appear first, followed by five recent repositories and the alphabetical remainde
 worktrees stay nested. Workspace collapse, recent access, pins, and sidebar scroll
 survive restarts. Changed-file badges are neutral counts; errors retain error color.
 
+Repository-local desktop state lives under `.crab/desktop/` at Git's worktree
+root, including when opening a subdirectory. Its scoped ignore file keeps
+generated state out of Git changes; existing tracked files and ignore rules remain.
+
 ## Build
 
 Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
