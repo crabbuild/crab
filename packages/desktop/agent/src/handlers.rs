@@ -22,6 +22,7 @@ use crate::{
     rpc::Request, shellout,
 };
 
+mod file_write;
 mod lifecycle;
 
 /// Shared state across dispatch tasks. Holds the map of open
@@ -2326,29 +2327,12 @@ struct WriteTextParams {
 /// Write text content to a file in the working tree.
 ///
 /// Only works for local repos (those with a `work_dir`). The file is
-/// written atomically (write to temp + rename) to avoid partial writes
-/// on crash. Parent directories are created if needed.
+/// published atomically with its existing permissions. Parent directories
+/// are created if needed; paths must resolve inside the working tree.
 async fn write_text(state: &State, p: WriteTextParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-
-    // Ensure parent directories exist.
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(AgentError::Io)?;
-    }
-
-    // Atomic write: write to a sibling temp file, then rename.
-    let tmp = abs.with_extension("crab-tmp");
-    tokio::fs::write(&tmp, p.content.as_bytes())
-        .await
-        .map_err(AgentError::Io)?;
-    tokio::fs::rename(&tmp, &abs)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let size = p.content.len();
+    let bytes = p.content.into_bytes();
+    let size = file_write::write(work_dir, p.path, bytes).await?;
     Ok(json!({ "written": true, "size": size }))
 }
 
@@ -2364,9 +2348,8 @@ struct WriteBytesParams {
 
 /// Write binary content (base64-encoded) to a file in the working tree.
 ///
-/// Same semantics as `write_text` — local repos only, atomic write,
-/// parent directories created as needed. The payload is decoded from
-/// base64 before writing.
+/// Same publication and path semantics as `write_text`. The payload is
+/// decoded from base64 before writing.
 async fn write_bytes(state: &State, p: WriteBytesParams) -> Result<Value> {
     use base64::Engine as _;
 
@@ -2375,25 +2358,7 @@ async fn write_bytes(state: &State, p: WriteBytesParams) -> Result<Value> {
         .map_err(|e| AgentError::Other(format!("invalid base64: {e}")))?;
 
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-
-    // Ensure parent directories exist.
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(AgentError::Io)?;
-    }
-
-    // Atomic write: write to a sibling temp file, then rename.
-    let tmp = abs.with_extension("crab-tmp");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(AgentError::Io)?;
-    tokio::fs::rename(&tmp, &abs)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let size = bytes.len();
+    let size = file_write::write(work_dir, p.path, bytes).await?;
     Ok(json!({ "written": true, "size": size }))
 }
 
@@ -5493,6 +5458,8 @@ mod tests {
     use super::*;
     use std::process::Stdio;
     use tempfile::TempDir;
+
+    mod file_writes;
 
     fn sh(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new("git")

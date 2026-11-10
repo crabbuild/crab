@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type {} from "../../src/ipc";
@@ -21,6 +21,8 @@ test("SSH editor retains failed edits across tabs and writes the latest buffer a
   const git = (args: string[]) => execFileSync("git", args, { cwd: source, env });
   git(["init", "--initial-branch=main"]);
   writeFileSync(path.join(source, "pending.md"), "ORIGINAL_REMOTE\n");
+  chmodSync(path.join(source, "pending.md"), 0o751);
+  writeFileSync(path.join(source, "pending.crab-tmp"), "UNRELATED_USER_FILE\n");
   writeFileSync(path.join(source, "other.txt"), "OTHER_REMOTE_FILE\n");
   git(["add", "."]);
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "SSH editor fixture"]);
@@ -57,6 +59,8 @@ test("SSH editor retains failed edits across tabs and writes the latest buffer a
     await replace(acknowledged);
     await expect.poll(() => readFileSync(path.join(source, "pending.md"), "utf8")).toBe(acknowledged);
     await expect(page.getByLabel("Unsaved changes", { exact: true })).toHaveCount(0);
+    expect(statSync(path.join(source, "pending.md")).mode & 0o777).toBe(0o751);
+    expect(readFileSync(path.join(source, "pending.crab-tmp"), "utf8")).toBe("UNRELATED_USER_FILE\n");
     chmodSync(source, 0o500);
     await replace(pending);
     await expect(page.getByRole("button", { name: "Retry saving", exact: true })).toBeVisible();
@@ -79,9 +83,32 @@ test("SSH editor retains failed edits across tabs and writes the latest buffer a
     await expect(page.getByLabel("Unsaved changes", { exact: true })).toHaveCount(0);
     expect(fixture.requests.filter(request => request.method === "write_text").every(request => request.repo_id === repoId && request.path === "pending.md")).toBe(true);
     expect(fixture.requests.filter(request => request.method === "write_text").length).toBeGreaterThanOrEqual(3);
-    expect(readFileSync(path.join(source, ".git/index")).equals(index)).toBe(true);
     await expect(editor).toContainText(pending);
-    writeFileSync(test.info().outputPath("buffer-proof.json"), JSON.stringify({ actualUtf8Write: true, realPermissionFailure: true, retainedAfterTabClose: true, nativeReconnectAcknowledged: true, repositoryScopedWrites: true, indexUnchanged: true }, null, 2));
+    const publications = await page.evaluate(async repo_id => {
+      return Promise.all(Array.from({ length: 12 }, async (_, index) => {
+        const content = String.fromCharCode(65 + index).repeat(128 * 1024);
+        const path = `report.part${index}`;
+        const result = await window.crab!.rpc(index % 2 === 0 ? "write_text" : "write_bytes", {
+          repo_id, path, ...(index % 2 === 0 ? { content } : { bytes_b64: btoa(content) }),
+        });
+        return { path, content, result };
+      }));
+    }, repoId);
+    for (const publication of publications) {
+      expect(readFileSync(path.join(source, publication.path), "utf8")).toBe(publication.content);
+      expect(publication.result).toEqual({ written: true, size: publication.content.length });
+    }
+    expect(statSync(path.join(source, "pending.md")).mode & 0o777).toBe(0o751);
+    expect(readFileSync(path.join(source, "pending.crab-tmp"), "utf8")).toBe("UNRELATED_USER_FILE\n");
+    expect(readdirSync(source).filter(name => name.startsWith(".crab-write-"))).toEqual([]);
+    await page.getByRole("button", { name: "Refresh file tree", exact: true }).click();
+    for (const [filename, marker] of [["report.part0", "A"], ["report.part1", "B"]]) {
+      await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+      await expect(editor).toContainText(marker.repeat(64));
+    }
+    expect(readFileSync(path.join(source, ".git/index")).equals(index)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("native-file-publication.png") });
+    writeFileSync(test.info().outputPath("buffer-proof.json"), JSON.stringify({ actualUtf8Write: true, realPermissionFailure: true, retainedAfterTabClose: true, nativeReconnectAcknowledged: true, repositoryScopedWrites: true, indexUnchanged: true, executableModePreserved: true, unrelatedSameStemPreserved: true, competingTextAndBinaryPublications: publications.length, noTemporaryResidue: true }, null, 2));
   } finally {
     chmodSync(source, 0o700); fixture.setAccepting(true);
     if (application) {

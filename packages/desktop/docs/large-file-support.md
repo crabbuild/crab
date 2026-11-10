@@ -30,7 +30,7 @@ provider qualification run alongside each slice, rather than after all features.
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
 | P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Remaining: repository-switch repeatability under suite load, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening and real multi-hop cancellation. |
-| P0 | Physical write integrity | One native write owner handles temporary publication and existing file modes. | `write_text` and `write_bytes` currently use `with_extension("crab-tmp")`; different extensions with the same stem can target the same temporary path. Qualify competing saves and preserve executable modes before claiming general remote mutation parity. |
+| P0 | Physical write integrity | One native write owner handles temporary publication and existing file modes. | Native text/binary writes now share unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eight native checks and packaged macOS SSH publication/reconnect proof pass. Local Node atomic publication, full mutation workflows and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -57,8 +57,8 @@ materialization smoke does not imply mutation parity or durable recovery.
    broaden provider/profile coverage. Prove removal during an admitted opening
    against held real storage, and cancellation through actual jump hosts. Keep
    refreshes at their existing owner; add no component retry queue.
-2. First close native write publication/mode integrity: competing files must not
-   share a temporary path, and replacement must preserve executable modes. Then
+2. Native publication/mode integrity has the bounded proof below. Extend atomic
+   publication to local Node saves and qualify other platforms/providers, then
    complete one real repository round trip for each Crab/LFS profile: physical
    file create/edit/rename/delete, attribute setup, track, stage, commit, push,
    lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
@@ -84,6 +84,52 @@ reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
 
+## Native file-publication checkpoint
+
+Native `write_text` and `write_bytes` now use one plain-file writer. Every request
+owns a unique same-directory temporary until atomic publication or checked
+cleanup. Existing mode bits are restored before publication; new files retain
+normal create/umask semantics. The writer checks target write access rather than
+using rename to bypass a read-only file. Blocking I/O stays off Tokio workers,
+and native shutdown joins admitted requests before releasing their owners.
+
+Write paths must be relative and resolve inside the opened working tree. An
+internal symlink writes its target without replacing the link. Escaping and
+dangling links fail visibly, and an escaping missing parent is rejected before
+creating directories. Publication synchronizes the prepared file; this does not
+add a restart journal or claim power-loss durability of the directory rename.
+
+Three native red cases reproduced executable-mode loss, deletion of an unrelated
+same-stem `.crab-tmp` user file and incomplete competing text/binary publications.
+The old packaged SSH editor also lost executable mode on an actual save. Eight
+native checks now pass, including nested/empty/raw-binary files, UTF-8 byte
+acknowledgements, read-only targets, symlink boundaries and no temporary residue.
+Fifty-five adjacent buffer/provider/router cases and project/spec types pass.
+
+The freshly built native pair and Darwin SSH archive pass two packaged macOS
+arm64 cases. Native file/media recovery remains working. SSH editing preserves
+mode `0751`, the unrelated same-stem file and the index through a real permission
+failure, tab disposal and reconnect. Twelve concurrent text/binary RPC writes
+publish exact bytes; refreshing Files and opening both outputs shows their real
+content. No owned temporaries remain after acknowledgement. All 905 packaged
+renderer/Electron assets, native hashes, executable modes and the paired archive
+match the build. This checkpoint uses a new native build, not the earlier pair.
+
+Local `LocalProvider.fsWrite` still uses Node's in-place write. It never shared
+the native temporary name and does not replace the inode, so these native
+collision/mode failures do not apply to that sibling. Local atomic publication
+and complete remote create/rename/delete remain open. Captured materialization
+keeps its separate pointer checks, integrity verification and cancellation owner;
+it already uses a unique `NamedTempFile` and restores the captured target mode.
+
+Cargo format, build and packaging pass. Clippy reports three existing `unwrap`
+errors in forge comment assembly and directory-size scanning; the forge file is
+byte-identical to the requested `origin/crab-v2`, and the directory scanner has
+the same failing expression there. The new writer has no Clippy diagnostics.
+Current `origin/main` does not contain these desktop paths; no main-baseline pass
+is claimed. Cross-platform/provider CI and suite-load recovery repeatability
+remain release gates, and the complete acceptance matrix is still open.
+
 ## Acknowledged working-buffer checkpoint
 
 Text and Markdown now share one physical working-buffer owner. The editor view
@@ -106,9 +152,11 @@ Repository-scoped remote writes now call the existing native `write_text` with
 its required repository ID, relative file path and native session. The provider
 rejects paths outside the selected repository and incomplete acknowledgements.
 Both local and SSH acknowledgements report UTF-8 bytes. This qualifies isolated
-Files editor saves. Native temporary-file collision and mode preservation,
-remote create/rename/delete and the standalone file editor still need a
-canonical working path and actual UI proof.
+Files editor saves. At that checkpoint, native temporary-file collision and
+mode preservation were still open; the native publication checkpoint above now
+qualifies their bounded macOS cases. Local atomic saves, remote create/rename/
+delete and the standalone file editor still need a canonical working path and
+actual UI proof.
 
 Closing/reloading the application asks before losing unacknowledged edits. Quit
 first resolves that decision, then tears down terminal/SSH/native owners. Keep
