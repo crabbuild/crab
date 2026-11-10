@@ -23,6 +23,7 @@ const REMOTE_SAVE_DEBOUNCE_MS = 1000;
 export interface RemoteAutoSaveState {
   /** Whether a save is currently pending (failed and waiting for reconnection). */
   savePending: boolean;
+  isSaving: boolean;
   /** Called on every content change — debounces the remote write. */
   handleChange: (content: string) => void;
   /** Called for immediate save (e.g., Cmd+S). */
@@ -40,6 +41,7 @@ export function useRemoteAutoSave(
   onDirtyChange: (key: string, dirty: boolean) => void,
 ): RemoteAutoSaveState {
   const [savePending, setSavePending] = useState(false);
+  const [activeWrites, setActiveWrites] = useState(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingContentRef = useRef<string | null>(null);
   const capabilities = useRepoCapabilities();
@@ -56,10 +58,14 @@ export function useRemoteAutoSave(
 
   // Write to remote via rpc.writeText.
   const writeToRemote = useCallback(
-    async (content: string) => {
+    async (text: string) => {
+      const content = pendingContentRef.current ?? text;
+      pendingContentRef.current = content;
+      setActiveWrites(count => count + 1);
       try {
         await rpc.writeText(repoId, filePath, content);
-        // Success — clear pending state.
+        // Older acknowledgements cannot clear a newer pending buffer.
+        if (pendingContentRef.current !== content) return;
         pendingContentRef.current = null;
         pendingSaves.delete(saveKey);
         setSavePending(false);
@@ -67,9 +73,11 @@ export function useRemoteAutoSave(
       } catch (e) {
         // Write failed (likely connection loss). Persist locally.
         console.error("Remote save failed, persisting locally:", e);
-        pendingSaves.set(saveKey, { repoId, path: filePath, content });
+        const pending = pendingContentRef.current;
+        if (pending === null) return;
+        pendingSaves.set(saveKey, { repoId, path: filePath, content: pending });
         setSavePending(true);
-      }
+      } finally { setActiveWrites(count => count - 1); }
     },
     [repoId, filePath, saveKey, onDirtyChange, tabKey],
   );
@@ -106,7 +114,7 @@ export function useRemoteAutoSave(
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      pendingContentRef.current = null;
+      pendingContentRef.current = content;
       void writeToRemote(content);
     },
     [writeToRemote],
@@ -128,7 +136,7 @@ export function useRemoteAutoSave(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoId, filePath, saveKey]);
 
-  return { savePending, handleChange, handleSave };
+  return { savePending, isSaving: activeWrites > 0, handleChange, handleSave };
 }
 
 /**

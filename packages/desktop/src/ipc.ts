@@ -1672,7 +1672,7 @@ export type FileComparison = { kind: "git"; path: string; patch: string } | Larg
 export function fileDiffCancellable(
   repo_id: string,
   path: string,
-  opts: { before: DiffVersion; after: DiffVersion; old_path?: string },
+  opts: { native_session_id: string; before: DiffVersion; after: DiffVersion; old_path?: string },
 ): CancellableCall<FileComparison> {
   return callCancellable("file_diff", { repo_id, path, ...opts });
 }
@@ -1771,10 +1771,10 @@ export const rpc = {
 
   cancelOperation: (repo_id: string, op_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id }),
 
-  readText: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+  readText: (repo_id: string, path: string, { signal, ...opts }: { native_session_id?: string; rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
     call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),
 
-  readBytes: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+  readBytes: (repo_id: string, path: string, { signal, ...opts }: { native_session_id?: string; rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
     call<ReadBytesResult>("read_bytes", { repo_id, path, ...opts }, signal),
 
   writeText: (repo_id: string, path: string, content: string) =>
@@ -1817,8 +1817,8 @@ export const rpc = {
    *  `git apply --cached` would stage. */
   gitDiffIndexPatch: (
     repo_id: string,
-    opts: { path?: string; include_untracked?: boolean } = {},
-  ) => call<{ patch: string }>("git_diff_index_patch", { repo_id, ...opts }),
+    { signal, ...opts }: { native_session_id?: string; path?: string; include_untracked?: boolean; signal?: AbortSignal } = {},
+  ) => call<{ patch: string }>("git_diff_index_patch", { repo_id, ...opts }, signal),
 
   /** Index-vs-HEAD diff as a single unified patch — the staged
    *  side of `git diff`. Paired with `gitDiffIndexPatch` to derive
@@ -1826,8 +1826,8 @@ export const rpc = {
    *  Changes view without a per-file round trip. */
   gitDiffCachedPatch: (
     repo_id: string,
-    opts: { path?: string } = {},
-  ) => call<{ patch: string }>("git_diff_cached_patch", { repo_id, ...opts }),
+    { signal, ...opts }: { native_session_id?: string; path?: string; signal?: AbortSignal } = {},
+  ) => call<{ patch: string }>("git_diff_cached_patch", { repo_id, ...opts }, signal),
 
   /** Low-level: apply a raw unified patch. `cached` stages it,
    *  `reverse` undoes it. The hunk-level verbs below are the
@@ -2976,8 +2976,10 @@ export const mainProcess = {
     (repoId: string, fullPath: string, useTrash?: boolean): Promise<{ deleted: string; trash: boolean }>;
   },
   fsOpenExternal: (fullPath: string) => window.crab.fsOpenExternal(fullPath),
-  fsWriteFile: (fullPath: string, content: string) =>
-    window.crab.fsWriteFile(fullPath, content),
+  fsWriteFile: (...args: [string, string] | [string, string, string]) => {
+    if (args.length === 3) return window.crab.fsWriteFile(args[0], args[1], args[2]);
+    return window.crab.fsWriteFile(args[0], args[1]);
+  },
   fsReadFile: (fullPath: string) =>
     window.crab.fsReadFile(fullPath),
   fsReadImage: (fullPath: string) =>

@@ -93,6 +93,7 @@ async function resolveRefSafe(
  */
 export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
   const { state } = useStore();
+  const headRepo = state.repos.find(open => open.repo_id === head.repo.repo_id);
   const [compareState, setCompareState] = useState<CompareState>({ phase: "loading" });
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [baseRef, setBaseRef] = useState<RefInfo | null>(null);
@@ -300,9 +301,9 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
 
             {/* Diff panel */}
             <Panel minSize={40}>
-              {selectedFile && baseRef && headRef ? (
+              {selectedFile && baseRef && headRef && headRepo ? (
                 <DiffView
-                  repo={head.repo}
+                  repo={headRepo}
                   path={selectedFile}
                   base={baseRef.sha}
                   head={headRef.sha}

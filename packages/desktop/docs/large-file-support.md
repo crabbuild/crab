@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status and staging patches refresh by native epoch. Remaining: other UI state recovery, live removal during admitted opening and real multi-hop cancellation. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. Active local text/Markdown buffers retain unacknowledged edits during repair. Remaining: tab/remote buffer ownership, other UI state recovery, live removal during admitted opening and real multi-hop cancellation. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
@@ -43,8 +43,12 @@ materialization smoke does not imply mutation parity or durable recovery.
 ### Next bounded slices
 
 1. Finish recovery parity before extending transfer features. Preserve pending
-   editor saves and tab buffers; recapture selected Changes diffs and notebook
-   reads; restore kernel/query and media state deliberately. Dashboard, Datasets,
+   edits across tab disposal/reopening and remote editors; recapture notebook
+   documents and restore kernel/query and media state deliberately. Selected
+   comparisons and active local text/Markdown buffers have same-ID repair proof.
+   Consolidate the two local save loops and the remote pending-save store into
+   one acknowledged buffer owner that survives tab unmount; use the existing
+   provider for physical writes. Dashboard, Datasets,
    cached metrics and shared hydration inventories have local same-ID native
    repair proof; qualify storage rebind and SSH reconnect. Device metadata before
    construction is now qualified below. Storage replacement/cold bindings, SDK
@@ -78,6 +82,63 @@ its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
 
 ## Storage identity checkpoint
+
+### Selected sources and active editor recovery
+
+Selected text/LFS/notebook comparisons and the history comparison worker retain
+selection and comparison mode while replacing their reads on native epoch
+changes. Each captured comparison now includes the expected native session in
+its request and cancellation. The local agent and SSH router reject an old
+session after repository admission, before it can enter a replacement reader.
+The worktree panel updates its auxiliary handle through the existing runtime
+event; cross-repository comparison supplies its current head from app state.
+Those two auxiliary UI flows still need packaged recovery qualification.
+
+Changes uses one effect per selected patch or full-file read. Choosing an
+untracked file uses that same full-file path; staging refreshes status and the
+patch pair rather than starting a second imperative selected-file fetch. Effect
+cleanup aborts its previous read and suppresses late content/errors. Full-file
+errors are visible. Native loss retains selection and shows recovery status.
+Git patch subprocesses retain their existing terminal execution after view
+cancellation; stopping those subprocesses is separate work from suppressing
+obsolete results. Captured comparisons retain their existing native cancellation.
+
+Clean text/Markdown buffers re-read after native recovery. Pending local content
+and in-flight/failed remote saves prevent automatic replacement of an active
+buffer. Local text and Markdown saves use the existing repository provider,
+serialize writes and acknowledge only the content actually persisted. Failures
+retain pending content and offer Retry saving. A clean editor's blur is a no-op,
+so clicking repository Retry cannot submit an old unedited buffer. Generic
+workspace configuration writes retain their separate unscoped IPC use case.
+The remote save hook rejects older acknowledgements and records active writes;
+this is not complete remote write ordering or tab-buffer ownership.
+
+The packaged fixture keeps the logical repository ID, removes its real Git
+directory, kills its owned native process, changes content, restores Git and
+uses visible Retry. Text, Markdown, Changes content and text/LFS/notebook
+comparisons must refresh without reselection. Focused clean editors must not
+write old content on blur. Two held provider-write cases keep the latest edit
+through recovery while an earlier write is outstanding; the Markdown case then
+fails that write, shows the save error and persists the retained buffer through
+Retry saving. A final staging action proves the repaired patch/status path.
+Reads preserve the working file and unrelated index; intentional edits/staging
+are checked separately. The existing large-file and notebook comparison smokes
+also exercise the shared history/capture callers.
+
+The final checkpoint passes 97 focused cases across native admission, SSH
+routing, remote save acknowledgements, notebook comparison and binary decoding.
+Project and strict focused spec types, Cargo format, script syntax, renderer
+build and unsigned macOS arm64 packaging pass. Eleven current packaged cases
+pass on the final 905 matching assets: the eight source/buffer cases above,
+actual Crab chunk/LFS comparison, notebook comparison and native file/media
+recovery. All 1,680 Rust/Cargo inputs and native hashes match the qualified native
+producer. No dependency, lockfile, snapshot or inventory updates are needed.
+
+Remote editable buffers, switching/closing tabs, notebook document/kernel/query
+state, media playback position, storage-rebind/SSH UI qualification, plain Git
+patch cancellation and the complete acceptance matrix remain open. The next
+buffer consolidation must replace existing save owners, not add a retry queue
+beside them.
 
 ### Dashboard and dataset metadata recovery
 

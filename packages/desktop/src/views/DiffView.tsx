@@ -95,13 +95,15 @@ export function DiffView({ repo, path, base, head, commentsByLine, onAddComment 
     setResult(null);
     setErr(null);
     setStopped(false);
+    if (!repo.native_session_id) return;
+    const native_session_id = repo.native_session_id;
     cancelRef.current = () => { cancelled = true; cancelFn?.(); setStopped(true); };
 
     const attempt = async () => {
       const before: DiffVersion = base ? { kind: "revision", rev: base }
         : head ? { kind: "empty" } : comparison === "unstaged" ? { kind: "index" } : { kind: "revision", rev: "HEAD" };
       const after: DiffVersion = head ? { kind: "revision", rev: head } : comparison === "staged" ? { kind: "index" } : { kind: "working" };
-      const { promise, cancel } = fileDiffCancellable(repo.repo_id, path, { before, after });
+      const { promise, cancel } = fileDiffCancellable(repo.repo_id, path, { native_session_id, before, after });
       cancelFn = cancel;
       try {
         const r = await promise;
@@ -120,7 +122,7 @@ export function DiffView({ repo, path, base, head, commentsByLine, onAddComment 
       cancelFn?.();
       cancelRef.current = null;
     };
-  }, [repo.repo_id, path, base, head, comparison, refreshKey]);
+  }, [repo.repo_id, repo.native_session_id, path, base, head, comparison, refreshKey]);
 
   const hasComments =
     commentsByLine != null && Object.keys(commentsByLine).length > 0;
@@ -136,7 +138,8 @@ export function DiffView({ repo, path, base, head, commentsByLine, onAddComment 
               <button className="btn ml-2" onClick={handleRefresh}>Retry comparison</button>
             </div>
           )}
-          {!err && result == null && (
+          {!repo.native_session_id && <p role="status" className="p-4 text-sm text-gx-muted">Waiting for repository recovery…</p>}
+          {repo.native_session_id && !err && result == null && (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
               {stopped ? <>Comparison cancelled. <button className="btn" onClick={handleRefresh}>Retry comparison</button></>
                 : <><Loader2 size={14} className="animate-spin" /> Running diff… <button className="btn" onClick={() => cancelRef.current?.()}>Cancel comparison</button></>}

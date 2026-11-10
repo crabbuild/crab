@@ -176,11 +176,12 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   const [openFilePath, setOpenFilePath] = useState<string | null>(null);
   const [openFileContent, setOpenFileContent] = useState<string | null>(null);
   const [openFileLoading, setOpenFileLoading] = useState(false);
+  const [openFileError, setOpenFileError] = useState<string | null>(null);
 
   // Whole-repo patches used to derive the per-file tri-state
   // checkbox. One round-trip per side keeps the cost O(1) regardless
   // of how many files are in the change set (the per-file
-  // `fetchPatch` above still powers the right-pane view). Pending
+  // selected-file effect still powers the right pane). Pending
   // toggles live in `togglingPaths` so we can disable the checkbox
   // while the op is in flight.
   const [workTreePatch, setWorkTreePatch] = useState<string>("");
@@ -405,71 +406,43 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     [commandContext, refreshStatus, refreshPatchPair],
   );
 
-  // Open File handler: reads the full file content and shows it in
-  // the right pane, replacing the diff view. Uses rpc.readText for
-  // both local and remote repos (routes through RpcRouter).
-  const handleOpenFile = useCallback(
-    async (path: string) => {
-      setOpenFilePath(path);
-      setOpenFileLoading(true);
-      setOpenFileContent(null);
-      try {
-        const result = await rpc.readText(repo.repo_id, path);
-        setOpenFileContent(result.text);
-      } catch {
-        setOpenFileContent(null);
-      } finally {
-        setOpenFileLoading(false);
-      }
-    },
-    [repo.repo_id],
-  );
+  const handleOpenFile = useCallback((path: string) => { setOpenFilePath(path); }, []);
 
-  // Fetch the appropriate patch for the currently selected file.
-  // For fully-staged files (state === "full"), use `git diff --cached`
-  // (index vs HEAD) so the user sees what will be committed. For
-  // working/partial files, use worktree-vs-index.
-  const fetchPatch = useCallback(
-    async (path: string) => {
-      setPatchLoading(true);
-      setPatchError(null);
-      try {
-        const code = statusByPath.get(path) ?? "";
-        const state = fileStates[path] ?? "empty";
-
-        let r: { patch: string };
-        if (state === "full") {
-          // Staged file — show index vs HEAD (git diff --cached)
-          r = await rpc.gitDiffCachedPatch(repo.repo_id, { path });
-        } else {
-          // Working/partial — show worktree vs index
-          // When the file is untracked, `git diff` ignores it —
-          // include the worktree-side extras so the user still sees
-          // the new content. The agent honours `include_untracked`.
-          r = await rpc.gitDiffIndexPatch(repo.repo_id, {
-            path,
-            include_untracked: code === "??",
-          });
-        }
-        setPatch(r.patch);
-      } catch (e) {
-        setPatchError(e instanceof Error ? e.message : String(e));
-        setPatch(null);
-      } finally {
-        setPatchLoading(false);
-      }
-    },
-    [repo.repo_id, statusByPath, fileStates],
-  );
+  // Full-file and patch selections survive native replacement; only their
+  // reads are revoked. An old reply must never publish into a new selection.
+  useEffect(() => {
+    const controller = new AbortController();
+    setOpenFileContent(null);
+    setOpenFileError(null);
+    setOpenFileLoading(false);
+    if (!openFilePath || !repo.native_session_id) return;
+    setOpenFileLoading(true);
+    void rpc.readText(repo.repo_id, openFilePath, { native_session_id: repo.native_session_id, signal: controller.signal }).then(result => {
+      if (controller.signal.aborted) return;
+      if (result.truncated || result.text === null) setOpenFileError(result.reason ?? "File content is unavailable.");
+      else setOpenFileContent(result.text);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setOpenFileError(error instanceof Error ? error.message : String(error));
+    }).finally(() => { if (!controller.signal.aborted) setOpenFileLoading(false); });
+    return () => controller.abort();
+  }, [repo.repo_id, repo.native_session_id, openFilePath, entries]);
 
   useEffect(() => {
-    if (!selectedPath) {
-      setPatch(null);
-      setPatchError(null);
-      return;
-    }
-    void fetchPatch(selectedPath);
-  }, [selectedPath, fetchPatch]);
+    const controller = new AbortController();
+    setPatch(null);
+    setPatchError(null);
+    setPatchLoading(false);
+    if (!selectedPath || !repo.native_session_id) return;
+    setPatchLoading(true);
+    const options = { path: selectedPath, native_session_id: repo.native_session_id, signal: controller.signal };
+    const request = fileStates[selectedPath] === "full"
+      ? rpc.gitDiffCachedPatch(repo.repo_id, options)
+      : rpc.gitDiffIndexPatch(repo.repo_id, { ...options, include_untracked: statusByPath.get(selectedPath) === "??" });
+    void request.then(result => { if (!controller.signal.aborted) setPatch(result.patch); })
+      .catch((error: unknown) => { if (!controller.signal.aborted) setPatchError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!controller.signal.aborted) setPatchLoading(false); });
+    return () => controller.abort();
+  }, [repo.repo_id, repo.native_session_id, selectedPath, statusByPath, fileStates]);
 
   // Reset selection + patch when the repo changes so we don't show
   // stale content.
@@ -489,20 +462,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       // For new untracked files, automatically show full file content
       // since there's no meaningful diff to display.
       const code = statusByPath.get(path) ?? "";
-      if (code === "??") {
-        void (async () => {
-          setOpenFilePath(path);
-          setOpenFileLoading(true);
-          try {
-            const result = await rpc.readText(repo.repo_id, path);
-            setOpenFileContent(result.text);
-          } catch {
-            // Fall through — will show empty state
-          } finally {
-            setOpenFileLoading(false);
-          }
-        })();
-      }
+      if (code === "??") setOpenFilePath(path);
     },
     [statusByPath, repo.repo_id],
   );
@@ -556,7 +516,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       try {
         await op();
         if (successToast) setToast({ kind: "info", text: successToast });
-        if (selectedPath) await fetchPatch(selectedPath);
         // Suppress the entries-triggered refreshPatchPair since we
         // call it explicitly here — avoids a redundant RPC round-trip.
         skipPatchPairEffectRef.current = true;
@@ -568,7 +527,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
             kind: "info",
             text: "File changed on disk — refreshing diff.",
           });
-          if (selectedPath) await fetchPatch(selectedPath);
           skipPatchPairEffectRef.current = true;
           refreshStatus();
           await refreshPatchPair();
@@ -580,7 +538,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         });
       }
     },
-    [selectedPath, fetchPatch, refreshStatus, refreshPatchPair],
+    [refreshStatus, refreshPatchPair],
   );
 
   // Toast auto-dismiss (4 s) — simple enough that dragging in a
@@ -1187,6 +1145,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                 path={openFilePath}
                 content={openFileContent}
                 loading={openFileLoading}
+                error={openFileError}
+                waiting={!repo.native_session_id}
                 onClose={() => { setOpenFilePath(null); setOpenFileContent(null); }}
               />
             ) : (
@@ -1585,11 +1545,15 @@ function FileContentPane({
   path,
   content,
   loading,
+  error,
+  waiting,
   onClose,
 }: {
   path: string;
   content: string | null;
   loading: boolean;
+  error: string | null;
+  waiting: boolean;
   onClose: () => void;
 }) {
   const lines = useMemo(() => content?.split("\n") ?? [], [content]);
@@ -1612,17 +1576,19 @@ function FileContentPane({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {loading && (
+        {waiting && <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>}
+        {!waiting && loading && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
             <Loader2 size={14} className="animate-spin" /> Loading file…
           </div>
         )}
-        {!loading && content == null && (
+        {!waiting && !loading && error && <p role="alert" className="m-4 text-xs text-gx-error">{error}</p>}
+        {!waiting && !loading && !error && content == null && (
           <div className="flex h-full items-center justify-center text-sm text-gx-muted">
             Unable to read file content (binary or missing).
           </div>
         )}
-        {!loading && content != null && (
+        {!waiting && !loading && !error && content != null && (
           <pre className="p-0 m-0 text-[12px] leading-[1.6] font-mono">
             <table className="w-full border-collapse">
               <tbody>

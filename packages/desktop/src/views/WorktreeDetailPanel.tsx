@@ -18,7 +18,7 @@ import {
   WorktreeStatus,
   MergeStrategy,
   OpResult,
-  RepoHandle,
+  onAgentEvent,
 } from "../ipc";
 import { DiffView } from "./DiffView";
 import { EditorPane, EditorTab } from "../components/EditorPane";
@@ -63,7 +63,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
 
   // Worktree repo handle (opened lazily for file listing/editing)
-  const [wtRepo, setWtRepo] = useState<(RepoHandle & { label: string; path: string; openedAt: number }) | null>(null);
+  const [wtRepo, setWtRepo] = useState<OpenRepo | null>(null);
 
   const branch = shortBranch(worktree.branch);
   const changedPathSet = useMemo(
@@ -97,6 +97,16 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
       });
     return () => { cancelled = true; };
   }, [worktree.path, worktree.meta?.display_name]);
+
+  // This auxiliary handle is owned by the panel rather than the app's open
+  // repository list. Keep its reader identity current after native replay.
+  useEffect(() => onAgentEvent(event => {
+    if (event.method !== "repo:capabilities-changed") return;
+    const update = event.params as Pick<OpenRepo, "repo_id" | "native_session_id" | "capabilities"> & { error?: string };
+    setWtRepo(current => current?.repo_id === update.repo_id ? {
+      ...current, native_session_id: update.native_session_id, capabilities: update.capabilities, native_error: update.error,
+    } : current);
+  }), []);
 
   // Fetch the full file listing for the worktree.
   // Falls back to the parent repo if the worktree can't be opened

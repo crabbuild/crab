@@ -43,6 +43,10 @@ generated state out of Git changes; existing tracked files and ignore rules rema
 Use the file comparison selector for HEAD → Working tree, Index → Working tree,
 or HEAD → Index. History compares a commit with its first parent; an initial
 commit compares with an empty tree.
+Selected comparisons keep their version selector through native recovery and
+refresh their content after the repository reopens. Clean local text/Markdown
+buffers refresh too; pending edits remain visible until saving finishes. Local
+save failures retain the buffer and offer **Retry saving**.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

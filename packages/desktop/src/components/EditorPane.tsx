@@ -561,6 +561,17 @@ function NativePreview({ kind, entryKind, ...common }: { kind: NativePreviewKind
   return remaining;
 }
 
+function SaveErrorNotice({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return <div role="alert" className="border-b border-gx-error/40 p-2 text-xs text-gx-error">
+    Could not save this file. Your edits are still in this tab.
+    <button type="button" className="btn ml-2" onClick={onRetry}>Retry saving</button>
+    <details className="mt-1 text-gx-muted">
+      <summary className="cursor-pointer">Error details</summary>
+      <p className="mt-1 break-words">{error}</p>
+    </details>
+  </div>;
+}
+
 function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
   type LoadState =
     | { state: "loading" }
@@ -594,8 +605,12 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
   const isSavingRef = useRef(false);
   const pendingContentRef = useRef<string | null>(null);
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   // Track dirty state for external change detection.
   const [isDirty, setIsDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = isDirty;
 
   // External file change detection: when a file change event arrives,
   // re-read the file and either silently reload or prompt the user.
@@ -621,29 +636,26 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
     onReload: handleExternalReload,
   });
 
-  const writeToDisk = useCallback(
-    async (content: string) => {
-      isSavingRef.current = true;
-      try {
-        if (isLocal) {
-          const fullPath = `${repo.path}/${tab.path}`;
-          await mainProcess.fsWriteFile(fullPath, content);
-        } else {
-          await rpc.writeText(repo.repo_id, tab.path, content);
-        }
+  const writeToDisk = useCallback(async () => {
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+    setSaveError(null);
+    try {
+      // Serialize writes and acknowledge only the buffer actually persisted.
+      // A late reply cannot clear a newer edit or leave older bytes on disk.
+      while (pendingContentRef.current !== null) {
+        const content = pendingContentRef.current;
+        await mainProcess.fsWriteFile(repo.repo_id, `${repo.path}/${tab.path}`, content);
+        if (pendingContentRef.current !== content) continue;
         pendingContentRef.current = null;
         setIsDirty(false);
         onDirtyChange(tab.key, false);
-      } catch (e) {
-        console.error("Failed to save file:", e);
-      } finally {
-        isSavingRef.current = false;
       }
-    },
-    [isLocal, repo.path, repo.repo_id, tab.path, onDirtyChange, tab.key],
-  );
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally { isSavingRef.current = false; }
+  }, [repo.repo_id, repo.path, tab.path, onDirtyChange, tab.key]);
 
-  // Called on every keystroke — debounces the actual write.
   const handleChange = useCallback(
     (content: string) => {
       if (!isLocal) {
@@ -660,7 +672,7 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
       }
       saveTimerRef.current = setTimeout(() => {
         saveTimerRef.current = null;
-        void writeToDisk(content);
+        void writeToDisk();
       }, 300);
     },
     [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
@@ -669,6 +681,9 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
   // Immediate save on Cmd+S.
   const handleSave = useCallback(
     (content: string) => {
+      // Blur also calls save: a clean buffer must not overwrite external changes
+      // while repository recovery moves focus out of the editor.
+      if (isLocal && pendingContentRef.current === null) return;
       if (!isLocal) {
         remoteAutoSave.handleSave(content);
         setIsDirty(false);
@@ -678,11 +693,12 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      pendingContentRef.current = null;
-      setIsDirty(false);
-      void writeToDisk(content);
+      pendingContentRef.current = content;
+      setIsDirty(true);
+      onDirtyChange(tab.key, true);
+      void writeToDisk();
     },
-    [isLocal, remoteAutoSave, writeToDisk],
+    [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
   );
 
   // Flush any pending save when the component unmounts (tab closed).
@@ -692,22 +708,24 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      // Flush unsaved content synchronously on unmount (local only).
+      // Submit the local pending buffer before tab disposal.
       const pending = pendingContentRef.current;
       if (pending !== null && repo.path && isLocal) {
         const fullPath = `${repo.path}/${tab.path}`;
         // Fire-and-forget — component is unmounting so we can't await.
-        void mainProcess.fsWriteFile(fullPath, pending);
+        void mainProcess.fsWriteFile(repo.repo_id, fullPath, pending);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.path, tab.path, isLocal]);
+  }, [repo.repo_id, repo.path, tab.path, isLocal]);
 
   useEffect(() => {
+    // Revalidate a clean buffer after recovery; pending edits retain their owner.
+    if (!repo.native_session_id || dirtyRef.current || pendingContentRef.current !== null || remoteAutoSave.isSaving || remoteAutoSave.savePending) return;
     const controller = new AbortController();
     setLoad({ state: "loading" });
     rpc.readBytes(repo.repo_id, tab.path, {
-      rev: tab.rev ?? undefined, max_bytes: maxBytes, signal: controller.signal,
+      native_session_id: repo.native_session_id, rev: tab.rev ?? undefined, max_bytes: maxBytes, signal: controller.signal,
     }).then((res) => {
       if (controller.signal.aborted) return;
       if (res.truncated) {
@@ -722,7 +740,7 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
       if (!controller.signal.aborted) setLoad({ state: "error", message: error instanceof Error ? error.message : String(error) });
     });
     return () => controller.abort();
-  }, [repo.repo_id, tab.key, tab.path, tab.rev, maxBytes]);
+  }, [repo.repo_id, repo.native_session_id, tab.key, tab.path, tab.rev, maxBytes]);
 
   if (load.state === "loading") {
     return (
@@ -765,6 +783,7 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
 
   return (
     <div className="flex h-full flex-col">
+      {saveError && <SaveErrorNotice error={saveError} onRetry={() => void writeToDisk()} />}
       {/* Save pending indicator for remote files */}
       {!isLocal && remoteAutoSave.savePending && (
         <div className="flex shrink-0 items-center gap-2 border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">
@@ -806,12 +825,17 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
   const [error, setError] = useState<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingContentRef = useRef<string | null>(null);
+  const isSavingRef = useRef(false);
 
   // Transport routing: local files save via fs, remote files save via RPC.
   const isLocal = !!repo.path && !repo.is_remote;
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   // Track dirty state for external change detection.
   const [isDirty, setIsDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = isDirty;
 
   // Remote auto-save hook for remote files.
   const remoteAutoSave = useRemoteAutoSave(
@@ -843,24 +867,25 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
     onReload: handleExternalReload,
   });
 
-  const writeToDisk = useCallback(
-    async (text: string) => {
-      try {
-        if (isLocal) {
-          const fullPath = `${repo.path}/${tab.path}`;
-          await mainProcess.fsWriteFile(fullPath, text);
-        } else {
-          await rpc.writeText(repo.repo_id, tab.path, text);
-        }
+  const writeToDisk = useCallback(async () => {
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+    setSaveError(null);
+    try {
+      // Serialize writes and acknowledge only the buffer actually persisted.
+      // A late reply cannot clear a newer edit or leave older bytes on disk.
+      while (pendingContentRef.current !== null) {
+        const content = pendingContentRef.current;
+        await mainProcess.fsWriteFile(repo.repo_id, `${repo.path}/${tab.path}`, content);
+        if (pendingContentRef.current !== content) continue;
         pendingContentRef.current = null;
         setIsDirty(false);
         onDirtyChange(tab.key, false);
-      } catch (e) {
-        console.error("Failed to save markdown:", e);
       }
-    },
-    [isLocal, repo.path, repo.repo_id, tab.path, onDirtyChange, tab.key],
-  );
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally { isSavingRef.current = false; }
+  }, [repo.repo_id, repo.path, tab.path, onDirtyChange, tab.key]);
 
   const handleChange = useCallback(
     (text: string) => {
@@ -876,7 +901,7 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
         saveTimerRef.current = null;
-        void writeToDisk(text);
+        void writeToDisk();
       }, 300);
     },
     [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
@@ -884,6 +909,7 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
 
   const handleSave = useCallback(
     (text: string) => {
+      if (isLocal && pendingContentRef.current === null) return;
       if (!isLocal) {
         remoteAutoSave.handleSave(text);
         setIsDirty(false);
@@ -893,11 +919,12 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      pendingContentRef.current = null;
-      setIsDirty(false);
-      void writeToDisk(text);
+      pendingContentRef.current = text;
+      setIsDirty(true);
+      onDirtyChange(tab.key, true);
+      void writeToDisk();
     },
-    [isLocal, remoteAutoSave, writeToDisk],
+    [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
   );
 
   // Flush pending save on unmount (local only).
@@ -909,17 +936,18 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
       }
       const pending = pendingContentRef.current;
       if (pending !== null && repo.path && isLocal) {
-        void mainProcess.fsWriteFile(`${repo.path}/${tab.path}`, pending);
+        void mainProcess.fsWriteFile(repo.repo_id, `${repo.path}/${tab.path}`, pending);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.path, tab.path, isLocal]);
+  }, [repo.repo_id, repo.path, tab.path, isLocal]);
 
   useEffect(() => {
+    if (!repo.native_session_id || dirtyRef.current || pendingContentRef.current !== null || remoteAutoSave.isSaving || remoteAutoSave.savePending) return;
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    rpc.readText(repo.repo_id, tab.path, { max_bytes: maxBytes, signal: controller.signal })
+    rpc.readText(repo.repo_id, tab.path, { native_session_id: repo.native_session_id, max_bytes: maxBytes, signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
         if (result.truncated) setError(result.reason ?? "File exceeds the editor limit");
@@ -928,7 +956,7 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
       .catch((error) => { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : String(error)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [repo.repo_id, tab.key, tab.path, maxBytes]);
+  }, [repo.repo_id, repo.native_session_id, tab.key, tab.path, maxBytes]);
 
   if (loading) {
     return (
@@ -947,6 +975,7 @@ function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab:
 
   return (
     <div className="flex h-full flex-col">
+      {saveError && <SaveErrorNotice error={saveError} onRetry={() => void writeToDisk()} />}
       {/* Save pending indicator for remote files */}
       {!isLocal && remoteAutoSave.savePending && (
         <div className="flex shrink-0 items-center gap-2 border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">

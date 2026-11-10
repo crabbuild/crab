@@ -626,12 +626,14 @@ const AllDiffsPane = forwardRef<
     const initial = new Map<string, FilePatchState>();
     for (const entry of entries) initial.set(entry.path, { result: null, err: null, loading: true });
     setPatches(initial);
+    if (!repo.native_session_id) return;
+    const native_session_id = repo.native_session_id;
     const before: DiffVersion = parentSha ? { kind: "revision", rev: parentSha } : { kind: "empty" };
     const after: DiffVersion = { kind: "revision", rev: selectedSha };
     const CONCURRENCY = 3;
     let idx = 0;
     const fetchDiff = async (entry: CommitFileChange) => {
-      const request = fileDiffCancellable(repo.repo_id, entry.path, { before, after, old_path: entry.old_path ?? undefined });
+      const request = fileDiffCancellable(repo.repo_id, entry.path, { native_session_id, before, after, old_path: entry.old_path ?? undefined });
       requests.add(request.cancel);
       try {
         const result = await request.promise;
@@ -663,7 +665,7 @@ const AllDiffsPane = forwardRef<
     void Promise.all(workers);
 
     return () => { cancelled = true; for (const cancel of requests) cancel(); };
-  }, [repo.repo_id, selectedSha, parentSha, entries, setPatches]);
+  }, [repo.repo_id, repo.native_session_id, selectedSha, parentSha, entries, setPatches]);
 
   const setFileRef = useCallback((path: string, el: HTMLDivElement | null) => {
     if (el) {

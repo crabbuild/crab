@@ -215,20 +215,20 @@ describe("native agent process ownership", () => {
     expect(children[1].frames.at(-1)?.params.__storage_auth).toMatchObject({ id: first.id });
   });
 
-  it("a captured read queued behind identity replacement cannot enter the replacement native owner", async () => {
+  it.each(["read_range", "read_text", "read_bytes", "file_diff", "git_diff_index_patch", "git_diff_cached_patch"])("%s queued behind identity replacement cannot enter the replacement native owner", async method => {
     const { first, second } = await storageAgent();
     const initial = await agent.request("open_local", { repo_id: "one", path: "/one", storage_connection_id: first.id }) as { native_session_id: string };
     children[0].holdOpen = "one";
     const changed = agent.request("storage_connections_bind", { repo_id: "one", id: second.id });
     void changed.catch(() => {});
     await vi.waitFor(() => expect(children[0].frames.filter(frame => frame.method === "open_local")).toHaveLength(2));
-    const stale = agent.request("read_range", { repo_id: "one", file_id: "old-reader", native_session_id: initial.native_session_id, offset: 0, length: 1 });
+    const stale = agent.request(method, { repo_id: "one", file_id: "old-reader", native_session_id: initial.native_session_id, offset: 0, length: 1 });
     void stale.catch(() => {});
     children[0].holdOpen = undefined;
     children[0].answer(children[0].frames.filter(frame => frame.method === "open_local")[1]);
     await changed;
     await expect(stale).rejects.toMatchObject({ code: "NATIVE_SESSION_LOST" });
-    expect(children[0].frames.some(frame => frame.method === "read_range")).toBe(false);
+    expect(children[0].frames.some(frame => frame.method === method)).toBe(false);
   });
 
   it("forgetting credentials joins an admitted first open before retiring its late native owner", async () => {
