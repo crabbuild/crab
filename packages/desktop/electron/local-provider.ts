@@ -12,16 +12,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { shell } from "electron";
 
+import { fullCapabilities, type CapabilitySet } from "./repo-capabilities";
 import { Agent } from "./agent";
 import {
   BaseProvider,
-  CapabilitySet,
   FsCreateResult,
   FsDeleteResult,
   FsReadResult,
   FsRenameResult,
   FsWriteResult,
-  fullCapabilities,
 } from "./repo-provider";
 
 // ── File Watcher Internals ───────────────────────────────────────

@@ -14,10 +14,43 @@ completion. This record tracks implementation and qualification separately.
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Decoded parser budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
-| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Native cancellation/drain is qualified; packaged cancellation, network counters, durable/restart ownership and component-owned publishing remain open. |
+| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, Safetensors preview, exact materialization, independent sessions and reconnect metadata replay are qualified. Complete RPC parity, persistence, multi-hop cancellation and other targets/providers remain open. |
 | Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
+
+## Remaining priorities
+
+Work proceeds in this order. A gap closes only after the corresponding user
+action produces the real side effect and an accurate visible result. CI and
+provider qualification run alongside each slice, rather than after all features.
+
+| Priority | Deliverable | Consolidation boundary | Closure proof |
+| --- | --- | --- | --- |
+| P0 | Reliable operation routing and controls | `ProviderRegistry` rejects unopened SSH identities; `RpcRouter` owns progress identity; one capability contract and one renderer event bridge. | Local packaged proof: rejected SSH writes do not touch local files, remote progress/cancellation reaches Activity, and remote native exit disables editing. Fresh cross-platform CI remains required. |
+| P0 | Reopen and connection lifetime | One saved-repository open path for startup/sidebar; one profile connection/bootstrap owner; each jump/SFTP attempt owns its transport. | Restart into an SSH repo, reconnect multiple repos, cancel authentication/deployment, and reject late old-transport callbacks without losing saved entries or resurrecting work. Local native restart, retained captures after restart, and single-file versus bulk hydration gates also remain open. |
+| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
+| P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
+| P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
+
+The first slice removes three duplicated capability definitions, optimistic
+capability defaults and unregistered-SSH local handling. The existing native
+request owner supplies repository identity for progress events that omit it;
+unmatched, mismatched and late operation events never update desktop jobs.
+Optional SSH IDE initialization no longer owns core event delivery. Native
+filesystem RPC parity and durable recovery are separate deliverables, not
+implied by a working read/materialization smoke.
+
+Current local proof: 187 focused tests across ten provider/router/connection
+files pass, following four reproduced operation-boundary failures. The packaged
+SSH smoke covers exact 4 MiB hydration, Activity progress, cancellation of a
+512 MiB payload without changing either pointer or leaving a temporary file,
+and native exit while SSH remains connected. The obsolete optional browser
+prefetch tests are removed with their retired path; real packaged opening and
+repository registration remain covered. The native Linux arm64 producer's CI
+failure identified the configured cross-linker missing from the native runner;
+the desktop build now selects `cc` unless Cargo's caller explicitly chooses a
+linker. Fresh Linux arm64 build proof remains required.
 
 ## Ownership
 

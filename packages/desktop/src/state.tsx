@@ -1,6 +1,7 @@
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
+import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, CapabilitySet, fullCapabilities, mainProcess, rpc, nextJobId, isCancelledError } from "./ipc";
+import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -700,9 +701,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: caps });
         },
         () => {
-          // On failure (e.g., repo not yet fully open), default to full
-          // capabilities so the UI remains functional.
-          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: fullCapabilities() });
+          // A failed query does not establish native availability.
+          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: noCapabilities() });
         },
       );
     }

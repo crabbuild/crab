@@ -275,6 +275,10 @@ tests and packaged storage qualification.
   agent for repository operations, bounded previews and materialization. Opened
   repository identities are restored before queued metadata requests replay on
   reconnect. Live content requests belong to the interrupted session and fail.
+- SSH progress reaches Activity only while its native request owns the job and
+  repository. Cancellation waits for the terminal result; unopened SSH identities
+  cannot fall through to local file operations. Editing controls are disabled
+  when the remote native agent is unavailable.
 - Explicit `--user-data-dir` profiles isolate SSH profiles, the SSH database and
   host trust. The default SSH profile/database location remains `.crab/desktop/`
   under the user's home directory, as shipped in `v2.0.0-alpha.1`.

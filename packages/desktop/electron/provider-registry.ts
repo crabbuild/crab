@@ -3,10 +3,9 @@
  * RepoProvider instance (local or remote).
  *
  * The registry is a singleton in the main process. It maps repo_id
- * strings to provider instances and provides automatic fallback
- * resolution based on the repo_id format:
+ * strings to provider instances and resolves by repo_id:
  *
- * - `ssh://<profileId>/<path>` → attempts RpcRouter-based resolution
+ * - `ssh://<profileId>/<path>` → requires an opened remote provider
  * - anything else → falls back to the LocalProvider singleton
  *
  * Emits lifecycle events (`provider:registered`, `provider:unregistered`)
@@ -68,25 +67,20 @@ export class ProviderRegistry extends EventEmitter {
    *
    * Resolution order:
    * 1. Explicit registration (exact match on repo_id)
-   * 2. If repo_id has `ssh://` prefix and no explicit registration,
-   *    returns `null` — the caller should route through RpcRouter
-   *    directly as a best-effort fallback (per Requirement 14.2)
+   * 2. An unregistered SSH repository throws before any local handling.
    * 3. Otherwise, returns the LocalProvider singleton
    *
-   * This method never throws. If no provider can be resolved (e.g.,
-   * LocalProvider hasn't been set yet), it returns `null`.
+   * Returns `null` if the local provider has not initialized.
    */
   resolve(repoId: string): RepoProvider | null {
     // 1. Check explicit registrations
     const registered = this.providers.get(repoId);
     if (registered) return registered;
 
-    // 2. Check if this is a remote repo_id with no registration
-    const parsed = parseRepoId(repoId);
-    if (parsed) {
-      // No explicit registration for this remote repo — return null
-      // so the caller can attempt RpcRouter-based routing directly.
-      return null;
+    if (parseRepoId(repoId)) {
+      // Every IPC surface resolves here. A missing SSH registration must never
+      // turn a remote operation into a local file write, watcher or RPC.
+      throw Object.assign(new Error("SSH repository is not open. Reopen it from SSH Connections."), { code: "SSH_REPOSITORY_NOT_OPEN" });
     }
 
     // 3. Local repo_id — fall back to LocalProvider singleton

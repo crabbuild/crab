@@ -257,7 +257,9 @@ export function ProgressDrawer({ open, onClose }: Props) {
             {filteredLogs.length === 0 && (
               <div className="flex h-full items-center justify-center text-gx-muted text-[12px]">
                 {state.logs.length === 0
-                  ? "No activity yet. Clone, push, or hydrate a repo to see progress here."
+                  ? jobEntries.length > 0
+                    ? "No command output. Transfer progress is shown with each job."
+                    : "No activity yet. Clone, push, or hydrate a repo to see progress here."
                   : "No logs match the current filter."}
               </div>
             )}

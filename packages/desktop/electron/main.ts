@@ -82,6 +82,12 @@ protocol.registerSchemesAsPrivileged([{ scheme: "crab-content", privileges: { st
 let media: MediaResources | null = null;
 
 let mainWindow: BrowserWindow | null = null;
+
+function sendAgentEvent(method: string, params: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send("crab:event", { method, params });
+}
+
 let agent: Agent | null = null;
 let resolveAgentReady!: () => void;
 let rejectAgentReady!: (reason: unknown) => void;
@@ -346,10 +352,7 @@ function registerIpc(skillManager: SkillManager) {
       if (repoId) {
         const parsed = parseRepoId(repoId);
         if (parsed) {
-          // Remote repo — RemoteProvider is registered by the SSH
-          // subsystem when the connection is established. If one isn't
-          // registered yet, the registry's resolve() will return null
-          // and we fall through to the RpcRouter-based fallback.
+          // SSH repository handles are registered by the SSH open path.
         } else {
           // Local repo — register with the LocalProvider singleton.
           // The LocalProvider is already set as the fallback, but
@@ -392,12 +395,11 @@ function registerIpc(skillManager: SkillManager) {
       if (provider) {
         return provider.request(method, params as Record<string, unknown>);
       }
-      // No provider found — for remote repos without explicit
-      // registration, this shouldn't happen after open. Fall through
-      // to the local agent as a safety net.
+      // Unregistered SSH identities throw in resolve; only local startup
+      // without an initialized provider reaches the agent below.
     }
 
-    // Fallback: no repo_id in params or no provider resolved — send
+    // No repo_id, or a local provider still starting — send
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
     return agent.request(method, params);
@@ -620,7 +622,7 @@ function registerIpc(skillManager: SkillManager) {
       return provider.capabilities(repoId);
     }
     // Fallback: local repos always have full capabilities.
-    const { fullCapabilities } = await import("./repo-provider.js");
+    const { fullCapabilities } = await import("./repo-capabilities.js");
     return fullCapabilities();
   });
 
@@ -1896,6 +1898,12 @@ app.whenReady().then(async () => {
   registerSshIpcHandlers(sshProfileManager, sshSessionManager, fileBrowser, sshTerminalManager, sshPortForwardManager);
 
   bridgeAgentDeployToRenderer(sshSessionManager);
+  // Remote progress is scoped by the router's live request owner. Forward only
+  // that stream; remote OAuth or other unowned notifications stay remote.
+  rpcRouter.on("progress", ({ method, params }) => sendAgentEvent(method, params));
+  remoteProvider.on("fs/changed", event => sendAgentEvent("fs/changed", { repo_path: event.repoPath }));
+  remoteProvider.on("capabilities-changed", event => sendAgentEvent("repo:capabilities-changed", { repo_id: event.repoId, capabilities: event.capabilities }));
+
 
   // Optional SSH IDE services cannot prevent native bootstrap or repository browsing.
   try {
@@ -1921,28 +1929,6 @@ app.whenReady().then(async () => {
     const bookmarkManager = new BookmarkManager(db);
     const workspaceManager = new RemoteWorkspaceManager(rpcRouter, sshSessionManager, fileEditor);
     const debugManager = new RemoteDebugManager(rpcRouter, sshSessionManager);
-
-    // Bridge RemoteProvider's fs/changed events to the renderer so the
-    // useFileWatcher hook picks them up. This mirrors how the local
-    // file-watcher.ts sends events via webContents.send("crab:event", ...).
-    remoteProvider.on("fs/changed", (evt) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-      mainWindow.webContents.send("crab:event", {
-        method: "fs/changed",
-        params: { repo_path: evt.repoPath },
-      });
-    });
-
-    // Bridge RemoteProvider's capabilities-changed events to the renderer
-    // so the UI can reactively enable/disable controls when the SSH
-    // connection state transitions (connected ↔ disconnected ↔ reconnecting).
-    remoteProvider.on("capabilities-changed", (evt) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-      mainWindow.webContents.send("crab:event", {
-        method: "repo:capabilities-changed",
-        params: { repo_id: evt.repoId, capabilities: evt.capabilities },
-      });
-    });
 
     wireEnhancedIpcHandlers({
       fileTransferManager,
@@ -2333,12 +2319,7 @@ app.whenReady().then(async () => {
         if (error) console.warn("[crab-desktop] Could not append agent log.");
       });
     });
-    agent.on("notification", (method, params) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
-        return;
-      }
-      mainWindow.webContents.send("crab:event", { method, params });
-    });
+    agent.on("notification", sendAgentEvent);
     agent.on("exit", (code, signal) => {
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
         return;

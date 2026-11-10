@@ -24,6 +24,7 @@ interface PendingRequest {
   owner: ChannelOwner;
   method: string;
   operation?: { op_id: string; repo_id?: string };
+  progress?: { job_id: string; repo_id: string };
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
@@ -54,6 +55,10 @@ const CONTENT_METHODS = new Set([
 ]);
 const CACHEABLE_READ_METHODS = new Set([
   "git_status_porcelain", "git_log", "list_refs", "repo_summary", "hydration_status",
+]);
+const PROGRESS_METHODS = new Set([
+  "progress/line", "progress/transfer", "progress/complete", "progress/partial",
+  "crab/add_progress", "crab/push_step", "crab/push_progress",
 ]);
 
 export function parseRepoId(repoId: string): { profileId: string; remotePath: string } | null {
@@ -242,13 +247,16 @@ export class RpcRouter extends EventEmitter {
     const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
     const operation = method !== "rpc/cancel" && typeof fields?.op_id === "string"
       ? { op_id: fields.op_id, ...(typeof fields.repo_id === "string" ? { repo_id: fields.repo_id } : {}) } : undefined;
+    const jobId = fields?.op_id ?? fields?.job_id;
+    const progress = method !== "rpc/cancel" && typeof jobId === "string" && typeof fields?.repo_id === "string" && parseRepoId(fields.repo_id)?.profileId === owner.profileId
+      ? { job_id: jobId, repo_id: fields.repo_id } : undefined;
     if (method === "rpc/cancel") {
       for (const request of this.pending.values()) if (request.owner === owner && request.operation?.op_id === fields?.op_id) request.cancelRequested = true;
     }
     const id = this.nextId++;
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve, reject) => {
-      const request: PendingRequest = { owner, method, operation, resolve, reject };
+      const request: PendingRequest = { owner, method, operation, progress, resolve, reject };
       this.pending.set(id, request);
       if (timeoutMs !== undefined) request.timer = setTimeout(() => {
         const error = Object.assign(new Error(`RPC timeout: ${method} did not respond within ${timeoutMs}ms`), { code: "SSH_RPC_TIMEOUT" });
@@ -295,6 +303,16 @@ export class RpcRouter extends EventEmitter {
     const frame: unknown = JSON.parse(line);
     if (!frame || typeof frame !== "object" || Array.isArray(frame) || !("jsonrpc" in frame) || frame.jsonrpc !== "2.0") throw new Error("Expected one JSON-RPC 2.0 frame");
     if ("method" in frame && typeof frame.method === "string" && !("id" in frame)) {
+      if (PROGRESS_METHODS.has(frame.method) && "params" in frame && frame.params && typeof frame.params === "object" && !Array.isArray(frame.params)) {
+        const params = frame.params as Record<string, unknown>;
+        const jobId = params.job_id ?? params.op_id;
+        const request = [...this.pending.values()].find(request => request.owner === owner && request.progress?.job_id === jobId);
+        if (request?.progress && (params.repo_id === undefined || params.repo_id === request.progress.repo_id)) {
+          // The request owns repository identity; native completion/line events
+          // omit it. Never let another channel/job update renderer operation state.
+          this.emit("progress", { method: frame.method, params: { ...params, repo_id: request.progress.repo_id } });
+        }
+      }
       this.emit("notification", { profileId: owner.profileId, method: frame.method, params: "params" in frame ? frame.params : undefined });
       return;
     }

@@ -4,52 +4,7 @@ import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionSt
 // free of `unknown` assertions and makes the agent's RPC surface
 // self-documenting.
 
-// ── Capability Set (renderer-side mirror of electron/repo-provider.ts) ──
-
-/**
- * Feature flags describing what a given repository supports at this
- * moment. Determined at open time and updated on connection state
- * changes. The renderer uses these to enable/disable UI controls
- * instead of checking `is_remote`.
- */
-export interface CapabilitySet {
-  /** File writing (create, rename, delete, write). */
-  canEdit: boolean;
-  /** Real-time file change notifications. */
-  canWatch: boolean;
-  /** Hunk-level git staging. */
-  canStageHunks: boolean;
-  /** Git worktree management. */
-  canWorktree: boolean;
-  /** PR/forge operations (depends on forge_provider). */
-  canForge: boolean;
-  /** Crab hydrate/dehydrate. */
-  canHydrate: boolean;
-  /** Full-text search. */
-  canSearch: boolean;
-  /** Command execution (terminals, build/run). */
-  canExec: boolean;
-  /** Move to trash (local only — remote has no trash). */
-  canTrash: boolean;
-}
-
-/**
- * Returns a CapabilitySet with all flags set to true. Used as the
- * default for local repos which have full access.
- */
-export function fullCapabilities(): CapabilitySet {
-  return {
-    canEdit: true,
-    canWatch: true,
-    canStageHunks: true,
-    canWorktree: true,
-    canForge: true,
-    canHydrate: true,
-    canSearch: true,
-    canExec: true,
-    canTrash: true,
-  };
-}
+import type { CapabilitySet } from "../electron/repo-capabilities";
 
 export interface RepoHandle {
   repo_id: string;

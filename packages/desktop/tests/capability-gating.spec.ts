@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { RemoteProvider } from "../electron/remote-provider";
-import { fullCapabilities, noCapabilities, type CapabilitySet } from "../electron/repo-provider";
+import { fullCapabilities, noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 
 // ── Mock factories (same patterns as remote-provider-polling.spec.ts) ──
 
@@ -212,22 +212,22 @@ describe("RemoteProvider capabilities", () => {
     expect(caps.canTrash).toBe(false);
   });
 
-  it("returns conservative defaults when capabilities not yet negotiated", async () => {
+  it("returns no capabilities without a negotiated native agent", async () => {
     mockCapNegotiator.getCached.mockReturnValue(null);
 
     const caps = await provider.capabilities(REPO_ID);
 
-    // canEdit and basic git ops should be true (optimistic)
-    expect(caps.canEdit).toBe(true);
-    expect(caps.canStageHunks).toBe(true);
-    expect(caps.canWorktree).toBe(true);
-    expect(caps.canForge).toBe(true);
-    // Features requiring agent support should be false (conservative)
-    expect(caps.canWatch).toBe(false);
-    expect(caps.canHydrate).toBe(false);
-    expect(caps.canSearch).toBe(false);
-    expect(caps.canExec).toBe(false);
-    expect(caps.canTrash).toBe(false);
+    expect(caps).toEqual(noCapabilities());
+  });
+
+  it("revokes watched repository capabilities when the native agent exits", async () => {
+    await provider.watchStart(REPO_ID);
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockCapNegotiator.getCached.mockReturnValue(null);
+    mockSessionManager.emit("ssh:agent-unavailable", { profileId: "profile-1" });
+    await Promise.resolve();
+    expect(changes).toEqual([{ type: "capabilities-changed", repoId: REPO_ID, capabilities: noCapabilities() }]);
   });
 
   it("returns noCapabilities for non-remote repo_id", async () => {

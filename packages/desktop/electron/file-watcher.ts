@@ -174,8 +174,8 @@ export function registerFileWatcher(getWindow: () => BrowserWindow | null): void
   ipcMain.handle("crab:fs-watch-start", async (_evt, repoPath: string) => {
     const registry = getProviderRegistry();
 
-    // If the path is a registered remote repo_id, delegate to the provider.
-    if (registry.has(repoPath) && parseRepoId(repoPath)) {
+    // Require the remote provider before attempting any local watching.
+    if (parseRepoId(repoPath)) {
       const provider = registry.resolve(repoPath);
       if (provider) {
         await provider.watchStart(repoPath);
@@ -191,8 +191,8 @@ export function registerFileWatcher(getWindow: () => BrowserWindow | null): void
   ipcMain.handle("crab:fs-watch-stop", async (_evt, repoPath: string) => {
     const registry = getProviderRegistry();
 
-    // If the path is a registered remote repo_id, delegate to the provider.
-    if (registry.has(repoPath) && parseRepoId(repoPath)) {
+    // Require the remote provider before attempting any local watching.
+    if (parseRepoId(repoPath)) {
       const provider = registry.resolve(repoPath);
       if (provider) {
         await provider.watchStop(repoPath);

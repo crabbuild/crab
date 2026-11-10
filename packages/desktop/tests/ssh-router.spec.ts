@@ -383,6 +383,42 @@ describe("RpcRouter — call queuing during reconnection", () => {
 });
 
 describe("RpcRouter — notification forwarding", () => {
+  it.each([
+    { method: "list", params: { op_id: "owned" }, event: "progress/partial", data: { op_id: "owned", kind: "list_entry", chunk: { path: "data.bin" } } },
+    { method: "crab_push_structured", params: { job_id: "owned" }, event: "crab/push_progress", data: { job_id: "owned", event: "upload_progress", data: { bytes_uploaded: 1024 } } },
+  ])("preserves $event notifications under their native operation identity", async ({ method, params, event, data }) => {
+    const sm = new MockSessionManager(), channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const progress: unknown[] = [];
+    router.on("progress", event => progress.push(event));
+    const repo_id = "ssh://server/repo";
+    const pending = router.route(repo_id, method, { ...params, repo_id });
+    simulateNotification(channel, event, data);
+    simulateResponse(channel, 1, {});
+    await pending;
+    expect(progress).toEqual([{ method: event, params: { ...data, repo_id } }]);
+  });
+
+  it("scopes UI progress to the pending request and drops unrelated or late jobs", async () => {
+    const sm = new MockSessionManager(), channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const progress: unknown[] = [];
+    router.on("progress", event => progress.push(event));
+    const repo_id = "ssh://server/repo";
+    const pending = router.route(repo_id, "file_materialize", { repo_id, file_id: "captured", op_id: "owned-job" });
+    simulateNotification(channel, "progress/complete", { job_id: "another-job", status: 0 });
+    simulateNotification(channel, "progress/transfer", { job_id: "owned-job", repo_id: "ssh://other/repo", written_bytes: 4 });
+    simulateNotification(channel, "progress/complete", { job_id: "owned-job", status: 0 });
+    simulateResponse(channel, 1, { written_bytes: 4 });
+    await pending;
+    simulateNotification(channel, "progress/complete", { job_id: "owned-job", status: 1 });
+    expect(progress).toEqual([{ method: "progress/complete", params: { job_id: "owned-job", repo_id, status: 0 } }]);
+  });
+
   it("forwards notifications with profileId tag", async () => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();

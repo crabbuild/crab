@@ -20,14 +20,13 @@
 
 import {
   BaseProvider,
-  noCapabilities,
-  type CapabilitySet,
   type FsCreateResult,
   type FsDeleteResult,
   type FsReadResult,
   type FsRenameResult,
   type FsWriteResult,
 } from "./repo-provider";
+import { noCapabilities, type CapabilitySet } from "./repo-capabilities";
 import { parseRepoId, type RpcRouter } from "./ssh-router";
 import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { RemoteGitManager } from "./ssh-remote-git";
@@ -87,6 +86,7 @@ export class RemoteProvider extends BaseProvider {
 
   /** Bound handler for SSH connection status changes (stored for cleanup). */
   private readonly onStatusChanged: (payload: { profileId: string; status: SshConnectionStatus; error?: string }) => void;
+  private readonly onAgentUnavailable: (payload: { profileId: string }) => void;
 
   constructor(options: RemoteProviderOptions) {
     super();
@@ -102,6 +102,11 @@ export class RemoteProvider extends BaseProvider {
     // Subscribe to connection status changes to stop/restart watching
     this.onStatusChanged = this.handleStatusChanged.bind(this);
     this.sessionManager.on("ssh:status-changed", this.onStatusChanged);
+    this.onAgentUnavailable = ({ profileId }) => {
+      this.stopWatchingProfile(profileId);
+      void this.emitCapabilityChanges(profileId);
+    };
+    this.sessionManager.on("ssh:agent-unavailable", this.onAgentUnavailable);
   }
 
   // ── Core Dispatch ────────────────────────────────────────────
@@ -281,44 +286,7 @@ export class RemoteProvider extends BaseProvider {
 
     const status = this.getConnectionStatus(parsed.profileId);
 
-    // No capabilities when disconnected or in error state
-    if (status !== "connected" && status !== "reconnecting") {
-      return noCapabilities();
-    }
-
-    // During reconnection, report limited capabilities (reads may work
-    // from cache, but writes are unavailable)
-    if (status === "reconnecting") {
-      return {
-        canEdit: false,
-        canWatch: false,
-        canStageHunks: false,
-        canWorktree: false,
-        canForge: false,
-        canHydrate: false,
-        canSearch: false,
-        canExec: false,
-        canTrash: false,
-      };
-    }
-
-    // Connected — resolve capabilities from the negotiator
-    const agentCaps = this.capabilityNegotiator.getCached(parsed.profileId);
-
-    if (!agentCaps) {
-      // Capabilities not yet negotiated — return conservative defaults
-      return {
-        canEdit: true,
-        canWatch: false,
-        canStageHunks: true,
-        canWorktree: true,
-        canForge: true,
-        canHydrate: false,
-        canSearch: false,
-        canExec: false,
-        canTrash: false,
-      };
-    }
+    if (status !== "connected" || !this.capabilityNegotiator.getCached(parsed.profileId)) return noCapabilities();
 
     return {
       canEdit: true,
@@ -341,6 +309,7 @@ export class RemoteProvider extends BaseProvider {
 
     // Unsubscribe from connection status changes
     this.sessionManager.off("ssh:status-changed", this.onStatusChanged);
+    this.sessionManager.off("ssh:agent-unavailable", this.onAgentUnavailable);
 
     // Clear all watch debounce timers
     for (const state of this.watchedRepos.values()) {
@@ -389,26 +358,7 @@ export class RemoteProvider extends BaseProvider {
   private handleStatusChanged(payload: { profileId: string; status: SshConnectionStatus; error?: string }): void {
     const { profileId, status } = payload;
 
-    if (status === "reconnecting" || status === "disconnected" || status === "error") {
-      // Connection lost — stop emitting events for repos on this profile.
-      // Clear debounce timers but keep the repos in the watched set so
-      // we can restart watching on reconnection.
-      for (const state of this.watchedRepos.values()) {
-        if (state.profileId !== profileId) continue;
-        if (state.debounceTimer) {
-          clearTimeout(state.debounceTimer);
-          state.debounceTimer = null;
-        }
-      }
-
-      // Stop polling if it's for a repo on this profile
-      if (this.pollingRepoId) {
-        const parsed = parseRepoId(this.pollingRepoId);
-        if (parsed && parsed.profileId === profileId) {
-          this.stopPolling();
-        }
-      }
-    }
+    if (status !== "connected") this.stopWatchingProfile(profileId);
 
     if (status === "connected") {
       // Connection restored — restart watching for all repos on this profile.
@@ -422,6 +372,27 @@ export class RemoteProvider extends BaseProvider {
     // Re-resolve capabilities for all watched repos on this profile and
     // emit capabilities-changed events so the renderer updates UI controls.
     void this.emitCapabilityChanges(profileId);
+  }
+
+  private stopWatchingProfile(profileId: string): void {
+    // Connection lost — stop emitting events for repos on this profile.
+    // Clear debounce timers but keep the repos in the watched set so
+    // we can restart watching on reconnection.
+    for (const state of this.watchedRepos.values()) {
+      if (state.profileId !== profileId) continue;
+      if (state.debounceTimer) {
+        clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+      }
+    }
+
+    // Stop polling if it's for a repo on this profile
+    if (this.pollingRepoId) {
+      const parsed = parseRepoId(this.pollingRepoId);
+      if (parsed && parsed.profileId === profileId) {
+        this.stopPolling();
+      }
+    }
   }
 
   /**

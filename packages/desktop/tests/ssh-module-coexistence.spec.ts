@@ -20,7 +20,6 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RemoteProvider, type RemoteProviderOptions } from "../electron/remote-provider";
-import { ProviderRegistry } from "../electron/provider-registry";
 
 // ── Mock Factories ───────────────────────────────────────────────
 
@@ -262,20 +261,6 @@ describe("SSH module coexistence — SSH-view features remain independent", () =
       expect(channel).not.toBe("crab:rpc");
       expect(channel).not.toContain("crab:");
     }
-  });
-
-  it("ProviderRegistry does not interfere with SSH-specific IPC handlers", () => {
-    const registry = new ProviderRegistry();
-
-    // Even with no providers registered, SSH-specific IPC handlers
-    // (which are on separate channels) continue to function.
-    // The registry only affects the crab:rpc channel routing.
-    expect(registry.resolve("ssh://server/repo")).toBeNull();
-
-    // This null result means the crab:rpc handler would fall through
-    // to RpcRouter-based routing — but SSH-specific IPC handlers
-    // (ssh:read-file, ssh:git-status, etc.) are completely unaffected
-    // because they're on different IPC channels.
   });
 
   it("RemoteFileEditor can be used by both RemoteProvider and ssh:* IPC handlers simultaneously", () => {

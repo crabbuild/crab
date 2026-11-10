@@ -12,34 +12,7 @@
 
 import { EventEmitter } from "node:events";
 
-// ── Capability Set ───────────────────────────────────────────────
-
-/**
- * Feature flags describing what a given repository supports at this
- * moment. Determined at open time and updated on connection state
- * changes. The renderer uses these to enable/disable UI controls
- * instead of checking `is_remote`.
- */
-export interface CapabilitySet {
-  /** File writing (create, rename, delete, write). */
-  canEdit: boolean;
-  /** Real-time file change notifications. */
-  canWatch: boolean;
-  /** Hunk-level git staging. */
-  canStageHunks: boolean;
-  /** Git worktree management. */
-  canWorktree: boolean;
-  /** PR/forge operations (depends on forge_provider). */
-  canForge: boolean;
-  /** Crab hydrate/dehydrate. */
-  canHydrate: boolean;
-  /** Full-text search. */
-  canSearch: boolean;
-  /** Command execution (terminals, build/run). */
-  canExec: boolean;
-  /** Move to trash (local only — remote has no trash). */
-  canTrash: boolean;
-}
+import type { CapabilitySet } from "./repo-capabilities";
 
 // ── Provider Events ──────────────────────────────────────────────
 
@@ -176,42 +149,4 @@ export abstract class BaseProvider extends EventEmitter implements ProviderEvent
   abstract fsRead(repoId: string, path: string): Promise<FsReadResult>;
   abstract capabilities(repoId: string): Promise<CapabilitySet>;
   abstract dispose(): void;
-}
-
-// ── Utility: Full capability set (local default) ─────────────────
-
-/**
- * Returns a CapabilitySet with all flags set to true. Used as the
- * default for local repos which have full access.
- */
-export function fullCapabilities(): CapabilitySet {
-  return {
-    canEdit: true,
-    canWatch: true,
-    canStageHunks: true,
-    canWorktree: true,
-    canForge: true,
-    canHydrate: true,
-    canSearch: true,
-    canExec: true,
-    canTrash: true,
-  };
-}
-
-/**
- * Returns a CapabilitySet with all flags set to false. Used when a
- * remote connection is lost and no operations are available.
- */
-export function noCapabilities(): CapabilitySet {
-  return {
-    canEdit: false,
-    canWatch: false,
-    canStageHunks: false,
-    canWorktree: false,
-    canForge: false,
-    canHydrate: false,
-    canSearch: false,
-    canExec: false,
-    canTrash: false,
-  };
 }
