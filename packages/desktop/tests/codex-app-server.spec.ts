@@ -37,7 +37,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 12345,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),

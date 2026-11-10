@@ -32,7 +32,6 @@ function createFakeProcess() {
   proc.stdin = stdin;
   proc.stdout = stdout;
   proc.stderr = stderr;
-  proc.pid = 12345;
   proc.kill = vi.fn();
   return { proc, stdin, stdout, stderr };
 }

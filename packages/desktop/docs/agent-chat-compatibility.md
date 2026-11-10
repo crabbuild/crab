@@ -1346,6 +1346,35 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   owned output. These checks do not establish durable mutation receipts across
   process death or task-database persistence failure; that remains release work.
 
+- Local native providers now start in an owned POSIX process group. Both adapters
+  signal that group and publish physical closure only after the group disappears
+  and stdio closes. Provider exit retires remaining members, including children
+  that ignore TERM or retain inherited stdio. This differs intentionally from
+  managed Run scripts: a background Run remains usable after its shell exits;
+  a conversation cannot use a dead provider. Unknown closure rejects without an
+  adapter exit event, retaining the writer at destructive workspace boundaries.
+  Denied Darwin probes remain uncertain until ESRCH; bounded failure preserves
+  its source error. Released groups cannot receive later signals from this owner.
+  [Node's exit/close distinction](https://nodejs.org/docs/latest-v22.x/api/child_process.html#event-close),
+  [POSIX detached sessions](https://nodejs.org/docs/latest-v22.x/api/child_process.html#optionsdetached)
+  and [leader-only kill semantics](https://nodejs.org/docs/latest-v22.x/api/child_process.html#subprocesskillsignal)
+  define this boundary. Protocol-only mocks no longer invent OS process IDs;
+  real fixtures qualify the physical owner separately.
+  Both new real-process cases failed before the fix. Current macOS proof passes
+  108 scoped checks, 29 process/workspace cases, six native provider cases and
+  two native shell-writer cancellations. Both installed providers stop actual
+  TERM-resistant parent/child writers before cancellation resolves. Codex review
+  cancellation, Claude startup-hook cancellation, model catalogs and exact file
+  writes remain verified with the existing CLI logins. Production/fixture types
+  and Electron build pass. Evidence: `local-native-owner-before.json`,
+  `local-native-owner-scoped-final.json`, `local-native-owner-live-final.json`,
+  `local-native-owner-providers.json`, and `local-native-tool-cancel.json` in the
+  owned output. CI runs the two inference-free owner cases on Linux and macOS.
+  A process group does not contain every provider tool:
+  [Codex tools can start their own groups/sessions](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/utils/pty/src/process_group.rs).
+  Normal native interruption has writer proof; forced provider death, escaped
+  descendants, packaged crash recovery and Windows job ownership remain gates.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;

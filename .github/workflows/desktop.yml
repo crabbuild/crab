@@ -108,6 +108,11 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
+      - name: Qualify local native process group ownership
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-native-owner"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-owner" npm test -- tests/agent-process-live.spec.ts
       - name: Build desktop runtime and application
         run: npm run build
       - name: Test native desktop integration

@@ -30,7 +30,7 @@ describe("Codex thread resume", () => {
     stdin = new PassThrough();
     stdout = new PassThrough();
     const child = Object.assign(new EventEmitter(), {
-      stdin, stdout, stderr: new PassThrough(), pid: 99999, kill: vi.fn(),
+      stdin, stdout, stderr: new PassThrough(), kill: vi.fn(),
     });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     adapter = new CodexAppServerAdapter();
