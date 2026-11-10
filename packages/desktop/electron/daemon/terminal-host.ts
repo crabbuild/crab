@@ -44,6 +44,8 @@ export interface CreateOrAttachOptions {
   cwd?: string;
   env?: Record<string, string>;
   command?: string;
+  shell?: string;
+  startupCommand?: string;
   shellReadySupported?: boolean;
   agentMeta?: AgentMeta;
   streamClient: StreamClient;
@@ -483,13 +485,18 @@ export class TerminalHost {
     const defaultShell = process.platform === "win32"
       ? process.env.COMSPEC || "cmd.exe"
       : process.env.SHELL ?? "/bin/sh";
-    const file = opts.command ?? defaultShell;
+    const file = opts.command ?? opts.shell ?? defaultShell;
+    const shellReadySupported = opts.shellReadySupported === true && ["zsh", "bash"].includes(file.split(/[\\/]/).pop() ?? "");
+    const loginShell = ["zsh", "bash", "fish", "ksh"].includes(file.split(/[\\/]/).pop() ?? "");
+    const args = !opts.command && process.platform !== "win32" && loginShell ? ["--login"] : [];
     const subprocess = this.spawnSubprocess({
       file,
+      args,
       cols,
       rows,
       cwd: opts.cwd,
       env: opts.env,
+      shellReadySupported,
     });
 
     let session!: Session;
@@ -499,7 +506,7 @@ export class TerminalHost {
       rows,
       cwd: opts.cwd ?? null,
       subprocess,
-      shellReadySupported: opts.shellReadySupported ?? false,
+      shellReadySupported,
       agentMeta: opts.agentMeta,
       onExit: (sessionId, exitCode) => {
         if (this.sessions.get(sessionId) === session) {
@@ -511,6 +518,9 @@ export class TerminalHost {
 
     this.sessions.set(opts.sessionId, session);
     session.attachClient(opts.streamClient);
+    // Session's ready barrier queues input until shell integration reports a
+    // prompt (or times out). A command line is shell input, never an executable path.
+    if (opts.startupCommand) session.write(opts.startupCommand + "\r");
 
     return {
       isNew: true,

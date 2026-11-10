@@ -58,19 +58,17 @@ sessions and in-process user shells open at the same time.
 
 ### Default rules
 
-When `sessionType` is omitted from a spawn call, the main process
-applies these defaults:
+Ordinary terminal spawns default to `"daemon"`. An explicit
+`CRAB_PTY_MODE=in-process` setting retains its ephemeral-shell contract. An agent may be started
+interactively after shell creation, so durability cannot depend on detecting an
+agent in the initial spawn payload. Explicit `"in-process"` requests remain
+available for ephemeral terminals. Unavailable daemon service is a typed error,
+not a silent downgrade to a process that dies with the app.
 
-| Spawn includes `agentMeta`? | Default `sessionType` |
-|-----------------------------|-----------------------|
-| Yes                         | `"daemon"`            |
-| No                          | `"in-process"`        |
-
-Agent flows (TopBar agent dropdown, `AgentTasksView`,
-`AgentManagerView`, orchestrator-driven spawns) always pass
-`sessionType: "daemon"` and a populated `agentMeta`. The generic
-terminal pane (user-opened tabs, "Open Terminal Here", split-view
-auto-spawn) defaults to `"in-process"`.
+Terminal IDs use a UUID after `term-d-` or `term-l-`, and durable sessions have a
+repository/task owner prefix. IDs do not collide with surviving sessions after
+an Electron restart. Reattach of v2.0.0-alpha.1 numeric IDs retains its original
+cwd-based lookup for that tagged upgrade boundary.
 
 ### Manual override
 
@@ -98,9 +96,9 @@ Controls whether the daemon is started at all.
 
 | Value        | Behavior |
 |--------------|----------|
-| `auto`       | Attempt to start the daemon; fall back to in-process on failure. This is the default. |
+| `auto`       | Attempt to start the daemon. Durable spawns fail visibly if unavailable; explicit local terminals remain available. This is the default. |
 | `daemon`     | Require the daemon; throw a fatal error if it cannot start. |
-| `in-process` | Skip the daemon entirely; all sessions are in-process. |
+| `in-process` | Skip the daemon; ordinary shells are ephemeral. Explicit durable/agent requests fail visibly. |
 
 ```bash
 # Force daemon-only mode (useful for CI or scripted environments)
@@ -125,11 +123,11 @@ CRAB_DAEMON_ENTRY=/path/to/daemon-main.js crab-desktop
 Resolution order when `CRAB_DAEMON_ENTRY` is not set:
 
 1. **Packaged app**: `<app>/Contents/Resources/daemon/daemon-main.js`
-2. **Development**: `dist-electron/daemon/daemon-main.js`
+2. **Development**: `dist-electron/daemon/daemon-main.cjs`
 
 If the resolved path does not exist, the main process emits a fatal
 error that includes all searched paths and the `CRAB_DAEMON_ENTRY`
-override hint, then falls back to in-process mode.
+override hint. Durable requests fail visibly; explicit local terminals remain available.
 
 Whether the path came from the env var is surfaced in the diagnostics
 panel as `daemonEntryFromEnv` for support debugging.
@@ -408,10 +406,11 @@ triggers `autoRespawn.restartDaemon()` and resets the breaker.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-This appears when the app was updated but the old daemon is still
-running. Clicking **Apply Daemon Upgrade** triggers a zero-downtime
-handoff (`crab:daemon-prepare-upgrade`) that swaps in the new binary
-without dropping live PTY sessions.
+This appears when the app was updated but its existing daemon is still running.
+Application updates reuse that daemon, so a changed application path does not end
+its shells or foreground agents. **Apply Daemon Upgrade** refuses replacement
+while terminals are live: inherited PTY descriptors currently cannot be resized
+by their successor. End those terminals before requesting daemon replacement.
 
 ### Actions
 
@@ -419,23 +418,11 @@ without dropping live PTY sessions.
 |--------|----------|--------|
 | Refresh | — | Re-fetches diagnostics immediately |
 | Restart Daemon | `crab:daemon-restart` | Kills all daemon sessions, respawns the daemon |
-| Apply Daemon Upgrade | `crab:daemon-prepare-upgrade` | Zero-downtime binary swap (visible when `pathMismatch` is true) |
+| Apply Daemon Upgrade | `crab:daemon-prepare-upgrade` | Requests replacement only when no terminals are running |
 
-## Zero-Downtime Daemon Upgrade
-
-When the app is updated, the new daemon binary can replace the running
-one without dropping live PTY sessions:
-
-1. The main process calls `crab:daemon-prepare-upgrade`.
-2. The predecessor daemon serializes all live sessions (PTY master fds
-   + pending output buffers) to a snapshot file.
-3. The successor daemon is spawned with `--handoff --snapshot <path>`.
-4. The successor adopts the inherited fds, replays pending buffers to
-   attached clients, binds the socket, and sends an upgrade ack.
-5. The predecessor exits cleanly. Live PTYs continue uninterrupted.
-
-If the handoff fails at any step, the predecessor continues running,
-the successor is killed, and the diagnostics panel shows the error.
+Application restart and daemon replacement have different lifetime contracts.
+The restart recovery checks cover reusing the existing daemon. The low-level
+fd-handoff implementation is not used to migrate live terminals.
 
 ## Troubleshooting
 
@@ -448,7 +435,7 @@ the successor is killed, and the diagnostics panel shows the error.
 3. Open the Health & Diagnostics panel and look at the **Mode** field
    for the fallback reason.
 4. In development, run `npm run build:electron` to ensure
-   `dist-electron/daemon/daemon-main.js` exists.
+   `dist-electron/daemon/daemon-main.cjs` exists.
 
 ### Sessions not surviving restart
 

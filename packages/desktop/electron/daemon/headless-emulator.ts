@@ -276,8 +276,7 @@ export class HeadlessEmulator {
       mouseTracking: mouseTrackingMode !== "none",
       mouseTrackingMode,
       sgrMouseMode: this.sgrMouseMode,
-      applicationCursor:
-        buffer.type === "normal" ? this.terminal.modes.applicationCursorKeysMode : false,
+      applicationCursor: this.terminal.modes.applicationCursorKeysMode,
       alternateScreen: buffer.type === "alternate",
     };
   }

@@ -72,7 +72,10 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+      - name: Install macOS SSH terminal test dependency
+        if: runner.os == 'macOS'
+        run: command -v tmux || brew install tmux
       - name: Install desktop dependencies
         # Electron's install script downloads its runtime outside npm's cache.
         run: npm ci || npm ci

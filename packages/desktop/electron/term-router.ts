@@ -6,8 +6,8 @@
  * InProcessBridge based on the resolved session type.
  *
  * Renderer IDs are partitioned:
- *   term-d-N  → daemon-backed session
- *   term-l-N  → in-process (local) session
+ *   term-d-UUID  → daemon-backed session
+ *   term-l-UUID  → in-process (local) session
  *
  * Refusing daemon spawns when the daemon is unavailable or the circuit
  * breaker is open is a hard error — no silent fallback.
@@ -15,6 +15,7 @@
 
 import type { CircuitBreaker } from "./daemon/circuit-breaker";
 import type { AgentMeta } from "./daemon/types";
+import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Minimal interface types (avoid pulling in full Electron at test time)
@@ -44,6 +45,7 @@ export type SessionType = "daemon" | "in-process";
 
 export interface TermSpawnPayload {
   cwd: string;
+  ownerPath?: string;
   sessionType?: SessionType;
   shell?: string;
   env?: Record<string, string>;
@@ -56,11 +58,9 @@ export interface TermSpawnPayload {
 // ---------------------------------------------------------------------------
 
 export interface TermSpawnResult {
-  /** Renderer-facing session ID: term-d-N or term-l-N. */
+  /** Renderer-facing session ID: term-d-UUID or term-l-UUID. */
   id: string;
   resolvedSessionType: SessionType;
-  /** Present when the requested session type could not be honored. */
-  fellBack?: { reason: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +118,7 @@ export interface InProcessBridge {
 export interface ModeResolution {
   /** Whether the daemon is currently available for new sessions. */
   daemonReady: boolean;
+  configuredMode?: "auto" | "daemon" | "in-process";
 }
 
 export interface ModeResolutionProvider {
@@ -150,10 +151,6 @@ export class TermRouter {
 
   /** Renderer ID → session type, so write/resize/kill route correctly. */
   private readonly sessionTypeMap = new Map<string, SessionType>();
-
-  /** Separate counters for each session type to produce partitioned IDs. */
-  private daemonCounter = 0;
-  private localCounter = 0;
 
   /** Whether register() has been called. Prevents double-registration. */
   private registered = false;
@@ -208,20 +205,18 @@ export class TermRouter {
    *
    * Rules (in priority order):
    * 1. Explicit `sessionType` from the caller is respected.
-   * 2. When `agentMeta` is present and no explicit type, default to "daemon".
-   * 3. Otherwise default to "in-process" (ephemeral, no leak risk).
+   * 2. All ordinary terminals are durable: an agent can be started later
+   *    inside any shell, after the spawn payload has been resolved.
    */
   resolveSessionType(
     payload: TermSpawnPayload,
-    _mode: ModeResolution,
+    mode: ModeResolution,
   ): SessionType {
     if (payload.sessionType !== undefined) {
       return payload.sessionType;
     }
-    if (payload.agentMeta !== undefined) {
-      return "daemon";
-    }
-    return "in-process";
+    if (payload.agentMeta) return "daemon";
+    return mode.configuredMode === "in-process" ? "in-process" : "daemon";
   }
 
   /**
@@ -244,17 +239,6 @@ export class TermRouter {
    */
   registerSession(rendererId: string, type: SessionType): void {
     this.sessionTypeMap.set(rendererId, type);
-    const match = /^term-([dl])-(\d+)$/.exec(rendererId);
-    if (match) {
-      const n = Number(match[2]);
-      if (Number.isFinite(n)) {
-        if (type === "daemon" && match[1] === "d") {
-          this.daemonCounter = Math.max(this.daemonCounter, n);
-        } else if (type === "in-process" && match[1] === "l") {
-          this.localCounter = Math.max(this.localCounter, n);
-        }
-      }
-    }
   }
 
   /** Remove a renderer session from routing without killing the backend. */
@@ -286,54 +270,27 @@ export class TermRouter {
     const resolved = this.resolveSessionType(payload, mode);
 
     if (resolved === "daemon") {
-      // When daemon is unavailable or circuit breaker is open:
-      // - Agent sessions (agentMeta present) get a hard error — durability is required.
-      // - User sessions gracefully fall back to in-process with a fellBack indicator.
-      const isAgentSession = payload.agentMeta != null;
-
       if (!mode.daemonReady) {
-        if (isAgentSession) {
-          return {
-            ok: false,
-            error: "daemon-unavailable",
-            message:
-              "Daemon is not available. Start the daemon or use an in-process session.",
-          };
-        }
-        // Graceful fallback for user terminals
-        return this.spawnInProcess(payload, "Daemon not available — using local session");
+        return { ok: false, error: "daemon-unavailable", message: "Terminal service is unavailable. Retry or explicitly open a local terminal." };
       }
-
       if (!this.circuitBreaker.shouldAttemptDaemon) {
-        if (isAgentSession) {
-          const snap = this.circuitBreaker.getSnapshot();
-          return {
-            ok: false,
-            error: "daemon-circuit-open",
-            message: "Daemon circuit breaker is open. Too many recent failures.",
-            cooldownRemainingMs: snap.cooldownRemainingMs ?? undefined,
-          };
-        }
-        // Graceful fallback for user terminals
-        return this.spawnInProcess(payload, "Daemon circuit breaker open — using local session");
+        const snap = this.circuitBreaker.getSnapshot();
+        return {
+          ok: false, error: "daemon-circuit-open",
+          message: "Terminal service is temporarily unavailable after repeated failures.",
+          cooldownRemainingMs: snap.cooldownRemainingMs ?? undefined,
+        };
       }
-
-      const rendererId = `term-d-${++this.daemonCounter}`;
+      // IDs outlive this Electron process. Counters would attach new tabs to
+      // an old background PTY after relaunch, even in a different repository.
+      const rendererId = `term-d-${randomUUID()}`;
       try {
         await this.daemonBridge.handleSpawn(payload, rendererId);
         this.sessionTypeMap.set(rendererId, "daemon");
         return { id: rendererId, resolvedSessionType: "daemon" };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        if (isAgentSession) {
-          return {
-            ok: false,
-            error: "daemon-unavailable",
-            message: `Daemon spawn failed: ${message}`,
-          };
-        }
-        // Graceful fallback for user terminals on spawn failure
-        return this.spawnInProcess(payload, `Daemon spawn failed — using local session: ${message}`);
+        return { ok: false, error: "daemon-unavailable", message: `Cannot start terminal: ${message}` };
       }
     }
 
@@ -341,22 +298,17 @@ export class TermRouter {
     return this.spawnInProcess(payload);
   }
 
-  /**
-   * Spawn an in-process terminal session. Optionally includes a fellBack
-   * reason when the session was originally intended for daemon mode.
-   */
+  /** Spawn an explicitly ephemeral terminal session. */
   private async spawnInProcess(
     payload: TermSpawnPayload,
-    fellBackReason?: string,
   ): Promise<TermSpawnResult> {
-    const rendererId = `term-l-${++this.localCounter}`;
+    const rendererId = `term-l-${randomUUID()}`;
     try {
       await this.inProcessBridge.handleSpawn(payload, rendererId);
       this.sessionTypeMap.set(rendererId, "in-process");
       return {
         id: rendererId,
         resolvedSessionType: "in-process",
-        ...(fellBackReason ? { fellBack: { reason: fellBackReason } } : {}),
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

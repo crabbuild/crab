@@ -59,6 +59,8 @@ export interface CreateOrAttachPayload {
   cwd?: string;
   env?: Record<string, string>;
   command?: string;
+  shell?: string;
+  startupCommand?: string;
   shellReadySupported?: boolean;
   agentMeta?: AgentMeta;
 }
@@ -69,6 +71,16 @@ export interface CreateOrAttachResult {
   snapshot: TerminalSnapshot | null;
   pid: number | null;
   shellState: ShellReadyState;
+}
+
+/** Compose a snapshot for replay into an xterm-compatible terminal. */
+export function snapshotReplayData(snapshot: Pick<TerminalSnapshot, "snapshotAnsi" | "rehydrateSequences">): string {
+  const alternateScreen = "\x1b[?1049h";
+  const modes = snapshot.rehydrateSequences;
+  if (!modes.includes(alternateScreen)) return snapshot.snapshotAnsi + modes;
+  // Entering the alternate screen clears it. Paint after entering, then
+  // restore remaining modes without clearing the recovered agent display.
+  return alternateScreen + snapshot.snapshotAnsi + modes.replaceAll(alternateScreen, "");
 }
 
 /** Payload for prepare-upgrade requests. */

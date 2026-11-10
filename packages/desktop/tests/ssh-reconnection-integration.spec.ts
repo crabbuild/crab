@@ -10,7 +10,7 @@
  * 4. Write operations are rejected immediately
  * 5. Non-cacheable read operations are queued
  * 6. Reconnection success → queued calls are replayed
- * 7. Terminal sessions are probed and either resumed or marked as ended
+ * 7. Closed terminal attachments resume their existing tmux sessions
  * 8. Audit log records the reconnection event
  */
 
@@ -19,7 +19,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ClientChannel } from "ssh2";
+import type { ClientChannel, ExecOptions } from "ssh2";
 
 import { RpcRouter } from "../electron/ssh-router";
 import { RemoteCache } from "../electron/ssh-cache";
@@ -29,6 +29,7 @@ import { SshAuditLog, bridgeAuditLog } from "../electron/ssh-audit-log";
 // ── Mock SSH channel ─────────────────────────────────────────────
 
 class MockChannel extends EventEmitter {
+  stderr = new EventEmitter();
   written: string[] = [];
   ended = false;
 
@@ -43,6 +44,9 @@ class MockChannel extends EventEmitter {
     this.emit("close");
   }
 
+  close(): void { this.end(); }
+  resume(): void {}
+
   setWindow(_rows: number, _cols: number, _height: number, _width: number): void {
     // no-op for tests
   }
@@ -54,40 +58,34 @@ class MockChannel extends EventEmitter {
 
 // ── Mock SSH Client ──────────────────────────────────────────────
 
+type ExecCallback = (error: Error | null, stream: ClientChannel) => void;
+
 class MockSshClient extends EventEmitter {
-  shellCalls: Array<{ opts: any; callback: Function }> = [];
-  private shellChannels: MockChannel[] = [];
+  commands: string[] = [];
+  controlError: string | null = null;
+  private terminalChannels: MockChannel[] = [];
 
-  /**
-   * Pre-register channels that will be returned by shell() calls.
-   */
-  addShellChannel(channel: MockChannel): void {
-    this.shellChannels.push(channel);
-  }
+  addTerminalChannel(channel: MockChannel): void { this.terminalChannels.push(channel); }
 
-  shell(opts: any, callback: (err: Error | null, stream: ClientChannel) => void): void {
-    this.shellCalls.push({ opts, callback });
-    const ch = this.shellChannels.shift();
-    if (ch) {
-      callback(null, ch.asChannel());
+  exec(command: string, optionsOrCallback: ExecOptions | ExecCallback, callback?: ExecCallback): void {
+    this.commands.push(command);
+    if (typeof optionsOrCallback === "function") {
+      const channel = new MockChannel();
+      const error = this.controlError;
+      this.controlError = null;
+      optionsOrCallback(null, channel.asChannel());
+      queueMicrotask(() => {
+        if (error) channel.stderr.emit("data", Buffer.from(error));
+        channel.emit("close", error ? 1 : 0);
+      });
     } else {
-      // Default: create a new channel
-      const newCh = new MockChannel();
-      callback(null, newCh.asChannel());
+      const channel = this.terminalChannels.shift() ?? new MockChannel();
+      callback?.(null, channel.asChannel());
+      setImmediate(() => channel.emit("data", Buffer.from("tmux screen")));
     }
   }
 
-  exec(cmd: string, callback: (err: Error | null, stream: ClientChannel) => void): void {
-    const ch = new MockChannel();
-    callback(null, ch.asChannel());
-    // Simulate immediate response for health checks
-    ch.emit("data", Buffer.from("1\n"));
-    ch.emit("close");
-  }
-
-  end(): void {
-    this.emit("end");
-  }
+  end(): void { this.emit("end"); }
 }
 
 // ── Mock SSH Session Manager ─────────────────────────────────────
@@ -329,160 +327,85 @@ describe("SSH Reconnection Integration", () => {
   });
 
   describe("terminal recovery after reconnection", () => {
-    it("probes terminal sessions and marks dead ones as ended", async () => {
-      // Set up a connected state with a terminal
-      const terminalChannel = new MockChannel();
-      const mockClient = new MockSshClient();
-      mockClient.addShellChannel(terminalChannel);
-
+    function connect(client: MockSshClient) {
+      sessionManager.setConnection(PROFILE_ID, { status: "connected", client });
       sessionManager.setStatus(PROFILE_ID, "connected");
-      sessionManager.setConnection(PROFILE_ID, {
-        status: "connected",
-        client: mockClient,
-        channels: { agent: new MockChannel().asChannel() },
-      });
+    }
 
-      // Open a terminal session
-      const terminalId = await terminalManager.openTerminal(PROFILE_ID, 80, 24, "/home/user");
-
-      // Verify terminal is alive
-      const session = terminalManager.getSession(terminalId);
-      expect(session).toBeDefined();
-      expect(session!.alive).toBe(true);
-
-      // Simulate network interruption — channel closes
-      terminalChannel.emit("close");
-
-      // The channel close handler should mark the session as ended
-      const updatedSession = terminalManager.getSession(terminalId);
-      expect(updatedSession!.alive).toBe(false);
-      expect(updatedSession!.awaitingReconnect).toBe(true);
+    it("retains the terminal identity when its transport channel closes", async () => {
+      const client = new MockSshClient();
+      const channel = new MockChannel();
+      client.addTerminalChannel(channel);
+      connect(client);
+      const id = await terminalManager.openTerminal(PROFILE_ID, 80, 24, "/home/user");
+      const ended = vi.fn();
+      terminalManager.on("ssh:terminal-session-ended", ended);
+      channel.emit("close");
+      expect(terminalManager.getSession(id)).toMatchObject({ terminalId: id, alive: false, awaitingReconnect: true, channel: null });
+      expect(ended).toHaveBeenCalledWith({ terminalId: id, profileId: PROFILE_ID });
     });
 
-    it("emits terminal-session-ended when probe fails after reconnection", async () => {
-      // Set up a terminal with a channel that will fail the probe
-      const terminalChannel = new MockChannel();
-      const mockClient = new MockSshClient();
-      mockClient.addShellChannel(terminalChannel);
-
-      sessionManager.setStatus(PROFILE_ID, "connected");
-      sessionManager.setConnection(PROFILE_ID, {
-        status: "connected",
-        client: mockClient,
-        channels: { agent: new MockChannel().asChannel() },
-      });
-
-      const terminalId = await terminalManager.openTerminal(PROFILE_ID, 120, 40);
-
-      // Collect events
-      const endedEvents: any[] = [];
-      terminalManager.on("ssh:terminal-session-ended", (e) => endedEvents.push(e));
-
-      // Simulate the channel dying (no response to probe)
-      // First, null out the channel to simulate it being dead
-      const session = terminalManager.getSession(terminalId);
-      session!.channel = null;
-
-      // Trigger reconnection handling
-      await terminalManager.handleReconnection(PROFILE_ID);
-
-      // Verify the session is marked as ended
-      expect(session!.alive).toBe(false);
-      expect(session!.awaitingReconnect).toBe(true);
-      expect(endedEvents).toHaveLength(1);
-      expect(endedEvents[0].terminalId).toBe(terminalId);
-      expect(endedEvents[0].profileId).toBe(PROFILE_ID);
+    it("automatically reattaches the same tmux session on a connected event", async () => {
+      const first = new MockSshClient();
+      const oldChannel = new MockChannel();
+      first.addTerminalChannel(oldChannel);
+      connect(first);
+      const id = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
+      oldChannel.emit("close");
+      sessionManager.setStatus(PROFILE_ID, "reconnecting");
+      const replacement = new MockSshClient();
+      const resumed = vi.fn();
+      terminalManager.on("ssh:terminal-resumed", resumed);
+      connect(replacement);
+      await vi.waitFor(() => expect(resumed).toHaveBeenCalledWith({ terminalId: id, profileId: PROFILE_ID }));
+      expect(terminalManager.getSession(id)).toMatchObject({ alive: true, awaitingReconnect: false });
+      expect(replacement.commands).toEqual([
+        expect.stringContaining(`has-session -t '=crab-${id}'`),
+        expect.stringContaining(`attach-session -d -t '=crab-${id}'`),
+      ]);
+      expect(oldChannel.written).toEqual([]);
     });
 
-    it("resumes terminal when probe succeeds after reconnection", async () => {
-      // Set up a terminal with a channel that will respond to probe
-      const terminalChannel = new MockChannel();
-      const mockClient = new MockSshClient();
-      mockClient.addShellChannel(terminalChannel);
-
-      sessionManager.setStatus(PROFILE_ID, "connected");
-      sessionManager.setConnection(PROFILE_ID, {
-        status: "connected",
-        client: mockClient,
-        channels: { agent: new MockChannel().asChannel() },
-      });
-
-      const terminalId = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
-
-      // Collect events
-      const resumedEvents: any[] = [];
-      terminalManager.on("ssh:terminal-resumed", (e) => resumedEvents.push(e));
-
-      // Simulate the probe succeeding: when the probe writes \x00,
-      // the channel responds with data
-      const session = terminalManager.getSession(terminalId);
-      const channel = session!.channel!;
-
-      // Override write to simulate the shell responding
-      const originalWrite = channel.write.bind(channel);
-      (channel as any).write = (data: any, ...args: any[]) => {
-        originalWrite(data, ...args);
-        // Simulate shell responding to the probe
-        if (data === "\x00") {
-          setTimeout(() => channel.emit("data", Buffer.from("")), 10);
-        }
-      };
-
-      // Trigger reconnection handling
-      await terminalManager.handleReconnection(PROFILE_ID);
-
-      // Verify the session is resumed
-      expect(resumedEvents).toHaveLength(1);
-      expect(resumedEvents[0].terminalId).toBe(terminalId);
-      expect(resumedEvents[0].profileId).toBe(PROFILE_ID);
+    it("keeps a failed remote restore retryable without creating a new shell", async () => {
+      const first = new MockSshClient();
+      const channel = new MockChannel();
+      first.addTerminalChannel(channel);
+      connect(first);
+      const id = await terminalManager.openTerminal(PROFILE_ID, 120, 40);
+      channel.emit("close");
+      const replacement = new MockSshClient();
+      replacement.controlError = "session is not available";
+      const output = vi.fn();
+      terminalManager.on("ssh:terminal-data", output);
+      connect(replacement);
+      await vi.waitFor(() => expect(output).toHaveBeenCalledWith(expect.objectContaining({ terminalId: id, data: expect.stringContaining("session is not available") })));
+      expect(terminalManager.getSession(id)).toMatchObject({ alive: false, awaitingReconnect: true });
+      expect(replacement.commands).toEqual([expect.stringContaining(`has-session -t '=crab-${id}'`)]);
+      const resumed = vi.fn();
+      terminalManager.on("ssh:terminal-resumed", resumed);
+      terminalManager.writeToTerminal(id, "\r");
+      await vi.waitFor(() => expect(resumed).toHaveBeenCalledWith({ terminalId: id, profileId: PROFILE_ID }));
+      expect(replacement.commands.some(command => command.includes("new-session"))).toBe(false);
     });
 
-    it("handles multiple terminals with mixed probe results", async () => {
-      const aliveChannel = new MockChannel();
-      const deadChannel = new MockChannel();
-      const mockClient = new MockSshClient();
-      mockClient.addShellChannel(aliveChannel);
-      mockClient.addShellChannel(deadChannel);
-
-      sessionManager.setStatus(PROFILE_ID, "connected");
-      sessionManager.setConnection(PROFILE_ID, {
-        status: "connected",
-        client: mockClient,
-        channels: { agent: new MockChannel().asChannel() },
-      });
-
-      const aliveTerminalId = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
-      const deadTerminalId = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
-
-      const resumedEvents: any[] = [];
-      const endedEvents: any[] = [];
-      terminalManager.on("ssh:terminal-resumed", (e) => resumedEvents.push(e));
-      terminalManager.on("ssh:terminal-session-ended", (e) => endedEvents.push(e));
-
-      // Make the alive channel respond to probe
-      const aliveSession = terminalManager.getSession(aliveTerminalId);
-      const aliveCh = aliveSession!.channel!;
-      const origWrite = aliveCh.write.bind(aliveCh);
-      (aliveCh as any).write = (data: any, ...args: any[]) => {
-        origWrite(data, ...args);
-        if (data === "\x00") {
-          setTimeout(() => aliveCh.emit("data", Buffer.from("ok")), 10);
-        }
-      };
-
-      // Make the dead channel not respond (null it out)
-      const deadSession = terminalManager.getSession(deadTerminalId);
-      deadSession!.channel = null;
-
-      await terminalManager.handleReconnection(PROFILE_ID);
-
-      // Alive terminal should be resumed
-      expect(resumedEvents).toHaveLength(1);
-      expect(resumedEvents[0].terminalId).toBe(aliveTerminalId);
-
-      // Dead terminal should be marked as ended
-      expect(endedEvents).toHaveLength(1);
-      expect(endedEvents[0].terminalId).toBe(deadTerminalId);
+    it("reattaches closed terminals while leaving healthy attachments untouched", async () => {
+      const client = new MockSshClient();
+      const healthy = new MockChannel();
+      const closed = new MockChannel();
+      client.addTerminalChannel(healthy);
+      client.addTerminalChannel(closed);
+      connect(client);
+      const healthyId = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
+      const closedId = await terminalManager.openTerminal(PROFILE_ID, 80, 24);
+      closed.emit("close");
+      const replacement = new MockSshClient();
+      const resumed = vi.fn();
+      terminalManager.on("ssh:terminal-resumed", resumed);
+      connect(replacement);
+      await vi.waitFor(() => expect(resumed).toHaveBeenCalledOnce());
+      expect(resumed).toHaveBeenCalledWith({ terminalId: closedId, profileId: PROFILE_ID });
+      expect(terminalManager.getSession(healthyId)?.channel).toBe(healthy);
+      expect(replacement.commands.every(command => !command.includes(healthyId))).toBe(true);
     });
   });
 

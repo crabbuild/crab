@@ -8,7 +8,7 @@
  */
 
 import type { DaemonClient } from "./daemon-client";
-import type { CreateOrAttachResult, ColdRestorePayload } from "./protocol";
+import { snapshotReplayData, type CreateOrAttachResult, type ColdRestorePayload } from "./protocol";
 import { reconcileOnStartup } from "./startup-reconciliation";
 import type { SessionInfo, TerminalSnapshot } from "./types";
 
@@ -52,6 +52,7 @@ export interface AgentMeta {
 /** Spawn payload accepted by handleSpawn. */
 export interface SpawnPayload {
   cwd: string;
+  ownerPath?: string;
   shell?: string;
   env?: Record<string, string>;
   startupCommand?: string;
@@ -92,7 +93,7 @@ interface BridgeState {
   /** Renderer ID → daemon session ID mapping. */
   rendererToDaemon: Map<string, string>;
   /** Daemon session ID → renderer ID (reverse mapping). */
-  daemonToRenderer: Map<string, string>;
+  daemonToRenderer: Map<string, { rendererId: string; ownerPath?: string }>;
   /** Counter for generating renderer-facing IDs. */
   termCounter: number;
   /** Whether the bridge has been disposed. */
@@ -143,7 +144,7 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   /** Returns all daemon session IDs currently tracked by the bridge. */
   getDaemonSessionIds: () => string[];
   /** Register a renderer-to-daemon session ID mapping (for reattach). */
-  registerMapping: (rendererId: string, daemonSessionId: string) => void;
+  registerMapping: (rendererId: string, daemonSessionId: string, ownerPath?: string) => void;
   /** Dispose the bridge and clean up state. */
   dispose: () => void;
 } {
@@ -163,12 +164,13 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   function handleSessionData(sessionId: string, data: string): void {
     if (state.disposed) return;
 
-    const rendererId = state.daemonToRenderer.get(sessionId);
+    const binding = state.daemonToRenderer.get(sessionId);
+    const rendererId = binding?.rendererId;
     if (!rendererId) return;
 
     const win = getMainWindow();
     if (win && !win.isDestroyed()) {
-      win.webContents.send("crab:term-data", { id: rendererId, data });
+      win.webContents.send("crab:term-data", { id: rendererId, data, ownerPath: binding?.ownerPath });
     }
 
     // Preserve session log writing — daemon doesn't own log files
@@ -180,7 +182,8 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   function handleSessionExit(sessionId: string, code: number): void {
     if (state.disposed) return;
 
-    const rendererId = state.daemonToRenderer.get(sessionId);
+    const binding = state.daemonToRenderer.get(sessionId);
+    const rendererId = binding?.rendererId;
     if (!rendererId) return;
 
     const win = getMainWindow();
@@ -202,7 +205,7 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   function synthesizeExitEvent(daemonSessionId: string, code: number): void {
     if (state.disposed) return;
 
-    const rendererId = state.daemonToRenderer.get(daemonSessionId);
+    const rendererId = state.daemonToRenderer.get(daemonSessionId)?.rendererId;
     if (!rendererId) return;
 
     const win = getMainWindow();
@@ -232,7 +235,8 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   function handleColdRestoreAvailable(sessionId: string, payload: ColdRestorePayload): void {
     if (state.disposed) return;
 
-    const rendererId = state.daemonToRenderer.get(sessionId);
+    const binding = state.daemonToRenderer.get(sessionId);
+    const rendererId = binding?.rendererId;
     if (!rendererId) return;
 
     const win = getMainWindow();
@@ -245,10 +249,10 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   }
 
   const handleSpawn = async (payload: SpawnPayload, externalRendererId?: string): Promise<{ id: string }> => {
-    const { cwd, shell: _shell, env: extraEnv, startupCommand, agentMeta } = payload;
+    const { cwd, shell, env: extraEnv, startupCommand, agentMeta } = payload;
 
     const rendererId = externalRendererId ?? `term-${++state.termCounter}`;
-    const workspacePath = getWorkspacePath();
+    const workspacePath = payload.ownerPath || getWorkspacePath();
     const sessionId = workspacePath
       ? `${workspacePath}@@${rendererId}`
       : rendererId;
@@ -260,22 +264,22 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
         rows: 30,
         cwd: cwd || process.env.HOME || "/",
         env: extraEnv,
-        command: startupCommand,
-        shellReadySupported: agentMeta != null,
+        shell,
+        startupCommand,
+        shellReadySupported: true,
         ...(agentMeta != null ? { agentMeta } : {}),
       });
 
       // Map renderer ID ↔ daemon session ID
       state.rendererToDaemon.set(rendererId, sessionId);
-      state.daemonToRenderer.set(sessionId, rendererId);
+      state.daemonToRenderer.set(sessionId, { rendererId, ownerPath: workspacePath ?? undefined });
       client.mapSessionId(rendererId, sessionId);
 
       // If reattaching to existing session, send snapshot data immediately
       if (!result.isNew && result.snapshot) {
         const win = getMainWindow();
         if (win && !win.isDestroyed()) {
-          const snapshotData = result.snapshot.snapshotAnsi +
-            (result.snapshot.rehydrateSequences || "");
+          const snapshotData = snapshotReplayData(result.snapshot);
           win.webContents.send("crab:term-data", { id: rendererId, data: snapshotData });
         }
       }
@@ -422,7 +426,7 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
 
           // Map renderer ID ↔ daemon session ID
           state.rendererToDaemon.set(rendererId, session.sessionId);
-          state.daemonToRenderer.set(session.sessionId, rendererId);
+          state.daemonToRenderer.set(session.sessionId, { rendererId, ownerPath: workspacePath });
           client.mapSessionId(rendererId, session.sessionId);
 
           results.push({
@@ -463,9 +467,9 @@ export function createDaemonBridge(opts: DaemonBridgeOptions): {
   }
 
   /** Register a renderer↔daemon session ID mapping for reattach. */
-  function registerMapping(rendererId: string, daemonSessionId: string): void {
+  function registerMapping(rendererId: string, daemonSessionId: string, ownerPath?: string): void {
     state.rendererToDaemon.set(rendererId, daemonSessionId);
-    state.daemonToRenderer.set(daemonSessionId, rendererId);
+    state.daemonToRenderer.set(daemonSessionId, { rendererId, ownerPath });
     client.mapSessionId(rendererId, daemonSessionId);
   }
 

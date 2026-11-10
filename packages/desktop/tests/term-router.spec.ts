@@ -131,7 +131,7 @@ describe("TermRouter", () => {
 
       const result = await spawn({ cwd: "/home/user", sessionType: "in-process" });
 
-      expect(result).toMatchObject({ id: "term-l-1", resolvedSessionType: "in-process" });
+      expect(result).toMatchObject({ id: expect.stringMatching(/^term-l-[0-9a-f-]{36}$/), resolvedSessionType: "in-process" });
       expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
       expect(daemonBridge.handleSpawn).not.toHaveBeenCalled();
     });
@@ -148,17 +148,17 @@ describe("TermRouter", () => {
       };
       await spawn(payload);
 
-      expect(inProcessBridge.handleSpawn).toHaveBeenCalledWith(payload, "term-l-1");
+      expect(inProcessBridge.handleSpawn).toHaveBeenCalledWith(payload, expect.stringMatching(/^term-l-[0-9a-f-]{36}$/));
     });
 
-    it("increments the local counter independently of daemon counter", async () => {
+    it("creates unique local session identities", async () => {
       const { spawn } = buildRouter(true);
 
       const r1 = await spawn({ cwd: "/a", sessionType: "in-process" });
       const r2 = await spawn({ cwd: "/b", sessionType: "in-process" });
 
-      expect((r1 as TermSpawnResult).id).toBe("term-l-1");
-      expect((r2 as TermSpawnResult).id).toBe("term-l-2");
+      expect((r1 as TermSpawnResult).id).toMatch(/^term-l-[0-9a-f-]{36}$/);
+      expect((r2 as TermSpawnResult).id).toMatch(/^term-l-[0-9a-f-]{36}$/);
     });
 
     it("routes to in-process even when daemonReady is false", async () => {
@@ -170,14 +170,18 @@ describe("TermRouter", () => {
       expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
     });
 
-    it("defaults to in-process when no sessionType and no agentMeta", async () => {
+    it("honors an explicit global ephemeral mode for ordinary shells", async () => {
+      const { router } = buildRouter(false);
+      expect(router.resolveSessionType({ cwd: "/repo" }, { daemonReady: false, configuredMode: "in-process" })).toBe("in-process");
+      expect(router.resolveSessionType({ cwd: "/repo", agentMeta: { taskId: "task", agentType: "agent", worktreePath: "/repo" } }, { daemonReady: false, configuredMode: "in-process" })).toBe("daemon");
+    });
+
+    it("defaults to durable sessions even without agent metadata", async () => {
       const { spawn, inProcessBridge, daemonBridge } = buildRouter(true);
-
       const result = await spawn({ cwd: "/home" });
-
-      expect((result as TermSpawnResult).resolvedSessionType).toBe("in-process");
-      expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
-      expect(daemonBridge.handleSpawn).not.toHaveBeenCalled();
+      expect((result as TermSpawnResult).resolvedSessionType).toBe("daemon");
+      expect(daemonBridge.handleSpawn).toHaveBeenCalledOnce();
+      expect(inProcessBridge.handleSpawn).not.toHaveBeenCalled();
     });
   });
 
@@ -191,7 +195,7 @@ describe("TermRouter", () => {
 
       const result = await spawn({ cwd: "/home/user", sessionType: "daemon" });
 
-      expect(result).toMatchObject({ id: "term-d-1", resolvedSessionType: "daemon" });
+      expect(result).toMatchObject({ id: expect.stringMatching(/^term-d-[0-9a-f-]{36}$/), resolvedSessionType: "daemon" });
       expect(daemonBridge.handleSpawn).toHaveBeenCalledOnce();
       expect(inProcessBridge.handleSpawn).not.toHaveBeenCalled();
     });
@@ -206,17 +210,17 @@ describe("TermRouter", () => {
       };
       await spawn(payload);
 
-      expect(daemonBridge.handleSpawn).toHaveBeenCalledWith(payload, "term-d-1");
+      expect(daemonBridge.handleSpawn).toHaveBeenCalledWith(payload, expect.stringMatching(/^term-d-[0-9a-f-]{36}$/));
     });
 
-    it("increments the daemon counter independently of local counter", async () => {
+    it("creates unique durable session identities", async () => {
       const { spawn } = buildRouter(true);
 
       const r1 = await spawn({ cwd: "/a", sessionType: "daemon" });
       const r2 = await spawn({ cwd: "/b", sessionType: "daemon" });
 
-      expect((r1 as TermSpawnResult).id).toBe("term-d-1");
-      expect((r2 as TermSpawnResult).id).toBe("term-d-2");
+      expect((r1 as TermSpawnResult).id).toMatch(/^term-d-[0-9a-f-]{36}$/);
+      expect((r2 as TermSpawnResult).id).toMatch(/^term-d-[0-9a-f-]{36}$/);
     });
 
     it("defaults to daemon when agentMeta is present and no explicit sessionType", async () => {
@@ -240,10 +244,10 @@ describe("TermRouter", () => {
       const d2 = await spawn({ cwd: "/c", sessionType: "daemon" });
       const l2 = await spawn({ cwd: "/d", sessionType: "in-process" });
 
-      expect((d1 as TermSpawnResult).id).toBe("term-d-1");
-      expect((l1 as TermSpawnResult).id).toBe("term-l-1");
-      expect((d2 as TermSpawnResult).id).toBe("term-d-2");
-      expect((l2 as TermSpawnResult).id).toBe("term-l-2");
+      expect((d1 as TermSpawnResult).id).toMatch(/^term-d-[0-9a-f-]{36}$/);
+      expect((l1 as TermSpawnResult).id).toMatch(/^term-l-[0-9a-f-]{36}$/);
+      expect((d2 as TermSpawnResult).id).toMatch(/^term-d-[0-9a-f-]{36}$/);
+      expect((l2 as TermSpawnResult).id).toMatch(/^term-l-[0-9a-f-]{36}$/);
     });
   });
 
@@ -257,10 +261,8 @@ describe("TermRouter", () => {
 
       const result = await spawn({ cwd: "/home", sessionType: "daemon" });
 
-      // Explicit daemon request from user (no agentMeta) → graceful fallback
-      expect((result as TermSpawnResult).resolvedSessionType).toBe("in-process");
-      expect((result as TermSpawnResult).fellBack?.reason).toBeTruthy();
-      expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ ok: false, error: "daemon-unavailable" });
+      expect(inProcessBridge.handleSpawn).not.toHaveBeenCalled();
       expect(daemonBridge.handleSpawn).not.toHaveBeenCalled();
     });
 
@@ -302,19 +304,17 @@ describe("TermRouter", () => {
   // -------------------------------------------------------------------------
 
   describe("circuit breaker open", () => {
-    it("falls back to in-process for user terminals when breaker is open", async () => {
+    it("refuses ordinary durable terminals when breaker is open", async () => {
       const breaker = new CircuitBreaker({ threshold: 1, windowMs: 60_000, cooldownMs: 300_000 });
       breaker.recordFailure(); // trips the breaker (threshold = 1)
 
       const { spawn, daemonBridge, inProcessBridge } = buildRouter(true, breaker);
 
-      // Explicit daemon request without agentMeta → graceful fallback
       const result = await spawn({ cwd: "/home", sessionType: "daemon" });
 
-      expect((result as TermSpawnResult).resolvedSessionType).toBe("in-process");
-      expect((result as TermSpawnResult).fellBack?.reason).toBeTruthy();
+      expect(result).toMatchObject({ ok: false, error: "daemon-circuit-open" });
       expect(daemonBridge.handleSpawn).not.toHaveBeenCalled();
-      expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
+      expect(inProcessBridge.handleSpawn).not.toHaveBeenCalled();
     });
 
     it("returns daemon-circuit-open error for agent sessions when breaker is open", async () => {
@@ -504,29 +504,29 @@ describe("TermRouter", () => {
       expect(router.getSessionTypeBreakdown()).toEqual({ daemon: 0, inProcess: 0 });
     });
 
-    it("registerSession advances the daemon counter for reattached sessions", async () => {
+    it("new durable sessions cannot reuse a restored session identity", async () => {
       const { spawn, router, daemonBridge } = buildRouter(true);
 
       router.registerSession("term-d-7", "daemon");
       const result = await spawn({ cwd: "/home", sessionType: "daemon" });
 
-      expect((result as TermSpawnResult).id).toBe("term-d-8");
+      expect((result as TermSpawnResult).id).toMatch(/^term-d-[0-9a-f-]{36}$/);
       expect(daemonBridge.handleSpawn).toHaveBeenCalledWith(
         { cwd: "/home", sessionType: "daemon" },
-        "term-d-8",
+        expect.stringMatching(/^term-d-[0-9a-f-]{36}$/),
       );
     });
 
-    it("registerSession advances the local counter for reattached local sessions", async () => {
+    it("new local sessions cannot reuse a restored session identity", async () => {
       const { spawn, router, inProcessBridge } = buildRouter(true);
 
       router.registerSession("term-l-4", "in-process");
       const result = await spawn({ cwd: "/home", sessionType: "in-process" });
 
-      expect((result as TermSpawnResult).id).toBe("term-l-5");
+      expect((result as TermSpawnResult).id).toMatch(/^term-l-[0-9a-f-]{36}$/);
       expect(inProcessBridge.handleSpawn).toHaveBeenCalledWith(
         { cwd: "/home", sessionType: "in-process" },
-        "term-l-5",
+        expect.stringMatching(/^term-l-[0-9a-f-]{36}$/),
       );
     });
   });

@@ -228,6 +228,25 @@ describe("workspace-poller", () => {
       poller.stop();
     });
 
+    it.each([false, true])("discards an in-flight result after stop (restarted: %s)", async (restart) => {
+      const poller = new StatusPoller(tmpDir, []);
+      let complete!: (statuses: RepoStatus[]) => void;
+      const pending = new Promise<RepoStatus[]>(resolve => { complete = resolve; });
+      vi.spyOn(poller, "pollNow").mockReturnValueOnce(pending).mockResolvedValue([]);
+      const publish = vi.fn();
+      poller.on("status", publish);
+      try {
+        poller.start();
+        poller.stop();
+        if (restart) poller.start();
+        complete([]);
+        await pending;
+        // Drain both runs' publication reactions; only the new run may emit.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(publish.mock.calls).toEqual(restart ? [[[]]] : []);
+      } finally { poller.stop(); }
+    });
+
     it("stop() prevents further polling", async () => {
       await createGitRepo("stop-repo");
 

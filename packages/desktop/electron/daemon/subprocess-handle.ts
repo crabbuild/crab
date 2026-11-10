@@ -13,6 +13,10 @@
 
 import type { IPty } from "node-pty";
 import type { SubprocessHandle } from "./types";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getBashRcfileContent, getZshRcfileContent } from "./shell-ready";
 
 export interface SubprocessSpawnOptions {
   file: string;
@@ -21,6 +25,7 @@ export interface SubprocessSpawnOptions {
   rows: number;
   cwd?: string;
   env?: Record<string, string>;
+  shellReadySupported?: boolean;
 }
 
 /**
@@ -44,7 +49,7 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
   private dataCallbacks: Array<(data: string) => void> = [];
   private exitCallbacks: Array<(exitCode: number) => void> = [];
 
-  constructor(pty: IPty) {
+  constructor(pty: IPty, private readonly cleanup = () => {}) {
     this.pty = pty;
     this.pid = pty.pid;
     // node-pty exposes the master fd via the internal _fd property
@@ -58,6 +63,7 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
     });
 
     this.pty.onExit(({ exitCode }) => {
+      this.cleanup();
       for (const cb of this.exitCallbacks) {
         cb(exitCode);
       }
@@ -125,6 +131,7 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
     this.dataCallbacks = [];
     this.exitCallbacks = [];
     this.pty.kill();
+    this.cleanup();
   }
 }
 
@@ -137,12 +144,35 @@ export function createNodePtySpawner(): SubprocessSpawner {
   const nodePty = require("node-pty") as typeof import("node-pty");
 
   return (opts: SubprocessSpawnOptions): SubprocessHandle => {
-    const pty = nodePty.spawn(opts.file, opts.args ?? [], {
+    const env = { ...process.env, ...opts.env } as Record<string, string>;
+    const shell = path.basename(opts.file);
+    let args = opts.args ?? [];
+    let wrapper: string | undefined;
+    if (opts.shellReadySupported && (shell === "bash" || shell === "zsh")) {
+      wrapper = fs.mkdtempSync(path.join(os.tmpdir(), "crab-shell-"));
+      if (shell === "bash") {
+        fs.writeFileSync(path.join(wrapper, "bashrc"), getBashRcfileContent());
+        args = ["--rcfile", path.join(wrapper, "bashrc"), "-i"];
+      } else {
+        env.CRAB_ORIG_ZDOTDIR = env.ZDOTDIR || env.HOME;
+        // Load login configuration from its original location. The wrapper
+        // owns readiness only; user files and subsequent shells keep their home.
+        fs.writeFileSync(path.join(wrapper, ".zshenv"), '[[ -f "$CRAB_ORIG_ZDOTDIR/.zshenv" ]] && source "$CRAB_ORIG_ZDOTDIR/.zshenv"\n');
+        fs.writeFileSync(path.join(wrapper, ".zprofile"), '[[ -f "$CRAB_ORIG_ZDOTDIR/.zprofile" ]] && source "$CRAB_ORIG_ZDOTDIR/.zprofile"\n');
+        fs.writeFileSync(path.join(wrapper, ".zshrc"), getZshRcfileContent() + '\nZDOTDIR="$CRAB_ORIG_ZDOTDIR"\n');
+        env.ZDOTDIR = wrapper;
+        args = ["--login", "-i"];
+      }
+    }
+    const cleanup = () => { if (wrapper) fs.rmSync(wrapper, { recursive: true, force: true }); };
+    try {
+      const pty = nodePty.spawn(opts.file, args, {
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: opts.env as Record<string, string>,
-    });
-    return new NodePtySubprocessHandle(pty);
+      env,
+      });
+      return new NodePtySubprocessHandle(pty, cleanup);
+    } catch (error) { cleanup(); throw error; }
   };
 }

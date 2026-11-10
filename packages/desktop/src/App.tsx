@@ -240,7 +240,7 @@ function Shell() {
 
     if (prevRoot === currentRoot) return;
 
-    // Save the departing workspace session and suspend its terminals.
+    // Save the departing workspace session. Terminal ownership follows paths.
     if (prevRoot) {
       workspaceSwitchingRef.current = true;
       wsSessionManager.save(prevRoot, {
@@ -249,9 +249,6 @@ function Shell() {
         sidebarWidth: repoSidebarOpen ? 260 : 0,
       });
       wsSessionManager.flush();
-      // Suspend terminal state for the departing workspace so terminals
-      // stay alive (hidden) and can be resumed on switch-back.
-      terminalKeepAliveRef.current?.suspendWorkspace(prevRoot);
     }
 
     // Restore the arriving workspace session (startup or workspace switch).
@@ -287,10 +284,8 @@ function Shell() {
         }
       }
     } else if (currentRoot && prevRoot) {
-      // Workspace switch (not startup) — resume the arriving workspace's terminals.
-      // We need to wait a tick for the new repos to be in state before resuming.
+      // Keep removals from evicting renderers while workspace state settles.
       requestAnimationFrame(() => {
-        terminalKeepAliveRef.current?.resumeWorkspace(currentRoot, state.repos);
         workspaceSwitchingRef.current = false;
       });
 

@@ -194,17 +194,17 @@ describe("terminal-persistence", () => {
       expect(deserializeLayout(data)).toBeNull();
     });
 
-    it("returns null for empty tabs array", () => {
+    it("preserves an intentionally empty layout", () => {
       const data = {
         version: 1,
         tabs: [],
         splits: [],
         activeTabIndex: 0,
       };
-      expect(deserializeLayout(data)).toBeNull();
+      expect(deserializeLayout(data)?.tabs).toEqual(data.tabs);
     });
 
-    it("returns null for more than 12 tabs", () => {
+    it("restores tabs across multiple panes beyond the per-pane limit", () => {
       const tabs = Array.from({ length: 13 }, (_, i) => ({
         id: `t-${i}`,
         shell: "/bin/zsh",
@@ -217,7 +217,7 @@ describe("terminal-persistence", () => {
         splits: [],
         activeTabIndex: 0,
       };
-      expect(deserializeLayout(data)).toBeNull();
+      expect(deserializeLayout(data)?.tabs).toEqual(data.tabs);
     });
 
     it("returns null for invalid tab (missing id)", () => {

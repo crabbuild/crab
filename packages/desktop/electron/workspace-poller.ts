@@ -111,6 +111,7 @@ export class StatusPoller extends EventEmitter {
   private options: PollerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private pollGeneration = 0;
   private registry: ProviderRegistry | null;
   private rpcRouter: RpcRouter | null;
   private sessionManager: SshSessionManager | null;
@@ -139,20 +140,22 @@ export class StatusPoller extends EventEmitter {
   start(): void {
     if (this.running) return;
     this.running = true;
+    const generation = ++this.pollGeneration;
+    const publish = (statuses: RepoStatus[]) => {
+      // A completed poll belongs to the run that started it. Stopping or
+      // restarting must not publish stale results into the next workspace.
+      if (this.running && generation === this.pollGeneration) this.emit("status", statuses);
+    };
 
     // Immediate first poll
-    this.pollNow().then((statuses) => {
-      this.emit("status", statuses);
-    });
+    void this.pollNow().then(publish);
 
     this.timer = setInterval(() => {
-      this.pollNow().then((statuses) => {
-        this.emit("status", statuses);
-      });
+      void this.pollNow().then(publish);
     }, this.options.intervalMs);
   }
 
-  /** Stops the polling interval. */
+  /** Stops polling and discards pending status publications. */
   stop(): void {
     this.running = false;
     if (this.timer !== null) {

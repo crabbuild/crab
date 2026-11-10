@@ -8,73 +8,51 @@ detection.
 
 ## System Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Renderer (TerminalView.tsx)                                    │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  XTerm.js Terminal Instance                              │   │
-│  │  + WebGL Addon (GPU rendering)                           │   │
-│  │  + Fit Addon (auto-resize)                               │   │
-│  │  + Search Addon (Cmd+F)                                  │   │
-│  │  + Unicode11 Addon (emoji/CJK)                           │   │
-│  │  + WebLinks Addon (clickable URLs)                       │   │
-│  │  + Clipboard Addon (system clipboard)                    │   │
-│  │  + Serialize Addon (state persistence)                   │   │
-│  └────────────────────────────┬─────────────────────────────┘   │
-│                               │ IPC: terminal:data / terminal:resize
-└───────────────────────────────┼─────────────────────────────────┘
-                                │
-┌───────────────────────────────▼─────────────────────────────────┐
-│  Main Process (Terminal Pool)                                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Pre-warmed PTY Pool (2 shells)                          │   │
-│  │  • Detects login shell ($SHELL or /bin/zsh)              │   │
-│  │  • Inherits user's shell config (.zshrc, .bashrc)        │   │
-│  │  • Expanded PATH (cargo, homebrew, nvm, mise)            │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  node-pty (native PTY binding)                           │   │
-│  │  • Allocates pseudo-terminal                             │   │
-│  │  • Handles SIGWINCH (resize)                             │   │
-│  │  • Streams data bidirectionally                          │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  View[TerminalView and xterm] -->|terminal IPC| Router[TermRouter]
+  Router -->|default| Daemon[Detached PTY daemon]
+  Router -->|explicit local terminal| Local[Electron-owned PTY]
+  View -->|SSH terminal IPC| Remote[RemoteTerminalManager]
+  Remote -->|SSH attachment| Tmux[Remote tmux PTY]
+  View -->|layout changes| Store[Profile layout store]
 ```
 
-## PTY Pool
+The daemon owns ordinary local shells and their foreground agents. Electron
+owns routing and renderer attachments. Closing an app window, quitting, or
+upgrading disconnects the client without killing daemon PTYs. The next app
+instance probes and reuses the live daemon even when its application entry path
+has changed. An explicitly requested in-process terminal remains ephemeral.
+Live daemon replacement is deferred while PTYs exist: the adopted-fd backend
+cannot resize those PTYs. Application updates can reuse the existing owner.
 
-The terminal pool pre-warms shell processes on app startup to
-eliminate the 200-500ms shell initialization delay when the user
-first opens a terminal.
+Each terminal has a UUID-based renderer ID. Daemon IDs combine the repository
+or task owner with that ID; creating a terminal after a restart cannot reuse a
+surviving session's identity. The same router ID reaches the local bridge.
 
-### Pool Configuration
+`TerminalKeepAlive` keys its bounded renderer cache by repository path. LRU
+eviction disposes xterm, timers and subscriptions, and detaches durable sessions.
+The layout store saves tab identities, pane membership, nested split directions
+and sizes, active tabs and focused pane whenever they change. Writes use atomic
+replacement, independent of window-close and updater event timing. Existing v1
+flat layouts remain readable for the v2.0.0-alpha.1 upgrade boundary.
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Pool size | 2 | Covers most immediate needs without waste |
-| Shell | `$SHELL` or `/bin/zsh` | User's configured shell |
-| Columns | 80 | Default; resized on attach |
-| Rows | 24 | Default; resized on attach |
+Warm attach maps saved identities to live sessions before reconstructing the
+split tree. Snapshots enter the alternate screen before painting agent content;
+remaining terminal modes are restored without clearing that screen. Every input
+surface uses the same backend selection, including paste, broadcast and command
+replay. Failed restores keep tab identities and allow Enter to retry. A missing
+local process may reopen as a fresh shell; saved startup commands and credentials
+are not replayed.
 
-### Pool Lifecycle
+SSH terminals use remote tmux through a separate `crab-desktop` socket. An SSH
+channel is an attachment, not the owner of the remote process. The layout stores
+profile and remote terminal identities. Restore checks that session exists, then
+attaches and lets tmux redraw. Detach preserves it; explicit termination kills
+only that named session. Missing tmux and missing sessions are visible failures.
 
-```
-App Start
-    │
-    ├─ Spawn PTY #1 (idle, waiting for attach)
-    ├─ Spawn PTY #2 (idle, waiting for attach)
-    │
-User opens terminal
-    │
-    ├─ Attach PTY #1 to XTerm instance
-    ├─ Resize to actual terminal dimensions
-    ├─ Spawn replacement PTY #3 (refill pool)
-    │
-User opens second terminal
-    │
-    ├─ Attach PTY #2 to XTerm instance
-    ├─ Spawn replacement PTY #4 (refill pool)
-```
+The PTY prewarm pool is disabled. `crab:term-pool-hint` remains a no-op for the
+preload API shipped in v2.0.0-alpha.1.
 
 ## Shell Environment
 

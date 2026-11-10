@@ -2,7 +2,6 @@ import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage } from 
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
@@ -12,9 +11,11 @@ import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
 import { getUserShellBaseEnv } from "./env/userShellEnv";
 import { SidecarManager,registerSidecarIpc } from "./sidecars";
 import { initializeDaemonSubsystem } from "./daemon/init";
+import { parsePtyMode } from "./daemon/mode-selection";
 import { registerDiagnosticsUiIpc } from "./daemon/diagnostics-ui-ipc";
 import { createInProcessBridge } from "./in-process-bridge";
 import { TermRouter } from "./term-router";
+import { registerTerminalPersistence } from "./terminal-persistence";
 import { registerKeychainHandlers } from "./keychain";
 import { registerForgeAuth } from "./forge-auth";
 import { registerOrchestratorIpc } from "./orchestrator-ipc";
@@ -61,13 +62,7 @@ import { registerAgentWorkflowIpc } from "./agent-workflows/agent-workflow-ipc";
 import { LspManager } from "./lsp-manager";
 import { registerLspIpc } from "./lsp-ipc";
 import { registerFileWatcher,stopAllWatchers } from "./file-watcher";
-import {
-rendererIdFromDaemonSessionId,
-sessionBelongsToRepoPath,
-toDaemonSessionSummary,
-type DaemonSessionSummary,
-type DaemonSessionSummaryCandidate,
-} from "./terminal-reattach";
+import { registerTerminalSessionIpc } from "./terminal-reattach";
 import { readWorkspaceConfig,writeWorkspaceConfig,defaultWorkspaceConfig,WorkspaceConfig } from "./workspace-config";
 import { discoverRepos,DiscoveredRepo } from "./workspace-discovery";
 import { StatusPoller,RepoStatus } from "./workspace-poller";
@@ -991,16 +986,7 @@ function registerIpc(skillManager: SkillManager) {
   const termStateDir = path.join(app.getPath("userData"), "terminal");
   const termLogsDir = path.join(termStateDir, "logs");
 
-  // A profile can host multiple repositories and task terminals. Each owner
-  // needs its own layout; sharing one file can restore another repo's deleted cwd.
-  function terminalStatePaths(persistenceKey: string) {
-    const key = createHash("sha256").update(persistenceKey).digest("hex");
-    const directory = path.join(termStateDir, "layouts", key);
-    return {
-      statePath: path.join(directory, "state.json"),
-      scrollbackDir: path.join(directory, "scrollback"),
-    };
-  }
+  const terminalStatePaths = registerTerminalPersistence(ipcMain, termStateDir);
 
   // ---- Terminal session logging ----
   // Per-session log writers (main-process side).
@@ -1182,110 +1168,6 @@ function registerIpc(skillManager: SkillManager) {
   }
   // Run cleanup on startup
   setTimeout(cleanupOldLogs, 5000);
-
-  ipcMain.handle(
-    "crab:term-save-state",
-    async (
-      _evt,
-      req: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> },
-    ) => {
-      try {
-        const { statePath, scrollbackDir } = terminalStatePaths(req.persistenceKey);
-        fs.mkdirSync(scrollbackDir, { recursive: true });
-
-        // Write the layout state file.
-        const stateFile = {
-          version: 1,
-          savedAt: new Date().toISOString(),
-          layout: req.layout,
-        };
-        fs.writeFileSync(statePath, JSON.stringify(stateFile, null, 2), "utf8");
-
-        // Write scrollback data for each session.
-        for (const [sessionId, content] of Object.entries(req.scrollbackData)) {
-          const scrollbackPath = path.join(scrollbackDir, `${sessionId}.bin`);
-          fs.writeFileSync(scrollbackPath, content, "utf8");
-        }
-
-        return { success: true };
-      } catch (err: unknown) {
-        // Handle disk-full errors gracefully — warn but don't block app close.
-        const code = (err as NodeJS.ErrnoException)?.code;
-        if (code === "ENOSPC" || code === "EACCES" || code === "EROFS") {
-          console.warn(
-            `[crab-desktop] Failed to save terminal state (${code}):`,
-            err instanceof Error ? err.message : String(err),
-          );
-          return { success: false, error: code };
-        }
-        console.warn(
-          "[crab-desktop] Failed to save terminal state:",
-          err instanceof Error ? err.message : String(err),
-        );
-        return { success: false, error: "unknown" };
-      }
-    },
-  );
-
-  ipcMain.handle("crab:term-restore-state", async (_evt, persistenceKey: string) => {
-    try {
-      const { statePath, scrollbackDir } = terminalStatePaths(persistenceKey);
-      if (!fs.existsSync(statePath)) {
-        return { layout: null, scrollbackData: {} };
-      }
-
-      const raw = fs.readFileSync(statePath, "utf8");
-      const parsed = JSON.parse(raw);
-
-      if (!parsed || typeof parsed !== "object" || !parsed.layout) {
-        return { layout: null, scrollbackData: {} };
-      }
-
-      // Read scrollback data for each session in the layout.
-      const scrollbackData: Record<string, string> = {};
-      const layout = parsed.layout;
-      if (layout && Array.isArray(layout.tabs)) {
-        for (const tab of layout.tabs) {
-          if (tab && typeof tab.id === "string") {
-            const scrollbackPath = path.join(scrollbackDir, `${tab.id}.bin`);
-            if (fs.existsSync(scrollbackPath)) {
-              try {
-                scrollbackData[tab.id] = fs.readFileSync(scrollbackPath, "utf8");
-              } catch {
-                // Skip unreadable scrollback files.
-              }
-            }
-          }
-        }
-        // Also check quick terminal scrollback.
-        if (layout.quickTerminal && typeof layout.quickTerminal.id === "string") {
-          const scrollbackPath = path.join(
-            scrollbackDir,
-            `${layout.quickTerminal.id}.bin`,
-          );
-          if (fs.existsSync(scrollbackPath)) {
-            try {
-              scrollbackData[layout.quickTerminal.id] = fs.readFileSync(
-                scrollbackPath,
-                "utf8",
-              );
-            } catch {
-              // Skip unreadable scrollback files.
-            }
-          }
-        }
-      }
-
-      return { layout, scrollbackData };
-    } catch (err) {
-      // Corrupt JSON or read error — return empty state.
-      console.warn(
-        "[crab-desktop] Failed to restore terminal state:",
-        err instanceof Error ? err.message : String(err),
-      );
-      return { layout: null, scrollbackData: {} };
-    }
-  });
 
   // ---- Terminal notifications (native desktop) ----
 
@@ -1934,7 +1816,7 @@ app.whenReady().then(async () => {
   // Core SSH modules
   const sshSessionManager = new SshSessionManager();
   _sshSessionManager = sshSessionManager;
-  const sshTerminalManager = new RemoteTerminalManager(sshSessionManager);
+  const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
   registerSshIpcHandlers(sshProfileManager, sshSessionManager, sshTerminalManager, sshPortForwardManager);
 
@@ -2174,15 +2056,15 @@ app.whenReady().then(async () => {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Daemon is only required for durable agent terminal sessions.
-    // User-invoked terminals work fine via in-process PTY without the daemon.
-    console.warn(`[crab-desktop] PTY daemon unavailable (agent sessions will not be durable): ${msg}`);
+    // Ordinary shells require durable ownership. Explicit local terminals
+    // remain available when daemon startup fails.
+    console.warn(`[crab-desktop] PTY daemon unavailable (open an explicit local terminal or retry): ${msg}`);
     // Register fallback IPC handlers so the renderer doesn't get
     // "No handler registered" errors when daemon subsystem failed entirely.
     try {
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: "auto",
+        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
         fallback: { reason: "Daemon subsystem init failed", error: msg, timestamp: Date.now() },
       }));
     } catch { /* already registered */ }
@@ -2206,7 +2088,12 @@ app.whenReady().then(async () => {
   const daemonBridgeForRouter = {
     handleSpawn: async (payload: Parameters<typeof inProcessBridge.handleSpawn>[0], rendererId: string) => {
       if (!daemonBridgeHandle) throw new Error("Daemon not available");
-      const result = await daemonBridgeHandle.handleSpawn(payload, rendererId);
+      await shellEnvPromise;
+      const result = await daemonBridgeHandle.handleSpawn({
+        ...payload,
+        shell: payload.shell || getDefaultShell(),
+        env: buildTerminalEnv(payload.env),
+      }, rendererId);
       return { daemonSessionId: result.id };
     },
     handleWrite: async (id: string, data: string) => {
@@ -2236,8 +2123,8 @@ app.whenReady().then(async () => {
   // handleSpawn(payload, rendererId) and handleWrite/Resize/Kill(id, ...).
   // InProcessBridge methods take an extra leading _evt parameter.
   const inProcessBridgeForRouter = {
-    handleSpawn: async (payload: Parameters<typeof inProcessBridge.handleSpawn>[0], _rendererId: string) => {
-      await inProcessBridge.handleSpawn(payload);
+    handleSpawn: async (payload: Parameters<typeof inProcessBridge.handleSpawn>[0], rendererId: string) => {
+      await inProcessBridge.handleSpawn(payload, rendererId);
     },
     handleWrite: async (id: string, data: string) => {
       inProcessBridge.handleWrite(null, id, data);
@@ -2270,6 +2157,7 @@ app.whenReady().then(async () => {
       // after auto-respawn immediately enable daemon-backed sessions.
       current: () => ({
         daemonReady: daemonSubsystem?.daemonClient?.isConnected ?? false,
+        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
       }),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2385,130 +2273,7 @@ app.whenReady().then(async () => {
 
     console.log("[crab-desktop] PTY daemon mode active — both bridges registered");
 
-    // ---- Daemon session listing / attach on repo switch ----
-    // TerminalView lists persistent daemon sessions without materializing all
-    // of them as visible tabs, then explicitly attaches selected sessions.
-    async function listRepoDaemonSessions(repoPath: string): Promise<DaemonSessionSummary[]> {
-      if (!daemonSubsystem?.daemonReady || !daemonSubsystem?.daemonClient?.isConnected) {
-        return [];
-      }
-
-      const sessions = await daemonSubsystem.daemonClient.request<DaemonSessionSummaryCandidate[]>("listSessions");
-      return sessions
-        .filter((s) => sessionBelongsToRepoPath(s, repoPath))
-        .map((s) => toDaemonSessionSummary(s, repoPath))
-        .sort((a, b) => (b.lastDataAt || b.createdAt) - (a.lastDataAt || a.createdAt));
-    }
-
-    async function attachDaemonSession(
-      daemonSessionId: string,
-      repoPath: string,
-    ): Promise<{ id: string; daemonSessionId: string; snapshot: string | null; cwd: string | null; summary: DaemonSessionSummary }> {
-      if (!daemonSubsystem?.daemonReady || !daemonSubsystem?.daemonClient?.isConnected) {
-        throw new Error("PTY daemon is not connected");
-      }
-
-      const sessions = await daemonSubsystem.daemonClient.request<DaemonSessionSummaryCandidate[]>("listSessions");
-      const session = sessions.find((s) => s.sessionId === daemonSessionId);
-      if (!session || !sessionBelongsToRepoPath(session, repoPath)) {
-        throw new Error("Daemon session is not available for this repository");
-      }
-
-      const rendererId = rendererIdFromDaemonSessionId(session.sessionId, repoPath);
-      const result = await daemonSubsystem.daemonClient.request<{
-        isNew: boolean;
-        snapshot: { snapshotAnsi: string; rehydrateSequences?: string } | null;
-      }>("createOrAttach", {
-        sessionId: session.sessionId,
-        cols: session.cols ?? 120,
-        rows: session.rows ?? 30,
-        cwd: session.cwd || session.initialCwd || repoPath,
-      });
-
-      daemonSubsystem.daemonBridge.registerMapping(rendererId, session.sessionId);
-      termRouter.registerSession(rendererId, "daemon");
-
-      const snapshotData = result.snapshot
-        ? (result.snapshot.snapshotAnsi || "") + (result.snapshot.rehydrateSequences || "")
-        : null;
-
-      return {
-        id: rendererId,
-        daemonSessionId: session.sessionId,
-        snapshot: snapshotData,
-        cwd: session.cwd ?? session.initialCwd ?? null,
-        summary: toDaemonSessionSummary(session, repoPath),
-      };
-    }
-
-    ipcMain.handle(
-      "crab:term-list-daemon-sessions",
-      async (_evt: unknown, params: { repoPath: string }) => {
-        try {
-          return await listRepoDaemonSessions(params.repoPath);
-        } catch (err) {
-          console.warn("[crab-desktop] termListDaemonSessions failed:", err instanceof Error ? err.message : String(err));
-          return [];
-        }
-      },
-    );
-
-    ipcMain.handle(
-      "crab:term-attach-daemon-session",
-      async (_evt: unknown, params: { repoPath: string; daemonSessionId: string }) =>
-        attachDaemonSession(params.daemonSessionId, params.repoPath),
-    );
-
-    ipcMain.handle(
-      "crab:term-detach-daemon-session",
-      async (_evt: unknown, params: { rendererId: string }) => {
-        await daemonSubsystem.daemonBridge.handleDetach(params.rendererId);
-        termRouter.unregisterSession(params.rendererId);
-      },
-    );
-
-    ipcMain.handle(
-      "crab:term-kill-daemon-session",
-      async (_evt: unknown, params: { repoPath: string; daemonSessionId: string }) => {
-        if (!daemonSubsystem?.daemonReady || !daemonSubsystem?.daemonClient?.isConnected) {
-          throw new Error("PTY daemon is not connected");
-        }
-        const sessions = await daemonSubsystem.daemonClient.request<DaemonSessionSummaryCandidate[]>("listSessions");
-        const session = sessions.find((s) => s.sessionId === params.daemonSessionId);
-        if (!session || !sessionBelongsToRepoPath(session, params.repoPath)) {
-          throw new Error("Daemon session is not available for this repository");
-        }
-        await daemonSubsystem.daemonClient.request("kill", { sessionId: params.daemonSessionId });
-      },
-    );
-
-    // Legacy bulk reattach handler retained for compatibility. New renderer
-    // code uses list + explicit attach so background sessions stay hidden.
-    ipcMain.handle(
-      "crab:term-reattach-sessions",
-      async (_evt: unknown, params: { repoPath: string }) => {
-        if (!daemonSubsystem?.daemonReady || !daemonSubsystem?.daemonClient?.isConnected) {
-          return [];
-        }
-        try {
-          const matching = await listRepoDaemonSessions(params.repoPath);
-          const results: Array<{ id: string; snapshot: string | null; cwd: string | null }> = [];
-          for (const session of matching) {
-            try {
-              const attached = await attachDaemonSession(session.daemonSessionId, params.repoPath);
-              results.push({ id: attached.id, snapshot: attached.snapshot, cwd: attached.cwd });
-            } catch {
-              // Skip sessions that fail to reattach
-            }
-          }
-
-          return results;
-        } catch (err) {
-          console.warn("[crab-desktop] termReattachSessions failed:", err instanceof Error ? err.message : String(err));
-          return [];
-        }
-      },
-    );
+    registerTerminalSessionIpc(ipcMain, daemonSubsystem.daemonClient, daemonSubsystem.daemonBridge, termRouter);
   } else {
     console.log("[crab-desktop] PTY daemon unavailable — in-process bridge only");
     // Register no-op daemon handlers so renderer doesn't get IPC errors.

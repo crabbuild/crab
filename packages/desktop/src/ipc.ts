@@ -1107,14 +1107,15 @@ declare global {
         // New object-based overload
         (opts: {
           cwd: string;
+          ownerPath?: string;
           sessionType?: "daemon" | "in-process";
           shell?: string;
           env?: Record<string, string>;
           startupCommand?: string;
           agentMeta?: { taskId: string; agentType: string; worktreePath: string };
-        }): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process"; fellBack?: { reason: string } }>;
+        }): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process" }>;
         // Legacy positional overload (kept until all call sites migrate)
-        (cwd: string, shell?: string, extraEnv?: Record<string, string>, startupCommand?: string): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process"; fellBack?: { reason: string } }>;
+        (cwd: string, shell?: string, extraEnv?: Record<string, string>, startupCommand?: string): Promise<{ id: string; resolvedSessionType: "daemon" | "in-process" }>;
       };
       termWrite: (id: string, data: string) => Promise<void>;
       termResize: (id: string, cols: number, rows: number) => Promise<void>;
@@ -1250,6 +1251,8 @@ declare global {
       };
       // SSH enhanced operations
       ssh: {
+        openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => Promise<{ terminalId: string }>;
+        detachTerminal: (terminalId: string) => Promise<void>;
         openAsRepo: (profileId: string, path: string) => Promise<RepoHandle>;
         // Sync operations
         syncAddPair: (config: { profileId: string; localDir: string; remoteDir: string; ignorePatterns?: string[] }) => Promise<{ syncPairId: string }>;

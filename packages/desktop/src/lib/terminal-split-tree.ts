@@ -29,6 +29,7 @@ export interface LeafTab {
   id: string;
   title: string;
   shell: string;
+  cwd?: string;
   startupCommand?: string;
   sshRemote?: {
     profileId: string;
@@ -253,12 +254,11 @@ export function updateBranchSizes(
 ): SplitNode {
   if (root.type === "leaf") return root;
   if (root.id === branchId) {
+    if (root.sizes.length === sizes.length && root.sizes.every((size, index) => size === sizes[index])) return root;
     return { ...root, sizes };
   }
-  return {
-    ...root,
-    children: root.children.map((child) => updateBranchSizes(child, branchId, sizes)),
-  };
+  const children = root.children.map((child) => updateBranchSizes(child, branchId, sizes));
+  return children.every((child, index) => child === root.children[index]) ? root : { ...root, children };
 }
 
 // ── Serialization (compatible with terminal-persistence.ts) ─────────

@@ -31,6 +31,7 @@ import type { AgentActivityState,StreamClient } from "./types";
 import type { AdoptedSession } from "./fd-handoff";
 import {
 PROTOCOL_VERSION,
+snapshotReplayData,
 NOTIFY_PREFIX,
 encodeFrame,
 FrameDecoder,
@@ -654,6 +655,8 @@ export class DaemonServer {
           cwd: p.cwd,
           env: p.env,
           command: p.command,
+          shell: p.shell,
+          startupCommand: p.startupCommand,
           shellReadySupported: p.shellReadySupported,
           agentMeta: p.agentMeta,
           streamClient,
@@ -820,6 +823,12 @@ export class DaemonServer {
     payload: { successorPath: string },
   ): Promise<void> {
     try {
+      // Application upgrades reuse this daemon. The adopted-fd backend cannot
+      // resize live PTYs, so replacing their owner would break running TUIs.
+      if (this.host.sessionCount > 0) {
+        this.sendResponse(client, { id: requestId, ok: false, error: "Daemon replacement is deferred while terminals are running. Application updates preserve these sessions; end the terminals before replacing their daemon." });
+        return;
+      }
       // Gather live session info for serialization
       const sessions = this.host.getLiveSessionInfo();
       const ptyFds = this.host.getPtyFds();
@@ -931,10 +940,11 @@ export class DaemonServer {
       }
 
       // Replay snapshot content to all attached stream clients before any
-      // input flows. We write snapshotAnsi + rehydrateSequences as a data
-      // event so the renderer xterm receives the restored screen state.
+      // input flows. Replay uses the same ordering as warm attachment so
+      // entering the alternate buffer cannot erase the restored display.
+      // Send a data event so xterm receives the restored screen state.
       const snapshot = pending.snapshot;
-      const replayData = (snapshot.snapshotAnsi ?? "") + (snapshot.rehydrateSequences ?? "");
+      const replayData = snapshotReplayData(snapshot);
       if (replayData.length > 0) {
         const replayBuf = Buffer.from(replayData, "utf-8");
         for (const c of this.clients.values()) {
