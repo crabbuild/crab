@@ -12,7 +12,6 @@ import * as readline from "node:readline";
 
 import {
   AgentAdapter,
-  getExpandedEnv,
   type AgentEvent,
 } from "./orchestrator-adapters";
 import { CodexRpcClient } from "./codex-rpc";
@@ -141,14 +140,15 @@ export class CodexAppServerAdapter extends AgentAdapter {
    * start a new turn on an already-live connection (adapter reuse
    * across iterations).
    */
-  spawn(prompt: string, cwd: string, env?: Record<string, string>): void {
+  async spawn(prompt: string, cwd: string, env?: Record<string, string>): Promise<void> {
     // If already initialized (reuse across iterations), just start a new turn.
     if (this.initialized && this.rpc) {
       this.startTurn(prompt);
       return;
     }
 
-    this.doSpawn(prompt, cwd, env);
+    const environment = await this.prepareEnvironment(env);
+    if (environment) this.doSpawn(prompt, cwd, environment);
   }
 
   sendMessage(_text: string): void {
@@ -214,6 +214,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
    * Idempotent — a second call while shutdown is in progress is a no-op.
    */
   cancel(): void {
+    this.cancelPreparation();
     this.clearTurnTimeout();
     if (this.cancelInProgress) return; // Idempotent
     this.cancelInProgress = true;
@@ -230,7 +231,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
 
     this.proc = spawn(this.binary, args, {
       cwd,
-      env: getExpandedEnv(env),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 

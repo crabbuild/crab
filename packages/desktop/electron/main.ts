@@ -97,15 +97,6 @@ function sendRepositoryCapabilities(event: CapabilitiesChangedEvent): void {
 }
 
 let agent: Agent | null = null;
-let resolveLocalAgent!: (value: Agent) => void;
-let rejectLocalAgent!: (reason: unknown) => void;
-const localAgent = new Promise<Agent>((resolve, reject) => {
-  resolveLocalAgent = resolve;
-  rejectLocalAgent = reject;
-});
-// Only local calls wait for construction. Each process owns its own readiness;
-// an unavailable local sidecar must not prevent authenticated SSH reads.
-void localAgent.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
 let isShuttingDown = false;
@@ -321,7 +312,7 @@ function extractRepoIdFromParams(params: unknown): string | null {
   return null;
 }
 
-function registerIpc(skillManager: SkillManager) {
+function registerIpc(skillManager: SkillManager, storageConnections: StorageConnections, localAgent: () => Promise<Agent>) {
   // Keychain handlers for secure credential storage.
   registerKeychainHandlers(ipcMain);
 
@@ -347,19 +338,24 @@ function registerIpc(skillManager: SkillManager) {
   // the RepoHandle to the renderer (prevents race conditions).
   async function requestAgent(method: string, params: unknown): Promise<unknown> {
     if (method.startsWith("storage_connections_")) {
+      if (method !== "storage_connections_test") {
+        // Device metadata owns no native readiness. Identity changes still join
+        // existing repository owners through the vault's shared callback.
+        return storageConnections.request(method, params, () => { throw new Error("Unknown storage connection operation"); });
+      }
       const repoId = extractRepoIdFromParams(params);
       const remote = repoId ? parseRepoId(repoId) : null;
       if (method === "storage_connections_test" && remote) {
         if (!_rpcRouter) throw new Error("SSH services are not initialized");
         return _rpcRouter.sendToRemoteAgent(remote.profileId, method, params);
       }
-      return (await localAgent).request(method, params);
+      return (await localAgent()).request(method, params);
     }
     const registry = getProviderRegistry();
 
     // Handle repo open methods: register provider before returning handle.
     if (method === "open_local" || method === "open_url") {
-      const handle = await (await localAgent).request(method, params);
+      const handle = await (await localAgent()).request(method, params);
       // Register the appropriate provider for this repo_id.
       const repoId = (handle as { repo_id?: string })?.repo_id;
       if (repoId) {
@@ -392,11 +388,11 @@ function registerIpc(skillManager: SkillManager) {
           void provider.watchStop(repoId).catch(() => {});
           result = await provider.request(method, params as Record<string, unknown>);
         } else {
-          result = await (await localAgent).request(method, params);
+          result = await (await localAgent()).request(method, params);
         }
         registry.unregister(repoId);
       } else {
-        result = await (await localAgent).request(method, params);
+        result = await (await localAgent()).request(method, params);
       }
       return result;
     }
@@ -428,7 +424,7 @@ function registerIpc(skillManager: SkillManager) {
     // No repo_id, or a local provider still starting — send
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
-    return (await localAgent).request(method, params);
+    return (await localAgent()).request(method, params);
   }
   media = new MediaResources(requestAgent, (owner, id, error) => {
     const contents = webContents.fromId(owner);
@@ -1859,11 +1855,6 @@ app.whenReady().then(async () => {
   await skillManager.initialize();
   registerSkillManagerIpc(ipcMain, skillManager, () => mainWindow);
 
-  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager);
-  registerSidecarIpc(sidecarManager);
-  registerLspIpc(lspManager, () => mainWindow);
-  registerFileWatcher(() => mainWindow);
-
   // SSH subsystem initialization
   // v2.0.0-alpha.1 stores the default SSH data here. Custom app profiles must
   // stay isolated; moving default data requires an explicit migration.
@@ -1872,6 +1863,11 @@ app.whenReady().then(async () => {
   const sshProfileManager = new SshProfileManager(path.join(sshDataDirectory, "ssh-profiles.json"));
   const sshDatabase = new SshDatabase(path.join(sshDataDirectory, "ssh-enhanced.db"));
   const db = sshDatabase.getDb();
+
+  // Core SSH modules
+  const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
+  const verifyHostKey = knownHosts.authorize.bind(knownHosts);
+  const sshSessionManager = new SshSessionManager(verifyHostKey);
 
   const storageConnections = new StorageConnections(
     path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
@@ -1888,10 +1884,21 @@ app.whenReady().then(async () => {
     },
   );
 
-  // Core SSH modules
-  const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
-  const verifyHostKey = knownHosts.authorize.bind(knownHosts);
-  const sshSessionManager = new SshSessionManager(verifyHostKey);
+  // Share construction, not process readiness: Agent retains its own restart
+  // and repository owners. A failed prerequisite can be repaired and retried.
+  let construction: Promise<Agent> | undefined;
+  function localAgent(): Promise<Agent> {
+    if (isShuttingDown) return Promise.reject(new Error("Crab Desktop is shutting down"));
+    if (agent) return Promise.resolve(agent);
+    if (!construction) construction = constructLocalAgent().finally(() => { construction = undefined; });
+    return construction;
+  }
+
+  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager, storageConnections, localAgent);
+  registerSidecarIpc(sidecarManager);
+  registerLspIpc(lspManager, () => mainWindow);
+  registerFileWatcher(() => mainWindow);
+
   knownHosts.on("ssh:host-key-request", (prompt: HostKeyRequest) => {
     if (!mainWindow || mainWindow.isDestroyed()) { void knownHosts.answer(prompt.requestId, false); return; }
     mainWindow.webContents.send("ssh:host-key-request", prompt);
@@ -1913,7 +1920,7 @@ app.whenReady().then(async () => {
 
   const rpcRouter = new RpcRouter(sshSessionManager, {
     request: async (method: string, params: unknown) => {
-      return (await localAgent).request(method, params);
+      return (await localAgent()).request(method, params);
     },
   }, storageConnections);
   _rpcRouter = rpcRouter;
@@ -2313,11 +2320,7 @@ app.whenReady().then(async () => {
     daemonSubsystem?.dispose();
   });
 
-  // Spin up the agent in the background. If it fails, surface the
-  // error via IPC so the renderer can render a banner; otherwise the
-  // renderer's first RPC call transparently waits for `start()` to
-  // finish.
-  try {
+  async function constructLocalAgent(): Promise<Agent> {
     try {
       const shellEnv = await shellEnvPromise;
       if (shellEnv) {
@@ -2327,6 +2330,8 @@ app.whenReady().then(async () => {
       console.warn("[crab-desktop] Failed to resolve shell environment before starting agent:", err);
     }
 
+    // A delayed shell lookup cannot create a process after application shutdown.
+    if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
     const mainSettings = readMainSettings();
 
     // Persist only main-process-redacted logs; the native file sink would
@@ -2347,15 +2352,15 @@ app.whenReady().then(async () => {
     // Each application profile owns its SlateDB writer; parallel profiles must
     // not contend for the standalone sidecar's home-directory index.
     const indexerDirectory = path.join(app.getPath("userData"), "native", "indexer");
-    agent = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), ["--index-dir", indexerDirectory], storageConnections);
-    if (logsDir) agent.on("stderr", (line: string) => {
+    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), ["--index-dir", indexerDirectory], storageConnections);
+    if (logsDir) next.on("stderr", (line: string) => {
       const day = new Date().toISOString().slice(0, 10);
       fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {
         if (error) console.warn("[crab-desktop] Could not append agent log.");
       });
     });
-    agent.on("notification", sendAgentEvent);
-    agent.on("exit", (code, signal) => {
+    next.on("notification", sendAgentEvent);
+    next.on("exit", (code, signal) => {
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
         return;
       }
@@ -2367,34 +2372,37 @@ app.whenReady().then(async () => {
 
     // Register the OAuth device flow handler so `auth/start`
     // notifications from the agent trigger browser-open + token polling.
-    registerForgeAuth(agent, () => mainWindow);
+    registerForgeAuth(next, () => mainWindow);
 
     // Initialize the ProviderRegistry with the LocalProvider singleton.
     // This must happen after the agent is created so the LocalProvider
     // can delegate RPC calls to it.
     const registry = getProviderRegistry();
-    const localProvider = new LocalProvider(agent);
+    const localProvider = new LocalProvider(next);
     registry.setLocalProvider(localProvider);
     localProvider.on("capabilities-changed", sendRepositoryCapabilities);
-    resolveLocalAgent(agent);
+    agent = next;
 
     // Fire-and-forget; we don't want to block the window on the
     // agent's ping round-trip. Failures bubble into the catch below.
-    agent.start().catch((err) => {
+    next.start().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       mainWindow?.webContents.send("crab:event", {
         method: "agent/failed",
         params: { message },
       });
     });
-  } catch (err) {
-    rejectLocalAgent(err);
+    return next;
+  }
+
+  void localAgent().catch((err) => {
+    if (isShuttingDown) return;
     const message = err instanceof Error ? err.message : String(err);
     mainWindow?.webContents.send("crab:event", {
       method: "agent/failed",
       params: { message },
     });
-  }
+  });
 
   // ── SSH Remote Activity Bridge ──────────────────────────────────
   // When the SSH subsystem creates an RPC router, call

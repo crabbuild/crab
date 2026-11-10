@@ -777,11 +777,11 @@ export class Orchestrator extends EventEmitter {
     if (adapter instanceof CodexAppServerAdapter && task.codexThreadId) {
       adapter.resumeThreadId = task.codexThreadId;
     }
-    adapter.spawn(task.prompt, task.worktreePath, agentConfig.env);
+    // Register admission before waiting for environment discovery so cancellation
+    // and timeouts can revoke a launch before its process exists.
     this.adapters.set(taskId, adapter);
-
-    // Set up timeout.
     this.setupTimeout(taskId);
+    await adapter.spawn(task.prompt, task.worktreePath, agentConfig.env);
   }
 
   /**

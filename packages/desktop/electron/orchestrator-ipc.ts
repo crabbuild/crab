@@ -751,13 +751,13 @@ export function registerOrchestratorIpc(
 
         // Spawn the same agent CLI that ran the task in one-shot mode
         // to perform the review. This avoids needing a separate AI provider.
-        const { getExpandedEnv } = await import("./orchestrator-adapters.js");
+        const { getExpandedEnv } = await import("./env/userShellEnv.js");
         const { execFile: execFileCb } = await import("node:child_process");
         const { promisify } = await import("node:util");
         const execFileAsync = promisify(execFileCb);
 
         const agentConfig = loadAgentConfig(task.agentType);
-        const agentEnv = getExpandedEnv(agentConfig.env);
+        const agentEnv = await getExpandedEnv(agentConfig.env);
 
         let reviewText: string;
 
@@ -2034,7 +2034,7 @@ export function registerOrchestratorIpc(
         });
 
         // Spawn in the same worktree
-        adapter.spawn(prompt, parentTask.worktreePath);
+        await adapter.spawn(prompt, parentTask.worktreePath);
 
         await orchestrator.persistTasks();
         return { success: true, agentId, childTaskId: childTask.id };

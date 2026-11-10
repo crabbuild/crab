@@ -7,7 +7,7 @@ export type UserShellEnvOptions = {
   extraEnv?: NodeJS.ProcessEnv;
 };
 
-let cachedBaseEnv: NodeJS.ProcessEnv | null = null;
+let cachedBaseEnv: Promise<NodeJS.ProcessEnv> | null = null;
 
 function uniqPathEntries(value: string): string {
   const seen = new Set<string>();
@@ -63,9 +63,16 @@ function mergeNoProxy(value?: string): string {
   return Array.from(new Set(entries)).join(",");
 }
 
-export async function getUserShellBaseEnv(): Promise<NodeJS.ProcessEnv> {
-  if (cachedBaseEnv) return cachedBaseEnv;
+export function getUserShellBaseEnv(): Promise<NodeJS.ProcessEnv> {
+  if (!cachedBaseEnv) {
+    const pending = loadUserShellBaseEnv();
+    cachedBaseEnv = pending;
+    void pending.catch(() => { if (cachedBaseEnv === pending) cachedBaseEnv = null; });
+  }
+  return cachedBaseEnv;
+}
 
+async function loadUserShellBaseEnv(): Promise<NodeJS.ProcessEnv> {
   let loginShellEnv: NodeJS.ProcessEnv = {};
 
   try {
@@ -92,7 +99,7 @@ export async function getUserShellBaseEnv(): Promise<NodeJS.ProcessEnv> {
       .join(path.delimiter)
   );
 
-  cachedBaseEnv = {
+  return {
     ...process.env,
     ...loginShellEnv,
 
@@ -109,8 +116,6 @@ export async function getUserShellBaseEnv(): Promise<NodeJS.ProcessEnv> {
     NO_PROXY: mergeNoProxy(loginShellEnv.NO_PROXY || process.env.NO_PROXY),
     no_proxy: mergeNoProxy(loginShellEnv.no_proxy || process.env.no_proxy),
   };
-
-  return cachedBaseEnv;
 }
 
 export async function buildTerminalEnv(
@@ -132,4 +137,75 @@ export async function buildTerminalEnv(
 
 export function invalidateUserShellEnvCache(): void {
   cachedBaseEnv = null;
+}
+
+export async function getExpandedEnv(extraEnv?: Record<string, string>): Promise<Record<string, string>> {
+  const base = await getUserShellBaseEnv();
+  const env = Object.fromEntries(Object.entries({ ...base, ...process.env, ...extraEnv })
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  const home = os.homedir();
+  const fs = require("node:fs");
+
+  const extraPaths: string[] = [
+    path.join(home, ".cargo", "bin"),
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    path.join(home, ".local", "bin"),
+    path.join(home, ".local", "share", "mise", "shims"),  // mise shims
+    path.join(home, ".npm-global", "bin"),
+    "/opt/homebrew/opt/node/bin",
+  ];
+
+  // Detect nvm in all common locations ($NVM_DIR, ~/.nvm, ~/.config/nvm).
+  const nvmCandidates = [
+    process.env.NVM_DIR,
+    path.join(home, ".nvm"),
+    path.join(home, ".config", "nvm"),
+  ].filter(Boolean) as string[];
+
+  for (const nvmDir of nvmCandidates) {
+    try {
+      const versions = path.join(nvmDir, "versions", "node");
+      if (!fs.existsSync(versions)) continue;
+      const dirs = fs.readdirSync(versions) as string[];
+      // Add every installed node version — binaries may be in any of them.
+      // Put the newest first so it wins duplicate lookups.
+      const sorted = dirs.sort().reverse();
+      for (const v of sorted) {
+        extraPaths.push(path.join(versions, v, "bin"));
+      }
+    } catch {
+      // Best-effort.
+    }
+  }
+
+  // Detect mise-installed node versions and add their bin dirs too.
+  try {
+    const miseNode = path.join(home, ".local", "share", "mise", "installs", "node");
+    if (fs.existsSync(miseNode)) {
+      const dirs = fs.readdirSync(miseNode) as string[];
+      for (const v of dirs.sort().reverse()) {
+        extraPaths.push(path.join(miseNode, v, "bin"));
+      }
+    }
+  } catch {
+    // Best-effort.
+  }
+
+  const currentPath = env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
+  const pathSet = new Set(currentPath.split(path.delimiter));
+
+  // Merge login-shell PATH (picks up nvm/volta/asdf/bun/custom prefixes).
+  const shellPath = base.PATH;
+  if (shellPath) {
+    for (const p of shellPath.split(path.delimiter)) {
+      if (p) pathSet.add(p);
+    }
+  }
+
+  for (const p of extraPaths) {
+    if (!pathSet.has(p)) pathSet.add(p);
+  }
+  env.PATH = [...pathSet].join(path.delimiter);
+  return env;
 }

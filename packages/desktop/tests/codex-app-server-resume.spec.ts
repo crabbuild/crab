@@ -3,6 +3,8 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -53,7 +55,7 @@ describe("Codex thread resume", () => {
   }
 
   async function initialize() {
-    adapter.spawn("Continue the task", "/tmp/test-project");
+    await adapter.spawn("Continue the task", "/tmp/test-project");
     const init = drainFrames(stdin).find(frame => frame.method === "initialize");
     const frames = await reply(init?.id, { result: {} });
     expect(frames.map(frame => frame.method)).toEqual(["initialized", "thread/resume"]);

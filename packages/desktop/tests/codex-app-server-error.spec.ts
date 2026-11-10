@@ -12,6 +12,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PassThrough } from "node:stream";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -138,7 +140,7 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
     const events: AgentEvent[] = [];
     adapter.onEvent((e) => events.push(e));
 
-    adapter.spawn("test prompt", "/tmp/test");
+    await adapter.spawn("test prompt", "/tmp/test");
     await completeHandshake(stdin, stdout);
 
     // Clear events from handshake
@@ -182,7 +184,7 @@ describe("CodexAppServerAdapter — Mid-turn error notifications (D11)", () => {
     const events: AgentEvent[] = [];
     adapter.onEvent((e) => events.push(e));
 
-    adapter.spawn("test prompt", "/tmp/test");
+    await adapter.spawn("test prompt", "/tmp/test");
     await completeHandshake(stdin, stdout);
 
     // Clear events from handshake

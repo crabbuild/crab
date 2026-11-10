@@ -14,6 +14,8 @@ import { EventEmitter } from "node:events";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
 // We need to mock child_process.spawn before importing the adapter.
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -140,7 +142,7 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     adapter.onEvent((event) => events.push(event));
 
     // Spawn the adapter (triggers initialization)
-    adapter.spawn("Hello, write a test", "/tmp/test-cwd");
+    await adapter.spawn("Hello, write a test", "/tmp/test-cwd");
 
     // Complete the handshake
     await completeHandshake(fakeProc.stdin, fakeProc.stdout);

@@ -10,125 +10,7 @@
 import { spawn, ChildProcess, execFile } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
-import * as os from "node:os";
-
-// ─── PATH Expansion ──────────────────────────────────────────────────────────
-
-/**
- * On macOS, GUI apps don't inherit the user's shell PATH. This builds
- * an expanded PATH that includes common tool directories where npm
- * global binaries (claude, codex) are typically installed.
- */
-/**
- * Cached login-shell PATH. Populated on first call from the user's
- * login shell (zsh/bash) so we inherit nvm/volta/asdf/bun additions.
- */
-let _cachedShellPath: string | null = null;
-
-/**
- * Fetches the user's login shell PATH synchronously (blocks on first call only).
- * Returns null if not on Unix or if fetching fails.
- */
-function getLoginShellPath(): string | null {
-  if (_cachedShellPath !== null) return _cachedShellPath || null;
-  if (process.platform === "win32") {
-    _cachedShellPath = "";
-    return null;
-  }
-  try {
-    const { execFileSync } = require("node:child_process");
-    const shell = process.env.SHELL || "/bin/zsh";
-    const out = execFileSync(shell, ["-ilc", "printf '%s' \"$PATH\""], {
-      timeout: 3000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    _cachedShellPath = (out as string).trim();
-    return _cachedShellPath || null;
-  } catch {
-    _cachedShellPath = "";
-    return null;
-  }
-}
-
-/**
- * Pre-warms the login shell PATH cache. Call once at app startup so the
- * first agent spawn doesn't block on a synchronous shell exec.
- */
-export function prewarmShellPath(): void {
-  if (_cachedShellPath !== null) return; // already cached
-  // Run in a microtask so it doesn't block the event loop during import.
-  setImmediate(() => { getLoginShellPath(); });
-}
-
-export function getExpandedEnv(extraEnv?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { ...process.env as Record<string, string>, ...extraEnv };
-  const home = os.homedir();
-  const fs = require("node:fs");
-
-  const extraPaths: string[] = [
-    path.join(home, ".cargo", "bin"),
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    path.join(home, ".local", "bin"),
-    path.join(home, ".local", "share", "mise", "shims"),  // mise shims
-    path.join(home, ".npm-global", "bin"),
-    "/opt/homebrew/opt/node/bin",
-  ];
-
-  // Detect nvm in all common locations ($NVM_DIR, ~/.nvm, ~/.config/nvm).
-  const nvmCandidates = [
-    process.env.NVM_DIR,
-    path.join(home, ".nvm"),
-    path.join(home, ".config", "nvm"),
-  ].filter(Boolean) as string[];
-
-  for (const nvmDir of nvmCandidates) {
-    try {
-      const versions = path.join(nvmDir, "versions", "node");
-      if (!fs.existsSync(versions)) continue;
-      const dirs = fs.readdirSync(versions) as string[];
-      // Add every installed node version — binaries may be in any of them.
-      // Put the newest first so it wins duplicate lookups.
-      const sorted = dirs.sort().reverse();
-      for (const v of sorted) {
-        extraPaths.push(path.join(versions, v, "bin"));
-      }
-    } catch {
-      // Best-effort.
-    }
-  }
-
-  // Detect mise-installed node versions and add their bin dirs too.
-  try {
-    const miseNode = path.join(home, ".local", "share", "mise", "installs", "node");
-    if (fs.existsSync(miseNode)) {
-      const dirs = fs.readdirSync(miseNode) as string[];
-      for (const v of dirs.sort().reverse()) {
-        extraPaths.push(path.join(miseNode, v, "bin"));
-      }
-    }
-  } catch {
-    // Best-effort.
-  }
-
-  const currentPath = env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
-  const pathSet = new Set(currentPath.split(":"));
-
-  // Merge login-shell PATH (picks up nvm/volta/asdf/bun/custom prefixes).
-  const shellPath = getLoginShellPath();
-  if (shellPath) {
-    for (const p of shellPath.split(":")) {
-      if (p) pathSet.add(p);
-    }
-  }
-
-  for (const p of extraPaths) {
-    if (!pathSet.has(p)) pathSet.add(p);
-  }
-  env.PATH = [...pathSet].join(":");
-  return env;
-}
+import { getExpandedEnv } from "./env/userShellEnv";
 
 // ─── macOS Path Normalization ─────────────────────────────────────────────────
 
@@ -260,8 +142,32 @@ export abstract class AgentAdapter {
   /** Guards against emitting a second `done` event from the exit handler
    *  when the protocol already delivered one (turn.completed / result). */
   protected doneEmitted = false;
+  private preparation: AbortController | undefined;
 
-  abstract spawn(prompt: string, cwd: string, env?: Record<string, string>): void;
+  abstract spawn(prompt: string, cwd: string, env?: Record<string, string>): void | Promise<void>;
+
+  // Environment discovery is shared; cancellation only revokes this launch.
+  // A late environment reply must not start a cancelled or superseded process.
+  protected async prepareEnvironment(extra?: Record<string, string>): Promise<Record<string, string> | undefined> {
+    this.preparation?.abort();
+    const owner = new AbortController();
+    this.preparation = owner;
+    let stop!: () => void;
+    const cancelled = new Promise<undefined>(resolve => { stop = () => resolve(undefined); });
+    owner.signal.addEventListener("abort", stop, { once: true });
+    try {
+      const env = await Promise.race([getExpandedEnv(extra), cancelled]);
+      return owner.signal.aborted ? undefined : env;
+    } catch (error) {
+      if (!owner.signal.aborted) throw error;
+      return undefined;
+    } finally {
+      owner.signal.removeEventListener("abort", stop);
+      if (this.preparation === owner) this.preparation = undefined;
+    }
+  }
+
+  protected cancelPreparation(): void { this.preparation?.abort(); }
 
   abstract sendMessage(text: string): void;
 
@@ -280,6 +186,7 @@ export abstract class AgentAdapter {
   respondApproval?(requestId: string, decision: "allow" | "allow_once" | "deny"): void;
 
   cancel(): void {
+    this.cancelPreparation();
     if (this.proc) {
       this.proc.kill("SIGTERM");
       this.proc = null;
@@ -371,7 +278,9 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     this.extraArgs = extraArgs ?? [];
   }
 
-  spawn(prompt: string, cwd: string, env?: Record<string, string>): void {
+  async spawn(prompt: string, cwd: string, env?: Record<string, string>): Promise<void> {
+    const environment = await this.prepareEnvironment(env);
+    if (!environment) return;
     this.cwd = cwd;
     this.proc = spawn(
       this.binary,
@@ -385,7 +294,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
       ],
       {
         cwd,
-        env: getExpandedEnv(env),
+        env: environment,
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
@@ -780,10 +689,12 @@ export class GenericAdapter extends AgentAdapter {
     this.args = extraArgs ?? [];
   }
 
-  spawn(prompt: string, cwd: string, env?: Record<string, string>): void {
+  async spawn(prompt: string, cwd: string, env?: Record<string, string>): Promise<void> {
+    const environment = await this.prepareEnvironment(env);
+    if (!environment) return;
     this.proc = spawn(this.binary, [...this.args, prompt], {
       cwd,
-      env: getExpandedEnv(env),
+      env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -910,7 +821,6 @@ export function getCachedAgents(): DetectedAgent[] | null {
  * the UI and shouldn't crash the app.
  */
 export function prewarmAgents(): void {
-  prewarmShellPath();
   detectAgents().catch(() => {});
 }
 
@@ -968,48 +878,14 @@ async function detectBinaryWithFlag(
   return { type, name, binary, path: binaryPath, version, available: true };
 }
 
-/**
- * Finds a binary using a layered strategy:
- *   1. Direct `which` with our augmented PATH
- *   2. User's login shell (-ilc "which <binary>") to pick up shell rc PATH
- *      additions (nvm, volta, asdf, bun, mise, custom npm prefix, etc.)
- *
- * Electron processes don't inherit the login shell's PATH on macOS, so
- * step 2 is essential for binaries installed via node version managers
- * or custom prefixes.
- */
-function findOnPath(binary: string): Promise<string | null> {
-  if (process.platform === "win32") {
-    return new Promise((resolve) => {
-      execFile("where", [binary], { timeout: 5000, env: getExpandedEnv() }, (err, stdout) => {
-        if (err || !stdout.trim()) { resolve(null); return; }
-        resolve(stdout.trim().split(/\r?\n/)[0].trim());
-      });
-    });
-  }
-
-  return new Promise((resolve) => {
-    // First try: direct `which` with our augmented PATH.
-    execFile("which", [binary], { timeout: 5000, env: getExpandedEnv() }, (err, stdout) => {
-      if (!err && stdout.trim()) {
-        resolve(stdout.trim().split("\n")[0].trim());
-        return;
-      }
-
-      // Fallback: run through the user's login shell so we inherit rc-file PATH.
-      const shell = process.env.SHELL || "/bin/zsh";
-      execFile(
-        shell,
-        ["-ilc", `command -v ${binary} 2>/dev/null`],
-        { timeout: 5000 },
-        (err2, stdout2) => {
-          if (err2 || !stdout2.trim()) {
-            resolve(null);
-            return;
-          }
-          resolve(stdout2.trim().split("\n")[0].trim());
-        },
-      );
+// Detection and process launches share the resolved login environment, so GUI
+// startup never needs a second synchronous shell probe.
+async function findOnPath(binary: string): Promise<string | null> {
+  const env = await getExpandedEnv();
+  const command = process.platform === "win32" ? "where" : "which";
+  return new Promise(resolve => {
+    execFile(command, [binary], { timeout: 5000, env }, (error, stdout) => {
+      resolve(error || !stdout.trim() ? null : stdout.trim().split(/\r?\n/)[0].trim());
     });
   });
 }

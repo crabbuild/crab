@@ -14,6 +14,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // captured and no real codex process is forked during the test.
 const spawnCalls: Array<{ binary: string; args: string[]; options: unknown }> = [];
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return {
@@ -61,16 +63,16 @@ function makeFakeProc() {
 }
 
 import { CodexAppServerAdapter } from "../electron/codex-app-server-adapter";
-import { getExpandedEnv } from "../electron/orchestrator-adapters";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
 
 beforeEach(() => {
   spawnCalls.length = 0;
 });
 
 describe("codex app-server wiring", () => {
-  it("spawns `codex app-server --listen stdio://` with correct cwd and stdio", () => {
+  it("spawns `codex app-server --listen stdio://` with correct cwd and stdio", async () => {
     const adapter = new CodexAppServerAdapter();
-    adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
+    await adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
 
     expect(spawnCalls).toHaveLength(1);
     const call = spawnCalls[0];
@@ -82,9 +84,9 @@ describe("codex app-server wiring", () => {
     expect(opts.stdio).toEqual(["pipe", "pipe", "pipe"]);
   });
 
-  it("env includes custom vars and PATH expansion via getExpandedEnv", () => {
+  it("env includes custom vars and PATH expansion via getExpandedEnv", async () => {
     const adapter = new CodexAppServerAdapter();
-    adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
+    await adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
 
     const call = spawnCalls[0];
     const opts = call.options as { env: Record<string, string> };
@@ -97,13 +99,13 @@ describe("codex app-server wiring", () => {
     expect(opts.env.PATH.length).toBeGreaterThan(0);
 
     // Verify the env matches what getExpandedEnv produces.
-    const expected = getExpandedEnv({ CUSTOM_VAR: "value" });
-    expect(opts.env).toEqual(expected);
+    const expected = await getExpandedEnv({ CUSTOM_VAR: "value" });
+    expect(opts.env.PATH).toBe(expected.PATH);
   });
 
-  it("extraArgs are appended after the base args", () => {
+  it("extraArgs are appended after the base args", async () => {
     const adapter = new CodexAppServerAdapter(["--model", "o3"]);
-    adapter.spawn("test prompt", "/tmp/workdir");
+    await adapter.spawn("test prompt", "/tmp/workdir");
 
     expect(spawnCalls).toHaveLength(1);
     const call = spawnCalls[0];

@@ -187,7 +187,11 @@ performs one real, read-only bucket/container listing with a 30-second deadline;
 it reports provider failures without retrying and verifies read/list access,
 not write permission. Ordinary data operations retain retries. Save the
 connection, then choose **Use connection** for the open repository. Clone and Crab
-setup use the same picker and connection test.
+setup use the same picker and connection test. Saving, editing and forgetting
+connections work before native construction, including while login-shell
+discovery is blocked or a startup prerequisite fails. Repairing the prerequisite
+allows native operations to retry in the running app. CLI launch preparation
+shares the asynchronous shell environment and remains cancellable.
 
 | Provider | Built-in credentials | Repository URL |
 | --- | --- | --- |
