@@ -1707,3 +1707,13 @@ They use the existing Vite test server and an isolated installed-Chrome profile.
   navigation; neither reproduces or explains the earlier combined-suite failure.
   Windows descendant ownership and packaged restart stability remain release
   gates.
+- CI run `42843352759` passes Linux ARM64's native/SSH job. Linux x64 passes
+  native integration, checkpoint ownership, packaged smoke, packaged storage,
+  and SSH qualification, then reports 4,046 passes, 99 skips, and eleven goal
+  failures in the broad suite. The goal fixture intercepted every spawned
+  process, including checkpoint Git, and returned an empty HEAD result.
+  Restricting its protocol mock to Codex preserves real Git snapshots. All
+  eleven failures reproduce locally before this fixture correction; all eleven
+  cases and the fixture type check pass afterward. Assertions remain intact.
+  Evidence: `goal-owner-before.json` and `goal-owner-after.json`. New-head broad
+  CI is still required; macOS and Windows had not completed at this check.

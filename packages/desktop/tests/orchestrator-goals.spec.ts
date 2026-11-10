@@ -42,7 +42,11 @@ describe("native goal task ownership", () => {
     pendingTurn = undefined;
     holdGoalRead = false;
     pendingGoalReads = [];
-    vi.mocked(spawn).mockImplementation(() => {
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(spawn).mockImplementation((...args) => {
+      // Only the provider speaks the fixture protocol. Checkpoint Git must
+      // execute normally so a fake close cannot stand in for its commit.
+      if (args[0] !== "codex") return native.spawn(...args);
       const stdin = new PassThrough();
       const stdout = new PassThrough();
       const connection: Connection = { stdout, requests: [], closed: false };
