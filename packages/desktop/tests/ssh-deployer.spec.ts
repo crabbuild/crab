@@ -12,7 +12,7 @@ import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { Client, Server, utils, type Connection, type SFTPWrapper, type Stats } from "ssh2";
 import { AgentDeployer } from "../electron/ssh-deployer";
-import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
+import { KnownHostsManager, createHostKeyVerifier, type HostKeyVerifier } from "../electron/ssh-known-hosts";
 import { RemoteRuntimeStore } from "../electron/ssh-runtime";
 import { RemoteFileBrowser } from "../electron/ssh-file-browser";
 import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
@@ -27,6 +27,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   let directory: string; let remote: string; let local: string; let server: Server; let client: Client; let owner: AbortController;
   const connections = new Set<Connection>(); const children = new Set<ChildProcess>(); const descriptors = new Set<number>();
   let commands: string[]; let uploads: number; let acknowledged: number; let corrupt: boolean;
+  let verifier: HostKeyVerifier;
   let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>; let diagnostics: string[];
   beforeEach(async () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
@@ -38,6 +39,10 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     await writeFile(path.join(local, "runtime.json"), JSON.stringify({ version: "2.0.0-alpha.1", platform: "darwin", arch: "arm64", hashes: { crab: digest(cli), "crab-desktop-agent": digest(agent) } }));
     commands = []; diagnostics = []; native = false; stalledOperation = undefined; written = undefined; exits = []; abortOnWrite = false; uploads = 0; acknowledged = 0; corrupt = false; uname = "Darwin\narm64\n"; owner = new AbortController();
     server = new Server({ hostKeys: [pem] }, connection => {
+      // OpenSSH enables TCP_NODELAY for non-PTY sessions too. Model that peer
+      // policy so Linux delayed ACKs do not dominate this transport fixture.
+      // ssh2 exposes this server method but its Connection type omits it.
+      (connection as Connection & { setNoDelay(noDelay: boolean): void }).setNoDelay(true);
       connections.add(connection); connection.on("error", () => {}); connection.once("close", () => connections.delete(connection));
       connection.on("authentication", context => {
         if (context.method !== "publickey" || !context.key.data.equals(hostKey)) { context.reject(); return; }
@@ -67,12 +72,12 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const address = server.address();
     if (!address || typeof address === "string") throw new Error("Owned fixture did not bind");
     const hosts = new KnownHostsManager(path.join(directory, "pins.json"), path.join(directory, "user"), path.join(directory, "global"));
-    hosts.accept("127.0.0.1", address.port, hostKey); const verify = createHostKeyVerifier(hosts, async () => false);
+    hosts.accept("127.0.0.1", address.port, hostKey); verifier = createHostKeyVerifier(hosts, async () => false);
     client = new Client(); client.on("error", () => {});
     await new Promise<void>((resolve, reject) => {
-      client.once("ready", resolve); client.once("error", reject);
+      client.once("ready", () => { client.setNoDelay(true); resolve(); }); client.once("error", reject);
       client.connect({ host: "127.0.0.1", port: address.port, username: "fixture", privateKey: pem,
-        hostVerifier: (candidate: Buffer, done: (accepted: boolean) => void) => { void verify("127.0.0.1", address.port, candidate, owner.signal).then(() => done(true), () => done(false)); },
+        hostVerifier: (candidate: Buffer, done: (accepted: boolean) => void) => { void verifier("127.0.0.1", address.port, candidate, owner.signal).then(() => done(true), () => done(false)); },
       });
     });
   });
@@ -131,8 +136,8 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const store = new RemoteRuntimeStore({ packaged: false, appPath: path.join(directory, "app"), version: "2.0.0-alpha.1", cacheDirectory: path.join(directory, "cache") });
     return new AgentDeployer(store.resolve.bind(store));
   }
-  async function start() {
-    const channel = await deployer().ensureAgent(client, owner.signal);
+  async function start(target = client) {
+    const channel = await deployer().ensureAgent(target, owner.signal);
     const output = await new Promise<string>((resolve, reject) => { let data = ""; channel.on("data", (chunk: Buffer) => { data += chunk.toString(); if (data.split("owned-cli").length === 3) resolve(data); }); channel.once("error", reject); });
     return { channel, output };
   }
@@ -145,6 +150,22 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   it("reuses a verified runtime while another session is running", async () => {
     const first = await start(); const second = await start();
     expect({ uploads, outputs: [first.output, second.output] }).toEqual({ uploads: 2, outputs: ["owned-cli\nowned-cli\n", "owned-cli\nowned-cli\n"] }); first.channel.end(); second.channel.end();
+  });
+  it("streams a multi-megabyte runtime through the normal deployment boundary", async () => {
+    const padding = Buffer.concat([Buffer.from("#"), Buffer.alloc(2 * 1024 * 1024, 120), Buffer.from("\n")]);
+    const cli = Buffer.concat([await readFile(path.join(local, "crab")), padding]);
+    const agent = Buffer.concat([await readFile(path.join(local, "crab-desktop-agent")), padding]);
+    await writeFile(path.join(local, "crab"), cli); await writeFile(path.join(local, "crab-desktop-agent"), agent);
+    await writeFile(path.join(local, "runtime.json"), JSON.stringify({ version: "2.0.0-alpha.1", platform: "darwin", arch: "arm64", hashes: { crab: digest(cli), "crab-desktop-agent": digest(agent) } }));
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("Owned fixture unavailable");
+    const identity = path.join(directory, "large-identity.pem"); await writeFile(identity, pem, { mode: 0o600 });
+    const manager = new SshSessionManager(verifier);
+    try {
+      await manager.connect({ id: "large", label: "Owned large runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: false, tags: [], portForwards: [], createdAt: Date.now() });
+      const connection = manager.getConnection("large"); if (!connection) throw new Error("Managed SSH connection missing");
+      const { channel, output } = await start(connection.client); channel.end();
+      expect({ output, uploads, acknowledged }).toEqual({ output: "owned-cli\nowned-cli\n", uploads: 2, acknowledged: 2 });
+    } finally { await manager.disconnect("large"); }
   });
   it("does not start a corrupted upload and removes its own staging files", async () => {
     corrupt = true; await expect(deployer().ensureAgent(client, owner.signal)).rejects.toThrow("checksum mismatch");
@@ -196,9 +217,15 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
     const negotiator = new CapabilityNegotiator(router);
     manager.setAgentDependencies({ createDeployer: () => new AgentDeployer(store.resolve.bind(store)), rpcRouter: router, capabilityNegotiator: negotiator });
+    // Persist before waits so a runner deadline still leaves the last phase
+    // and owned process diagnostics, even when the test's finally cannot finish.
+    const progress = (phase: string) => fs.writeFileSync(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-progress.json"), JSON.stringify({
+      phase, uploads, acknowledged, commands: commands.slice(-20), exits, children: [...children].map(child => child.pid), diagnostics: diagnostics.join("").slice(-64 * 1024),
+    }));
     let completedWithCapabilities = false;
-    manager.on("ssh:deploy-progress", value => { if (value.stage === "starting" && value.percent === 100) completedWithCapabilities = Boolean(negotiator.getCached("runtime")); });
+    manager.on("ssh:deploy-progress", value => { progress(`${value.stage}:${value.percent}`); if (value.stage === "starting" && value.percent === 100) completedWithCapabilities = Boolean(negotiator.getCached("runtime")); });
     try {
+      progress("connect");
       await manager.connect({ id: "runtime", label: "Owned native runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: true, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
       expect({ status: manager.getStatus("runtime"), version: negotiator.getCached("runtime")?.version, downloads: requests.length, uploads, completedWithCapabilities }).toEqual({ status: "connected", version, downloads: 3, uploads: 2, completedWithCapabilities: true });
       const repo = path.join(remote, "repo"); const worktree = path.join(remote, "task-worktree"); await mkdir(repo);
@@ -207,10 +234,12 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await run("git", ["add", "tracked.txt"], { cwd: repo, env });
       await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo, env });
       const browser = new RemoteFileBrowser(router, manager);
+      progress("open-repository");
       const opened = await browser.openAsRepo("runtime", repo) as { repo_id: string; is_remote: boolean };
       const repoId = `ssh://runtime${repo}`;
       expect({ id: opened.repo_id, remote: opened.is_remote }).toEqual({ id: repoId, remote: true });
       const processFactory = remoteAgentProcessFactory(router, "runtime");
+      progress("native-stdio");
       const nativeProcess = processFactory("/bin/sh", ["-c", "cat > native-stdin-proof.bin"], { cwd: repo });
       const processErrors: string[] = [];
       nativeProcess.process.on("error", (error: Error) => processErrors.push(error.message));
@@ -224,6 +253,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       const comparison = await router.sendToRemoteAgent("runtime", "task_compute_diff", { worktree_path: worktree, base_ref: "HEAD" }) as { diff: string };
       expect({ created: created.created, path: created.path, content: await readFile(path.join(worktree, "tracked.txt"), "utf8"), diff: comparison.diff }).toEqual({ created: true, path: await realpath(worktree), content: "after-native-deployment\n", diff: expect.stringContaining("+after-native-deployment") });
       const taskIds = ["12345678-1111-4111-8111-111111111111", "12345678-2222-4222-8222-222222222222"];
+      progress("task-workspaces");
       const shortPath = path.join(remote, ".crab", "worktrees", "12345678");
       await mkdir(shortPath, { recursive: true });
       await writeFile(path.join(shortPath, "keep.txt"), "unrelated user bytes");
@@ -323,12 +353,13 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       expect(surviving.running).toBe(true);
       // A real transport loss must defer the supported read until the new
       // sidecar has attached and completed its own capability handshake.
+      progress("reconnect");
       for (const connection of connections) connection.end();
       await vi.waitFor(() => expect(manager.getStatus("runtime")).toBe("reconnecting"));
       const listing = await router.sendToRemoteAgent("runtime", "git_worktree_list", { repo_id: repoId });
       expect({ listing, status: manager.getStatus("runtime"), uploads }).toEqual({ listing: { worktrees: expect.arrayContaining([expect.objectContaining({ path: await realpath(worktree) })]) }, status: "connected", uploads: 2 });
       await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "ssh-native-runtime.json"), JSON.stringify({ downloads: requests, uploads, created, diff: comparison.diff, listing, status: manager.getStatus("runtime") }));
-    } finally { await manager.disconnect("runtime"); }
+    } finally { progress("disconnect"); await manager.disconnect("runtime"); }
     await vi.waitFor(() => expect(children.size).toBe(0), { timeout: 10_000 });
     // Tracing's severity follows its timestamp. A WARN can contain the CLI's
     // serialized ERROR for an intentionally rejected request inside its field.
@@ -337,6 +368,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "task-workspace-diagnostics.json"), JSON.stringify({ ownership, diagnostics }));
     expect(ownership).toEqual({ cleanExits: true, errors: false, cachesRemoved: true });
     await writeFile(path.join(process.env.CRAB_AGENT_LIVE_ROOT!, "indexer-concurrent-ssh.json"), JSON.stringify({ cachePaths, ...ownership }));
+    progress("complete");
   }, 120_000);
 
 });

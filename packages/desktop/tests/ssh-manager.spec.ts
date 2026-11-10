@@ -47,6 +47,7 @@ class MockClientChannel extends EventEmitter {
 
 class MockClient extends EventEmitter {
   connect = vi.fn();
+  setNoDelay = vi.fn();
   end = vi.fn();
   destroy = vi.fn();
   exec = vi.fn();
@@ -158,8 +159,8 @@ describe("SshSessionManager", () => {
 
     it("connect transitions to 'connected' when ssh2 client emits 'ready'", async () => {
       const profile = makeProfile();
-      await connectProfile(manager, profile);
-      expect(manager.getStatus("test-profile-1")).toBe("connected");
+      const client = await connectProfile(manager, profile);
+      expect({ status: manager.getStatus("test-profile-1"), noDelay: client.setNoDelay.mock.calls }).toEqual({ status: "connected", noDelay: [[true]] });
     });
 
     it("connect transitions to 'error' when ssh2 client emits 'error'", async () => {

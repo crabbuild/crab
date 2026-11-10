@@ -258,6 +258,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1 --minWorkers 1
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Crab-remote-runtime-Linux-ARM64-diagnostics
+          path: ${{ runner.temp }}/crab-ssh-runtime
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && hashFiles('packages/desktop/release/remote-runtime/*') != '' }}
         with:
           name: Crab-remote-runtime-Linux-ARM64
           path: packages/desktop/release/remote-runtime/*

@@ -543,7 +543,12 @@ export class SshSessionManager extends EventEmitter {
         signal.removeEventListener("abort", cancel);
       };
       const failed = (reason: unknown) => { cleanup(); reject(reason); };
-      const ready = () => { cleanup(); resolve(); };
+      const ready = () => {
+        // Match OpenSSH for exec/SFTP as well as PTYs. Small SSH frames must
+        // not wait for delayed ACKs on every deployment or RPC round trip.
+        client.setNoDelay(true);
+        cleanup(); resolve();
+      };
       const closed = () => failed(new Error("SSH connection closed before ready"));
       const cancel = () => { failed(signal.reason); client.destroy(); };
       client.once("ready", ready); client.once("end", closed); client.once("close", closed);

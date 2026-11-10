@@ -1402,7 +1402,8 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   Discard removes the workspace and its refs after closure. Production/fixture
   types and Electron build pass. CI adds the inference-free checkpoint case.
   The [811924de411 process-owner gate](https://github.com/crabbuild/crab/actions/runs/42801653371)
-  passes on Linux and macOS ARM64/Intel; full jobs and this new head remain pending.
+  passes on Linux and macOS ARM64/Intel. Its Linux ARM64 job passed all 271 native
+  tests but timed out in two SSH cases; full jobs and this new head remain gates.
   Evidence: `remote-native-scoped-final.json`, `remote-checkpoint-resources.json`,
   `remote-native-local-workspaces.json`, `remote-native-task-live-final.json`,
   `remote-native-checkpoint-live-final.json` and matching type/build logs.
@@ -1411,6 +1412,27 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   durable endpoint/Apply-target recovery and packaged/cross-OS behavior remain
   release gates. The unused auxiliary remote facade is outside the production
   main-orchestrator path and still needs retirement of its unsupported calls.
+
+- SSH connections now enable TCP_NODELAY at the shared ready boundary, including
+  Test Connection, reconnect and jump clients. This follows OpenSSH 9.6's
+  [socket policy](https://github.com/openssh/openssh-portable/blob/V_9_6_P1/packet.c#L2121-L2136),
+  used for exec/SFTP as well as interactive sessions. ssh2 1.17 forwards the
+  client setting to its underlying socket; loopback servers model the same peer
+  policy. Linux ARM64 reproduced the five-second runtime-reuse timeout. With
+  both peers configured it passes in 252 ms. A new 4 MiB transfer through the real
+  session manager fails in 5204 ms when only the production setting is removed,
+  then passes in 587 ms with the setting restored. The ordinary test budget is
+  unchanged. All ten inference-free Linux SFTP cases pass; macOS also passes the
+  built native-runtime case, 72 scoped checks and both real terminal cases.
+  Production/fixture types, Electron build, Rust formatting and workflow parse
+  pass. Evidence: `ssh-linux-control.json`, `ssh-linux-managed-large-before.json`,
+  `ssh-linux-managed-large-fixed.json`, `ssh-linux-nodelay-final.json`,
+  `ssh-nodelay-native-final.json`, `ssh-nodelay-scoped-first.json` and
+  `ssh-nodelay-terminal-final.json` in the owned output. This reproduces and fixes
+  the short ARM64 timeout; the 120-second built-runtime case still requires CI
+  proof. That case now persists its last phase and bounded process diagnostics,
+  and ARM64 CI retains diagnostics and built assets even after qualification
+  failure. No timeout was increased and no failing check was bypassed.
 
 ## Remaining completion gates
 
