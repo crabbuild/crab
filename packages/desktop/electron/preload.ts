@@ -542,15 +542,15 @@ contextBridge.exposeInMainWorld("crab", {
   // Open a URL in the system browser
   openUrl: (url: string) => ipcRenderer.invoke("crab:open-url", url),
   // Jupyter kernel
-  jupyterListKernels: () => ipcRenderer.invoke("crab:jupyter-list-kernels"),
-  jupyterCheck: () => ipcRenderer.invoke("crab:jupyter-check"),
-  jupyterInstall: () => ipcRenderer.invoke("crab:jupyter-install"),
-  jupyterStart: (kernelName: string, cwd: string, jupyterPath?: string) => ipcRenderer.invoke("crab:jupyter-start", kernelName, cwd, jupyterPath),
-  jupyterExecute: (id: string, code: string) => ipcRenderer.invoke("crab:jupyter-execute", id, code),
+  jupyterListKernels: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-list-kernels", pythonPath),
+  jupyterCheck: (pythonPath?: string) => ipcRenderer.invoke("crab:jupyter-check", pythonPath),
+  jupyterInstall: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-install", pythonPath),
+  jupyterStart: (kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => ipcRenderer.invoke("crab:jupyter-start", kernelName, repoId, nativeSessionId, pythonPath),
+  jupyterExecute: (id: string, code: string, requestId: string) => ipcRenderer.invoke("crab:jupyter-execute", id, code, requestId),
   jupyterInterrupt: (id: string) => ipcRenderer.invoke("crab:jupyter-interrupt", id),
   jupyterRestart: (id: string) => ipcRenderer.invoke("crab:jupyter-restart", id),
   jupyterShutdown: (id: string) => ipcRenderer.invoke("crab:jupyter-shutdown", id),
-  onJupyterOutput: (listener: (evt: { id: string; msgType: string; content: Record<string, unknown>; parentMsgId: string }) => void) => {
+  onJupyterOutput: (listener: (evt: import("./jupyter-types").KernelOutput & { id: string }) => void) => {
     const handler = (_e: unknown, payload: any) => listener(payload);
     ipcRenderer.on("crab:jupyter-output", handler);
     return () => { ipcRenderer.removeListener("crab:jupyter-output", handler); };

@@ -6,6 +6,7 @@ import { parseRepoId } from "../electron/ssh-types";
 // self-documenting.
 
 import type { CapabilitySet } from "../electron/repo-capabilities";
+import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec } from "../electron/jupyter-types";
 
 export interface RepoHandle {
   repo_id: string;
@@ -1072,6 +1073,16 @@ declare global {
   interface Window {
     crab: {
       rpc: (method: string, params: unknown) => Promise<unknown>;
+      jupyterCheck: (pythonPath?: string) => Promise<JupyterRuntime>;
+      jupyterListKernels: (pythonPath: string) => Promise<KernelSpec[]>;
+      jupyterInstall: (pythonPath: string) => Promise<string>;
+      jupyterStart: (name: string, repoId: string, nativeSessionId: string, pythonPath: string) => Promise<{ id: string }>;
+      jupyterExecute: (id: string, code: string, requestId: string) => Promise<KernelExecution>;
+      jupyterInterrupt: (id: string) => Promise<void>;
+      jupyterRestart: (id: string) => Promise<void>;
+      jupyterShutdown: (id: string) => Promise<void>;
+      onJupyterOutput: (listener: (event: KernelOutput & { id: string }) => void) => () => void;
+      onJupyterStatus: (listener: (event: { id: string; status: string }) => void) => () => void;
       pickRepoDirectory: () => Promise<string | null>;
       pickCloneDestination: () => Promise<string | null>;
       pickWorktreePath: () => Promise<string | null>;

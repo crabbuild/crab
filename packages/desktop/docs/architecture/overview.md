@@ -149,7 +149,7 @@ App Shutdown
 | Main | Electron 33 | Desktop shell |
 | Main | node-pty | Terminal PTY |
 | Main | better-sqlite3 | Local persistence |
-| Main | zeromq | Inter-process messaging |
+| Kernel runtime | Jupyter Client (user's Python) | Authenticated protocol, readiness and kernel process ownership |
 | Agent | Rust 2024 | Systems language |
 | Agent | tokio | Async runtime |
 | Agent | crab-sdk | Object store access |

@@ -1,4 +1,5 @@
 import { fileBuffers } from "./lib/file-buffer-store";
+import { retainNotebookRepositories } from "./lib/jupyter-ipc";
 import { workspaceDocuments } from "./lib/workspace-settings-store";
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
@@ -676,6 +677,7 @@ const StoreContext = createContext<Ctx | null>(null);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  useEffect(() => { retainNotebookRepositories(new Set(state.repos.map(repo => repo.repo_id))); }, [state.repos]);
 
   useEffect(() => {
     // Batch progress lines to avoid re-rendering the entire tree on every

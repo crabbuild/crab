@@ -1,415 +1,170 @@
-/**
- * Jupyter Kernel Manager — implements the Jupyter Messaging Protocol
- * over ZeroMQ for per-cell code execution.
- *
- * Architecture:
- *   1. Discover kernels via `jupyter kernelspec list --json`
- *   2. Launch a kernel via `jupyter kernel --kernel=<name>`
- *   3. Connect to the kernel's ZeroMQ sockets (shell, iopub, stdin, control)
- *   4. Send execute_request messages, receive outputs via iopub
- *   5. Route outputs back to the renderer via IPC
- *
- * Wire protocol: each message is a multipart ZeroMQ frame sequence:
- *   [ident, DELIM, HMAC, header, parent_header, metadata, content, ...]
- * where DELIM = "<IDS|MSG>" and HMAC is computed over header+parent+meta+content.
- */
-
-import { spawn, ChildProcess } from "node:child_process";
-import * as fs from "node:fs";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
-import * as crypto from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
+import { promisify } from "node:util";
+import { app } from "electron";
+import { getUserShellBaseEnv } from "./env/userShellEnv";
+import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec } from "./jupyter-types";
 
-function uuidv4(): string {
-  return crypto.randomUUID();
+const exec = promisify(execFile);
+// Python cannot read Electron's virtual ASAR filesystem. The packaged
+// worker is explicitly unpacked; development uses the adjacent build asset.
+const runtimeScript = app?.isPackaged
+  ? path.join(process.resourcesPath, "app.asar.unpacked", "dist-electron", "jupyter-runtime.py")
+  : path.join(__dirname, "jupyter-runtime.py");
+const runtimeCommands = new Set<{ cancel: () => void; done: Promise<unknown> }>();
+let commandsClosed = false;
+
+function runPython(pythonPath: string, args: string[], timeout: number, installs = false): Promise<{ stdout: string; stderr: string }> {
+  const abort = new AbortController();
+  const done = (async () => {
+    if (commandsClosed) throw new Error("Jupyter services are shutting down");
+    let cancel!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      cancel = () => reject(new Error("Jupyter services are shutting down"));
+      abort.signal.addEventListener("abort", cancel, { once: true });
+    });
+    let env: NodeJS.ProcessEnv;
+    try { env = await Promise.race([getUserShellBaseEnv(), cancelled]); }
+    finally { abort.signal.removeEventListener("abort", cancel); }
+    if (commandsClosed) throw new Error("Jupyter services are shutting down");
+    // Read-only probes can stop immediately. An admitted pip mutation keeps
+    // ownership through completion; quitting must not abandon its environment.
+    return exec(pythonPath, args, { env, timeout, maxBuffer: 1024 * 1024, signal: installs ? undefined : abort.signal });
+  })();
+  const entry = { cancel: () => abort.abort(), done };
+  runtimeCommands.add(entry);
+  void done.finally(() => runtimeCommands.delete(entry)).catch(() => {});
+  return done;
 }
 
-// ZeroMQ is loaded dynamically to avoid issues if the native module
-// fails to load (e.g. in dev without rebuild).
-let zmq: typeof import("zeromq") | null = null;
-async function getZmq() {
-  if (!zmq) {
-    try {
-      zmq = await import("zeromq");
-    } catch (e) {
-      throw new Error(`ZeroMQ not available: ${e instanceof Error ? e.message : String(e)}`);
-    }
+export async function stopJupyterRuntimeCommands(): Promise<void> {
+  commandsClosed = true;
+  for (const command of runtimeCommands) command.cancel();
+  await Promise.allSettled([...runtimeCommands].map(command => command.done));
+}
+
+export async function checkJupyterRuntime(pythonPath = process.platform === "win32" ? "python" : "python3"): Promise<JupyterRuntime> {
+  try {
+    const { stdout } = await runPython(pythonPath, ["-c", "import importlib.util,json,sys; print(json.dumps({'pythonPath':sys.executable,'available':importlib.util.find_spec('jupyter_client') is not None}))"], 10_000);
+    return JSON.parse(stdout) as JupyterRuntime;
+  } catch (error) {
+    return { pythonPath: null, available: false, error: error instanceof Error ? error.message : String(error) };
   }
-  return zmq;
 }
 
-/**
- * Find the jupyter binary. In packaged Electron apps, the PATH
- * doesn't include the user's shell profile paths. Search common
- * locations.
- */
-function findJupyter(): string {
-  const candidates = [
-    "jupyter", // hope it's in PATH
-    "/usr/local/bin/jupyter",
-    "/opt/homebrew/bin/jupyter",
-    `${process.env.HOME}/.local/bin/jupyter`,
-    `${process.env.HOME}/miniconda3/bin/jupyter`,
-    `${process.env.HOME}/anaconda3/bin/jupyter`,
-    `${process.env.HOME}/.conda/bin/jupyter`,
-  ];
-  for (const c of candidates) {
-    try {
-      const { execSync } = require("node:child_process") as typeof import("node:child_process");
-      execSync(`${c} --version`, { stdio: "ignore" });
-      return c;
-    } catch { /* not found */ }
-  }
-  return "jupyter"; // fallback
+export async function listKernelSpecs(pythonPath: string): Promise<KernelSpec[]> {
+  const { stdout } = await runPython(pythonPath, ["-u", runtimeScript, "--list"], 10_000);
+  return JSON.parse(stdout) as KernelSpec[];
 }
 
-const JUPYTER_BIN = findJupyter();
-
-const DELIM = "<IDS|MSG>";
-
-interface ConnectionInfo {
-  shell_port: number;
-  iopub_port: number;
-  stdin_port: number;
-  control_port: number;
-  hb_port: number;
-  ip: string;
-  key: string;
-  transport: string;
-  signature_scheme: string;
-  kernel_name: string;
-}
-
-interface JupyterMessage {
-  header: {
-    msg_id: string;
-    session: string;
-    username: string;
-    date: string;
-    msg_type: string;
-    version: string;
-  };
-  parent_header: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-  content: Record<string, unknown>;
-}
-
-export interface KernelSpec {
-  name: string;
-  displayName: string;
-  language: string;
-}
-
-export interface KernelOutput {
-  msgType: string;
-  content: Record<string, unknown>;
-  parentMsgId: string;
+export async function installJupyter(pythonPath: string): Promise<string> {
+  const { stdout, stderr } = await runPython(pythonPath, ["-m", "pip", "install", "jupyter_client", "ipykernel"], 120_000, true);
+  return stdout + stderr;
 }
 
 export class JupyterKernel {
-  private process: ChildProcess | null = null;
-  private connectionFile: string | null = null;
-  private connInfo: ConnectionInfo | null = null;
-  private session: string = uuidv4();
-  private shellSocket: any = null;
-  private iopubSocket: any = null;
-  private controlSocket: any = null;
+  private process: ChildProcessWithoutNullStreams | null = null;
+  private closed: Promise<void> | null = null;
+  private stopping: Promise<void> | null = null;
+  private exitError: Error | null = null;
+  private pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
   private onOutput: ((output: KernelOutput) => void) | null = null;
   private onStatus: ((status: string) => void) | null = null;
   private alive = false;
-  private jupyterBin: string;
 
-  constructor(
-    private kernelName: string,
-    private cwd: string,
-    jupyterPath?: string,
-  ) {
-    this.jupyterBin = jupyterPath || JUPYTER_BIN;
-  }
+  constructor(private kernelName: string, private cwd: string, private pythonPath: string, private env: NodeJS.ProcessEnv) {}
 
-  setOutputHandler(handler: (output: KernelOutput) => void) {
-    this.onOutput = handler;
-  }
-
-  setStatusHandler(handler: (status: string) => void) {
-    this.onStatus = handler;
-  }
+  setOutputHandler(handler: (output: KernelOutput) => void) { this.onOutput = handler; }
+  setStatusHandler(handler: (status: string) => void) { this.onStatus = handler; }
 
   async start(): Promise<void> {
-    // Launch kernel process.
-    const proc = spawn(this.jupyterBin, ["kernel", `--kernel=${this.kernelName}`], {
-      cwd: this.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
-    });
+    if (this.process || this.stopping) throw new Error("Kernel already started or disconnected");
+    const proc = spawn(this.pythonPath, ["-u", runtimeScript], { env: this.env, stdio: ["pipe", "pipe", "pipe"] });
     this.process = proc;
-
-    // The kernel prints the connection file path to stdout.
-    const connFilePath = await new Promise<string>((resolve, reject) => {
-      let stdout = "";
-      const timeout = setTimeout(() => reject(new Error("Kernel startup timed out")), 30000);
-      proc.stdout?.on("data", (data: Buffer) => {
-        stdout += data.toString();
-        // Look for the connection file path in output.
-        const match = stdout.match(/Connection file: (.+\.json)/);
-        if (match) {
-          clearTimeout(timeout);
-          resolve(match[1].trim());
-        }
-        // Alternative: jupyter kernel outputs JSON with connection_file.
-        try {
-          const parsed = JSON.parse(stdout.trim());
-          if (parsed.connection_file) {
-            clearTimeout(timeout);
-            resolve(parsed.connection_file);
-          }
-        } catch { /* not JSON yet */ }
-      });
-      proc.stderr?.on("data", (data: Buffer) => {
-        const text = data.toString();
-        // Some kernels print the connection file to stderr.
-        const match = text.match(/kernel-[\w-]+\.json/);
-        if (match) {
-          // Construct full path from jupyter runtime dir.
-          const runtimeDir = path.join(
-            process.env.HOME || "/tmp",
-            "Library/Jupyter/runtime",
-          );
-          const candidate = path.join(runtimeDir, match[0]);
-          if (fs.existsSync(candidate)) {
-            clearTimeout(timeout);
-            resolve(candidate);
-          }
-        }
-      });
-      proc.on("error", (err) => { clearTimeout(timeout); reject(err); });
-      proc.on("exit", (code) => {
-        clearTimeout(timeout);
-        if (!this.alive) reject(new Error(`Kernel exited with code ${code}`));
+    proc.stdin.on("error", error => this.fail(error));
+    let stderr = "", text = "";
+    const decoder = new StringDecoder("utf8");
+    proc.stderr.on("data", (bytes: Buffer) => { stderr = (stderr + bytes.toString()).slice(-16_384); });
+    proc.stdout.on("data", (bytes: Buffer) => {
+      text += decoder.write(bytes);
+      let end: number;
+      while ((end = text.indexOf("\n")) !== -1) {
+        const line = text.slice(0, end); text = text.slice(end + 1);
+        try { this.receive(JSON.parse(line) as Record<string, unknown>); }
+        catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); }
+      }
+    });
+    this.closed = new Promise(resolve => {
+      proc.once("error", error => this.fail(error));
+      proc.once("close", (code, signal) => {
+        this.process = null; this.alive = false;
+        const failure = new Error(`Kernel worker exited (${signal ?? code})${stderr ? `: ${stderr.trim()}` : ""}`);
+        if (code !== 0) this.exitError = failure;
+        this.fail(failure);
+        this.onStatus?.(this.stopping ? "disconnected" : "dead");
+        resolve();
       });
     });
-
-    this.connectionFile = connFilePath;
-
-    // Wait a moment for the file to be written.
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Read connection info.
-    const raw = fs.readFileSync(connFilePath, "utf8");
-    this.connInfo = JSON.parse(raw) as ConnectionInfo;
-    this.alive = true;
-
-    // Connect ZeroMQ sockets.
-    const z = await getZmq();
-    const addr = (port: number) =>
-      `${this.connInfo!.transport}://${this.connInfo!.ip}:${port}`;
-
-    // Shell socket (DEALER) — for execute_request/reply.
-    this.shellSocket = new z.Dealer();
-    this.shellSocket.routingId = Buffer.from(uuidv4());
-    await this.shellSocket.connect(addr(this.connInfo.shell_port));
-
-    // IOPub socket (SUB) — for broadcast outputs.
-    this.iopubSocket = new z.Subscriber();
-    this.iopubSocket.subscribe("");
-    await this.iopubSocket.connect(addr(this.connInfo.iopub_port));
-
-    // Control socket (DEALER) — for interrupt/shutdown.
-    this.controlSocket = new z.Dealer();
-    this.controlSocket.routingId = Buffer.from(uuidv4());
-    await this.controlSocket.connect(addr(this.connInfo.control_port));
-
-    // Start listening on iopub.
-    this.listenIopub();
-  }
-
-  private async listenIopub() {
-    if (!this.iopubSocket) return;
     try {
-      for await (const frames of this.iopubSocket) {
-        if (!this.alive) break;
-        const msg = this.decodeMessage(frames as Buffer[]);
-        if (!msg) continue;
-
-        const msgType = msg.header.msg_type;
-        const parentMsgId = (msg.parent_header as any)?.msg_id ?? "";
-
-        if (msgType === "status") {
-          const state = (msg.content as any).execution_state;
-          this.onStatus?.(state);
-        }
-
-        this.onOutput?.({
-          msgType,
-          content: msg.content,
-          parentMsgId,
-        });
-      }
-    } catch {
-      // Socket closed.
+      await this.request("start", { kernelName: this.kernelName, cwd: this.cwd });
+      if (this.stopping) throw new Error("Kernel disconnected during startup");
+      this.alive = true;
+    } catch (error) {
+      try { await this.shutdown(); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], `Kernel startup failed: ${String(error)}; cleanup failed: ${String(cleanup)}`); }
+      throw error;
     }
   }
 
-  async execute(code: string): Promise<string> {
-    if (!this.shellSocket || !this.connInfo) {
-      throw new Error("Kernel not connected");
-    }
-
-    const msgId = uuidv4();
-    const msg = this.buildMessage("execute_request", {
-      code,
-      silent: false,
-      store_history: true,
-      user_expressions: {},
-      allow_stdin: false,
-      stop_on_error: true,
-    }, msgId);
-
-    const frames = this.encodeMessage(msg);
-    await this.shellSocket.send(frames);
-
-    return msgId;
+  async execute(code: string, requestId: string): Promise<KernelExecution> {
+    if (!this.alive) throw new Error("Kernel not connected");
+    return await this.request("execute", { code }, requestId) as KernelExecution;
   }
 
-  async interrupt(): Promise<void> {
-    if (this.process) {
-      this.process.kill("SIGINT");
-    }
+  async interrupt(): Promise<void> { await this.request("interrupt"); }
+  async restart(): Promise<void> { await this.request("restart"); }
+
+  shutdown(): Promise<void> {
+    if (!this.stopping) this.stopping = (async () => {
+      this.alive = false;
+      // EOF is the worker's shutdown admission, even if startup is pending.
+      // Await its exit so KernelManager still owns child/connection cleanup.
+      this.process?.stdin.end();
+      await this.closed;
+      if (this.exitError) throw this.exitError;
+    })();
+    return this.stopping;
   }
 
-  async restart(): Promise<void> {
-    await this.shutdown();
-    await new Promise((r) => setTimeout(r, 1000));
-    await this.start();
-  }
+  isAlive(): boolean { return this.alive; }
 
-  async shutdown(): Promise<void> {
-    this.alive = false;
-    try {
-      if (this.controlSocket && this.connInfo) {
-        const msg = this.buildMessage("shutdown_request", { restart: false }, uuidv4());
-        const frames = this.encodeMessage(msg);
-        await this.controlSocket.send(frames);
-      }
-    } catch { /* best effort */ }
-
-    try { this.shellSocket?.close(); } catch {}
-    try { this.iopubSocket?.close(); } catch {}
-    try { this.controlSocket?.close(); } catch {}
-    this.shellSocket = null;
-    this.iopubSocket = null;
-    this.controlSocket = null;
-
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
-    }
-
-    // Clean up connection file.
-    if (this.connectionFile && fs.existsSync(this.connectionFile)) {
-      try { fs.unlinkSync(this.connectionFile); } catch {}
-    }
-  }
-
-  isAlive(): boolean {
-    return this.alive;
-  }
-
-  private buildMessage(
-    msgType: string,
-    content: Record<string, unknown>,
-    msgId: string,
-  ): JupyterMessage {
-    return {
-      header: {
-        msg_id: msgId,
-        session: this.session,
-        username: "crab-desktop",
-        date: new Date().toISOString(),
-        msg_type: msgType,
-        version: "5.3",
-      },
-      parent_header: {},
-      metadata: {},
-      content,
-    };
-  }
-
-  private encodeMessage(msg: JupyterMessage): Buffer[] {
-    const header = Buffer.from(JSON.stringify(msg.header));
-    const parentHeader = Buffer.from(JSON.stringify(msg.parent_header));
-    const metadata = Buffer.from(JSON.stringify(msg.metadata));
-    const content = Buffer.from(JSON.stringify(msg.content));
-
-    const key = this.connInfo?.key ?? "";
-    let hmac = "";
-    if (key) {
-      const h = crypto.createHmac("sha256", key);
-      h.update(header);
-      h.update(parentHeader);
-      h.update(metadata);
-      h.update(content);
-      hmac = h.digest("hex");
-    }
-
-    return [
-      Buffer.from(DELIM),
-      Buffer.from(hmac),
-      header,
-      parentHeader,
-      metadata,
-      content,
-    ];
-  }
-
-  private decodeMessage(frames: Buffer[]): JupyterMessage | null {
-    // Find the DELIM frame.
-    let delimIdx = -1;
-    for (let i = 0; i < frames.length; i++) {
-      if (frames[i].toString() === DELIM) {
-        delimIdx = i;
-        break;
-      }
-    }
-    if (delimIdx === -1 || delimIdx + 5 >= frames.length) return null;
-
-    // frames[delimIdx+1] = HMAC (skip verification for now)
-    const header = JSON.parse(frames[delimIdx + 2].toString());
-    const parentHeader = JSON.parse(frames[delimIdx + 3].toString());
-    const metadata = JSON.parse(frames[delimIdx + 4].toString());
-    const content = JSON.parse(frames[delimIdx + 5].toString());
-
-    return { header, parent_header: parentHeader, metadata, content };
-  }
-}
-
-/**
- * List available Jupyter kernel specs.
- */
-export async function listKernelSpecs(jupyterPath?: string): Promise<KernelSpec[]> {
-  const bin = jupyterPath || JUPYTER_BIN;
-  return new Promise((resolve) => {
-    const proc = spawn(bin, ["kernelspec", "list", "--json"], {
-      stdio: ["pipe", "pipe", "pipe"],
+  private request(method: string, params = {}, id: string = randomUUID()): Promise<unknown> {
+    const proc = this.process;
+    if (!proc || this.stopping) return Promise.reject(new Error("Kernel not connected"));
+    if (this.pending.has(id)) return Promise.reject(new Error("Duplicate kernel request"));
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      proc.stdin.write(JSON.stringify({ id, method, params }) + "\n", error => { if (error) { this.pending.delete(id); reject(error); } });
     });
-    let stdout = "";
-    proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-    proc.on("error", () => resolve([]));
-    proc.on("exit", () => {
-      try {
-        const data = JSON.parse(stdout);
-        const specs: KernelSpec[] = [];
-        for (const [name, spec] of Object.entries(data.kernelspecs ?? {})) {
-          const s = spec as any;
-          specs.push({
-            name,
-            displayName: s.spec?.display_name ?? name,
-            language: s.spec?.language ?? "unknown",
-          });
-        }
-        resolve(specs);
-      } catch {
-        resolve([]);
-      }
-    });
-  });
+  }
+
+  private receive(message: Record<string, unknown>): void {
+    if (message.kind === "reply" && typeof message.id === "string") {
+      const request = this.pending.get(message.id); this.pending.delete(message.id);
+      if (typeof message.error === "string") request?.reject(new Error(message.error));
+      else request?.resolve(message.result);
+    } else if (message.kind === "output") {
+      if (typeof message.requestId !== "string" || typeof message.msgType !== "string" || !message.content || typeof message.content !== "object") throw new Error("Invalid kernel output");
+      this.onOutput?.({ requestId: message.requestId, msgType: message.msgType, content: message.content as Record<string, unknown> });
+    } else if (message.kind === "status" && typeof message.status === "string") this.onStatus?.(message.status);
+    else if (message.kind === "failed") this.fail(new Error(String(message.error)));
+    else throw new Error("Invalid kernel worker message");
+  }
+
+  private fail(error: Error): void {
+    for (const request of this.pending.values()) request.reject(error);
+    this.pending.clear();
+  }
 }

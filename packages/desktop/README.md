@@ -59,8 +59,16 @@ Notebook previews recapture after repository services recover and offer
 static documents; scripts and automatic external resource loads are disabled.
 Audio/video restore position, volume, mute, playback rate and paused/playing
 intent after reader replacement. If automatic playback is denied, the recovered
-controls remain available for manual Play. Live kernel execution and SQL-query
-recovery remain tracked in the acceptance matrix below.
+controls remain available for manual Play.
+
+Notebook execution uses a selected local Python environment with Jupyter Client.
+Run All waits for each cell to finish and stops on failure. Live outputs and
+kernel variables survive tab changes and native-reader repair; interrupt,
+restart and busy disconnect/Quit join the existing kernel owner. Runtime
+discovery and optional installation use that Python environment asynchronously.
+Remote-server connection, cancellation during readiness, post-idle output
+routing, output budgets and SQL-query recovery remain tracked in the acceptance
+matrix below.
 
 Notebook comparisons show source, outputs, cell details and notebook metadata.
 Show unchanged cells to inspect them, and use the page controls to reach any

@@ -1,14 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, Component, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, Component, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 import { ChevronDown, ChevronRight, Code2, FileText, Loader2, Pause, Play, Power, RefreshCw, Terminal, Zap } from "lucide-react";
 import { rpc } from "../../ipc";
 import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
+import { notebookKernel, type NotebookOutput as IpynbOutput } from "../../lib/jupyter-ipc";
+import type { JupyterRuntime, KernelSpec } from "../../../electron/jupyter-types";
 
 // Use a simple pre-formatted code block instead of Monaco to avoid
 // TDZ/initialization crashes when rendering many cells.
-
-interface JupyterOutput { id: string; msgType: string; content: Record<string, unknown>; parentMsgId: string; }
-interface KernelSpec { name: string; displayName: string; language: string; }
 
 interface Props {
   repoId: string;
@@ -17,36 +16,12 @@ interface Props {
   nativeSessionId: string | null;
 }
 
-// Jupyter IPC — access directly via window.crab to avoid any
-// circular import / TDZ issues. The preload exposes these methods.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const w = typeof window !== "undefined" ? (window as any).crab ?? {} : {};
-const jupyterIpc = {
-  listKernels: (): Promise<KernelSpec[]> => w.jupyterListKernels?.() ?? Promise.resolve([]),
-  start: (name: string, cwd: string, jupyterPath?: string) => w.jupyterStart?.(name, cwd, jupyterPath) ?? Promise.resolve({ id: null, status: "error", message: "not available" }),
-  execute: (id: string, code: string) => w.jupyterExecute?.(id, code) ?? Promise.resolve({ error: "not available" }),
-  interrupt: (id: string) => w.jupyterInterrupt?.(id) ?? Promise.resolve(),
-  restart: (id: string) => w.jupyterRestart?.(id) ?? Promise.resolve(),
-  shutdown: (id: string) => w.jupyterShutdown?.(id) ?? Promise.resolve(),
-  onOutput: (listener: (evt: JupyterOutput) => void) => w.onJupyterOutput?.(listener) ?? (() => {}),
-  onStatus: (listener: (evt: { id: string; status: string }) => void) => w.onJupyterStatus?.(listener) ?? (() => {}),
-};
-
 interface IpynbCell {
   cell_type: "code" | "markdown" | "raw";
   source: string | string[];
   outputs?: IpynbOutput[];
   execution_count?: number | null;
   metadata?: Record<string, unknown>;
-}
-interface IpynbOutput {
-  output_type: string;
-  name?: string;
-  text?: string | string[];
-  data?: Record<string, string | string[]>;
-  ename?: string;
-  evalue?: string;
-  traceback?: string[];
 }
 interface Ipynb {
   cells: IpynbCell[];
@@ -62,6 +37,9 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const kernelOwner = useMemo(() => notebookKernel(repoId, path, rev), [repoId, path, rev]);
+  const kernelState = useSyncExternalStore(kernelOwner.subscribe, kernelOwner.snapshot, kernelOwner.snapshot);
+  const { id: kernelId, status: kernelStatus, outputs: cellOutputs, running, counts } = kernelState;
 
   const nb = useMemo<Ipynb | string>(() => {
     if (text == null) return "";
@@ -71,15 +49,6 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
 
   const lang = typeof nb !== "string" ? (nb.metadata?.language_info?.name ?? nb.metadata?.kernelspec?.language ?? "python") : "python";
 
-  // ---- Kernel state (must be before any early returns) ----
-  const [kernelId, setKernelId] = useState<string | null>(null);
-  const [kernelStatus, setKernelStatus] = useState<string>("disconnected");
-  const [kernelSpecs, setKernelSpecs] = useState<KernelSpec[]>([]);
-  const [cellOutputs, setCellOutputs] = useState<Map<number, IpynbOutput[]>>(new Map());
-  const [runningCell, setRunningCell] = useState<number | null>(null);
-  const msgToCellRef = useRef<Map<string, number>>(new Map());
-  const documentText = useRef<string | null>(null);
-
   useEffect(() => {
     const abort = new AbortController();
     setText(null); setErr(null);
@@ -87,75 +56,11 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
     void rpc.readText(repoId, path, { rev: rev ?? undefined, max_bytes: 20 * 1024 * 1024, native_session_id: nativeSessionId, signal: abort.signal }).then(result => {
       if (abort.signal.aborted) return;
       if (result.truncated || result.text === null) { setErr(result.reason ?? "The notebook was not read completely."); return; }
-      if (documentText.current !== result.text) {
-        // Kernel variables survive native repair; outputs belong to the
-        // document that ran them and cannot attach to replacement cells.
-        msgToCellRef.current.clear(); setCellOutputs(new Map()); setRunningCell(null);
-      }
-      documentText.current = result.text;
+      kernelOwner.document(result.text);
       setText(result.text);
     }).catch((error: Error) => { if (!abort.signal.aborted) setErr(error.message); });
     return () => { abort.abort(); };
-  }, [repoId, path, rev, nativeSessionId, retry]);
-
-  useEffect(() => {
-    jupyterIpc.listKernels().then(setKernelSpecs).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const offOutput = jupyterIpc.onOutput((evt: JupyterOutput) => {
-      if (evt.id !== kernelId) return;
-      const cellIdx = msgToCellRef.current.get(evt.parentMsgId);
-      if (cellIdx == null) return;
-      const output = kernelOutputToIpynb(evt);
-      if (!output) return;
-      setCellOutputs((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(cellIdx) ?? [];
-        next.set(cellIdx, [...existing, output]);
-        return next;
-      });
-      if (evt.msgType === "execute_reply") setRunningCell(null);
-    });
-    const offStatus = jupyterIpc.onStatus((evt) => {
-      if (evt.id === kernelId) setKernelStatus(evt.status);
-    });
-    return () => { offOutput(); offStatus(); };
-  }, [kernelId]);
-
-  const [detectedJupyterPath, setDetectedJupyterPath] = useState<string | null>(null);
-
-  const connectKernel = useCallback(async (specName?: string, jupyterPath?: string) => {
-    const name = specName ?? kernelSpecs.find(s => s.language === lang)?.name ?? "python3";
-    setKernelStatus("starting");
-    // If no path provided, run a check first to detect it.
-    let effectivePath = jupyterPath ?? detectedJupyterPath;
-    if (!effectivePath) {
-      try {
-        const check = await (w.jupyterCheck?.() as Promise<{ jupyterPath: string | null }>);
-        if (check?.jupyterPath) {
-          effectivePath = check.jupyterPath;
-          setDetectedJupyterPath(effectivePath);
-        }
-      } catch { /* ignore */ }
-    }
-    if (jupyterPath) setDetectedJupyterPath(jupyterPath);
-    const result = await jupyterIpc.start(name, "", effectivePath ?? undefined);
-    if (result.id) { setKernelId(result.id); setKernelStatus("idle"); }
-    else { setKernelStatus(`error: ${result.message ?? "failed"} (path: ${effectivePath ?? "none"})`); }
-  }, [kernelSpecs, lang, detectedJupyterPath]);
-
-  const disconnectKernel = useCallback(async () => {
-    if (kernelId) { await jupyterIpc.shutdown(kernelId); setKernelId(null); setKernelStatus("disconnected"); }
-  }, [kernelId]);
-
-  const runCell = useCallback(async (cellIdx: number, code: string) => {
-    if (!kernelId) return;
-    setCellOutputs((prev) => { const next = new Map(prev); next.set(cellIdx, []); return next; });
-    setRunningCell(cellIdx);
-    const result = await jupyterIpc.execute(kernelId, code);
-    if (result.msgId) msgToCellRef.current.set(result.msgId, cellIdx);
-  }, [kernelId]);
+  }, [repoId, path, rev, nativeSessionId, retry, kernelOwner]);
 
   // ---- Early returns (AFTER all hooks) ----
   if (!nativeSessionId) return <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>;
@@ -178,7 +83,7 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
     for (let i = 0; i < cells.length; i++) {
       if (cells[i].cell_type === "code") {
         const source = Array.isArray(cells[i].source) ? (cells[i].source as string[]).join("") : cells[i].source as string;
-        await runCell(i, source);
+        if (!await kernelOwner.run(i, source)) break;
       }
     }
   };
@@ -199,16 +104,16 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
         </div>
       )}
       {/* Notebook header with kernel controls */}
-      <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-gx-border bg-gx-surface px-4 py-2 text-[11px] text-gx-muted">
-        <FileText size={12} className="text-gx-accent" />
-        <span className="font-medium text-gx-text">{path.split("/").pop()}</span>
-        <span className="chip">{kernel}{version ? ` ${version}` : ""}</span>
-        <span>{cells.length} cells</span>
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gx-border bg-gx-surface px-4 py-2 text-[11px] text-gx-muted">
+        <FileText size={12} className="shrink-0 text-gx-accent" />
+        <span className="min-w-0 truncate font-medium text-gx-text">{path.split("/").pop()}</span>
+        <span className="chip shrink-0">{kernel}{version ? ` ${version}` : ""}</span>
+        <span className="shrink-0">{cells.length} cells</span>
 
         {/* Kernel controls */}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap">
           {/* Status indicator */}
-          <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
+          <span role="status" aria-label="Kernel status" className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
             kernelStatus === "idle" ? "bg-gx-success/20 text-gx-success" :
             kernelStatus === "busy" ? "bg-gx-warn/20 text-gx-warn" :
             kernelStatus === "disconnected" ? "bg-gx-muted/20 text-gx-muted" :
@@ -225,20 +130,21 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
           {!kernelId ? (
             <KernelConnectButton
               status={kernelStatus}
-              onConnect={connectKernel}
+              language={lang}
+              onConnect={(name, pythonPath) => { void kernelOwner.connect(name, nativeSessionId, pythonPath); }}
             />
           ) : (
             <>
-              <button type="button" className="btn text-[10px]" onClick={() => void runAllCells()} disabled={kernelStatus === "busy"}>
+              <button type="button" className="btn text-[10px]" onClick={() => void runAllCells()} disabled={running.size > 0 || kernelStatus === "starting" || kernelStatus === "stopping"}>
                 <Play size={10} /> Run All
               </button>
-              <button type="button" className="btn text-[10px]" onClick={() => void jupyterIpc.interrupt(kernelId)} title="Interrupt" aria-label="Interrupt kernel">
+              <button type="button" className="btn text-[10px]" onClick={() => void kernelOwner.control("interrupt")} title="Interrupt" aria-label="Interrupt kernel">
                 <Pause size={10} />
               </button>
-              <button type="button" className="btn text-[10px]" onClick={() => void jupyterIpc.restart(kernelId)} title="Restart kernel" aria-label="Restart kernel">
+              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("restart")} title="Restart kernel" aria-label="Restart kernel">
                 <RefreshCw size={10} />
               </button>
-              <button type="button" className="btn text-[10px]" onClick={() => void disconnectKernel()} title="Disconnect" aria-label="Disconnect kernel">
+              <button type="button" className="btn text-[10px]" onClick={() => void kernelOwner.control("disconnect")} title="Disconnect" aria-label="Disconnect kernel">
                 <Power size={10} />
               </button>
             </>
@@ -246,6 +152,7 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
         </div>
       </div>
 
+      {kernelState.error && <p role="alert" className="m-4 break-words rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{kernelState.error}</p>}
       <div className="mx-auto max-w-5xl space-y-1 p-4">
         {cells.map((cell, i) => (
           <CellView
@@ -254,9 +161,11 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
             index={i}
             language={lang}
             kernelConnected={!!kernelId}
-            isRunning={runningCell === i}
+            canRun={kernelStatus !== "starting" && kernelStatus !== "stopping"}
+            isRunning={running.has(i)}
+            executionCount={counts.get(i)}
             liveOutputs={cellOutputs.get(i)}
-            onRun={(code) => void runCell(i, code)}
+            onRun={(code) => { void kernelOwner.run(i, code); }}
           />
         ))}
       </div>
@@ -265,12 +174,14 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
   );
 }
 
-function CellView({ cell, index, language, kernelConnected, isRunning, liveOutputs, onRun }: {
+function CellView({ cell, index, language, kernelConnected, canRun, isRunning, executionCount, liveOutputs, onRun }: {
   cell: IpynbCell;
   index: number;
   language: string;
   kernelConnected: boolean;
+  canRun: boolean;
   isRunning: boolean;
+  executionCount?: number;
   liveOutputs?: IpynbOutput[];
   onRun: (code: string) => void;
 }) {
@@ -304,7 +215,7 @@ function CellView({ cell, index, language, kernelConnected, isRunning, liveOutpu
 
   if (cell.cell_type === "code") {
     return (
-      <div className="group rounded-lg border border-gx-border/60 bg-gx-surface transition hover:border-gx-border">
+      <div role="group" aria-label={`Notebook cell ${index + 1}`} className="group rounded-lg border border-gx-border/60 bg-gx-surface transition hover:border-gx-border">
         {/* Cell header */}
         <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-gx-muted">
           <button type="button" onClick={() => setCollapsed(!collapsed)} className="hover:text-gx-text" aria-label={collapsed ? "Expand cell" : "Collapse cell"}>
@@ -315,7 +226,7 @@ function CellView({ cell, index, language, kernelConnected, isRunning, liveOutpu
           {/* Execution count badge */}
           <span className="flex items-center gap-1 rounded bg-gx-bg-sub px-1.5 py-[1px] font-mono text-[10px]">
             <Play size={8} className="text-gx-success" />
-            {cell.execution_count ?? " "}
+            {executionCount ?? cell.execution_count ?? " "}
           </span>
           <span className="ml-auto flex items-center gap-2 text-[9px]">
             {kernelConnected && (
@@ -323,7 +234,7 @@ function CellView({ cell, index, language, kernelConnected, isRunning, liveOutpu
                 type="button"
                 className="flex items-center gap-1 rounded bg-gx-success/20 px-1.5 py-0.5 text-gx-success hover:bg-gx-success/30 disabled:opacity-50"
                 onClick={() => onRun(source)}
-                disabled={isRunning}
+                disabled={isRunning || !canRun}
               >
                 {isRunning ? <Loader2 size={9} className="animate-spin" /> : <Play size={9} />}
                 Run
@@ -344,14 +255,14 @@ function CellView({ cell, index, language, kernelConnected, isRunning, liveOutpu
 
             {/* Outputs — show live outputs if available, otherwise saved */}
             {(() => {
-              const outputs = liveOutputs && liveOutputs.length > 0 ? liveOutputs : cell.outputs;
+              const outputs = liveOutputs ?? cell.outputs;
               const hasOutputs = outputs && outputs.length > 0;
               if (!hasOutputs) return null;
               return (
-                <div className="border-t border-gx-border/40 bg-gx-bg-sub p-3">
+                <div role="region" aria-label={`Cell ${index + 1} output`} className="border-t border-gx-border/40 bg-gx-bg-sub p-3">
                   <div className="mb-1 flex items-center gap-1 text-[9px] uppercase tracking-wider text-gx-muted">
                     <Terminal size={9} /> Output
-                    {liveOutputs && liveOutputs.length > 0 && <span className="text-gx-success">(live)</span>}
+                    {liveOutputs !== undefined && <span className="text-gx-success">(live)</span>}
                   </div>
                   <div className="space-y-2">
                     {outputs!.map((o, i) => (
@@ -456,130 +367,63 @@ function joinData(d: string | string[] | undefined): string | null {
   return Array.isArray(d) ? d.join("") : d;
 }
 
-/**
- * Convert a Jupyter kernel output message to the IpynbOutput format
- * used by the cell renderer.
- */
-function kernelOutputToIpynb(evt: JupyterOutput): IpynbOutput | null {
-  const c = evt.content as Record<string, unknown>;
-  switch (evt.msgType) {
-    case "stream":
-      return { output_type: "stream", name: c.name as string, text: c.text as string };
-    case "execute_result":
-    case "display_data":
-      return { output_type: evt.msgType, data: c.data as Record<string, string | string[]> };
-    case "error":
-      return {
-        output_type: "error",
-        ename: c.ename as string,
-        evalue: c.evalue as string,
-        traceback: c.traceback as string[],
-      };
-    default:
-      return null;
-  }
-}
-
-
-/**
- * Kernel connection button with "not found" UX, auto-install, and
- * remote server connection support.
- */
-function KernelConnectButton({ status, onConnect }: { status: string; onConnect: (specName?: string, jupyterPath?: string) => void }) {
+function KernelConnectButton({ status, language, onConnect }: { status: string; language: string; onConnect: (name: string, pythonPath: string) => void }) {
   const [showPanel, setShowPanel] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [checkResult, setCheckResult] = useState<{ available: boolean; jupyterPath: string | null; pythonPath: string | null } | null>(null);
+  const [runtime, setRuntime] = useState<JupyterRuntime | null>(null);
+  const [pythonPath, setPythonPath] = useState("");
+  const [specs, setSpecs] = useState<KernelSpec[]>([]);
+  const [selected, setSelected] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
-  const [installResult, setInstallResult] = useState<string | null>(null);
   const [remoteUrl, setRemoteUrl] = useState("");
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const w = typeof window !== "undefined" ? (window as any).crab ?? {} : {};
-
-  const checkJupyter = async () => {
-    setChecking(true);
+  const check = async (value?: string) => {
+    setChecking(true); setError(null); setSpecs([]);
     try {
-      const result = await w.jupyterCheck?.();
-      setCheckResult(result);
-    } catch { setCheckResult({ available: false, jupyterPath: null, pythonPath: null }); }
+      const result = await window.crab.jupyterCheck(value);
+      setRuntime(result);
+      if (result.pythonPath) setPythonPath(result.pythonPath);
+      if (result.error) setError(result.error);
+      if (result.available && result.pythonPath) {
+        const available = await window.crab.jupyterListKernels(result.pythonPath);
+        setSpecs(available);
+        setSelected(available.find(spec => spec.language === language)?.name ?? available[0]?.name ?? "");
+      }
+    } catch (failure) { setError(String(failure)); }
     finally { setChecking(false); }
   };
-
-  const installJupyter = async () => {
-    setInstalling(true);
-    setInstallResult(null);
-    try {
-      const result = await w.jupyterInstall?.();
-      if (result?.success) {
-        setInstallResult("✓ Installed successfully! Click Connect to start.");
-        setCheckResult({ available: true, jupyterPath: "jupyter", pythonPath: checkResult?.pythonPath ?? null });
-      } else {
-        setInstallResult(`✗ ${result?.output ?? "Installation failed"}`);
-      }
-    } catch (e) { setInstallResult(`✗ ${e instanceof Error ? e.message : String(e)}`); }
+  const install = async () => {
+    if (!runtime?.pythonPath) return;
+    setInstalling(true); setError(null);
+    try { await window.crab.jupyterInstall(runtime.pythonPath); await check(runtime.pythonPath); }
+    catch (failure) { setError(String(failure)); }
     finally { setInstalling(false); }
   };
 
-  if (!showPanel) {
-    return (
-      <button
-        type="button"
-        className="btn btn-primary text-[10px]"
-        onClick={() => { setShowPanel(true); void checkJupyter(); }}
-        disabled={status === "starting"}
-      >
-        <Zap size={10} /> Connect Kernel
-      </button>
-    );
-  }
-
+  if (!showPanel) return <button type="button" className="btn btn-primary text-[10px]" onClick={() => { setShowPanel(true); void check(); }} disabled={status === "starting"}><Zap size={10} /> Connect Kernel</button>;
   return (
-    <div className="absolute right-4 top-10 z-20 w-80 rounded-lg border border-gx-border bg-gx-surface p-4 shadow-2xl">
-      <div className="mb-3 flex items-center justify-between">
-        <span className="text-[12px] font-semibold">Connect to Kernel</span>
+    <div role="dialog" aria-label="Connect to kernel" className="absolute right-4 top-10 z-20 w-80 space-y-3 rounded-lg border border-gx-border bg-gx-surface p-4 shadow-2xl">
+      <div className="flex items-center justify-between">
+        <span className="text-[12px] font-semibold text-gx-text">Connect to kernel</span>
         <button type="button" onClick={() => setShowPanel(false)} className="text-gx-muted hover:text-gx-text text-[11px]" aria-label="Close panel">✕</button>
       </div>
-
-      {checking && <div className="text-[11px] text-gx-muted">Checking for Jupyter…</div>}
-
-      {checkResult && checkResult.available && (
-        <div className="space-y-2">
-          <div className="flex items-start gap-2 text-[11px] text-gx-success">
-            <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-gx-success" />
-            <span className="min-w-0 break-all">Jupyter found at <code className="font-mono text-[10px]">{checkResult.jupyterPath}</code></span>
-          </div>
-          <button type="button" className="btn btn-primary w-full text-[11px]" onClick={() => { setShowPanel(false); onConnect(undefined, checkResult.jupyterPath ?? undefined); }}>
-            <Play size={10} /> Start Local Kernel
-          </button>
-        </div>
-      )}
-
-      {checkResult && !checkResult.available && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-[11px] text-gx-warn">
-            <span className="h-2 w-2 rounded-full bg-gx-warn" /> Jupyter not found
-          </div>
-          {checkResult.pythonPath && (
-            <div className="text-[10px] text-gx-muted">Python found at: {checkResult.pythonPath}</div>
-          )}
-          <button
-            type="button"
-            className="btn btn-primary w-full text-[11px]"
-            onClick={() => void installJupyter()}
-            disabled={installing}
-          >
-            {installing ? <><Loader2 size={10} className="animate-spin" /> Installing…</> : <><Zap size={10} /> Auto-install Jupyter + ipykernel</>}
-          </button>
-          {installResult && (
-            <div className={`text-[10px] ${installResult.startsWith("✓") ? "text-gx-success" : "text-gx-error"}`}>
-              {installResult}
-            </div>
-          )}
-          <div className="text-[10px] text-gx-muted">
-            Or install manually: <code className="kbd">pip install jupyter ipykernel</code>
-          </div>
-        </div>
-      )}
+      <label className="block space-y-1 text-[11px]">Python executable
+        <input className="input w-full" value={pythonPath} placeholder="Python executable or virtual environment path" onChange={event => { setPythonPath(event.target.value); setRuntime(null); }} />
+      </label>
+      <button type="button" className="btn text-[11px]" disabled={checking || installing} onClick={() => { void check(pythonPath || undefined); }}>{checking ? "Checking runtime…" : "Check runtime"}</button>
+      {error && <p role="alert" className="break-words text-[11px] text-gx-error">{error}</p>}
+      {runtime?.pythonPath && !runtime.available && <div className="space-y-2 text-[11px]">
+        <p>Jupyter Client is not installed in this Python environment.</p>
+        <button type="button" className="btn w-full" disabled={installing} onClick={() => { void install(); }}>{installing ? "Installing…" : "Install Jupyter Client + ipykernel"}</button>
+      </div>}
+      {runtime?.available && specs.length > 0 && <div className="space-y-2">
+        <label className="block text-[11px]">Kernel
+          <select className="input w-full" value={selected} onChange={event => setSelected(event.target.value)}>{specs.map(spec => <option key={spec.name} value={spec.name}>{spec.displayName}</option>)}</select>
+        </label>
+        <button type="button" className="btn btn-primary w-full text-[11px]" onClick={() => { if (!runtime.pythonPath) return; setShowPanel(false); onConnect(selected, runtime.pythonPath); }}><Play size={10} /> Start Local Kernel</button>
+      </div>}
+      {runtime?.available && !checking && !specs.length && !error && <p className="text-[11px] text-gx-warn">No kernels are installed in this environment.</p>}
 
       {/* Remote server connection */}
       <div className="mt-3 border-t border-gx-border pt-3">

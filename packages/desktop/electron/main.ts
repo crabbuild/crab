@@ -2,9 +2,12 @@ import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protoco
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { JupyterKernel, checkJupyterRuntime, installJupyter, listKernelSpecs, stopJupyterRuntimeCommands } from "./jupyter-kernel";
+import type { WebContents } from "electron";
 import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
 import type { CapabilitiesChangedEvent } from "./repo-provider";
 import { rpcReply } from "./rpc-transport";
@@ -103,6 +106,23 @@ const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
 let isShuttingDown = false;
 let quitRequested = false;
+const notebookKernels = new Map<string, { repoId: string; owner: WebContents; kernel: JupyterKernel; release: () => void }>();
+
+async function closeNotebookKernel(id: string): Promise<void> {
+  const entry = notebookKernels.get(id);
+  if (!entry) return;
+  try { await entry.kernel.shutdown(); }
+  finally {
+    if (notebookKernels.get(id) === entry) notebookKernels.delete(id);
+    entry.release();
+  }
+}
+
+async function stopNotebookKernels(repoId?: string): Promise<void> {
+  const results = await Promise.allSettled([...notebookKernels].filter(([, entry]) => !repoId || entry.repoId === repoId).map(([id]) => closeNotebookKernel(id)));
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Notebook shutdown failed");
+}
 // Resolve the renderer's unsaved-buffer decision before tearing down native,
 // terminal or SSH owners; cancelling Quit must leave the app fully usable.
 app.on("before-quit", event => {
@@ -406,6 +426,7 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     if (method === "close") {
       const repoId = extractRepoIdFromParams(params);
       if (repoId) await media?.closeRepo(repoId);
+      if (repoId) await stopNotebookKernels(repoId);
       // Route the close call through the appropriate provider.
       let result: unknown;
       if (repoId) {
@@ -1222,175 +1243,50 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     await shell.openExternal(url);
   });
 
-  // ---- Jupyter kernel management ----
-  // Lazy-loaded to avoid crashing the app if zeromq fails to load.
-  let JupyterKernelModule: typeof import("./jupyter-kernel.js") | null = null;
-  try {
-    JupyterKernelModule = require("./jupyter-kernel") as typeof import("./jupyter-kernel.js");
-  } catch (e) {
-    console.error("[crab-desktop] Failed to load jupyter-kernel module:", e);
-  }
+  ipcMain.handle("crab:jupyter-check", (_evt, pythonPath?: string) => checkJupyterRuntime(pythonPath));
+  ipcMain.handle("crab:jupyter-list-kernels", async (_evt, pythonPath: string) => listKernelSpecs(pythonPath));
+  ipcMain.handle("crab:jupyter-install", async (_evt, pythonPath: string) => installJupyter(pythonPath));
 
-  const kernels = new Map<string, any>();
-  let kernelCounter = 0;
-  let detectedJupyterPath: string | null = null;
-
-  ipcMain.handle("crab:jupyter-list-kernels", async () => {
-    if (!JupyterKernelModule) return [];
-    const path = detectedJupyterPath || undefined;
-    try {
-      return await JupyterKernelModule.listKernelSpecs(path);
-    } catch {
-      return [];
-    }
-  });
-
-  ipcMain.handle("crab:jupyter-check", async () => {
-    // Check if jupyter + ipykernel are available.
-    // Use `which` to get the FULL path — spawn() needs an absolute path
-    // in packaged Electron apps where PATH is limited.
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-
-    let jupyterPath: string | null = null;
-
-    // Best approach: use a login shell which sources .zshrc/.bashrc
-    // and picks up version managers (mise, pyenv, conda, etc.).
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const result = execSync(`${shell} -l -c "which jupyter"`, {
-        encoding: "utf8",
-        timeout: 10000,
-      }).trim();
-      if (result && result.startsWith("/")) jupyterPath = result;
-    } catch { /* login shell failed */ }
-
-    // Fallback: try with manually expanded PATH.
-    if (!jupyterPath) {
-      try {
-        const result = execSync("which jupyter", {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin:${process.env.HOME}/.local/bin:${process.env.HOME}/miniconda3/bin:${process.env.HOME}/anaconda3/bin`,
-          },
-          shell: "/bin/bash",
-          timeout: 5000,
-        }).trim();
-        if (result && result.startsWith("/")) jupyterPath = result;
-      } catch { /* not found */ }
-    }
-
-    // Fallback: probe known paths directly using fs.existsSync.
-    if (!jupyterPath) {
-      const { existsSync, readdirSync } = require("node:fs") as typeof import("node:fs");
-      const candidates = [
-        "/opt/homebrew/bin/jupyter",
-        "/usr/local/bin/jupyter",
-        `${process.env.HOME}/.local/bin/jupyter`,
-        `${process.env.HOME}/miniconda3/bin/jupyter`,
-        `${process.env.HOME}/anaconda3/bin/jupyter`,
-        `${process.env.HOME}/.pyenv/shims/jupyter`,
-      ];
-      // Also check mise installs (common on macOS).
-      try {
-        const miseDir = `${process.env.HOME}/.local/share/mise/installs/python`;
-        if (existsSync(miseDir)) {
-          const versions = readdirSync(miseDir);
-          for (const v of versions.sort().reverse()) {
-            candidates.push(`${miseDir}/${v}/bin/jupyter`);
-          }
-        }
-      } catch { /* ignore */ }
-      for (const p of candidates) {
-        if (existsSync(p)) { jupyterPath = p; break; }
-      }
-    }
-
-    // Cache the detected path for subsequent calls.
-    if (jupyterPath) detectedJupyterPath = jupyterPath;
-
-    let pythonPath: string | null = null;
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const result = execSync(`${shell} -l -c "which python3"`, {
-        encoding: "utf8",
-        timeout: 10000,
-      }).trim();
-      if (result && result.startsWith("/")) pythonPath = result;
-    } catch { /* not found */ }
-
-    return { jupyterPath, pythonPath, available: jupyterPath !== null };
-  });
-
-  ipcMain.handle("crab:jupyter-install", async () => {
-    // Auto-install ipykernel using pip.
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-    const pips = ["pip3", "pip", "/usr/local/bin/pip3", "/opt/homebrew/bin/pip3",
-      `${process.env.HOME}/.local/bin/pip3`];
-    for (const pip of pips) {
-      try {
-        const output = execSync(`${pip} install jupyter ipykernel`, {
-          encoding: "utf8", timeout: 120000,
-          env: { ...process.env, PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin` },
-        });
-        return { success: true, output };
-      } catch { /* try next */ }
-    }
-    return { success: false, output: "Could not find pip. Please install Python first." };
-  });
-
-  ipcMain.handle("crab:jupyter-start", async (_evt, kernelName: string, cwd: string, jupyterPath?: string) => {
-    if (!JupyterKernelModule) return { id: null, status: "error", message: "Jupyter support not available (zeromq failed to load)" };
-    const id = `kernel-${++kernelCounter}`;
-    const effectivePath = jupyterPath || detectedJupyterPath || undefined;
-    const kernel = new JupyterKernelModule.JupyterKernel(kernelName, cwd, effectivePath);
-    kernel.setOutputHandler((output: any) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("crab:jupyter-output", { id, ...output });
-      }
-    });
-    kernel.setStatusHandler((status: any) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("crab:jupyter-status", { id, status });
-      }
-    });
+  ipcMain.handle("crab:jupyter-start", async (evt, kernelName: string, repoId: string, nativeSessionId: string, pythonPath: string) => {
+    if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
+    if (parseRepoId(repoId)) throw new Error("A local kernel requires a local working tree.");
+    const env = await getUserShellBaseEnv();
+    const local = await localAgent();
+    if (isShuttingDown || evt.sender.isDestroyed()) throw new Error("Notebook closed during kernel startup");
+    if (!nativeSessionId || local.repositorySession(repoId) !== nativeSessionId) throw nativeSessionLost();
+    const cwd = local.worktreePath(repoId);
+    if (!cwd) throw new Error("The repository has no local working tree for this kernel.");
+    const id = crypto.randomUUID();
+    // Environment preparation yields; validate the caller above immediately
+    // before worker creation so a replacement cannot inherit old admission.
+    const kernel = new JupyterKernel(kernelName, cwd, pythonPath, env);
+    const owner = evt.sender;
+    const destroyed = () => { void closeNotebookKernel(id).catch(error => console.error("Notebook cleanup failed", error)); };
+    owner.once("destroyed", destroyed);
+    // Admit before startup: window/repository/app shutdown must also join
+    // workers waiting for readiness, not only successfully connected kernels.
+    notebookKernels.set(id, { repoId, owner, kernel, release: () => owner.removeListener("destroyed", destroyed) });
+    kernel.setOutputHandler(output => { if (!owner.isDestroyed()) owner.send("crab:jupyter-output", { id, ...output }); });
+    kernel.setStatusHandler(status => { if (!owner.isDestroyed()) owner.send("crab:jupyter-status", { id, status }); });
     try {
       await kernel.start();
-      kernels.set(id, kernel);
-      return { id, status: "ok" };
-    } catch (e) {
-      return { id: null, status: "error", message: e instanceof Error ? e.message : String(e) };
+      if (isShuttingDown || owner.isDestroyed() || !notebookKernels.has(id)) throw new Error("Notebook closed during kernel startup");
+      return { id };
+    } catch (error) {
+      await closeNotebookKernel(id);
+      throw error;
     }
   });
 
-  ipcMain.handle("crab:jupyter-execute", async (_evt, id: string, code: string) => {
-    const kernel = kernels.get(id);
-    if (!kernel) return { error: "kernel not found" };
-    try {
-      const msgId = await kernel.execute(code);
-      return { msgId };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
-  });
-
-  ipcMain.handle("crab:jupyter-interrupt", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) await kernel.interrupt();
-  });
-
-  ipcMain.handle("crab:jupyter-restart", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) await kernel.restart();
-  });
-
-  ipcMain.handle("crab:jupyter-shutdown", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) {
-      await kernel.shutdown();
-      kernels.delete(id);
-    }
-  });
+  function ownedKernel(id: string, sender: WebContents): JupyterKernel {
+    const entry = notebookKernels.get(id);
+    if (!entry || entry.owner !== sender) throw new Error("Kernel not connected");
+    return entry.kernel;
+  }
+  ipcMain.handle("crab:jupyter-execute", (evt, id: string, code: string, requestId: string) => ownedKernel(id, evt.sender).execute(code, requestId));
+  ipcMain.handle("crab:jupyter-interrupt", (evt, id: string) => ownedKernel(id, evt.sender).interrupt());
+  ipcMain.handle("crab:jupyter-restart", (evt, id: string) => ownedKernel(id, evt.sender).restart());
+  ipcMain.handle("crab:jupyter-shutdown", async (evt, id: string) => { ownedKernel(id, evt.sender); await closeNotebookKernel(id); });
 
   // ---- Workspace IPC handlers ----
 
@@ -2394,6 +2290,8 @@ app.on("will-quit", (e) => {
   stopAutoUpdater();
   Promise.allSettled([
     stopFileWrites(),
+    stopNotebookKernels(),
+    stopJupyterRuntimeCommands(),
     stopAllWatchers(),
     (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
     sidecarManager.stopAll(),

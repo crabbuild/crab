@@ -13,7 +13,7 @@ record historical evidence rather than separate work queues.
 | --- | --- | --- |
 | File inspector | Distinguish Git, Crab chunks, and Git LFS; show identity, logical/local/cache bytes, availability, pending uploads, and expandable chunk/xorb details. Unknown values remain unknown. | Retained sources and real chunk pages have packaged macOS proof, including pointer replacement during pagination. Local/cache bytes, availability and pending-upload reporting remain open. |
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
-| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, and audio/video playback-state recovery have bounded macOS proof below. Live kernel/output state, decoded parser budgets and query paths remain open. |
+| Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers now use captured ranges and respect `rev`; NPZ reads headers. Packaged Crab/LFS/Git audio and VP9 video seeking are qualified through retained ranges. Notebook document recovery, static HTML/SVG output isolation, local kernel execution/lifetime and audio/video playback-state recovery have bounded macOS proof below. Remote kernels, readiness cancellation, post-idle outputs, decoded/output budgets and query paths remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
@@ -29,7 +29,7 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local watcher stalls, physical caller-session handoff, notebook document recapture and audio/video playback state now have bounded packaged proof. Remaining: live kernel/output and query state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader media/profile/platform qualification. |
+| P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Local watcher stalls, physical caller-session handoff, notebook document recapture and audio/video playback state now have bounded packaged proof. Remaining: remote Jupyter connection, readiness/restart cancellation, post-idle outputs, abrupt kernel recovery and query state, auxiliary comparison UI proof, live removal during admitted opening, real multi-hop cancellation and broader media/profile/platform qualification. |
 | P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Discard-quit now drains admitted local publication and failure cleanup, with packaged proof below. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
 | P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
@@ -56,13 +56,13 @@ alongside each slice.
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
-   complete live kernel/output and query ownership/state. Notebook documents
-   now recapture, and audio/video restore playback through reader replacement.
-   A supported Jupyter runtime passes upstream readiness, execution and shutdown,
-   while Crab's current client times out during startup with that runtime's
-   explicit runtime directory. Fix and qualify the existing kernel boundary's
-   discovery/startup, execution completion, interrupt/restart, lifetime and
-   advertised remote-server action. Query drafts and captured-source/budget
+   complete remote kernel and query ownership/state. Notebook documents
+   recapture, and audio/video restore playback through reader replacement.
+   Local kernel readiness, execution completion, interrupt/restart and busy
+   teardown now have bounded proof below. Finish the advertised remote-server
+   action, installer E2E, cancellation while readiness/restart is pending, abrupt worker/kernel
+   recovery, post-idle output routing and kernel output budgets. Query drafts
+   and captured-source/budget
    semantics also remain open. Qualify auxiliary worktree/cross-repository comparison recovery and
    snapshot model isolation through their actual UI entry points. Dashboard, Datasets,
    cached metrics and shared hydration inventories have local same-ID native
@@ -103,6 +103,83 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Local notebook execution checkpoint
+
+The prior Node kernel module is byte-identical to the requested `crab-v2` base.
+It times out with a supported Jupyter runtime after that runtime creates its
+connection file. Its stderr path handling discards the actual directory; its
+interrupt signals the Jupyter launcher, whose signal handler shuts down the
+kernel. It also has no shell-reply consumer or authenticated receive path.
+
+The selected Python environment now owns a packaged worker using Jupyter
+Client's `KernelManager` and client channels. Runtime/spec discovery and optional
+installation use the shared asynchronous login environment; guessed executable
+lists, synchronous shell commands and the Node protocol implementation are
+removed. Jupyter owns connection files, authentication, readiness, the kernel
+provisioner and platform-specific interrupt/shutdown behavior. The worker is
+explicitly unpacked for Python access under Electron's ASAR contract. The npm
+ZeroMQ dependency and its three unused lockfile entries are removed; no npm
+dependency is added. The Jupyter web-server sidecar remains a separate server
+service under its existing owner.
+
+Execution completes after both its shell reply and IOPub idle. The renderer
+associates a request before IPC admission, preserves live outputs/running cells
+in one notebook owner across tab and Settings navigation, and stops Run All on
+failure. Same-document native repair keeps kernel variables and live outputs;
+replacement documents or kernels retire old request associations. Clear-output
+and display-update messages use that same output owner. There is no second
+kernel client or component retry queue.
+
+Main admits each worker before waiting for readiness, binds initial local
+startup to the caller's native session and the agent-owned physical working
+tree, and restricts controls/events to the initiating window. A remote or SDK
+path cannot become a local kernel directory. Repository close, window teardown
+and normal Quit join worker shutdown. EOF makes the worker close its kernel,
+channels and temporary connection data before exiting. Failed admission without
+a process uses resource cleanup. Runtime-command admission closes on Quit;
+queued environment lookups and read-only probes cancel, while admitted pip
+mutation retains ownership through completion.
+
+The native admission check runs after environment preparation. A held lookup
+plus a real repository-owner replacement reproduced stale startup in the
+intermediate package; the final package rejects it before creating any Python
+worker, displays the failure, and connects successfully on explicit retry.
+
+The combined recovery smoke also exposed a native crash-loop modal: a second
+native failure within 30 seconds blocked the main process in `NSAlert.runModal`,
+including independent notebook and Settings controls. The existing native owner
+keeps its one automatic restart and crash diagnostics. On budget exhaustion it
+now publishes repository errors and the existing failure notification, blocks
+background starts, and leaves explicit local/SDK repository reopening to reset
+the budget after old streams close. No app-wide Restart/Quit dialog or second
+restart owner remains. Local/SDK unit checks also cover a manual reopen already
+waiting for the old process to drain.
+
+Five real-kernel cases cover immediate output/completion, native stdout pipe
+isolation, variable-preserving interrupt, process-replacing restart, busy
+shutdown and failed startup cleanup. Five notebook-owner cases cover early
+outputs, detached views, replacement documents/kernels, display clearing/update
+and visible execution failure. A blocked shared-environment case proves zero
+late runtime processes after shutdown. Together with the existing format/read
+regressions and 41 native lifecycle cases, seven focused suites pass 96 cases.
+
+Two packaged notebook cases drive Python selection, a real failed kernelspec
+and retry, stale startup admission with zero workers, sequential Run All,
+physical side effects, tab/Settings disposal, repeated native
+repair, interrupt, restart, stop-on-error and busy disconnect/normal Quit. They
+verify retired worker/kernel PIDs, actual working directory, unchanged notebook
+and index bytes, and compact controls. Twenty packaged recovery/media/output
+cases pass together. macOS arm64 is the qualified local target; CI adds the same
+pinned runtime and notebook proof on the desktop platform matrix.
+
+This checkpoint does not close remote-server connection (the existing Connect
+action is still a no-op), installer E2E, cancellation during blocked readiness/restart,
+abrupt worker/kernel recovery, post-idle output routing, output/decoded budgets,
+SQL queries or broader
+runtime/provider/platform qualification. Those remain release gates above.
+Protocol and packaging contracts follow the [Jupyter messaging specification](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
+and [Electron ASAR limitations](https://www.electronjs.org/docs/latest/tutorial/asar-archives).
 
 ## Notebook and media recovery checkpoint
 
