@@ -24,7 +24,7 @@ async function fixturePort(): Promise<number> {
 }
 
 describe.skipIf(!liveRoot)("hunk actions through the renderer", () => {
-  it.each([... ["hunk", "snapshot"].flatMap(kind => [false, true].map(stale => ({ kind, stale }))), { kind: "diff", stale: false }])("$kind reflects real files with a conflicting edit: $stale", async ({ kind, stale }) => {
+  it.each([... ["hunk", "snapshot", "revert"].flatMap(kind => [false, true].map(stale => ({ kind, stale }))), { kind: "diff", stale: false }])("$kind reflects real files with a conflicting edit: $stale", async ({ kind, stale }) => {
     const directory = await mkdtemp(path.join(liveRoot!, "hunk-renderer-"));
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     const orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
@@ -58,6 +58,11 @@ describe.skipIf(!liveRoot)("hunk actions through the renderer", () => {
           if (!handler) throw new Error("Diff handler not registered");
           response.end(JSON.stringify(await handler({} as IpcMainInvokeEvent, JSON.parse(Buffer.concat(chunks).toString())))); return;
         }
+        if (request.url === "/revertFile") {
+          const handler = handlers.get("orchestrator:revert-file");
+          if (!handler) throw new Error("Revert handler not registered");
+          response.end(JSON.stringify(await handler({} as IpcMainInvokeEvent, JSON.parse(Buffer.concat(chunks).toString())))); return;
+        }
         if (request.url === "/snapshots" || request.url === "/listCheckpoints") {
           response.end(JSON.stringify({ success: true, checkpoints: await snapshots.listCheckpoints(owner), backups: await snapshots.listRestoreBackups(owner) })); return;
         }
@@ -79,6 +84,10 @@ describe.skipIf(!liveRoot)("hunk actions through the renderer", () => {
       await run("git", ["init", "--initial-branch=main", directory]);
       await run("git", ["config", "user.name", "Crab Fixture"], { cwd: directory });
       await run("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
+      if (kind === "revert") {
+        await writeFile(path.join(directory, "first.ts"), "before\n");
+        await run("git", ["add", "first.ts"], { cwd: directory });
+      }
       await run("git", ["commit", "--allow-empty", "-m", "Owned fixture"], { cwd: directory });
       const task = await orchestrator.createTask("Owned edit", "claude-code", directory, "HEAD", { worktreeMode: kind === "hunk" ? "primary" : "auto" });
       taskId = task.id;
@@ -114,7 +123,32 @@ describe.skipIf(!liveRoot)("hunk actions through the renderer", () => {
       const query = kind !== "hunk" ? `liveWorkspace=${encodeURIComponent(base)}` : `liveHunk=${encodeURIComponent(base)}`;
       const fixture = kind !== "hunk" ? "agent-workspace" : "agent-requests";
       await page.goto(`http://127.0.0.1:${ui.port}/tests/fixtures/${fixture}.html?${query}`);
-      if (kind === "diff") {
+      if (kind === "revert") {
+        await page.waitForFunction(() => window.workspaceStreamReady === true);
+        await page.getByRole("tab", { name: /^Diff/ }).click();
+        const first = page.getByText("first.ts", { exact: true }).first();
+        await browserExpect(first).toBeVisible();
+        if (stale) task.baseRef = "refs/heads/missing-baseline";
+        await first.hover();
+        await page.getByRole("button", { name: "Revert first.ts", exact: true }).click();
+        if (stale) {
+          await browserExpect(page.getByRole("alert")).toContainText("missing-baseline");
+          await browserExpect(first).toBeVisible();
+          expect(await readFile(path.join(workspace, "first.ts"), "utf8")).toBe("later user bytes");
+        } else {
+          await browserExpect(first).toHaveCount(0);
+          expect(await readFile(path.join(workspace, "first.ts"), "utf8")).toBe("before\n");
+          const second = page.getByText(secondFile, { exact: true }).first();
+          await second.hover();
+          await page.getByRole("button", { name: `Revert ${secondFile}`, exact: true }).click();
+          await browserExpect(page.getByText("No changes to display.", { exact: true })).toBeVisible();
+          await expect(readFile(path.join(workspace, secondFile))).rejects.toMatchObject({ code: "ENOENT" });
+          const backups = await snapshots.listRestoreBackups(task);
+          expect(backups).toHaveLength(2);
+          await orchestrator.restoreFiles(task.id, backups[0].ref);
+          expect(await readFile(path.join(workspace, secondFile), "utf8")).toBe("four");
+        }
+      } else if (kind === "diff") {
         await page.waitForFunction(() => window.workspaceStreamReady === true);
         await page.getByRole("tab", { name: /^Diff/ }).click();
         await browserExpect(page.getByRole("alert")).toContainText("missing-baseline");

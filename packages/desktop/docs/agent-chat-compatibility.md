@@ -1189,6 +1189,29 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   that target; no local target was created. Small non-repository live fixtures
   use an owned temporary directory.
 
+- Single-file Revert now uses the same workspace mutation owner as hunk edits
+  and saved-file restoration. It drains shared native owners, post-turn writers,
+  and Run descendants; checks the live comparison and workspace identity; and
+  retains a pre-edit backup before changing bytes. Rename sources come from
+  Git's live comparison. Modified/deleted files, tracked/untracked additions,
+  and literal Unicode paths restore without moving HEAD or changing unrelated
+  staging. Replaced directories, symbolic-link parents, ignored collisions,
+  and failed backup publication reject before mutation. The renderer checks
+  IPC success, shows failures without dropping the row, prevents duplicate
+  submissions, and reloads the actual comparison after success. Historical
+  snapshot views do not offer a live-baseline Revert action.
+  The browser first reproduced the silent resolved-failure response; a real Git
+  probe also reproduced the old checkout failure for untracked additions.
+  Qualification: 267 scoped owner/checkpoint/comparison tests, seven renderer
+  cases, and six real Run-descendant cases pass on macOS; typecheck and both
+  JavaScript builds and strict touched-fixture types pass. Owned-worktree backup recovery is exercised through
+  the renderer and real files. This does not qualify provider-native rewind or
+  full restoration of a user's primary folder. Evidence: `revert-before.json`,
+  `revert-git-contract.json`, `revert-owner-tests.json`,
+  `revert-renderer-final.json`, and `revert-real-writers.json` in the owned output.
+  The path behavior follows [Git restore](https://git-scm.com/docs/git-restore)
+  with [literal pathspecs](https://git-scm.com/docs/git#Documentation/git.txt---literal-pathspecs).
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;
@@ -1211,13 +1234,6 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   unchanged, but native Retry returned `no rollout found`. Claude's equivalent
   checkpoint-failure run passes. Rollout existence, follow-up cancellation, and
   request traces are retained alongside browser traces for diagnosis.
-- Bring single-file Revert under the workspace writer/backup owner. The current
-  `orchestrator:revert-file` handler runs Git directly; DiffTab discards the row
-  after any resolved IPC response, including `{ success: false }`. The preload
-  method exists, but the renderer bridge lacks its type. Capture a real failure
-  and active-writer case, then align it with hunk/full-file restoration ownership
-  and visible failure handling. [Git's path checkout](https://git-scm.com/docs/git-checkout)
-  modifies index and working-tree content, so it is not a read-only preview.
 - Finish native recovery semantics. Saved-file restoration and text-hunk ownership
   now have real file/browser proof. Turn-summary Undo still
   needs native provider-shape qualification: Codex unified diffs and Claude

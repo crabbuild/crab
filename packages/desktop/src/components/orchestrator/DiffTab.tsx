@@ -127,6 +127,9 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
   const [loading, setLoading] = useState(true);
   const [diffError, setDiffError] = useState<string>();
   const [diffRequest, setDiffRequest] = useState(0);
+  const [revertError, setRevertError] = useState<string>();
+  const [revertingFile, setRevertingFile] = useState<string>();
+  const revertOwner = useRef<{ taskId: string; pending: boolean }>();
   const effective = useEffectiveTheme();
 
   // View mode: list / tree / unified (matches commit timeline page)
@@ -161,6 +164,14 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
 
   // Unified-mode all-diffs pane ref
   const allDiffsRef = useRef<{ scrollToFile: (path: string) => void } | null>(null);
+
+  useEffect(() => {
+    const owner = { taskId: task.id, pending: false };
+    revertOwner.current = owner;
+    setRevertError(undefined);
+    setRevertingFile(undefined);
+    return () => { if (revertOwner.current === owner) revertOwner.current = undefined; };
+  }, [task.id]);
 
   // Persist view mode preferences
   useEffect(() => {
@@ -297,16 +308,23 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
 
   // File revert
   const handleRevertFile = useCallback(async (filePath: string) => {
+    const owner = revertOwner.current;
+    if (!owner || owner.taskId !== task.id || owner.pending) return;
+    owner.pending = true;
+    setRevertingFile(filePath);
+    setRevertError(undefined);
     try {
-      await (window as any).crab.orchestrator.revertFile(task.id, filePath);
-      setFiles((prev) => prev.filter((f) => f.path !== filePath));
-      if (activeFile === filePath) {
-        setActiveFile(files.find((f) => f.path !== filePath)?.path ?? null);
-      }
-    } catch {
-      // Revert failed silently.
+      const result = await window.crab.orchestrator.revertFile(task.id, filePath);
+      if (revertOwner.current !== owner) return;
+      if (!result.success) throw new Error(result.error ?? "File restoration failed");
+      setDiffRequest(request => request + 1);
+    } catch (error: unknown) {
+      if (revertOwner.current === owner) setRevertError(`Could not revert ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      owner.pending = false;
+      if (revertOwner.current === owner) setRevertingFile(undefined);
     }
-  }, [task.id, activeFile, files]);
+  }, [task.id]);
 
   // Add comment handler
   const handleAddComment = useCallback(
@@ -452,6 +470,8 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
         }}
       />
 
+      {revertError && <div role="alert" className="break-words border-b border-gx-border px-3 py-2 text-xs text-gx-error">{revertError}</div>}
+
       {/* Conflict banner */}
       {conflicts && (
         <ConflictBanner conflicts={conflicts} onDismiss={() => setConflicts(null)} />
@@ -478,7 +498,8 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
               appliedFiles={appliedFiles}
               onSelectFile={handleSelectFile}
               onToggleFile={toggleFile}
-              onRevertFile={handleRevertFile}
+              onRevertFile={checkpointSha ? undefined : handleRevertFile}
+              revertingFile={revertingFile}
               fileComments={fileComments}
             />
           ) : fileViewMode === "tree" ? (
@@ -795,6 +816,7 @@ function DiffFileList({
   onSelectFile,
   onToggleFile,
   onRevertFile,
+  revertingFile,
   fileComments,
 }: {
   files: DiffFile[];
@@ -803,7 +825,8 @@ function DiffFileList({
   appliedFiles: Set<string>;
   onSelectFile: (path: string) => void;
   onToggleFile: (path: string) => void;
-  onRevertFile: (path: string) => void;
+  onRevertFile?: (path: string) => void;
+  revertingFile?: string;
   fileComments: FileComments;
 }) {
   return (
@@ -893,9 +916,11 @@ function DiffFileList({
                   </span>
 
                   {/* Revert button (visible on hover) */}
-                  {!isApplied && (
+                  {!isApplied && onRevertFile && (
                     <button
                       type="button"
+                      disabled={revertingFile !== undefined}
+                      aria-busy={revertingFile === f.path}
                       onClick={(e) => {
                         e.stopPropagation();
                         onRevertFile(f.path);

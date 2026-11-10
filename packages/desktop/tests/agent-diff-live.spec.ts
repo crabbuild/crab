@@ -143,7 +143,7 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       };
       const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>();
       registerDiffIpc({ handle: (name, handler) => { handlers.set(name, handler); } } as IpcMain,
-        { getTask: () => task, getRpcRouter: () => router }, () => null);
+        { getTask: () => task, getRpcRouter: () => router, revertFile: async () => { throw new Error("File edits require a local workspace"); } }, () => null);
       const handler = handlers.get("orchestrator:get-diff");
       if (!handler) throw new Error("Comparison IPC not registered");
       const result = await handler({} as IpcMainInvokeEvent, { taskId: task.id }) as { success: boolean; diff?: TaskDiff; error?: string };

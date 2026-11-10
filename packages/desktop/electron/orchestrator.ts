@@ -32,7 +32,7 @@ import { loadAgentConfig, migrateSettings } from "./orchestrator-settings";
 import { buildAgentModelFlags } from "./orchestrator-steering";
 import { CheckpointManager } from "./orchestrator-checkpoints";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
-import { applyAll, cherryPickFiles, type ApplyResult } from "./orchestrator-diff";
+import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
 import { parseRepoId } from "./ssh-router";
@@ -1676,6 +1676,24 @@ export class Orchestrator extends EventEmitter {
   /** Drains workspace writers before applying or reverting an exact text edit. */
   async editHunk(taskId: string, patch: HunkPatch, operation: "apply" | "revert"): Promise<void> {
     return this.editFiles(taskId, task => editWorkspaceHunk(task.worktreePath, patch, operation));
+  }
+
+  /** Restores a live changed file to its baseline with a retained pre-edit backup. */
+  async revertFile(taskId: string, filePath: string): Promise<void> {
+    let oldPath: string | undefined;
+    const validate = async (task: Task) => {
+      const owner = this.ownedWorkspaceTask(task);
+      if (owner) {
+        this.migrateWorkspaceMetadata(task);
+        if (owner.status === "discarded" || readTaskMetadata(owner.worktreePath)?.taskId !== owner.id) throw new Error("This directory no longer belongs to the saved workspace. Start a new chat for it.");
+      }
+      // Resolve rename sources from the live comparison, never renderer input.
+      // Recheck after closure: a provider can finish changing files as it exits.
+      const file = (await computeDiff(task)).files.find(file => file.path === filePath);
+      if (!file) throw new Error("This file no longer has changes. Reload changes before reverting it.");
+      oldPath = file.status === "renamed" ? file.oldPath : undefined;
+    };
+    return this.editFiles(taskId, task => this.checkpoints.revertFile(task, filePath, oldPath), validate);
   }
 
   /** Restores a conversation's files while retaining its history and native identity. */

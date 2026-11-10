@@ -22,6 +22,7 @@ import { AgentSubmissionUncertainError, type AgentTurnOptions } from "../electro
 import { agentRegistry } from "../electron/orchestrator-registry";
 import { WorkspaceScripts } from "../electron/orchestrator-scripts";
 import { readTaskMetadata } from "../electron/orchestrator-worktree";
+import * as diff from "../electron/orchestrator-diff";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -225,6 +226,32 @@ describe("Orchestrator", () => {
   });
 
   describe("hunk workspace owner", () => {
+    it("awaits both native owners before reverting a shared file", async () => {
+      const workspace = path.dirname(persistPath);
+      const parent = await orchestrator.createTask("Parent", "codex", workspace, "main", { worktreeMode: "primary" });
+      const peer = await orchestrator.createTask("Sibling", "claude-code", workspace, "main", { worktreeMode: "primary" });
+      await orchestrator.startTask(parent.id);
+      await orchestrator.startTask(peer.id);
+      const filePath = path.join(workspace, "source.txt");
+      fs.writeFileSync(filePath, "after");
+      let closed!: () => void;
+      const closing = new Promise<void>(resolve => { closed = resolve; });
+      const first = mockAdapterInstances[0];
+      vi.spyOn(first, "cancel").mockImplementation(async () => { first.cancelled = true; await closing; });
+      const comparison = vi.spyOn(diff, "computeDiff").mockResolvedValue({ taskId: parent.id, baseRef: "main", headRef: "HEAD", rawDiff: "", files: [{ path: "source.txt", status: "modified", additions: 1, deletions: 1, patch: "" }], totalAdditions: 1, totalDeletions: 1 });
+      const revert = vi.spyOn(CheckpointManager.prototype, "revertFile").mockImplementation(async () => { fs.writeFileSync(filePath, "before"); });
+      const editing = orchestrator.revertFile(peer.id, "source.txt");
+      try {
+        await vi.waitFor(() => expect(mockAdapterInstances.map(adapter => adapter.cancelled)).toEqual([true, true]));
+        expect({ bytes: fs.readFileSync(filePath, "utf8"), writes: revert.mock.calls.length }).toEqual({ bytes: "after", writes: 0 });
+        await expect(orchestrator.iterate(parent.id, "Must wait")).rejects.toThrow("being updated");
+      } finally {
+        closed();
+        try { await editing; } finally { comparison.mockRestore(); revert.mockRestore(); }
+      }
+      expect({ bytes: fs.readFileSync(filePath, "utf8"), statuses: [parent.status, peer.status] }).toEqual({ bytes: "before", statuses: ["stopped", "stopped"] });
+    });
+
     it("drains an accepted snapshot preflight before acknowledging quit", async () => {
       const task = await orchestrator.createTask("Restore", "codex", "/tmp/repo");
       markOwned(task);

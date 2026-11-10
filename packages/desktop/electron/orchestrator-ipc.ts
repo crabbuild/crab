@@ -397,31 +397,6 @@ export function registerOrchestratorIpc(
 
 
   ipcMain.handle(
-    "orchestrator:revert-file",
-    async (_evt, payload: { taskId: string; filePath: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        // Revert a single file in the worktree to the base ref state.
-        const { execFile: execFileCb } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execFile = promisify(execFileCb);
-        await execFile(
-          "git",
-          ["checkout", task.baseRef, "--", payload.filePath],
-          { cwd: task.worktreePath },
-        );
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
     "orchestrator:get-commits",
     async (_evt, payload: { taskId: string }) => {
       try {

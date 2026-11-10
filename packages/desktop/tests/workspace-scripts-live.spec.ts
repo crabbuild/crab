@@ -43,7 +43,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("owned workspace scri
     }
   });
 
-  it.each(["owned", "borrowed", "primary"])("retires actual Run descendants before a hunk edits an %s workspace", async mode => {
+  it.each(["owned", "borrowed", "primary"].flatMap(mode => ["hunk", "file"].map(operation => ({ mode, operation }))))("retires actual Run descendants before a $operation edits an $mode workspace", async ({ mode, operation }) => {
     const parent = await orchestrator.createTask("Workspace", "codex", directory, "HEAD", { worktreeMode: mode === "primary" ? "primary" : "auto" });
     const editor = mode === "borrowed" ? orchestrator.createChildTaskForAgent(parent.id, "claude-code", "Edit")
       : mode === "primary" ? await orchestrator.createTask("Peer", "claude-code", directory, "HEAD", { worktreeMode: "primary" }) : parent;
@@ -51,8 +51,9 @@ describe.skipIf(!liveRoot || process.platform === "win32")("owned workspace scri
     await writeFile(filePath, "before");
     await orchestrator.runWorkspace(parent.id, { command: writer() });
     const pids = await ready();
-    await orchestrator.editHunk(editor.id, { filePath, oldString: "before", newString: "after" }, "apply");
-    expect({ alive: pids.map(alive), contents: await readFile(filePath, "utf8") }).toEqual({ alive: [false, false], contents: "after" });
+    if (operation === "hunk") await orchestrator.editHunk(editor.id, { filePath, oldString: "before", newString: "after" }, "apply");
+    else await orchestrator.revertFile(editor.id, "edit-proof.txt");
+    expect({ alive: pids.map(alive), contents: existsSync(filePath) ? await readFile(filePath, "utf8") : null }).toEqual({ alive: [false, false], contents: operation === "hunk" ? "after" : null });
   }, 30_000);
 
   it("drains actual shared Run writers before restoring files and can recover its backup", async () => {

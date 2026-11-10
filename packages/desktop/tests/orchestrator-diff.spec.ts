@@ -121,7 +121,7 @@ function createMockTask(
 function diffIpc(task: Task) {
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>();
   const send = vi.fn();
-  const owner = { getTask: (id: string) => id === task.id ? task : undefined, getRpcRouter: () => undefined };
+  const owner = { getTask: (id: string) => id === task.id ? task : undefined, getRpcRouter: () => undefined, revertFile: vi.fn() };
   const window = { isDestroyed: () => false, webContents: { send } } as unknown as BrowserWindow;
   registerDiffIpc({ handle: (channel, handler) => { handlers.set(channel, handler); } } as IpcMain, owner, () => window);
   const read = async (payload: { checkpointSha?: string; checkpointFromSha?: string } = {}) => {

@@ -90,6 +90,7 @@ Object.defineProperty(window, "crab", { value: {
       restoreTask: (taskId: string) => invoke("restoreTask", { taskId }),
       listCheckpoints: (taskId: string) => invoke("listCheckpoints", { taskId }),
       restoreFiles: (taskId: string, sourceRef: string) => invoke("restoreFiles", { taskId, sourceRef }),
+      revertFile: (taskId: string, filePath: string) => invoke("revertFile", { taskId, filePath }),
       retryTask: (taskId: string) => invoke("retryTask", { taskId }),
       startReview: (taskId: string) => invoke("startReview", { taskId }),
       applyAll: (taskId: string) => invoke("applyAll", { taskId }),

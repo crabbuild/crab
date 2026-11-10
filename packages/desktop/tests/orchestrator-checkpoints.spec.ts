@@ -108,6 +108,77 @@ describe("orchestrator-checkpoints", () => {
     cleanupRepo(repoDir);
   });
 
+  describe("single-file revert", () => {
+    it.each(["modified", "deleted", "untracked addition", "staged addition", "rename", "literal path"])("restores a %s without changing HEAD or unrelated staging", async kind => {
+      const task = createMockTask(repoDir);
+      const original = kind === "literal path" ? `file[1]${process.platform === "win32" ? " " : "\n"}雪.txt` : "source.txt";
+      const unrelated = kind === "literal path" ? original.replace("[1]", "1") : "file-other.txt";
+      const selected = kind === "rename" ? "renamed.txt" : original;
+      const addition = kind.endsWith("addition");
+      if (!addition) await commitFile(repoDir, original, "before\n", "Baseline");
+      task.baseRef = (await execFile("git", ["rev-parse", "HEAD"], { cwd: repoDir })).stdout.trim();
+      if (kind === "rename") fs.renameSync(path.join(repoDir, original), path.join(repoDir, selected));
+      if (kind === "deleted") fs.unlinkSync(path.join(repoDir, selected));
+      else fs.writeFileSync(path.join(repoDir, selected), "after\n");
+      if (kind === "staged addition") await execFile("git", ["add", "--", selected], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, "README.md"), "staged bytes\n");
+      await execFile("git", ["add", "README.md"], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, "README.md"), "unstaged bytes\n");
+      fs.writeFileSync(path.join(repoDir, unrelated), "untracked bytes\n");
+      const index = (await execFile("git", ["ls-files", "--stage", "--", "README.md"], { cwd: repoDir })).stdout;
+      await checkpointManager.revertFile(task, selected, kind === "rename" ? original : undefined);
+      const backups = await checkpointManager.listRestoreBackups(task);
+      expect({
+        file: fs.existsSync(path.join(repoDir, original)) ? fs.readFileSync(path.join(repoDir, original), "utf8") : null,
+        renamed: kind === "rename" && fs.existsSync(path.join(repoDir, selected)),
+        head: (await execFile("git", ["rev-parse", "HEAD"], { cwd: repoDir })).stdout.trim(),
+        index: (await execFile("git", ["ls-files", "--stage", "--", "README.md"], { cwd: repoDir })).stdout,
+        unrelated: fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
+        untracked: fs.readFileSync(path.join(repoDir, unrelated), "utf8"),
+        backup: kind === "deleted" ? (await execFile("git", ["ls-tree", backups[0].ref, "--", selected], { cwd: repoDir })).stdout
+          : (await execFile("git", ["show", `${backups[0].ref}:${selected}`], { cwd: repoDir })).stdout,
+      }).toEqual({ file: addition ? null : "before\n", renamed: false, head: task.baseRef, index, unrelated: "unstaged bytes\n", untracked: "untracked bytes\n", backup: kind === "deleted" ? "" : "after\n" });
+    });
+
+    it("leaves bytes and index intact when its backup cannot be retained", async () => {
+      const task = createMockTask(repoDir);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "user bytes");
+      fs.writeFileSync(path.join(repoDir, ".git/refs/crab"), "blocked ref directory");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      await expect(checkpointManager.revertFile(task, "README.md")).rejects.toThrow();
+      expect({ bytes: fs.readFileSync(path.join(repoDir, "README.md"), "utf8"), index: fs.readFileSync(path.join(repoDir, ".git/index")) }).toEqual({ bytes: "user bytes", index });
+    });
+
+    it.each(["../outside.txt", ".git/config", ".", "replacement"])("rejects unsafe file target %s before changing bytes", async target => {
+      const task = createMockTask(repoDir);
+      fs.mkdirSync(path.join(repoDir, "replacement"));
+      fs.writeFileSync(path.join(repoDir, "replacement/keep.txt"), "user bytes");
+      await expect(checkpointManager.revertFile(task, target)).rejects.toThrow();
+      expect(fs.readFileSync(path.join(repoDir, "replacement/keep.txt"), "utf8")).toBe("user bytes");
+    });
+
+    it("rejects a symbolic-link parent instead of writing outside the workspace", async () => {
+      const task = createMockTask(repoDir);
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "crab-revert-outside-"));
+      try {
+        fs.writeFileSync(path.join(outside, "keep.txt"), "user bytes");
+        fs.symlinkSync(outside, path.join(repoDir, "linked"), process.platform === "win32" ? "junction" : "dir");
+        await expect(checkpointManager.revertFile(task, "linked/keep.txt")).rejects.toThrow("replaced file");
+        expect(fs.readFileSync(path.join(outside, "keep.txt"), "utf8")).toBe("user bytes");
+      } finally { cleanupRepo(outside); }
+    });
+
+    it("rejects an ignored replacement that its backup cannot capture", async () => {
+      const task = createMockTask(repoDir);
+      fs.writeFileSync(path.join(repoDir, ".gitignore"), "README.md\n");
+      await execFile("git", ["rm", "--cached", "README.md"], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, "README.md"), "ignored user bytes");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      await expect(checkpointManager.revertFile(task, "README.md")).rejects.toThrow("Move ignored path");
+      expect({ bytes: fs.readFileSync(path.join(repoDir, "README.md"), "utf8"), index: fs.readFileSync(path.join(repoDir, ".git/index")) }).toEqual({ bytes: "ignored user bytes", index });
+    });
+  });
+
   describe("createCheckpoint", () => {
     it("captures untracked files even when user status configuration hides them", async () => {
       const task = createMockTask(repoDir);
@@ -243,34 +314,40 @@ describe("orchestrator-checkpoints", () => {
   });
 
   describe("saved file restoration", () => {
-    it("cannot restore through a replaced directory into its parent repository", async () => {
+    it.each(["snapshot", "file"])("cannot restore a %s through a replaced directory into its parent repository", async mode => {
       const task = createMockTask(repoDir);
       const checkpoint = await checkpointManager.createCheckpoint(task, 0);
       const replacement = path.join(repoDir, "replaced-workspace");
       fs.mkdirSync(replacement);
       fs.writeFileSync(path.join(repoDir, "README.md"), "primary user bytes");
       let rejected = false;
-      try { await checkpointManager.restoreFiles({ ...task, worktreePath: replacement }, checkpoint.ref); } catch { rejected = true; }
+      try {
+        const replaced = { ...task, worktreePath: replacement };
+        if (mode === "snapshot") await checkpointManager.restoreFiles(replaced, checkpoint.ref);
+        else await checkpointManager.revertFile(replaced, "README.md");
+      } catch { rejected = true; }
       expect({ rejected, primary: fs.readFileSync(path.join(repoDir, "README.md"), "utf8") }).toEqual({ rejected: true, primary: "primary user bytes" });
     });
 
-    it("rejects a replacement Git pointer that shares the primary index", async () => {
+    it.each(["snapshot", "file"])("rejects a %s replacement Git pointer that shares the primary index", async mode => {
       const task = createMockTask(repoDir);
       const checkpoint = await checkpointManager.createCheckpoint(task, 0);
       const replacement = path.join(repoDir, "replaced-workspace");
       fs.mkdirSync(replacement);
       fs.writeFileSync(path.join(replacement, ".git"), `gitdir: ${path.join(repoDir, ".git")}\n`);
       const index = fs.readFileSync(path.join(repoDir, ".git/index"));
-      await expect(checkpointManager.restoreFiles({ ...task, worktreePath: replacement }, checkpoint.ref)).rejects.toThrow("primary Git index");
+      const replaced = { ...task, worktreePath: replacement };
+      await expect(mode === "snapshot" ? checkpointManager.restoreFiles(replaced, checkpoint.ref) : checkpointManager.revertFile(replaced, "README.md")).rejects.toThrow("primary Git index");
       expect(fs.readFileSync(path.join(repoDir, ".git/index"))).toEqual(index);
     });
 
-    it("rejects an unrelated repository at the saved workspace path", async () => {
+    it.each(["snapshot", "file"])("rejects a %s in an unrelated repository at the saved workspace path", async mode => {
       const task = createMockTask(repoDir);
       const checkpoint = await checkpointManager.createCheckpoint(task, 0);
       const replacement = path.join(repoDir, "unrelated-repository");
       await execFile("git", ["clone", "--no-hardlinks", repoDir, replacement]);
-      await expect(checkpointManager.restoreFiles({ ...task, worktreePath: replacement }, checkpoint.ref)).rejects.toThrow("different Git repository");
+      const replaced = { ...task, worktreePath: replacement };
+      await expect(mode === "snapshot" ? checkpointManager.restoreFiles(replaced, checkpoint.ref) : checkpointManager.revertFile(replaced, "README.md")).rejects.toThrow("different Git repository");
     });
 
     it("retains and restores every pre-restore file backup through Git pruning", async () => {

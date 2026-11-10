@@ -274,6 +274,12 @@ export class CheckpointManager {
   async snapshotSha(task: Task, sourceRef: string): Promise<string> {
     const sources = [...await this.listCheckpoints(task), ...await this.listRestoreBackups(task)];
     if (!sources.some(source => source.ref === sourceRef)) throw new Error("Snapshot does not belong to this conversation");
+    await this.assertWorkspace(task);
+    const { stdout } = await execFile("git", ["rev-parse", "--verify", `${sourceRef}^{commit}`], { cwd: task.repoPath });
+    return stdout.trim();
+  }
+
+  private async assertWorkspace(task: Task): Promise<void> {
     const [root, common, repository, gitDir, repositoryGitDir] = await Promise.all([
       this.gitDirectory(task.worktreePath, "--show-toplevel"),
       this.gitDirectory(task.worktreePath, "--git-common-dir"),
@@ -286,8 +292,6 @@ export class CheckpointManager {
     if (root !== fs.realpathSync(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
     if (common !== repository) throw new Error("Workspace belongs to a different Git repository");
     if (root !== fs.realpathSync(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
-    const { stdout } = await execFile("git", ["rev-parse", "--verify", `${sourceRef}^{commit}`], { cwd: task.repoPath });
-    return stdout.trim();
   }
 
   private async gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir" | "--absolute-git-dir"): Promise<string> {
@@ -299,8 +303,60 @@ export class CheckpointManager {
   async restoreFiles(task: Task, sourceRef: string): Promise<void> {
     const sha = await this.snapshotSha(task, sourceRef);
     const { stdout: files } = await execFile("git", ["ls-tree", "-r", "--name-only", "-z", sha], { cwd: task.repoPath });
-    const { stdout: excluded } = await execFile("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"], { cwd: task.worktreePath });
     const targets = files.split("\0").filter(Boolean);
+    await this.assertNoIgnoredCollisions(task, targets);
+    const before = await this.backupFiles(task);
+    // Track the captured untracked files before replacing the index/tree, so
+    // later additions are removed too. HEAD and conversation history stay intact.
+    await execFile("git", ["read-tree", before], { cwd: task.worktreePath });
+    await execFile("git", ["read-tree", "--reset", "-u", sha], { cwd: task.worktreePath });
+  }
+
+  /** Restores a changed file (and its rename source) after workspace writers close. */
+  async revertFile(task: Task, filePath: string, oldPath?: string): Promise<void> {
+    await this.assertWorkspace(task);
+    const targets = [...new Set([filePath, ...(oldPath ? [oldPath] : [])])];
+    const root = fs.realpathSync(task.worktreePath);
+    for (const target of targets) {
+      const relative = path.relative(root, path.resolve(root, target));
+      if (!target || target.includes("\0") || path.isAbsolute(target) || relative === ".." || relative.startsWith(`..${path.sep}`)
+        || !relative || target.split(/[\\/]/).some(part => part.toLowerCase() === ".git")) throw new Error("Revert requires a file inside the task worktree");
+      // Git pathspecs also match directories. Never let a stale file row remove
+      // a replacement directory or traverse a symbolic-link parent.
+      const parts = relative.split(path.sep);
+      for (let index = 0; index < parts.length; index++) {
+        let entry: fs.Stats;
+        try { entry = fs.lstatSync(path.join(root, ...parts.slice(0, index + 1))); } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+          throw error;
+        }
+        const leaf = index === parts.length - 1;
+        if ((!leaf && !entry.isDirectory()) || (leaf && !entry.isFile() && !entry.isSymbolicLink())) throw new Error(`Cannot revert replaced file "${target}"`);
+      }
+    }
+    await this.assertNoIgnoredCollisions(task, targets);
+    const { stdout: source } = await execFile("git", ["rev-parse", "--verify", "--end-of-options", `${task.baseRef}^{commit}`], { cwd: task.repoPath });
+    const sha = source.trim();
+    const restore: string[] = [];
+    const remove: string[] = [];
+    for (const target of targets) {
+      const { stdout: baseline } = await execFile("git", ["--literal-pathspecs", "ls-tree", "-z", sha, "--", target], { cwd: task.repoPath });
+      if (baseline && !/^(100644|100755|120000) /.test(baseline)) throw new Error(`Revert requires a regular file or symbolic link: "${target}"`);
+      const { stdout: tracked } = await execFile("git", ["--literal-pathspecs", "ls-files", "-z", "--", target], { cwd: task.worktreePath });
+      if (baseline || tracked) restore.push(target);
+      else remove.push(path.join(root, target));
+    }
+    await this.backupFiles(task);
+    // Restore updates only these index entries; unrelated staging and HEAD
+    // remain intact. Git cannot remove additions absent from both source/index.
+    if (restore.length) await execFile("git", ["--literal-pathspecs", "restore", `--source=${sha}`, "--staged", "--worktree", "--no-recurse-submodules", "--", ...restore], { cwd: task.worktreePath });
+    for (const target of remove) {
+      try { fs.unlinkSync(target); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  }
+
+  private async assertNoIgnoredCollisions(task: Task, targets: string[]): Promise<void> {
+    const { stdout: excluded } = await execFile("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"], { cwd: task.worktreePath });
     // Ignored files are outside snapshot ownership. Git overwrites them during
     // checkout, so reject file/directory collisions before changing the index.
     for (const entry of excluded.split("\0").filter(Boolean)) {
@@ -309,13 +365,13 @@ export class CheckpointManager {
         throw new Error(`Move ignored path "${entry}" before restoring these files`);
       }
     }
+  }
+
+  private async backupFiles(task: Task): Promise<string> {
     const before = await this.snapshotHead(task);
     const backup = `${this.restorePrefix}/${task.id}/${Date.now()}-${randomUUID()}`;
     await execFile("git", ["update-ref", backup, before], { cwd: task.repoPath });
-    // Track the captured untracked files before replacing the index/tree, so
-    // later additions are removed too. HEAD and conversation history stay intact.
-    await execFile("git", ["read-tree", before], { cwd: task.worktreePath });
-    await execFile("git", ["read-tree", "--reset", "-u", sha], { cwd: task.worktreePath });
+    return before;
   }
 
   /** Lists retained file states from before each explicit restore. */

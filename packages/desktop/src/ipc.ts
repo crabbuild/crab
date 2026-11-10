@@ -1343,6 +1343,7 @@ declare global {
       orchestrator: {
         getDiff: (taskId: string, checkpointSha?: string, checkpointFromSha?: string) => Promise<{ success: boolean; diff?: import("../electron/orchestrator-diff").TaskDiff; error?: string }>;
         restoreFiles: (taskId: string, sourceRef: string) => Promise<{ success: boolean; error?: string }>;
+        revertFile: (taskId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
         listCheckpoints: (taskId: string) => Promise<{ success: boolean; checkpoints?: import("../electron/orchestrator-checkpoints").Checkpoint[]; backups?: import("../electron/orchestrator-checkpoints").RestoreBackup[]; error?: string }>;
         onCheckpointCreated: (listener: (event: { taskId: string; turnNumber: number; ref: string; sha: string }) => void) => () => void;
         onFilesChanged: (listener: (event: { taskIds: string[] }) => void) => () => void;

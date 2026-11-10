@@ -263,7 +263,15 @@ export function parseDiffOutput(
 }
 
 /** Owns local/remote comparison routing and exposes read failures to the renderer. */
-export function registerDiffIpc(ipcMain: IpcMain, orchestrator: Pick<Orchestrator, "getTask" | "getRpcRouter">, getMainWindow: () => BrowserWindow | null): void {
+export function registerDiffIpc(ipcMain: IpcMain, orchestrator: Pick<Orchestrator, "getTask" | "getRpcRouter" | "revertFile">, getMainWindow: () => BrowserWindow | null): void {
+  ipcMain.handle("orchestrator:revert-file", async (_evt, payload: { taskId: string; filePath: string }) => {
+    try {
+      await orchestrator.revertFile(payload.taskId, payload.filePath);
+      return { success: true };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
   ipcMain.handle(
     "orchestrator:get-diff",
     async (_evt, payload: { taskId: string; checkpointSha?: string; checkpointFromSha?: string }) => {
