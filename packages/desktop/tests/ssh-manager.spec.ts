@@ -126,7 +126,7 @@ describe("SshSessionManager", () => {
   beforeEach(() => {
     mockClientInstances = [];
     process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock";
-    manager = new SshSessionManager();
+    manager = new SshSessionManager(async () => {});
   });
 
   afterEach(() => {
@@ -572,7 +572,7 @@ describe("SSH connection ownership", () => {
     const deployer = new AgentDeployer(); const negotiator = new CapabilityNegotiator(router);
     const channels: AgentChannel[] = [];
     const deploy = vi.spyOn(deployer, "ensureAgent").mockImplementation(async () => { const channel = new AgentChannel(); channels.push(channel); return channel.asChannel(); });
-    manager = new SshSessionManager();
+    manager = new SshSessionManager(async () => {});
     manager.setAgentDependencies({ createDeployer: () => deployer, capabilityNegotiator: negotiator, rpcRouter: router });
     managers.push(manager);
     return { manager, router, negotiator, deploy, channels };
@@ -676,4 +676,60 @@ describe("SSH connection ownership", () => {
     } finally { await manager.disconnect("first"); await manager.disconnect("second"); }
   });
 
+});
+
+describe("SSH host verification ownership", () => {
+  let manager: SshSessionManager;
+  let verify: ReturnType<typeof vi.fn<[string, number, Buffer, AbortSignal], Promise<void>>>;
+  beforeEach(() => {
+    vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock";
+    verify = vi.fn<[string, number, Buffer, AbortSignal], Promise<void>>(async () => {}); manager = new SshSessionManager(verify);
+  });
+  afterEach(async () => { await manager.disconnect("test-profile-1"); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+  async function start() {
+    const connected = manager.connect(makeProfile());
+    const outcome = connected.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled());
+    const client = mockClientInstances[0];
+    const config = client.connect.mock.calls[0][0] as import("ssh2").ConnectConfig;
+    const hostVerifier = config.hostVerifier as import("ssh2").HostVerifier;
+    return { client, config, hostVerifier, outcome };
+  }
+  it("pauses the network deadline while the owner reviews the fingerprint", async () => {
+    let approve!: () => void; verify.mockImplementation(() => new Promise<void>(resolve => { approve = resolve; }));
+    const { client, config, hostVerifier, outcome } = await start(); const callback = vi.fn(); const key = Buffer.from("fixture");
+    await vi.advanceTimersByTimeAsync(9000); hostVerifier(key, callback);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect({ destroyed: client.destroy.mock.calls.length, decisions: callback.mock.calls.length, readyTimeout: config.readyTimeout, identity: verify.mock.calls[0].slice(0, 3) }).toEqual({ destroyed: 0, decisions: 0, readyTimeout: 0, identity: ["test.example.com", 22, key] });
+    approve(); await vi.advanceTimersByTimeAsync(0); client.emit("ready"); await outcome;
+    expect(callback).toHaveBeenCalledWith(true);
+  });
+  it("retains the remaining network budget after approval", async () => {
+    const { client, hostVerifier, outcome } = await start();
+    await vi.advanceTimersByTimeAsync(9000); hostVerifier(Buffer.from("fixture"), vi.fn());
+    await vi.advanceTimersByTimeAsync(1001);
+    expect({ result: (await outcome as Error).message, destroyed: client.destroy.mock.calls.length > 0 }).toEqual({ result: "SSH connection handshake timed out", destroyed: true });
+  });
+  it("does not resume a retired handshake after late approval", async () => {
+    let approve!: () => void; verify.mockImplementation(() => new Promise<void>(resolve => { approve = resolve; }));
+    const { hostVerifier, outcome } = await start(); const callback = vi.fn();
+    hostVerifier(Buffer.from("fixture"), callback); await manager.disconnect("test-profile-1"); approve(); await outcome; await vi.advanceTimersByTimeAsync(0);
+    expect({ decisions: callback.mock.calls.length, status: manager.getStatus("test-profile-1"), aborted: verify.mock.calls[0][3].aborted }).toEqual({ decisions: 0, status: "disconnected", aborted: true });
+  });
+  it("stops reconnecting after a trust rejection", async () => {
+    const first = await connectProfile(manager, makeProfile()); first.emit("end");
+    await vi.advanceTimersByTimeAsync(1000); const replacement = mockClientInstances.at(-1)!;
+    const hostVerifier = replacement.connect.mock.calls[0][0].hostVerifier as import("ssh2").HostVerifier;
+    const { HostKeyError } = await import("../electron/ssh-known-hosts");
+    verify.mockRejectedValue(new HostKeyError("SSH_HOST_KEY_REJECTED", "Key rejected"));
+    hostVerifier(Buffer.from("fixture"), vi.fn()); await vi.advanceTimersByTimeAsync(60_000);
+    expect({ status: manager.getStatus("test-profile-1"), attempts: mockClientInstances.length }).toEqual({ status: "error", attempts: 2 });
+  });
+  it("keeps verification active for rekey after readiness", async () => {
+    const { client, hostVerifier, outcome } = await start(); client.emit("ready"); await outcome;
+    const { HostKeyError } = await import("../electron/ssh-known-hosts");
+    verify.mockRejectedValue(new HostKeyError("SSH_HOST_KEY_REVOKED", "Key revoked"));
+    hostVerifier(Buffer.from("rekey"), vi.fn()); await vi.advanceTimersByTimeAsync(60_000);
+    expect({ status: manager.getStatus("test-profile-1"), attempts: mockClientInstances.length, destroyed: client.destroy.mock.calls.length }).toEqual({ status: "error", attempts: 1, destroyed: 1 });
+  });
 });

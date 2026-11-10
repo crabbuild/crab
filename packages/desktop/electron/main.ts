@@ -25,6 +25,8 @@ import { registerSkillManagerIpc } from "./skill-manager-ipc";
 import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
 import { SshSessionManager } from "./ssh-manager";
+import { KnownHostsManager, createHostKeyVerifier } from "./ssh-known-hosts";
+import { confirmSshHostKey } from "./ssh-host-key-dialog";
 import { registerSshIpcHandlers } from "./ssh-ipc";
 import { RemoteTerminalManager } from "./ssh-terminal";
 import { PortForwardManager } from "./ssh-port-forward";
@@ -1816,11 +1818,16 @@ app.whenReady().then(async () => {
   const db = sshDatabase.getDb();
 
   // Core SSH modules
-  const sshSessionManager = new SshSessionManager();
+  const knownHosts = new KnownHostsManager();
+  const verifyHostKey = createHostKeyVerifier(knownHosts, (request, signal) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false);
+    return confirmSshHostKey(mainWindow, request, signal);
+  });
+  const sshSessionManager = new SshSessionManager(verifyHostKey);
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
-  registerSshIpcHandlers(sshProfileManager, sshSessionManager, sshTerminalManager, sshPortForwardManager);
+  registerSshIpcHandlers(sshProfileManager, sshSessionManager, knownHosts, sshTerminalManager, sshPortForwardManager);
 
   // Enhanced SSH modules — wired after basic handlers so the app starts
   // even if any enhanced module fails to initialize.

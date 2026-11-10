@@ -10,6 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Server as SshServer, utils, type Client, type ClientChannel, type ServerChannel } from "ssh2";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
+import { KnownHostsManager, createHostKeyVerifier } from "../electron/ssh-known-hosts";
 import { SshSessionManager } from "../electron/ssh-manager";
 import { AgentDeployer } from "../electron/ssh-deployer";
 import { CapabilityNegotiator } from "../electron/ssh-capabilities";
@@ -64,7 +65,8 @@ async function sidecarChannel(startChild: () => ChildProcess, autoReconnect: boo
       return new Promise((resolve, reject) => client.exec("owned-sidecar", (error, stream) => error ? reject(error) : resolve(stream)));
     }
   }
-  const manager = new SshSessionManager();
+  const hosts = new KnownHostsManager(path.join(keyDirectory, "pins.json"), path.join(keyDirectory, "user_hosts"), path.join(keyDirectory, "global_hosts"));
+  const manager = new SshSessionManager(createHostKeyVerifier(hosts, async () => true));
   const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
   const negotiator = new CapabilityNegotiator(router);
   manager.setAgentDependencies({ createDeployer: () => new FixtureDeployer(), capabilityNegotiator: negotiator, rpcRouter: router });

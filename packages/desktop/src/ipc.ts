@@ -1,3 +1,4 @@
+import type { KnownHost } from "../electron/ssh-known-hosts";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
 // Typed wrapper around the `window.crab` bridge exposed by
 // `electron/preload.ts`. Centralising the types here keeps components
@@ -1253,6 +1254,8 @@ declare global {
       ssh: {
         openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => Promise<{ terminalId: string }>;
         detachTerminal: (terminalId: string) => Promise<void>;
+        listKnownHosts: () => Promise<KnownHost[]>;
+        removeKnownHost: (hostname: string, port: number, keyType: string) => Promise<boolean>;
         openAsRepo: (profileId: string, path: string) => Promise<RepoHandle>;
         // Sync operations
         syncAddPair: (config: { profileId: string; localDir: string; remoteDir: string; ignorePatterns?: string[] }) => Promise<{ syncPairId: string }>;

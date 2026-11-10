@@ -1,390 +1,208 @@
-import { EventEmitter } from "node:events";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-// ── Types ────────────────────────────────────────────────────────
+import { utils } from "ssh2";
 
 export interface KnownHost {
   hostname: string;
   port: number;
   keyType: string;
-  fingerprint: string; // SHA-256 base64
+  fingerprint: string;
   addedAt: number;
 }
 
-export type HostKeyVerifyResult = "trusted" | "unknown" | "changed";
-
-export interface HostKeyPromptPayload {
+export interface HostKeyInspection {
   hostname: string;
   port: number;
-  fingerprint: string;
   keyType: string;
-  asciiArt: string;
+  fingerprint: string;
+  previousFingerprints: string[];
+  status: "trusted" | "unknown" | "changed" | "revoked";
 }
 
-export interface HostKeyChangedPayload {
-  hostname: string;
-  port: number;
-  fingerprint: string;
-  oldFingerprint: string;
-  keyType: string;
+export class HostKeyError extends Error {
+  constructor(readonly code: string, message: string, options?: ErrorOptions) { super(message, options); }
 }
 
-// ── KnownHostsManager ────────────────────────────────────────────
+export type HostKeyVerifier = (hostname: string, port: number, key: Buffer, signal: AbortSignal) => Promise<void>;
 
-/**
- * Manages SSH host key verification for Crab Desktop. Stores accepted
- * host key fingerprints in `~/.crab/desktop/known_hosts.json` and
- * falls back to the system `~/.ssh/known_hosts` for already-trusted hosts.
- *
- * Emits:
- * - "ssh:host-key-prompt" for unknown hosts (first connection)
- * - "ssh:host-key-changed" for hosts whose key has changed (MITM warning)
- */
-export class KnownHostsManager extends EventEmitter {
-  private hostsPath: string;
-  private systemKnownHostsPath: string;
-  private hosts: KnownHost[] = [];
+function systemHostsPath(): string {
+  if (process.platform !== "win32") return "/etc/ssh/ssh_known_hosts";
+  const data = process.env.ProgramData;
+  if (!data) throw new HostKeyError("SSH_HOST_TRUST_IO", "Cannot locate the system SSH trust directory");
+  return path.join(data, "ssh", "ssh_known_hosts");
+}
 
-  constructor(hostsPath?: string, systemKnownHostsPath?: string) {
-    super();
-    this.hostsPath = hostsPath ?? path.join(os.homedir(), ".crab", "desktop", "known_hosts.json");
-    this.systemKnownHostsPath = systemKnownHostsPath ?? path.join(os.homedir(), ".ssh", "known_hosts");
-    this.load();
+function endpoint(hostname: string, port: number): string {
+  if (!hostname || /[\s,*?!|\x00-\x1f]/.test(hostname) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Invalid SSH host identity");
   }
+  return port === 22 ? hostname.toLowerCase() : `[${hostname.toLowerCase()}]:${port}`;
+}
 
-  /**
-   * Verify a host's key against known hosts. Checks the system
-   * `~/.ssh/known_hosts` first, then the app's own store.
-   *
-   * Returns:
-   * - "trusted" if the key matches a known entry
-   * - "unknown" if the host has never been seen
-   * - "changed" if the host's key differs from what was stored (MITM risk)
-   */
-  async verify(
-    hostname: string,
-    port: number,
-    key: Buffer,
-    keyType: string,
-  ): Promise<HostKeyVerifyResult> {
-    const fingerprint = this.computeFingerprint(key);
+function decode(value: string): Buffer {
+  const bytes = Buffer.from(value, "base64");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || bytes.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")) {
+    throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Invalid key data in SSH trust records");
+  }
+  return bytes;
+}
 
-    // Check system known_hosts first
-    const systemResult = this.checkSystemKnownHosts(hostname, port, key, keyType);
-    if (systemResult === "trusted") {
-      return "trusted";
+function matches(host: string, patterns: string): boolean {
+  if (patterns.startsWith("|")) {
+    const fields = patterns.split("|");
+    if (fields.length !== 4 || fields[1] !== "1") throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Unsupported hashed SSH host record");
+    const salt = decode(fields[2]); const expected = decode(fields[3]);
+    if (salt.length !== 20 || expected.length !== 20) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Invalid hashed SSH host record");
+    return crypto.timingSafeEqual(crypto.createHmac("sha1", salt).update(host).digest(), expected);
+  }
+  let included = false;
+  for (const pattern of patterns.split(",")) {
+    const negative = pattern.startsWith("!");
+    const raw = negative ? pattern.slice(1) : pattern;
+    const expression = raw.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    if (!new RegExp(`^${expression}$`, "i").test(host)) continue;
+    if (negative) return false;
+    included = true;
+  }
+  return included;
+}
+
+/** Checks application pins and OpenSSH trust records with revocation taking precedence. */
+export class KnownHostsManager {
+  constructor(
+    private readonly hostsPath = path.join(os.homedir(), ".crab", "desktop", "known_hosts.json"),
+    private readonly userHostsPath = path.join(os.homedir(), ".ssh", "known_hosts"),
+    private readonly globalHostsPath = systemHostsPath(),
+  ) {}
+
+  verify(hostname: string, port: number, key: Buffer): HostKeyInspection {
+    const host = endpoint(hostname, port);
+    const parsed = utils.parseKey(key);
+    if (parsed instanceof Error || Array.isArray(parsed)) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Server presented an invalid SSH host key");
+    const keyType = parsed.type; const fingerprint = this.computeFingerprint(parsed.getPublicSSH());
+    const pins = this.load().filter(pin => pin.hostname === hostname.toLowerCase() && pin.port === port && pin.keyType === keyType);
+    const previous = new Set(pins.map(pin => pin.fingerprint));
+    let revoked = false;
+    // OpenSSH defaults include the `2` sibling of each database. Its revocations
+    // must participate too; a match in the first file cannot bypass them.
+    for (const file of [this.userHostsPath, `${this.userHostsPath}2`, this.globalHostsPath, `${this.globalHostsPath}2`]) {
+      for (const line of this.read(file).split(/\r?\n/)) {
+        const fields = line.trim().split(/\s+/);
+        if (!fields[0] || fields[0].startsWith("#")) continue;
+        const marker = fields[0].startsWith("@") ? fields.shift() : undefined;
+        if (!fields[0] || !matches(host, fields[0])) continue;
+        if (marker === "@cert-authority") continue;
+        if (marker && marker !== "@revoked") throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Unsupported SSH trust marker");
+        if (fields.length < 3) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Incomplete SSH trust record");
+        const saved = utils.parseKey(decode(fields[2]));
+        if (saved instanceof Error || Array.isArray(saved) || saved.type !== fields[1]) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Invalid SSH trust record");
+        const savedFingerprint = this.computeFingerprint(saved.getPublicSSH());
+        if (marker === "@revoked") {
+          if (savedFingerprint === fingerprint) revoked = true;
+        } else if (saved.type === keyType) previous.add(savedFingerprint);
+      }
     }
-
-    // Check app's own known_hosts store
-    const existing = this.find(hostname, port);
-    if (!existing) {
-      this.emit("ssh:host-key-prompt", {
-        hostname,
-        port,
-        fingerprint,
-        keyType,
-        asciiArt: this.generateAsciiArt(key),
-      } satisfies HostKeyPromptPayload);
-      return "unknown";
-    }
-
-    if (existing.fingerprint === fingerprint) {
-      return "trusted";
-    }
-
-    // Key mismatch — potential MITM attack
-    this.emit("ssh:host-key-changed", {
-      hostname,
-      port,
-      fingerprint,
-      oldFingerprint: existing.fingerprint,
-      keyType,
-    } satisfies HostKeyChangedPayload);
-    return "changed";
+    // Neither a positive app pin nor an earlier matching line can override a
+    // revocation found later or in another authority's trust file.
+    const status = revoked ? "revoked" : previous.has(fingerprint) ? "trusted" : previous.size ? "changed" : "unknown";
+    return { hostname: hostname.toLowerCase(), port, keyType, fingerprint, previousFingerprints: [...previous].sort(), status };
   }
 
-  /**
-   * Accept a host's key and store it in the known hosts file.
-   * If an entry already exists for this host:port, it is replaced.
-   */
-  async accept(
-    hostname: string,
-    port: number,
-    key: Buffer,
-    keyType: string,
-  ): Promise<void> {
-    const fingerprint = this.computeFingerprint(key);
-
-    // Remove existing entry for this host:port if present
-    this.hosts = this.hosts.filter(
-      (h) => !(h.hostname === hostname && h.port === port),
-    );
-
-    this.hosts.push({
-      hostname,
-      port,
-      keyType,
-      fingerprint,
-      addedAt: Date.now(),
-    });
-
-    this.save();
+  accept(hostname: string, port: number, key: Buffer): void {
+    const checked = this.verify(hostname, port, key);
+    if (checked.status === "revoked") throw new HostKeyError("SSH_HOST_KEY_REVOKED", "The SSH host key is revoked and cannot be trusted");
+    if (checked.status === "trusted") return;
+    const pins = this.load().filter(pin => !(pin.hostname === checked.hostname && pin.port === port && pin.keyType === checked.keyType));
+    pins.push({ hostname: checked.hostname, port, keyType: checked.keyType, fingerprint: checked.fingerprint, addedAt: Date.now() });
+    this.save(pins);
   }
 
-  /**
-   * Remove a host entry from the known hosts store.
-   * Returns true if an entry was removed, false if not found.
-   */
-  remove(hostname: string, port: number): boolean {
-    const before = this.hosts.length;
-    this.hosts = this.hosts.filter(
-      (h) => !(h.hostname === hostname && h.port === port),
-    );
-    const removed = this.hosts.length < before;
-    if (removed) {
-      this.save();
-    }
-    return removed;
+  remove(hostname: string, port: number, keyType: string): boolean {
+    const pins = this.load();
+    const remaining = pins.filter(pin => !(pin.hostname === hostname && pin.port === port && pin.keyType === keyType));
+    if (remaining.length === pins.length) return false;
+    this.save(remaining); return true;
   }
 
-  /**
-   * Return all known hosts stored in the app's known_hosts file.
-   */
-  list(): KnownHost[] {
-    return [...this.hosts];
-  }
+  list(): KnownHost[] { return this.load(); }
 
-  /**
-   * Compute the SHA-256 fingerprint of a raw public key buffer.
-   * Returns the fingerprint as a base64-encoded string prefixed with "SHA256:".
-   */
   computeFingerprint(key: Buffer): string {
-    const hash = crypto.createHash("sha256").update(key).digest("base64");
-    return `SHA256:${hash}`;
+    return `SHA256:${crypto.createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
   }
 
-  /**
-   * Generate an ASCII art visualization of a key fingerprint using
-   * the "drunken bishop" algorithm (similar to OpenSSH's randomart).
-   *
-   * Produces a 17x9 grid showing the path of a "bishop" moving
-   * across the grid based on the key's hash bytes.
-   */
-  generateAsciiArt(key: Buffer): string {
-    const hash = crypto.createHash("md5").update(key).digest();
-    const width = 17;
-    const height = 9;
-    const field: number[][] = Array.from({ length: height }, () =>
-      Array.from({ length: width }, () => 0),
-    );
-
-    // Start position: center of the grid
-    let x = Math.floor(width / 2);
-    let y = Math.floor(height / 2);
-    const startX = x;
-    const startY = y;
-
-    // Walk the bishop based on hash bytes
-    for (const byte of hash) {
-      for (let shift = 0; shift < 8; shift += 2) {
-        const direction = (byte >> shift) & 0x03;
-
-        // Move based on 2-bit direction
-        switch (direction) {
-          case 0: // up-left
-            x = Math.max(0, x - 1);
-            y = Math.max(0, y - 1);
-            break;
-          case 1: // up-right
-            x = Math.min(width - 1, x + 1);
-            y = Math.max(0, y - 1);
-            break;
-          case 2: // down-left
-            x = Math.max(0, x - 1);
-            y = Math.min(height - 1, y + 1);
-            break;
-          case 3: // down-right
-            x = Math.min(width - 1, x + 1);
-            y = Math.min(height - 1, y + 1);
-            break;
-        }
-
-        field[y][x] += 1;
-      }
+  private read(file: string): string {
+    try { return fs.readFileSync(file, "utf8"); }
+    catch (cause: unknown) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return "";
+      throw new HostKeyError("SSH_HOST_TRUST_IO", `Cannot read SSH trust records: ${file}`, { cause });
     }
-
-    // Character map for visit counts
-    const chars = " .o+=*BOX@%&#/^SE";
-
-    // Render the grid
-    const lines: string[] = [];
-    lines.push("+---[HASH]----+");
-
-    for (let row = 0; row < height; row++) {
-      let line = "|";
-      for (let col = 0; col < width; col++) {
-        if (row === startY && col === startX) {
-          line += "S";
-        } else if (row === y && col === x) {
-          line += "E";
-        } else {
-          const visits = Math.min(field[row][col], chars.length - 1);
-          line += chars[visits];
-        }
-      }
-      line += "|";
-      lines.push(line);
-    }
-
-    lines.push("+-------------+");
-    return lines.join("\n");
   }
 
-  // ── System known_hosts fallback ──────────────────────────────
-
-  /**
-   * Check the system `~/.ssh/known_hosts` file for a matching host key.
-   * Parses the standard OpenSSH known_hosts format.
-   *
-   * Returns "trusted" if the host is found with a matching key,
-   * or "unknown" if not found (does not return "changed" — we only
-   * use the system file as a positive trust signal).
-   */
-  private checkSystemKnownHosts(
-    hostname: string,
-    port: number,
-    key: Buffer,
-    _keyType: string,
-  ): "trusted" | "unknown" {
+  private load(): KnownHost[] {
     let content: string;
     try {
-      content = fs.readFileSync(this.systemKnownHostsPath, "utf-8");
-    } catch {
-      // File doesn't exist or isn't readable — not an error
-      return "unknown";
+      const stat = fs.lstatSync(this.hostsPath);
+      if (!stat.isFile()) throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Application SSH trust store must be a regular file");
+      content = fs.readFileSync(this.hostsPath, "utf8");
+    } catch (cause: unknown) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if (cause instanceof HostKeyError) throw cause;
+      throw new HostKeyError("SSH_HOST_TRUST_IO", "Cannot read application SSH trust store", { cause });
     }
-
-    const fingerprint = this.computeFingerprint(key);
-    const hostPatterns = this.buildHostPatterns(hostname, port);
-
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("@")) {
-        continue;
-      }
-
-      const parsed = this.parseKnownHostsLine(trimmed);
-      if (!parsed) {
-        continue;
-      }
-
-      // Check if any of the host patterns match this line's hosts
-      const lineHosts = parsed.hosts.split(",");
-      const matches = hostPatterns.some((pattern) =>
-        lineHosts.some((lineHost) => this.hostMatchesPattern(pattern, lineHost.trim())),
-      );
-
-      if (!matches) {
-        continue;
-      }
-
-      // Compute fingerprint of the stored key and compare
-      try {
-        const storedKey = Buffer.from(parsed.keyData, "base64");
-        const storedFingerprint = this.computeFingerprint(storedKey);
-        if (storedFingerprint === fingerprint) {
-          return "trusted";
-        }
-      } catch {
-        // Invalid base64 or other parse error — skip this line
-        continue;
-      }
+    let value: unknown;
+    try { value = JSON.parse(content); }
+    catch (cause: unknown) { throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Application SSH trust store is invalid", { cause }); }
+    if (!Array.isArray(value) || value.some(pin => !pin || typeof pin !== "object" || typeof pin.hostname !== "string" || !pin.hostname
+      || !Number.isInteger(pin.port) || pin.port < 1 || pin.port > 65535 || typeof pin.keyType !== "string" || !pin.keyType
+      || typeof pin.fingerprint !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(pin.fingerprint) || !Number.isFinite(pin.addedAt))) {
+      throw new HostKeyError("SSH_HOST_TRUST_INVALID", "Application SSH trust store has invalid records");
     }
-
-    return "unknown";
+    return value as KnownHost[];
   }
 
-  /**
-   * Build the set of host patterns to search for in known_hosts.
-   * For non-standard ports, OpenSSH uses `[hostname]:port` format.
-   */
-  private buildHostPatterns(hostname: string, port: number): string[] {
-    const patterns = [hostname];
-    if (port !== 22) {
-      patterns.push(`[${hostname}]:${port}`);
-    }
-    return patterns;
-  }
-
-  /**
-   * Check if a host pattern matches a known_hosts entry.
-   * Handles plain hostnames and `[host]:port` bracket notation.
-   */
-  private hostMatchesPattern(pattern: string, entry: string): boolean {
-    // Hashed entries start with |1| — we can't match those without
-    // computing the HMAC, so skip them
-    if (entry.startsWith("|")) {
-      return false;
-    }
-    return pattern === entry;
-  }
-
-  /**
-   * Parse a single line from an OpenSSH known_hosts file.
-   * Format: `hostname[,hostname2,...] key-type base64-key [comment]`
-   */
-  private parseKnownHostsLine(
-    line: string,
-  ): { hosts: string; keyType: string; keyData: string } | null {
-    const parts = line.split(/\s+/);
-    if (parts.length < 3) {
-      return null;
-    }
-    return {
-      hosts: parts[0],
-      keyType: parts[1],
-      keyData: parts[2],
-    };
-  }
-
-  // ── Persistence ──────────────────────────────────────────────
-
-  /**
-   * Find an existing known host entry by hostname and port.
-   */
-  private find(hostname: string, port: number): KnownHost | undefined {
-    return this.hosts.find(
-      (h) => h.hostname === hostname && h.port === port,
-    );
-  }
-
-  /**
-   * Load known hosts from disk. Creates the file and parent
-   * directories if they don't exist.
-   */
-  private load(): void {
+  private save(pins: KnownHost[]): void {
+    const directory = path.dirname(this.hostsPath);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const temporary = path.join(directory, `.known-hosts-${crypto.randomUUID()}`);
+    let fd: number | undefined;
     try {
-      const content = fs.readFileSync(this.hostsPath, "utf-8");
-      const parsed = JSON.parse(content);
-      if (Array.isArray(parsed)) {
-        this.hosts = parsed;
-      }
-    } catch {
-      // File doesn't exist or is invalid — start with empty list
-      this.hosts = [];
+      fd = fs.openSync(temporary, "wx", 0o600);
+      fs.writeFileSync(fd, JSON.stringify(pins, null, 2)); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+      fs.renameSync(temporary, this.hostsPath);
+    } catch (cause: unknown) {
+      throw new HostKeyError("SSH_HOST_TRUST_IO", "Cannot save the verified SSH host key", { cause });
+    } finally {
+      // Cleanup cannot replace the original write/rename error. Unlinked private
+      // temporary files are never read as trust records.
+      try { if (fd !== undefined) fs.closeSync(fd); } catch { /* Preserve the source error. */ }
+      try { fs.rmSync(temporary, { force: true }); } catch { /* Preserve the source error. */ }
     }
   }
+}
 
-  /**
-   * Persist the current known hosts list to disk. Creates parent
-   * directories if they don't exist.
-   */
-  private save(): void {
-    const dir = path.dirname(this.hostsPath);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.hostsPath, JSON.stringify(this.hosts, null, 2), "utf-8");
-  }
+/** Holds an exact presented key through user verification and persists approval before authentication. */
+export function createHostKeyVerifier(
+  hosts: KnownHostsManager,
+  confirm: (request: HostKeyInspection, signal: AbortSignal) => Promise<boolean>,
+): HostKeyVerifier {
+  return async (hostname, port, key, signal) => {
+    signal.throwIfAborted();
+    const candidate = Buffer.from(key);
+    const checked = hosts.verify(hostname, port, candidate);
+    if (checked.status === "revoked") throw new HostKeyError("SSH_HOST_KEY_REVOKED", "The SSH host key is revoked and cannot be trusted");
+    if (checked.status === "trusted") return;
+    const accepted = await confirm(checked, signal);
+    signal.throwIfAborted();
+    if (!accepted) throw new HostKeyError("SSH_HOST_KEY_REJECTED", "SSH host key verification was rejected");
+    const current = hosts.verify(hostname, port, candidate);
+    if (current.status === "revoked") throw new HostKeyError("SSH_HOST_KEY_REVOKED", "The SSH host key was revoked while verification was pending");
+    if (current.status === "trusted") return;
+    if (current.status !== checked.status || current.previousFingerprints.join("\n") !== checked.previousFingerprints.join("\n")) {
+      throw new HostKeyError("SSH_HOST_TRUST_CHANGED", "SSH trust records changed during verification; reconnect to review the current key");
+    }
+    hosts.accept(hostname, port, candidate);
+    signal.throwIfAborted();
+  };
 }

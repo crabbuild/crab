@@ -1910,16 +1910,17 @@ function SshSettings() {
   const { settings, update } = useSettings();
   const features = settings.features;
   const [knownHosts, setKnownHosts] = useState<Array<{ hostname: string; port: number; fingerprint: string; keyType: string; addedAt: number }>>([]);
+  const [hostError, setHostError] = useState<string | null>(null);
   const [stats, setStats] = useState<{ successRate: number; avgLatencyMs: number; reconnections: number } | null>(null);
 
   useEffect(() => {
     // Load known hosts
     (async () => {
       try {
-        const hosts = await (window as any).crab?.ssh?.listKnownHosts?.();
-        if (hosts) setKnownHosts(hosts);
-      } catch {
-        // SSH not available
+        const hosts = await window.crab.ssh.listKnownHosts();
+        setKnownHosts(hosts);
+      } catch (error: unknown) {
+        setHostError(error instanceof Error ? error.message : String(error));
       }
     })();
     // Load diagnostics stats
@@ -1937,12 +1938,13 @@ function SshSettings() {
     update("features", { ...features, [key]: value });
   }
 
-  async function removeKnownHost(hostname: string, port: number) {
+  async function removeKnownHost(hostname: string, port: number, keyType: string) {
     try {
-      await (window as any).crab?.ssh?.removeKnownHost?.(hostname, port);
-      setKnownHosts((prev) => prev.filter((h) => !(h.hostname === hostname && h.port === port)));
-    } catch {
-      // Ignore
+      await window.crab.ssh.removeKnownHost(hostname, port, keyType);
+      setKnownHosts(await window.crab.ssh.listKnownHosts());
+      setHostError(null);
+    } catch (error: unknown) {
+      setHostError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -2000,14 +2002,16 @@ function SshSettings() {
 
           {/* Known Hosts */}
           <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Known Hosts</h3>
+            <h3 className="mb-3 text-xs font-semibold text-gx-text">Saved host keys</h3>
+            <p className="mb-2 text-xs text-gx-muted">Keys approved in Crab. OpenSSH user and system trust records are also checked when connecting.</p>
+            {hostError && <p role="alert" className="mb-2 text-xs text-red-500">{hostError}</p>}
             {knownHosts.length === 0 ? (
-              <p className="text-xs text-gx-muted">No known hosts saved yet. Hosts are added when you connect for the first time.</p>
+              <p className="text-xs text-gx-muted">No host keys approved in Crab yet.</p>
             ) : (
               <ul className="space-y-2">
                 {knownHosts.map((host) => (
                   <li
-                    key={`${host.hostname}:${host.port}`}
+                    key={`${host.hostname}:${host.port}:${host.keyType}`}
                     className="flex items-center justify-between rounded border border-gx-border bg-gx-surface p-2"
                   >
                     <div className="min-w-0">
@@ -2024,7 +2028,7 @@ function SshSettings() {
                     <button
                       type="button"
                       className="btn text-xs text-red-500 hover:text-red-600"
-                      onClick={() => removeKnownHost(host.hostname, host.port)}
+                      onClick={() => removeKnownHost(host.hostname, host.port, host.keyType)}
                       aria-label={`Remove ${host.hostname} from known hosts`}
                     >
                       <Trash2 size={12} />

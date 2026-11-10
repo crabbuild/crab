@@ -45,6 +45,17 @@ Changes-page edits enter through the base branch, not the audit commits.
   process ownership ends on `close`, after stdio drains, including failed spawn.
   Native cancellation now returns that closure promise; transport or control
   failure completes the turn without pretending the process already exited.
+- [OpenSSH known-hosts format](https://man.openbsd.org/sshd#SSH_KNOWN_HOSTS_FILE_FORMAT),
+  [hashed-host lookup](https://man.openbsd.org/ssh-keygen#F),
+  [default trust databases](https://man.openbsd.org/ssh_config#GlobalKnownHostsFile),
+  [Electron dialog ownership](https://www.electronjs.org/docs/latest/api/dialog#dialogshowmessageboxwindow-options), installed SSH2
+  `1.17.0` `client.js`/`protocol/kex.js`, and Electron `33.2.0`
+  `MessageBoxOptions`: asynchronous host verification must be supplied explicitly.
+  No verifier means acceptance. The SSH2 handshake timeout includes the user
+  decision unless the caller owns that deadline. Electron's abortable native
+  dialog needs a parent window on macOS. Crab checks its app pins plus default
+  OpenSSH user/system files; it does not implement OpenSSH certificate-authority
+  authentication or custom ssh_config trust-file options.
 - [SSH2 channel lifecycle](https://github.com/mscdex/ssh2/tree/v1.17.0#channel),
   installed `ssh2` 1.17.0 `Channel.js`, and
   [Node UTF-8 decoding](https://nodejs.org/api/string_decoder.html): EOF and
@@ -557,6 +568,31 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- SSH host verification now runs before authentication for direct connections,
+  every ProxyJump hop, reconnect and Test Connection. A connection-owned native
+  Electron dialog rejects by default; replacing a changed key also requires
+  explicit acknowledgement. Approval holds the exact presented key and saves it
+  before authentication; cancellation or changed trust records cannot grant a
+  late approval. Revocations take precedence across application, user and system
+  records. OpenSSH hashed endpoints, wildcard negation and nondefault-port
+  identities are checked; both default `known_hosts2` siblings participate in
+  revocation checks too. Malformed/unreadable trust records fail closed.
+  The old unconnected store's events, randomart and positive-only fallback are
+  removed. Application approvals are listed and removed through typed settings
+  IPC. User/system OpenSSH files remain read-only.
+  The SSH2 handshake deadline pauses during the decision and resumes with its
+  remaining network budget. Trust failures stop automatic reconnect, including
+  rekey failures. Scoped owner/policy/router/provider tests pass; five real SSH
+  cases cover approval, rejection before authentication, changed/revoked keys,
+  Test Connection and a two-hop chain. A separate parented native-dialog fixture
+  verifies rejection, approval and acknowledged key replacement through real
+  authentication, a remote marker write and a visible result. An OpenSSH
+  `ssh-keygen` oracle agrees on hashed endpoints and SHA256 fingerprints.
+  Four compiled-sidecar/browser cases still pass with the real trust policy.
+  Evidence: `ssh-host-final-tests.json`, `ssh-host-ipc-tests.json`,
+  `ssh-host-native-result.json`, `ssh-host-openssh-oracle.log` and
+  `ssh-host-sidecar-live.json` in the owned qualification output. Packaged and
+  cross-OS native dialog qualification still require CI/dedicated environments.
 - SSH readiness qualification adds seven regressions that failed against the
   previous manager, then passes 202 tests across ten manager/router/capability/
   recovery and adjacent files.
@@ -1047,10 +1083,11 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   negotiation and actual queued-read replay now have real SSH/browser proof.
   Production deployment still searches `resources/agents`, while native builds
   use `resources/native` and packaged `agent` layouts; remote-target binaries,
-  upload and version/hash policy need qualification. Host trust is a release
-  blocker: no `hostVerifier` is supplied, and pinned SSH2 1.17.0 explicitly
-  auto-accepts by default. Do not claim production SSH readiness from the owned
-  loopback fixture. Remote file editing/status consumers and their sidecar
+  upload and version/hash policy need qualification. Host verification now has
+  policy, real SSH and native-dialog proof; packaged/cross-OS qualification is
+  still open. Test Connection also needs bounded remote-command failure
+  handling after its authenticated handshake. Do not claim production SSH
+  readiness from the owned loopback fixture. Remote file editing/status consumers and their sidecar
   parameter/result contracts, remote Apply/Discard safety, native task dispatch,
   and Git-filter descendant cleanup remain open.
 - Finish live watch/command-control checks and the lifecycle/owner contract for

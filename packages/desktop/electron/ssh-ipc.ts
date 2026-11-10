@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import { ipcMain, BrowserWindow } from "electron";
 import { setPassword } from "./keychain";
+import type { KnownHostsManager } from "./ssh-known-hosts";
 import type { SshProfileManager } from "./ssh-profiles";
 import type { SshSessionManager, SshProfile } from "./ssh-manager";
 import type { RemoteTerminalManager } from "./ssh-terminal";
@@ -30,11 +31,15 @@ import type { FileTransferManager } from "./ssh-file-transfer";
 export function registerSshIpcHandlers(
   profileManager: SshProfileManager,
   sessionManager: SshSessionManager,
+  knownHosts: KnownHostsManager,
   terminalManager?: RemoteTerminalManager,
   portForwardManager?: PortForwardManager,
   fileBrowser?: RemoteFileBrowser,
   fileEditor?: RemoteFileEditor,
 ): void {
+  ipcMain.handle("ssh:list-known-hosts", () => knownHosts.list());
+  ipcMain.handle("ssh:remove-known-host", (_event, hostname: string, port: number, keyType: string) => knownHosts.remove(hostname, port, keyType));
+
   ipcMain.handle("ssh:list-profiles", async () => {
     return profileManager.list();
   });

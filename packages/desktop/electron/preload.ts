@@ -1,3 +1,4 @@
+import type { KnownHost } from "./ssh-known-hosts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 // Whitelist of RPC method names the renderer is allowed to invoke.
@@ -607,6 +608,9 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("ssh:test-connection", profileId),
     getStatus: (profileId: string) =>
       ipcRenderer.invoke("ssh:get-status", profileId),
+    listKnownHosts: () => ipcRenderer.invoke("ssh:list-known-hosts") as Promise<KnownHost[]>,
+    removeKnownHost: (hostname: string, port: number, keyType: string) =>
+      ipcRenderer.invoke("ssh:remove-known-host", hostname, port, keyType) as Promise<boolean>,
     // Remote terminal
     openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) =>
       ipcRenderer.invoke("ssh:open-terminal", profileId, cols, rows, cwd, resumeId, ownerPath) as Promise<{ terminalId: string }>,
