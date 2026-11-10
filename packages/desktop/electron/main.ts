@@ -1832,8 +1832,8 @@ app.whenReady().then(async () => {
       },
     });
     _rpcRouter = rpcRouter;
-    const agentDeployer = new AgentDeployer();
     const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
+    sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(), capabilityNegotiator, rpcRouter });
     const fileTransferManager = new FileTransferManager(sshSessionManager);
     const deltaSyncEngine = new DeltaSyncEngine(rpcRouter);
     const workspaceSyncEngine = new WorkspaceSyncEngine(
@@ -1959,7 +1959,6 @@ app.whenReady().then(async () => {
       toolManager,
       connectionQualityMonitor,
       bookmarkManager,
-      agentDeployer,
       capabilityNegotiator,
       workspaceManager,
       gitManager,

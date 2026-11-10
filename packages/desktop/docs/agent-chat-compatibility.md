@@ -1,6 +1,6 @@
 # Agent chat compatibility
 
-Status: in progress; [draft PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `2f6d36ec12a`.
+Status: in progress; [draft PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `54e5120f134`.
 Compatibility is not yet fully qualified.
 
 Refreshed from `64b33b64cba`; the workflow-output update integrated without
@@ -15,6 +15,12 @@ The subsequent forced-push history fix fast-forwarded to `2f6d36ec12a` without
 overlap. It changes only CLI push code, its tests, and protocol documentation.
 The tracked audit patch and all 50 untracked audit files again matched their
 preserved copies after integration; comparison proof source is unchanged.
+
+The PR was subsequently rebased onto `54e5120f134` (Changes sidebar reflow).
+That update touches only its guide, StagingZones and CommitComposer. The two
+published audit commits rebased without conflicts; all 14 in-flight SSH-owner
+files matched their preserved hashes after restoring the patch. Responsive
+Changes-page edits enter through the base branch, not the audit commits.
 
 ## Contracts checked
 
@@ -141,6 +147,7 @@ Its session/model totals include subagents and restored spend.
 | Saved file restoration | `restoreFiles` IPC → shared file-operation owner → checkpoint manager → retained Git backup and tree restoration | Saved-file menu, backup recovery, ignored-file rejection, real shared writers, native session/history continuity, and task-view Diff refresh |
 | Local file comparisons | `registerDiffIpc` → `computeDiff` → private intent index and one Git raw/patch stream | Default and saved-turn Diff, PR description reads, archived object reads, unusual paths, actual IPC errors and renderer Reload; remote wire parser remains separate |
 | Remote file comparisons | Same IPC → `RpcRouter` → sidecar dispatcher → `agent/src/task_diff.rs` | Private index, one bounded Git read, tagged response shape, shared path decoding; compiled sidecar and task-view checks over stdio and loopback SSH, with deployment still unqualified |
+| SSH session readiness | Main dependency factory → session manager → deployer/channel → capability negotiator → router | Initial/manual/reconnect share attachment; real sidecar capability response, interrupted tasks, bounded cancellation, profile-owned jump chains and four SSH/browser cases |
 | RPC channel ownership | `RpcRouter.attachChannel` → channel-local pending calls/decoder → sidecar NDJSON requests | Cache/poller batches use ordinary routing; closure/replacement, profile isolation, split UTF-8, error fidelity, timeout and queue-admission regressions; real SSH browser failure during an outstanding read |
 | Extended Codex actions | `electron/orchestrator-ipc.ts` → orchestrator → adapter | Feedback, preload API and operation contracts; remaining command/watch ownership and live controls are gates |
 | Live behavior | `tests/agent-chat-live.spec.ts` | Installed CLI → real file write → renderer turn derivation |
@@ -150,8 +157,28 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Corrections implemented
 
+- SSH initial connect, manual deployment and reconnect now share one channel
+  attachment and capability handshake. Main supplies the dependencies, with a
+  fresh deployer per attempt so progress cannot cross profiles. Both manual IPC
+  implementations use the session owner. Readiness is published only after
+  negotiation; auto-deployment failure rejects instead of publishing a partial
+  agent. Explicit agentless profiles remain available for SSH/SFTP and advertise
+  no repository RPC capabilities until manual deployment succeeds.
+- Each connection owns its cancellation signal and jump chain. Replacement,
+  disconnect and the total 60-second reconnect deadline retire in-flight work;
+  a late client or deployment cannot resurrect the profile or replace its
+  channel. Opening EOF rejects immediately. Router queues are the only read
+  queue; the unused fabricated replay path is removed. Successful reconnect
+  actually sends queued reads, and permanent disconnect rejects them.
+- Capabilities validate the response and reject retired-generation replies.
+  The sidecar now implements the capability handshake, truthfully reporting its
+  unimplemented extended SSH service flags as false. This does not advertise
+  native chat dispatch. Reconnecting interrupts remote tasks before recovery;
+  all affected siblings change state before persistence yields, and obsolete
+  interruption notifications are not published after recovery advances.
 - Remote reconnect admission now defers only the six inspected cacheable reads
-  and `task_compute_diff`. Mutating and unclassified methods reject immediately
+  and the inspected `task_compute_diff`, `git_stash_list` and `git_blame` reads.
+  Mutating and unclassified methods reject immediately
   with `SSH_RECONNECTING`, including calls made directly by the orchestrator.
   Repo routing, profile RPC and batch consumers share this owner boundary;
   the mutation-prefix denylist and its classification-only tests are removed.
@@ -530,6 +557,24 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
 
 ## Verification so far
 
+- SSH readiness qualification adds seven regressions that failed against the
+  previous manager, then passes 202 tests across ten manager/router/capability/
+  recovery and adjacent files.
+  Four task-view cases run the real session manager, router, capability
+  negotiator, compiled sidecar and Git over authenticated loopback SSH. Breaking
+  the channel causes a second sidecar and a fresh handshake; the queued file
+  refresh renders the changed bytes. Cancellation, late clients/channels,
+  credential lookup, manual deployment, permanent queue failure, concurrent
+  jump chains and stale capability replies have scoped proof. Eight Rust
+  comparison tests still pass after the real capability handler is added.
+  Production types, strict fixture types, both JavaScript builds, Rust format
+  and diff checks pass after the rebase. Production code shrinks by 145 lines.
+  The live fixture supplies its already-built sidecar through a startup-only
+  deployer; it does not qualify binary lookup, upload, host trust or remote
+  native dispatch. Ephemeral SSH keys stay outside the Git fixture and are
+  removed. The indexer sandbox remains enabled. Evidence:
+  `ssh-manager-owner-before.json`, `ssh-owner-final.json`,
+  `ssh-owner-live-final.json`, and `ssh-owner-rust-tests.log`.
 - Draft PR #670 contains the accumulated audit changes; responsive Changes-page
   files remain outside it. The follow-up replay-admission run passes 104 tests
   across six scoped files. Four regression cases first reproduced deferred
@@ -998,17 +1043,16 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   but the Rust sidecar dispatcher has no implementations. Local-provider proof
   does not qualify SSH agent chats. Remote comparison now has compiled-sidecar,
   RPC, and task-view proof over stdio; physical SSH deployment and remote
-  baseline ownership still need qualification. Channel-local RPC settlement and
-  request transport now have real SSH/browser proof. Production main creates the
-  session manager without its deployment dependencies, and no later wiring sets
-  them. The manager's reconnect path does not redeploy or replay the router's
-  read queue; its separate unused queue resolves fabricated replay metadata.
-  Manual deployment also discards the returned channel. Capabilities negotiation
-  uses a missing sidecar method and routes while status is `deploying`, which the
-  router currently rejects. Fix those owner/contract boundaries, cancellation
-  and late-client events, and Git-filter descendant cleanup before claiming
-  remote support. Router replay admission now rejects unclassified/mutating
-  calls; manager readiness and actual queue replay remain unfinished.
+  baseline ownership still need qualification. Session ownership, capability
+  negotiation and actual queued-read replay now have real SSH/browser proof.
+  Production deployment still searches `resources/agents`, while native builds
+  use `resources/native` and packaged `agent` layouts; remote-target binaries,
+  upload and version/hash policy need qualification. Host trust is a release
+  blocker: no `hostVerifier` is supplied, and pinned SSH2 1.17.0 explicitly
+  auto-accepts by default. Do not claim production SSH readiness from the owned
+  loopback fixture. Remote file editing/status consumers and their sidecar
+  parameter/result contracts, remote Apply/Discard safety, native task dispatch,
+  and Git-filter descendant cleanup remain open.
 - Finish live watch/command-control checks and the lifecycle/owner contract for
   extended controls that can execute or write outside ordinary chat submission.
 - Run appropriate scoped verification, build changed JavaScript bundles, inspect

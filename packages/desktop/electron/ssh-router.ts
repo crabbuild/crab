@@ -81,7 +81,7 @@ const CACHEABLE_READ_METHODS = new Set([
 
 // Only inspected read handlers may be deferred. A denylist would silently
 // queue new mutations and execute them after the user lost the connection.
-const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "task_compute_diff"]);
+const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "task_compute_diff", "git_stash_list", "git_blame"]);
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -261,6 +261,11 @@ export class RpcRouter extends EventEmitter {
     channel.on("close", close);
   }
 
+  /** Retires sent calls without moving the unsent read queue to another channel. */
+  detachChannel(profileId: string): void {
+    this.channels.get(profileId)?.stop(new Error("Remote agent disconnected before its RPC completed; outcome is unknown"));
+  }
+
   /**
    * Replay queued calls after a successful reconnection.
    * Called by the session manager when a connection is re-established.
@@ -337,7 +342,7 @@ export class RpcRouter extends EventEmitter {
       return this.enqueueCall(profileId, method, params);
     }
 
-    if (status !== "connected") {
+    if (status !== "connected" && !(status === "deploying" && method === "capabilities")) {
       throw new Error(`SSH connection not available (status: ${status})`);
     }
 

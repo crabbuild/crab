@@ -197,6 +197,19 @@ describe("SSH Connection Recovery", () => {
       expect(task.status).toBe("interrupted");
     });
 
+    it("marks all affected tasks before persistence can yield to reconnect", async () => {
+      const first = injectRemoteTask(orchestrator, { status: "running" });
+      const second = injectRemoteTask(orchestrator, { status: "iterating" });
+      let finish!: () => void;
+      vi.spyOn(orchestrator, "persistTasks").mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+      const events: Array<{ taskId: string; status: string }> = [];
+      orchestrator.on("orchestrator:task-status", payload => events.push(payload));
+      const interrupted = recovery.handleDisconnection("gpu-server");
+      const statuses = [first.status, second.status];
+      second.status = "reviewing"; finish(); await interrupted;
+      expect({ statuses, events }).toEqual({ statuses: ["interrupted", "interrupted"], events: [{ taskId: first.id, status: "interrupted" }] });
+    });
+
     it("does not affect tasks in other statuses", async () => {
       const reviewingTask = injectRemoteTask(orchestrator, { status: "reviewing" });
       const failedTask = injectRemoteTask(orchestrator, { status: "failed" });
@@ -403,11 +416,11 @@ describe("SSH Connection Recovery", () => {
   });
 
   describe("event-driven disconnection/reconnection", () => {
-    it("interrupts tasks when ssh:status-changed emits disconnected", async () => {
+    it.each(["disconnected", "reconnecting"])("interrupts tasks when ssh:status-changed emits %s", async status => {
       const task = injectRemoteTask(orchestrator, { status: "running" });
 
       // Simulate disconnection event
-      mockSessionManager.setStatus("gpu-server", "disconnected");
+      mockSessionManager.setStatus("gpu-server", status);
 
       // Allow async handler to complete
       await new Promise((resolve) => setTimeout(resolve, 10));

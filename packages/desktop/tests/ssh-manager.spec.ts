@@ -48,6 +48,7 @@ class MockClientChannel extends EventEmitter {
 class MockClient extends EventEmitter {
   connect = vi.fn();
   end = vi.fn();
+  destroy = vi.fn();
   exec = vi.fn();
   shell = vi.fn();
   forwardOut = vi.fn();
@@ -65,6 +66,12 @@ vi.mock("ssh2", () => ({
 }));
 
 import { SshSessionManager, SshProfile } from "../electron/ssh-manager";
+import type { ClientChannel } from "ssh2";
+import { RpcRouter } from "../electron/ssh-router";
+import { AgentDeployer } from "../electron/ssh-deployer";
+import { CapabilityNegotiator } from "../electron/ssh-capabilities";
+import type { AgentCapabilities } from "../electron/ssh-types";
+import { getPassword } from "../electron/keychain";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -80,7 +87,7 @@ function makeProfile(overrides: Partial<SshProfile> = {}): SshProfile {
     compression: false,
     keepAliveInterval: 15,
     autoReconnect: true,
-    autoDeployAgent: true,
+    autoDeployAgent: false,
     tags: [],
     portForwards: [],
     createdAt: Date.now(),
@@ -353,75 +360,14 @@ describe("SshSessionManager", () => {
       expect(manager.getStatus("test-profile-1")).toBe("disconnected");
     });
 
-    it("pending calls are queued and replayed on reconnection", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
+    it("cancelReconnection stops further attempts", async () => {
+      const client = await connectProfile(manager, makeProfile());
       client.emit("end");
-
-      // Queue some calls
-      const call1 = manager.queueCall("test-profile-1", "method1", { a: 1 });
-      const call2 = manager.queueCall("test-profile-1", "method2", { b: 2 });
-
-      // Reconnect successfully
-      await vi.advanceTimersByTimeAsync(1000);
-      const newClient = mockClientInstances[mockClientInstances.length - 1];
-      await vi.waitFor(() => expect(newClient.connect).toHaveBeenCalled());
-      newClient.emit("ready");
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Pending calls should resolve with replayed data
-      const result1 = await call1;
-      const result2 = await call2;
-      expect(result1).toEqual({ method: "method1", params: { a: 1 }, replayed: true });
-      expect(result2).toEqual({ method: "method2", params: { b: 2 }, replayed: true });
-    });
-
-    it("oldest calls are dropped when queue overflows (max 50)", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
-      client.emit("end");
-
-      // Queue 51 calls — the first should be dropped
-      const calls: Promise<unknown>[] = [];
-      for (let i = 0; i < 51; i++) {
-        calls.push(manager.queueCall("test-profile-1", `method${i}`, { i }));
-      }
-
-      // The first call should be rejected due to overflow
-      await expect(calls[0]).rejects.toThrow("queue overflow");
-    });
-
-    it("cancelReconnection stops attempts and rejects pending calls", async () => {
-      const profile = makeProfile({ autoReconnect: true });
-      const connectPromise = manager.connect(profile);
-      const client = mockClientInstances[0];
-      await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
-      client.emit("ready");
-      await connectPromise;
-
-      // Trigger reconnection
-      client.emit("end");
-
-      // Queue a call
-      const call = manager.queueCall("test-profile-1", "method1", {});
-
-      // Cancel reconnection
       manager.cancelReconnection("test-profile-1");
-
-      await expect(call).rejects.toThrow("Reconnection cancelled");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect({ status: manager.getStatus("test-profile-1"), clients: mockClientInstances.length }).toEqual({ status: "disconnected", clients: 1 });
     });
+
   });
 
   // ── Keep-alive timeout detection ─────────────────────────────────
@@ -598,4 +544,136 @@ describe("SshSessionManager", () => {
       expect(manager.getConnection("test-profile-1")).toBeUndefined();
     });
   });
+});
+
+
+describe("SSH connection ownership", () => {
+  const managers: SshSessionManager[] = [];
+  const capabilities: AgentCapabilities = { version: "2.0.0", features: { fileWatching: false, deltaSync: false, compression: false, processManagement: false, environmentManagement: false, debugging: false, search: false, buildRun: false, logTailing: false } };
+  class AgentChannel extends EventEmitter {
+    end = vi.fn();
+    destroy = vi.fn(() => { this.emit("close"); });
+    write(frame: string, done?: (error?: Error | null) => void): boolean {
+      const request = JSON.parse(frame) as { id: number; method: string };
+      this.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method === "capabilities" ? capabilities : { method: request.method } }) + "\n"));
+      done?.(); return true;
+    }
+    asChannel(): ClientChannel { return this as unknown as ClientChannel; }
+  }
+  function pending<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(done => { resolve = done; });
+    return { promise, resolve };
+  }
+  function fixture() {
+    let manager: SshSessionManager;
+    const proxy = { getStatus: (id: string) => manager.getStatus(id), getConnection: (id: string) => manager.getConnection(id) } as SshSessionManager;
+    const router = new RpcRouter(proxy, { request: async () => { throw new Error("Local fallback must not run"); } });
+    const deployer = new AgentDeployer(); const negotiator = new CapabilityNegotiator(router);
+    const channels: AgentChannel[] = [];
+    const deploy = vi.spyOn(deployer, "ensureAgent").mockImplementation(async () => { const channel = new AgentChannel(); channels.push(channel); return channel.asChannel(); });
+    manager = new SshSessionManager();
+    manager.setAgentDependencies({ createDeployer: () => deployer, capabilityNegotiator: negotiator, rpcRouter: router });
+    managers.push(manager);
+    return { manager, router, negotiator, deploy, channels };
+  }
+  beforeEach(() => { vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock"; });
+  afterEach(async () => { for (const manager of managers.splice(0)) await manager.disconnect("test-profile-1"); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("does not complete connect before the deployed channel and capabilities are ready", async () => {
+    const { manager, deploy, negotiator } = fixture(); const channel = new AgentChannel(); const starting = pending<ClientChannel>();
+    deploy.mockReturnValueOnce(starting.promise); let settled = false;
+    const connected = manager.connect(makeProfile({ autoDeployAgent: true })).then(() => { settled = true; });
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready");
+    await vi.advanceTimersByTimeAsync(0);
+    const before = { status: manager.getStatus("test-profile-1"), settled };
+    starting.resolve(channel.asChannel()); await connected; await vi.advanceTimersByTimeAsync(0);
+    expect({ before, after: manager.getStatus("test-profile-1"), capabilities: negotiator.getCached("test-profile-1") }).toEqual({ before: { status: "deploying", settled: false }, after: "connected", capabilities });
+  });
+
+  it("redeploys and actually executes the router's queued read after reconnect", async () => {
+    const { manager, router, deploy, channels } = fixture(); const client = await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
+    await vi.advanceTimersByTimeAsync(0); client.emit("end");
+    let result: unknown;
+    void router.sendToRemoteAgent("test-profile-1", "task_compute_diff", {}).then(value => { result = value; });
+    await vi.advanceTimersByTimeAsync(1000); const replacement = mockClientInstances.at(-1)!; replacement.emit("ready");
+    await vi.advanceTimersByTimeAsync(0);
+    expect({ deployments: deploy.mock.calls.length, channels: channels.length, result, status: manager.getStatus("test-profile-1") }).toEqual({ deployments: 2, channels: 2, result: { method: "task_compute_diff" }, status: "connected" });
+  });
+
+  it("ignores a retired client's late end, close and error", async () => {
+    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0);
+    await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0);
+    previous.emit("end"); previous.emit("close"); previous.emit("error", new Error("Retired transport"));
+    expect(manager.getStatus("test-profile-1")).toBe("connected");
+  });
+
+  it("does not resurrect a disconnected reconnect attempt after late ready", async () => {
+    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0); previous.emit("end");
+    await vi.advanceTimersByTimeAsync(1000); const pendingClient = mockClientInstances.at(-1)!;
+    await manager.disconnect("test-profile-1"); pendingClient.emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
+  });
+
+  it("retires a channel that finishes deploying after disconnect", async () => {
+    const { manager, deploy } = fixture(); const starting = pending<ClientChannel>(); const channel = new AgentChannel(); deploy.mockReturnValueOnce(starting.promise);
+    const connected = manager.connect(makeProfile({ autoDeployAgent: true })).catch(() => {});
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
+    await manager.disconnect("test-profile-1"); starting.resolve(channel.asChannel()); await connected; await vi.advanceTimersByTimeAsync(0);
+    expect({ status: manager.getStatus("test-profile-1"), destroyed: channel.destroy.mock.calls.length, channel: manager.getConnection("test-profile-1")?.channels.agent }).toEqual({ status: "disconnected", destroyed: 1, channel: undefined });
+  });
+
+  it("settles an opening handshake when the server closes without ready", async () => {
+    const { manager } = fixture(); let outcome = "pending";
+    void manager.connect(makeProfile({ autoDeployAgent: true })).then(() => { outcome = "connected"; }, () => { outcome = "failed"; });
+    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("close"); await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toBe("failed");
+  });
+
+  it("enforces the total reconnect deadline while a handshake is still opening", async () => {
+    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0); previous.emit("end");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
+  });
+  it("uses the same attached owner for explicit deployment and makes it idempotent", async () => {
+    const { manager, deploy, negotiator } = fixture();
+    await connectProfile(manager, makeProfile({ autoDeployAgent: false }));
+    await manager.deployAgent("test-profile-1"); await manager.deployAgent("test-profile-1");
+    expect({ deployments: deploy.mock.calls.length, attached: Boolean(manager.getConnection("test-profile-1")?.channels.agent), capabilities: negotiator.getCached("test-profile-1") }).toEqual({ deployments: 1, attached: true, capabilities });
+  });
+
+  it("rejects a queued read on permanent disconnect", async () => {
+    const { manager, router } = fixture(); const client = await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
+    client.emit("end"); const read = router.sendToRemoteAgent("test-profile-1", "task_compute_diff", {});
+    const outcome = read.catch(error => (error as Error).message);
+    await manager.disconnect("test-profile-1");
+    expect(await outcome).toBe("Connection lost permanently");
+  });
+
+  it("cancels credential lookup without starting a late SSH transport", async () => {
+    const { manager } = fixture(); const password = pending<string | null>(); vi.mocked(getPassword).mockReturnValueOnce(password.promise);
+    let outcome = "pending";
+    void manager.connect(makeProfile({ authMethod: { type: "password" }, autoDeployAgent: false })).then(() => { outcome = "connected"; }, () => { outcome = "failed"; });
+    const client = mockClientInstances[0]; await manager.disconnect("test-profile-1"); await vi.advanceTimersByTimeAsync(0);
+    const cancelled = outcome; password.resolve("owned-fixture-password"); await vi.advanceTimersByTimeAsync(0);
+    expect({ cancelled, connected: client.connect.mock.calls.length, status: manager.getStatus("test-profile-1") }).toEqual({ cancelled: "failed", connected: 0, status: "disconnected" });
+  });
+
+  it("keeps concurrent jump chains with their own profile", async () => {
+    const { manager } = fixture();
+    const first = manager.connect(makeProfile({ id: "first", jumpHost: "first-bastion", autoDeployAgent: false }));
+    const [firstClient, firstJump] = mockClientInstances;
+    const second = manager.connect(makeProfile({ id: "second", jumpHost: "second-bastion", autoDeployAgent: false }));
+    const [secondClient, secondJump] = mockClientInstances.slice(2);
+    const tunnel = (_source: string, _sourcePort: number, _target: string, _targetPort: number, done: (error: Error | undefined, stream: ClientChannel) => void) => done(undefined, new AgentChannel().asChannel());
+    firstJump.forwardOut.mockImplementation(tunnel); secondJump.forwardOut.mockImplementation(tunnel);
+    try {
+      firstJump.emit("ready"); secondJump.emit("ready"); await vi.advanceTimersByTimeAsync(0);
+      firstClient.emit("ready"); secondClient.emit("ready"); await Promise.all([first, second]);
+      const owners = [Object.is(manager.getConnection("first")?.jumpClients[0], firstJump), Object.is(manager.getConnection("second")?.jumpClients[0], secondJump)];
+      await manager.disconnect("first");
+      expect({ owners, firstClosed: firstJump.end.mock.calls.length > 0, secondClosed: secondJump.end.mock.calls.length }).toEqual({ owners: [true, true], firstClosed: true, secondClosed: 0 });
+    } finally { await manager.disconnect("first"); await manager.disconnect("second"); }
+  });
+
 });

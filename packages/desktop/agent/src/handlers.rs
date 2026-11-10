@@ -139,6 +139,22 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
     crate::storage_auth::validate_target(state, &method, &params).await?;
     match method.as_str() {
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
+        // These flags describe the extended SSH services, whose wire handlers
+        // are not implemented yet. Basic repository RPCs remain available.
+        "capabilities" => Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "features": {
+                "fileWatching": false,
+                "deltaSync": false,
+                "compression": false,
+                "processManagement": false,
+                "environmentManagement": false,
+                "debugging": false,
+                "search": false,
+                "buildRun": false,
+                "logTailing": false,
+            },
+        })),
         "managed_profiles" => crate::managed_service::profiles(),
         "managed_select_profile" => {
             crate::managed_service::select_profile(decode(&method, params)?)

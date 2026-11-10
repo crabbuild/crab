@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { once } from "node:events";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { chromium, expect as browserExpect, type Browser } from "@playwright/test";
 import { createServer as createViteServer, type ViteDevServer } from "vite";
@@ -9,9 +8,11 @@ import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Client, Server as SshServer, type ClientChannel, type ServerChannel } from "ssh2";
+import { Server as SshServer, utils, type Client, type ClientChannel, type ServerChannel } from "ssh2";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
-import type { SshSessionManager } from "../electron/ssh-manager";
+import { SshSessionManager } from "../electron/ssh-manager";
+import { AgentDeployer } from "../electron/ssh-deployer";
+import { CapabilityNegotiator } from "../electron/ssh-capabilities";
 import type { Task } from "../electron/orchestrator";
 import { RpcRouter } from "../electron/ssh-router";
 import { registerDiffIpc, type TaskDiff } from "../electron/orchestrator-diff";
@@ -28,46 +29,55 @@ async function fixturePort(): Promise<number> {
   return address.port;
 }
 
-async function sidecarChannel(child: ChildProcess): Promise<{ channel: ClientChannel; breakChannel: () => void; waitForRequest: (method: string) => Promise<void>; close: () => Promise<void> }> {
-  if (!child.stdout || !child.stdin) throw new Error("Sidecar pipes unavailable");
-  const input = child.stdin; const output = child.stdout;
+async function sidecarChannel(startChild: () => ChildProcess, autoReconnect: boolean) {
+  const keyDirectory = await mkdtemp(path.join(liveRoot!, "ssh-key-"));
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const pem = privateKey.export({ type: "pkcs1", format: "pem" });
+  const key = utils.parseKey(pem);
+  if (key instanceof Error || Array.isArray(key)) throw new Error("Fixture SSH key could not be parsed");
+  const keyPath = path.join(keyDirectory, "identity.pem");
+  await writeFile(keyPath, pem, { mode: 0o600 });
   let remote: ServerChannel | undefined;
-  const server = new SshServer({ hostKeys: [privateKey.export({ type: "pkcs1", format: "pem" })] }, connection => {
+  const server = new SshServer({ hostKeys: [pem] }, connection => {
     connection.on("error", () => {});
     connection.on("authentication", context => {
-      if (context.username === "fixture" && context.method === "none") context.accept();
-      else context.reject();
+      if (context.username !== "fixture" || context.method !== "publickey" || !context.key.data.equals(key.getPublicSSH())) { context.reject(); return; }
+      if (context.signature && (!context.blob || !key.verify(context.blob, context.signature, context.hashAlgo))) { context.reject(); return; }
+      context.accept();
     });
     connection.on("ready", () => connection.on("session", accept => {
       accept().on("exec", (start, reject, info) => {
         if (info.command !== "owned-sidecar") { reject(); return; }
-        remote = start();
-        remote.on("error", () => {});
-        remote.once("close", () => input.end());
-        remote.pipe(input); output.pipe(remote);
+        const child = startChild();
+        if (!child.stdin || !child.stdout) { reject(); return; }
+        const input = child.stdin; const stream = start(); remote = stream;
+        stream.on("error", () => {});
+        stream.once("close", () => input.end());
+        stream.pipe(input); child.stdout.pipe(stream);
       });
     }));
   });
-  const client = new Client();
-  let started = false; let clientClosed = false;
-  client.on("close", () => { clientClosed = true; });
-  client.on("error", () => {});
-  const close = async () => {
-    if (started && !clientClosed) {
-      const closed = new Promise<void>(resolve => client.once("close", () => resolve())); client.destroy(); await closed;
+  // The fixture supplies an already-built sidecar rather than uploading it.
+  // Connection, channel attachment, capabilities and reconnect remain real.
+  class FixtureDeployer extends AgentDeployer {
+    override ensureAgent(client: Client): Promise<ClientChannel> {
+      return new Promise((resolve, reject) => client.exec("owned-sidecar", (error, stream) => error ? reject(error) : resolve(stream)));
     }
+  }
+  const manager = new SshSessionManager();
+  const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
+  const negotiator = new CapabilityNegotiator(router);
+  manager.setAgentDependencies({ createDeployer: () => new FixtureDeployer(), capabilityNegotiator: negotiator, rpcRouter: router });
+  const close = async () => {
+    await manager.disconnect("fixture");
     if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(keyDirectory, { recursive: true, force: true });
   };
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("SSH fixture did not listen");
-    const ready = once(client, "ready");
-    started = true;
-    client.connect({ host: "127.0.0.1", port: address.port, username: "fixture", readyTimeout: 5_000 });
-    await ready;
-    const channel = await new Promise<ClientChannel>((resolve, reject) => client.exec("owned-sidecar", (error, stream) => error ? reject(error) : resolve(stream)));
+    await manager.connect({ id: "fixture", label: "Owned fixture", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
     const waitForRequest = (method: string) => new Promise<void>(resolve => {
       let buffer = "";
       const data = (chunk: Buffer) => {
@@ -76,24 +86,27 @@ async function sidecarChannel(child: ChildProcess): Promise<{ channel: ClientCha
       };
       remote?.on("data", data);
     });
-    return { channel, breakChannel: () => remote?.close(), waitForRequest, close };
-  } catch (error: unknown) {
-    await close(); throw error;
-  }
+    return { manager, router, get channel() {
+      const channel = manager.getConnection("fixture")?.channels.agent;
+      if (!channel) throw new Error("Fixture agent channel unavailable");
+      return channel;
+    }, breakChannel: () => remote?.close(), waitForRequest, close };
+  } catch (error: unknown) { await close(); throw error; }
 }
 
 // The macOS fixture denies the sidecar access to the user's indexer database.
 // A loopback SSH server carries the built sidecar RPC stream; deployment and
 // remote CLI credentials remain outside this transport qualification.
 describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built sidecar file comparisons", () => {
-  it.each(["success", "baseline-retry", "channel-close"] as const)("preserves the real index over SSH: %s", async kind => {
-    const missing = kind !== "success";
+  it.each(["success", "baseline-retry", "channel-close", "reconnect"] as const)("preserves the real index over SSH: %s", async kind => {
+    const missing = kind === "baseline-retry" || kind === "channel-close";
     const directory = await mkdtemp(path.join(liveRoot!, "sidecar-diff-"));
     const run = promisify(execFile);
     const binary = path.join(target!, "debug", "crab-desktop-agent");
     let stderr = "";
     let child: ReturnType<typeof spawn> | undefined;
     let closed: Promise<number | null> | undefined;
+    const children: Array<{ process: ChildProcess; closed: Promise<number | null> }> = [];
     let browser: Browser | undefined;
     let ssh: Awaited<ReturnType<typeof sidecarChannel>> | undefined;
     let vite: ViteDevServer | undefined;
@@ -112,15 +125,15 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       await writeFile(path.join(directory, "雪.txt"), "new\n");
       const protectedPath = path.join(homedir(), ".crab", "desktop", "indexer");
       const profile = `(version 1)(allow default)(deny file-read* file-write* (subpath ${JSON.stringify(protectedPath)}))`;
-      child = spawn("/usr/bin/sandbox-exec", ["-p", profile, binary], { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
-      closed = new Promise((resolve, reject) => { child!.once("error", reject); child!.once("close", resolve); });
-      child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
-      ssh = await sidecarChannel(child);
-      const { channel } = ssh;
-      let status = "connected";
-      const manager = { getStatus: () => status, getConnection: () => ({ channels: { agent: channel } }) } as unknown as SshSessionManager;
-      const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
-      router.attachChannel("fixture", channel);
+      ssh = await sidecarChannel(() => {
+        const process = spawn("/usr/bin/sandbox-exec", ["-p", profile, binary], { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
+        child = process;
+        const ending = new Promise<number | null>((resolve, reject) => { process.once("error", reject); process.once("close", resolve); });
+        closed = ending; children.push({ process, closed: ending });
+        process.stderr.on("data", chunk => { stderr += chunk.toString(); });
+        return process;
+      }, kind === "reconnect");
+      const { router, manager } = ssh;
       const task: Task = {
         id: "fixture", prompt: "Read files", agentType: "codex", status: "reviewing", branch: "main",
         worktreePath: directory, repoPath: "ssh://fixture/repo", baseRef: missing ? "missing-baseline" : "HEAD",
@@ -179,15 +192,17 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
         await browserExpect(page.getByRole("alert")).toContainText("missing-baseline");
         await browserExpect(page.getByText("No changes to display.", { exact: true })).toHaveCount(0);
         if (kind === "channel-close") {
-          child.kill("SIGSTOP");
-          await vi.waitFor(async () => expect((await run("ps", ["-o", "state=", "-p", String(child!.pid)])).stdout).toContain("T"), { timeout: 5_000 });
+          const stopped = child;
+          if (!stopped) throw new Error("Fixture child is not running");
+          stopped.kill("SIGSTOP");
+          await vi.waitFor(async () => expect((await run("ps", ["-o", "state=", "-p", String(stopped.pid)])).stdout).toContain("T"), { timeout: 5_000 });
           const read = ssh.waitForRequest("task_compute_diff");
           await page.getByRole("button", { name: "Reload changes", exact: true }).click();
           await read;
           ssh.breakChannel();
           await browserExpect(page.getByRole("alert")).toContainText(/channel closed|output ended/);
           await browserExpect(page.getByText("No changes to display.", { exact: true })).toHaveCount(0);
-          child.kill("SIGCONT");
+          stopped.kill("SIGCONT");
           await writeFile(path.join(liveRoot!, "sidecar-diff-ssh-closure.json"), JSON.stringify({ error: await page.getByRole("alert").textContent() }));
           // Replacing an SSH channel requires a new sidecar process; the successful
           // peer case proves normal reads. Reusing the closed stream would hide it.
@@ -203,6 +218,14 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
         await page.getByRole("button", { name: "Reload changes", exact: true }).click();
       }
       for (const file of ["tracked.txt", "雪.txt"]) await browserExpect(page.getByText(file, { exact: true }).first()).toBeVisible();
+      if (kind === "reconnect") {
+        await writeFile(path.join(directory, "tracked.txt"), "reconnected\n");
+        ssh.breakChannel();
+        await vi.waitFor(() => expect(manager.getStatus("fixture")).toBe("reconnecting"), { timeout: 5_000 });
+        for (const client of clients) client.write(`data: ${JSON.stringify({ channel: "orchestrator:files-changed", payload: { taskId: task.id } })}\n\n`);
+        await browserExpect(page.getByText("reconnected", { exact: true })).toBeVisible();
+        expect({ status: manager.getStatus("fixture"), processes: children.length, oldExit: await children[0].closed }).toEqual({ status: "connected", processes: 2, oldExit: 0 });
+      }
       expect(await readFile(path.join(directory, ".git/index"))).toEqual(index);
       await page.screenshot({ path: path.join(liveRoot!, `sidecar-diff-ssh-${kind}.png`) });
       await writeFile(path.join(liveRoot!, `sidecar-diff-ssh-${kind}.json`), JSON.stringify({ result, stderr }, null, 2));
@@ -210,11 +233,13 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
         await router.sendToRemoteAgent("fixture", "open_local", { repo_id: "fixture", path: directory });
         await router.sendToRemoteAgent("fixture", "write_text", { repo_id: "fixture", path: "tracked.txt", content: "connected-write\n" });
         expect(await readFile(path.join(directory, "tracked.txt"), "utf8")).toBe("connected-write\n");
-        status = "reconnecting";
+        const connection = manager.getConnection("fixture");
+        if (!connection) throw new Error("Fixture connection unavailable");
+        connection.status = "reconnecting";
         await expect(router.sendToRemoteAgent("fixture", "write_text", { repo_id: "fixture", path: "tracked.txt", content: "deferred-write\n" }))
           .rejects.toMatchObject({ code: "SSH_RECONNECTING" });
         const queued = router.sendToRemoteAgent("fixture", "task_compute_diff", { worktree_path: directory, base_ref: "HEAD" });
-        status = "connected";
+        connection.status = "connected";
         await router.replayQueue("fixture");
         const comparison = await queued as { diff: string };
         expect({ content: await readFile(path.join(directory, "tracked.txt"), "utf8"), diff: comparison.diff, index: await readFile(path.join(directory, ".git/index")) })
@@ -226,7 +251,7 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       for (const client of clients) client.end();
       await new Promise<void>(resolve => bridge!.close(() => resolve())); bridge = undefined;
       await Promise.allSettled([...operations]);
-      channel.end();
+      ssh.channel.end();
       expect(await closed).toBe(0);
     } finally {
       child?.kill("SIGCONT");
@@ -235,8 +260,8 @@ describe.skipIf(!liveRoot || !target || process.platform !== "darwin")("built si
       for (const client of clients) client.end();
       if (bridge) await new Promise<void>(resolve => bridge!.close(() => resolve()));
       await Promise.allSettled([...operations]);
-      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      if (closed) await closed;
+      for (const child of children) if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
+      await Promise.allSettled(children.map(child => child.closed));
       await ssh?.close();
       await rm(directory, { recursive: true, force: true });
       await rm(`${directory}-vite-cache`, { recursive: true, force: true });

@@ -86,6 +86,11 @@ describe("RemoteProvider polling fallback", () => {
     vi.useRealTimers();
   });
 
+  it("does not advertise repository operations without a negotiated agent", async () => {
+    mockCapNegotiator.getCached.mockReturnValueOnce(null);
+    expect(Object.values(await provider.capabilities(REPO_ID))).toEqual(Array(9).fill(false));
+  });
+
   it("starts polling when agent does not support fileWatching", async () => {
     await provider.watchStart(REPO_ID);
 
