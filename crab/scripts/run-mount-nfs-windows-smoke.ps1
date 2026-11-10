@@ -919,6 +919,24 @@ try {
     try {
         Cleanup-Mount
     } finally {
+        # Preserve startup failures before deleting the private profile; never
+        # retain its credentials, cache, or unredacted control endpoint tokens.
+        try {
+            $helperLogs = Join-Path $TestHome ".crab\mounts\logs"
+            if (Test-Path -LiteralPath $helperLogs) {
+                foreach ($file in Get-ChildItem -LiteralPath $helperLogs -Filter "*.log" -File) {
+                    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+                    $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+                    $reader = [System.IO.StreamReader]::new($stream)
+                    try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                    $safe = [regex]::Replace($text, '(tcp:[^\s"]*\?token=)[^\s"&]+', '$1<redacted>')
+                    $destination = Join-Path $LogDir ("helper-" + $file.Name)
+                    [System.IO.File]::WriteAllText($destination, $safe, $Utf8NoBom)
+                }
+            }
+        } catch {
+            Write-Warning "Could not retain sanitized NFS helper diagnostics"
+        }
         if (Test-Path -LiteralPath $PrivateRoot) {
             Remove-Item -LiteralPath $PrivateRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
