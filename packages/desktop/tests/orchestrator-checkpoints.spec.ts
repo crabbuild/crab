@@ -492,6 +492,25 @@ describe("orchestrator-checkpoints", () => {
   });
 
   describe("cleanup", () => {
+    it.each(["base", "checkpoint", "hold", "release", "cleanup"] as const)("keeps user branches intact when a private %s ref is symbolic", async operation => {
+      const task = createMockTask(repoDir);
+      const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoDir });
+      const original = stdout.trim();
+      fs.writeFileSync(path.join(repoDir, "protected.txt"), "protected branch state");
+      const protectedSha = await checkpointManager.snapshotHead(task);
+      await execFile("git", ["branch", "protected", protectedSha], { cwd: repoDir });
+      const ref = operation === "base" ? `refs/crab/bases/${original}`
+        : operation === "hold" || operation === "release" ? `refs/crab/checkpoint-intents/${task.id}/1` : `refs/crab/checkpoints/${task.id}/1`;
+      await execFile("git", ["symbolic-ref", ref, "refs/heads/protected"], { cwd: repoDir });
+      if (operation === "base") await checkpointManager.pinBase(task);
+      if (operation === "checkpoint") await checkpointManager.recordCheckpoint(task, 1, original);
+      if (operation === "hold") await checkpointManager.holdCheckpoint(task, 1, original);
+      if (operation === "release") await checkpointManager.releaseCheckpoint(task, 1);
+      if (operation === "cleanup") await checkpointManager.cleanup(task, true);
+      const { stdout: after } = await execFile("git", ["rev-parse", "--verify", "refs/heads/protected"], { cwd: repoDir });
+      expect(after.trim()).toBe(protectedSha);
+    });
+
     it("removes all checkpoint refs for a task", async () => {
       const task = createMockTask(repoDir);
 

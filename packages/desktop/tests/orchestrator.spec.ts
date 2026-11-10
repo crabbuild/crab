@@ -27,7 +27,8 @@ import * as diff from "../electron/orchestrator-diff";
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
 // Mock the worktree module — no real git operations.
-vi.mock("../electron/orchestrator-worktree", () => ({
+vi.mock("../electron/orchestrator-worktree", async importOriginal => ({
+  ...await importOriginal<typeof import("../electron/orchestrator-worktree")>(),
   createWorktree: vi.fn(async (_repoPath: string, taskId: string, _baseRef: string) => {
     return path.join(os.tmpdir(), `crab-agent-${taskId}`);
   }),
@@ -145,8 +146,9 @@ vi.mock("node:util", async (importOriginal) => {
         const revision = cmdArgs.at(-1)?.replace(/\^\{commit\}$/, "");
         if (cmdArgs[0] === "rev-parse" && revision && /^[a-f0-9]{40}$/.test(revision)) return { stdout: revision + "\n", stderr: "" };
         if (cmdArgs[0] === "update-ref") {
-          if (cmdArgs[1] === "-d") checkpointRefs.delete(cmdArgs[2]);
-          else checkpointRefs.add(cmdArgs[1]);
+          const values = cmdArgs.slice(1).filter(value => value !== "--no-deref");
+          if (values[0] === "-d") checkpointRefs.delete(values[1]);
+          else checkpointRefs.add(values[0]);
         }
         if (cmdArgs[0] === "for-each-ref" && cmdArgs[1] === "--format=%(refname)") {
           return { stdout: checkpointRefs.has(cmdArgs[2]) ? `${cmdArgs[2]}\n` : "", stderr: "" };
@@ -1077,7 +1079,7 @@ describe("Orchestrator", () => {
         await discard;
         await cancelledStartup;
         expect({ removed: vi.mocked(removeWorktree).mock.calls, child: child.status, parent: parent.status }).toEqual({
-          removed: [[parent.repoPath, parent.id]], child: "stopped", parent: "discarded",
+          removed: [[parent]], child: "stopped", parent: "discarded",
         });
       } finally { fs.rmSync(parent.worktreePath, { recursive: true, force: true }); }
     });
@@ -1931,7 +1933,7 @@ describe("Orchestrator", () => {
         expect(vi.mocked(removeWorktree).mock.calls).toEqual([]);
         releaseCheckpoint(snapshot);
         await Promise.all([archive, stoppedStartup, cancelledInput]);
-        expect({ status: parent.status, childStatus: child.status, queuedStatus: queued.status, processes: mockAdapterInstances.length, removal: vi.mocked(removeWorktree).mock.calls }).toEqual({ status: "archived", childStatus: "stopped", queuedStatus: "stopped", processes: 1, removal: [[parent.repoPath, parent.id, { preserveBranch: true }]] });
+        expect({ status: parent.status, childStatus: child.status, queuedStatus: queued.status, processes: mockAdapterInstances.length, removal: vi.mocked(removeWorktree).mock.calls }).toEqual({ status: "archived", childStatus: "stopped", queuedStatus: "stopped", processes: 1, removal: [[parent, { preserveBranch: true }]] });
       } finally {
         close();
         releaseCheckpoint(snapshot);
@@ -2137,7 +2139,7 @@ describe("Orchestrator", () => {
       await orchestrator.discardTask(task.id);
 
       expect(task.status).toBe("discarded");
-      expect(removeWorktree).toHaveBeenCalledWith(task.repoPath, task.id);
+      expect(removeWorktree).toHaveBeenCalledWith(task);
     });
 
     it("cancels running adapter before discarding", async () => {
@@ -2723,7 +2725,7 @@ describe("Orchestrator", () => {
       vi.spyOn(mockAdapterInstances[0], "iterate").mockImplementation(() => {
         const saved = new OrchestratorTaskDatabase(persistPath);
         try { prepared = { input: saved.loadTasks()[0]?.pendingInput, pins: execFileCalls.filter(call => call.args[0] === "update-ref"
-          && call.args[1] === `refs/crab/checkpoint-intents/${task.id}/1`).length }; } finally { saved.close(); }
+          && call.args.includes(`refs/crab/checkpoint-intents/${task.id}/1`)).length }; } finally { saved.close(); }
       });
       await orchestrator.iterate(task.id, "Exact new input", undefined, "prepared-input");
       expect(prepared).toEqual({ input: { id: "prepared-input", content: "Exact new input", kind: "message", phase: "prepared", turnNumber: 1, sha: expect.any(String) }, pins: 1 });

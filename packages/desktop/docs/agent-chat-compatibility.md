@@ -1314,8 +1314,37 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   explicit recovery for older/moved ownership records, and own mutating Git
   subprocesses through canceled RPCs and backend exit. Cooperative leases do
   not establish ownership of external editors or detached/crashed descendants.
-  The local Discard sibling still swallows removal/checkpoint cleanup failures;
-  its truthful terminal-state and recovery ordering need a separate fix.
+
+- Local Discard now uses the saved task path, UUID, recorded branch and live Git
+  identity through one worktree owner. Removed friendly-name lookup, path scans,
+  error-phrase success handling and opportunistic Git pruning from removal.
+  The existing root/common/private-index validation moved from checkpoints to
+  the worktree boundary and remains shared by snapshot restore and file Revert.
+  The tagged source-metadata migration remains explicit. Git refusal leaves the
+  task stopped with its bytes and recovery refs intact. Snapshot cleanup follows
+  confirmed directory removal. Retained branches or refs produce a warning while
+  the task records the completed discard. An absent checkout cannot authorize
+  deleting a branch from an old name; surviving refs stay available for recovery.
+  Archive uses the same identity check, captures the live branch after writer
+  closure and preserves it. A real changed-branch archive/restore/discard cycle
+  proves that intentional caller difference. Retention pruning does not report
+  success while branch cleanup needs attention; its caller supplies each task's
+  saved path and identity.
+  Private checkpoint/base/intent/backup writes now use `--no-deref`; cleanup also
+  supplies each captured old object ID. This follows
+  [Git update-ref's direct-ref and old-value contract](https://git-scm.com/docs/git-update-ref),
+  preventing a symbolic private ref from changing or deleting a user branch and
+  preserving concurrent ref updates. Five real-Git cases protect that invariant.
+  All four new Discard cases failed before the fix. The current source passes
+  307 scoped checks and all 27 owned-workspace live cases, including real branch
+  and snapshot ref locks, a locked checkout, recreated-directory rejection,
+  shared native/script closure, recovery and changed-branch Archive. Production
+  and touched-fixture types, Electron build and diff checks pass. Non-test source
+  shrank as removal and identity ownership replaced the duplicate paths.
+  Evidence: `local-discard-before.json`, `local-discard-scoped-second.json`,
+  `local-discard-live-archive-final.json`, and the matching type/build logs in the
+  owned output. These checks do not establish durable mutation receipts across
+  process death or task-database persistence failure; that remains release work.
 
 ## Remaining completion gates
 

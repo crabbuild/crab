@@ -661,6 +661,7 @@ rename to new-name.ts
       expect(await branchExists(repoDir, branch)).toBe(true);
 
       const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+      task.branch = branch;
       await discard(task);
 
       // Both should be gone.

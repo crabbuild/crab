@@ -658,7 +658,7 @@ export async function cherryPickFiles(
  *
  * Delegates to `removeWorktree` from the worktree module.
  */
-export async function discard(task: Task): Promise<void> {
+export async function discard(task: Task): Promise<string | undefined> {
   if (isPrimaryWorkspaceTask(task)) return;
-  await removeWorktree(task.repoPath, task.id);
+  return removeWorktree(task);
 }

@@ -1854,7 +1854,7 @@ export class Orchestrator extends EventEmitter {
         // Save archive intent before removal. After a crash, Restore can reuse
         // the existing tree or check out the preserved branch without resending.
         await this.persistTasks();
-        if (ownsWorktree) await removeWorktree(task.repoPath, task.id, { preserveBranch: true });
+        if (ownsWorktree) await removeWorktree(task, { preserveBranch: true });
         if (ownsWorktree) this.workspaceScripts.release(task);
       } catch (error: unknown) {
         Object.assign(task, previous);
@@ -1940,26 +1940,20 @@ export class Orchestrator extends EventEmitter {
         });
         cleanupWarning = confirmRemoteTaskOperation(result, "discard");
       } else if (!task.isRemote) {
-        if (ownsWorktree) await this.workspaceScripts.archive(task, options);
-        // Local tasks: clean up locally.
-        // Delete checkpoint refs before removing the worktree (needs repoPath).
+        if (ownsWorktree) {
+          await this.workspaceScripts.archive(task, options);
+          cleanupWarning = await removeWorktree(task);
+          this.workspaceScripts.release(task);
+        }
+        // Failed removal must leave recovery refs intact. Once the workspace
+        // is gone, ref cleanup failures are retained work, not a failed discard.
         try {
-          // A child's inherited creation baseline survives parent discard;
-          // only the final referencing conversation releases this Git object.
           const keepBase = [...this.tasks.values()].some(candidate => candidate.id !== task.id && candidate.status !== "discarded"
             && candidate.repoPath === task.repoPath && candidate.baseRef === task.baseRef);
           await this.checkpoints.cleanup(task, keepBase);
-        } catch {
-          // Best-effort — refs may already be gone.
-        }
-
-        if (ownsWorktree) {
-          try {
-            await removeWorktree(task.repoPath, task.id);
-            this.workspaceScripts.release(task);
-          } catch {
-            // Best-effort cleanup — worktree may already be gone.
-          }
+        } catch (error: unknown) {
+          const warning = `Conversation discarded; snapshot cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
+          cleanupWarning = cleanupWarning ? `${cleanupWarning}\n${warning}` : warning;
         }
       }
 

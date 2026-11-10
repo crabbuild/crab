@@ -138,6 +138,52 @@ describe.skipIf(!liveRoot || process.platform === "win32")("owned workspace scri
     expect({ baseline: stdout, present, file: await readFile(path.join(directory, "user-baseline.txt"), "utf8") }).toEqual({ baseline: "user bytes", present: false, file: "user bytes" });
   }, 30_000);
 
+  it("retains local Discard bytes, snapshots and state when Git refuses removal", async () => {
+    const task = await orchestrator.createTask("Locked workspace", "codex", directory);
+    await writeFile(path.join(task.worktreePath, "keep.txt"), "retained workspace bytes");
+    const checkpoint = await new CheckpointManager().createCheckpoint(task, 0);
+    await run("git", ["worktree", "lock", "--reason", "owned removal refusal", task.worktreePath], { cwd: directory });
+    await expect(orchestrator.discardTask(task.id)).rejects.toThrow();
+    const { stdout } = await run("git", ["rev-parse", "--verify", checkpoint.ref], { cwd: directory });
+    expect({ status: task.status, checkpoint: stdout.trim(), bytes: await readFile(path.join(task.worktreePath, "keep.txt"), "utf8") }).toEqual({ status: "stopped", checkpoint: checkpoint.sha, bytes: "retained workspace bytes" });
+  }, 30_000);
+
+  it("archives a changed live branch and restores its recorded ownership", async () => {
+    const task = await orchestrator.createTask("Changed branch", "codex", directory);
+    await writeFile(path.join(task.worktreePath, "branch-proof.txt"), "preserved branch bytes\n");
+    await run("git", ["branch", "-m", "agent/changed-branch"], { cwd: task.worktreePath });
+    await orchestrator.archiveTask(task.id);
+    const { stdout } = await run("git", ["show", `${task.branch}:branch-proof.txt`], { cwd: directory });
+    await orchestrator.restoreTask(task.id);
+    expect({ branch: task.branch, bytes: stdout, restored: await readFile(path.join(task.worktreePath, "branch-proof.txt"), "utf8") }).toEqual({ branch: "agent/changed-branch", bytes: "preserved branch bytes\n", restored: "preserved branch bytes\n" });
+    await orchestrator.discardTask(task.id);
+  }, 30_000);
+
+  it.each(["branch", "checkpoint"] as const)("reports local Discard %s cleanup failure after confirmed workspace removal", async kind => {
+    const task = await orchestrator.createTask("Cleanup receipt", "codex", directory);
+    const checkpoint = await new CheckpointManager().createCheckpoint(task, 0);
+    const ref = kind === "branch" ? `refs/heads/${task.branch}` : checkpoint.ref;
+    const { stdout } = await run("git", ["rev-parse", "--git-path", `${ref}.lock`], { cwd: directory });
+    const lock = path.resolve(directory, stdout.trim());
+    const errors: string[] = [];
+    orchestrator.on("orchestrator:error", value => errors.push(value.message));
+    await writeFile(lock, "owned lock fixture", { flag: "wx" });
+    try {
+      await orchestrator.discardTask(task.id);
+      const retained = await run("git", ["rev-parse", "--verify", ref], { cwd: directory }).then(() => true, () => false);
+      expect({ status: task.status, exists: existsSync(task.worktreePath), retained, warned: errors.some(error => error.includes("cleanup")) }).toEqual({ status: "discarded", exists: false, retained: true, warned: true });
+    } finally { await rm(lock); }
+  }, 30_000);
+
+  it("refuses local Discard in a recreated directory without its Git identity", async () => {
+    const task = await orchestrator.createTask("Recreated workspace", "codex", directory);
+    await rm(task.worktreePath, { recursive: true });
+    await mkdir(task.worktreePath);
+    await writeFile(path.join(task.worktreePath, "keep.txt"), "unrelated replacement bytes");
+    await expect(orchestrator.discardTask(task.id)).rejects.toThrow();
+    expect({ status: task.status, bytes: await readFile(path.join(task.worktreePath, "keep.txt"), "utf8") }).toEqual({ status: "stopped", bytes: "unrelated replacement bytes" });
+  }, 30_000);
+
   it("retains an inherited primary baseline after parent removal until its last child is discarded", async () => {
     await writeFile(path.join(directory, "user-baseline.txt"), "shared bytes");
     const parent = await orchestrator.createTask("Parent", "codex", directory, "HEAD", { worktreeMode: "primary" });

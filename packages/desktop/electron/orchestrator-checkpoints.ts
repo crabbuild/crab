@@ -21,6 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { Task } from "./orchestrator";
+import { assertWorkspace } from "./orchestrator-worktree";
 
 const execFile = promisify(execFileCb);
 
@@ -56,7 +57,7 @@ export class CheckpointManager {
   async pinBase(task: Pick<Task, "repoPath" | "baseRef">): Promise<string> {
     const { stdout } = await execFile("git", ["rev-parse", "--verify", `${task.baseRef}^{commit}`], { cwd: task.repoPath });
     const sha = stdout.trim();
-    await execFile("git", ["update-ref", `${this.basePrefix}/${sha}`, sha], { cwd: task.repoPath });
+    await execFile("git", ["update-ref", "--no-deref", `${this.basePrefix}/${sha}`, sha], { cwd: task.repoPath });
     return sha;
   }
 
@@ -87,7 +88,7 @@ export class CheckpointManager {
   /** Publishes a captured pre-input snapshot after provider acceptance. */
   async recordCheckpoint(task: Task, turnNumber: number, sha: string): Promise<{ ref: string; sha: string }> {
     const ref = `${this.refPrefix}/${task.id}/${turnNumber}`;
-    await execFile("git", ["update-ref", ref, sha], { cwd: task.repoPath });
+    await execFile("git", ["update-ref", "--no-deref", ref, sha], { cwd: task.repoPath });
     return { ref, sha };
   }
 
@@ -102,12 +103,12 @@ export class CheckpointManager {
 
   /** Pins a pre-input snapshot until delivery and bookkeeping are settled. */
   async holdCheckpoint(task: Task, turnNumber: number, sha: string): Promise<void> {
-    await execFile("git", ["update-ref", `${this.pendingPrefix}/${task.id}/${turnNumber}`, sha], { cwd: task.repoPath });
+    await execFile("git", ["update-ref", "--no-deref", `${this.pendingPrefix}/${task.id}/${turnNumber}`, sha], { cwd: task.repoPath });
   }
 
   /** Releases the pin after publication or a definitive input rejection. */
   async releaseCheckpoint(task: Task, turnNumber: number): Promise<void> {
-    await execFile("git", ["update-ref", "-d", `${this.pendingPrefix}/${task.id}/${turnNumber}`], { cwd: task.repoPath });
+    await execFile("git", ["update-ref", "--no-deref", "-d", `${this.pendingPrefix}/${task.id}/${turnNumber}`], { cwd: task.repoPath });
   }
 
   /**
@@ -274,29 +275,9 @@ export class CheckpointManager {
   async snapshotSha(task: Task, sourceRef: string): Promise<string> {
     const sources = [...await this.listCheckpoints(task), ...await this.listRestoreBackups(task)];
     if (!sources.some(source => source.ref === sourceRef)) throw new Error("Snapshot does not belong to this conversation");
-    await this.assertWorkspace(task);
+    await assertWorkspace(task);
     const { stdout } = await execFile("git", ["rev-parse", "--verify", `${sourceRef}^{commit}`], { cwd: task.repoPath });
     return stdout.trim();
-  }
-
-  private async assertWorkspace(task: Task): Promise<void> {
-    const [root, common, repository, gitDir, repositoryGitDir] = await Promise.all([
-      this.gitDirectory(task.worktreePath, "--show-toplevel"),
-      this.gitDirectory(task.worktreePath, "--git-common-dir"),
-      this.gitDirectory(task.repoPath, "--git-common-dir"),
-      this.gitDirectory(task.worktreePath, "--absolute-git-dir"),
-      this.gitDirectory(task.repoPath, "--absolute-git-dir"),
-    ]);
-    // Git searches parents when a checkout loses its .git pointer. A matching
-    // directory name alone must never authorize replacing the primary index.
-    if (root !== fs.realpathSync(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
-    if (common !== repository) throw new Error("Workspace belongs to a different Git repository");
-    if (root !== fs.realpathSync(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
-  }
-
-  private async gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir" | "--absolute-git-dir"): Promise<string> {
-    const { stdout } = await execFile("git", ["rev-parse", option], { cwd });
-    return fs.realpathSync(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
   }
 
   /** Restores an owned snapshot's files after its caller drains workspace writers. */
@@ -314,7 +295,7 @@ export class CheckpointManager {
 
   /** Restores a changed file (and its rename source) after workspace writers close. */
   async revertFile(task: Task, filePath: string, oldPath?: string): Promise<void> {
-    await this.assertWorkspace(task);
+    await assertWorkspace(task);
     const targets = [...new Set([filePath, ...(oldPath ? [oldPath] : [])])];
     const root = fs.realpathSync(task.worktreePath);
     for (const target of targets) {
@@ -370,7 +351,7 @@ export class CheckpointManager {
   private async backupFiles(task: Task): Promise<string> {
     const before = await this.snapshotHead(task);
     const backup = `${this.restorePrefix}/${task.id}/${Date.now()}-${randomUUID()}`;
-    await execFile("git", ["update-ref", backup, before], { cwd: task.repoPath });
+    await execFile("git", ["update-ref", "--no-deref", backup, before], { cwd: task.repoPath });
     return before;
   }
 
@@ -401,26 +382,14 @@ export class CheckpointManager {
       .sort((a, b) => a.turnNumber - b.turnNumber);
   }
 
-  /**
-   * Deletes all checkpoint refs for a task. Errors on individual
-   * ref deletions are silently ignored (ref may already be gone).
-   */
+  /** Deletes captured checkpoint refs after workspace removal, preserving concurrent updates. */
   async cleanup(task: Task, keepBase = false): Promise<void> {
     const prefix = `${this.refPrefix}/${task.id}/`;
     const refs = [...await this.getRefs(task, prefix), ...await this.getRefs(task, `${this.pendingPrefix}/${task.id}/`),
       ...await this.getRefs(task, `${this.restorePrefix}/${task.id}/`),
       ...(!keepBase ? await this.getRefs(task, `${this.basePrefix}/${task.baseRef}`) : [])];
-
-    for (const { ref } of refs) {
-      try {
-        await execFile(
-          "git",
-          ["update-ref", "-d", ref],
-          { cwd: task.repoPath },
-        );
-      } catch {
-        // Ref may already be deleted — ignore.
-      }
+    for (const { ref, sha } of refs) {
+      await execFile("git", ["update-ref", "--no-deref", "-d", ref, sha], { cwd: task.repoPath });
     }
   }
 

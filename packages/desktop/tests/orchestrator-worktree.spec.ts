@@ -185,7 +185,7 @@ describe("orchestrator-worktree", () => {
         // Branch should use the friendly name.
         expect(await branchExists(repoDir, `agent/${dirName}`)).toBe(true);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
 
@@ -202,7 +202,7 @@ describe("orchestrator-worktree", () => {
         expect(metadata!.originalBranch).toMatch(/^agent\//);
         expect(metadata!.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
 
@@ -227,7 +227,7 @@ describe("orchestrator-worktree", () => {
         expect(fs.existsSync(path.join(worktreePath, "second.txt"))).toBe(false);
         expect(fs.existsSync(path.join(worktreePath, "README.md"))).toBe(true);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
 
@@ -240,7 +240,7 @@ describe("orchestrator-worktree", () => {
         expect(fs.existsSync(worktreePath)).toBe(true);
         expect(fs.existsSync(path.join(worktreePath, "README.md"))).toBe(true);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
   });
@@ -338,7 +338,7 @@ describe("orchestrator-worktree", () => {
       const workspace = await createWorktree(repoDir, taskId, "main");
       const branch = readTaskMetadata(workspace)!.originalBranch;
       fs.writeFileSync(path.join(workspace, "unsaved.txt"), "unsaved work");
-      await expect(removeWorktree(repoDir, taskId, { preserveBranch: true })).rejects.toThrow();
+      await expect(removeWorktree({ id: taskId, repoPath: repoDir, worktreePath: workspace, branch }, { preserveBranch: true })).rejects.toThrow();
       expect({ content: fs.readFileSync(path.join(workspace, "unsaved.txt"), "utf8"), branch: await branchExists(repoDir, branch) }).toEqual({ content: "unsaved work", branch: true });
     });
 
@@ -349,7 +349,7 @@ describe("orchestrator-worktree", () => {
       fs.writeFileSync(path.join(workspace, "archive-proof.txt"), "preserved work");
       await execFile("git", ["add", "-A"], { cwd: workspace });
       await execFile("git", ["commit", "-m", "Saved archive work"], { cwd: workspace });
-      await removeWorktree(repoDir, taskId, { preserveBranch: true });
+      await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath: workspace, branch }, { preserveBranch: true });
       const restored = await restoreWorktree(repoDir, taskId, branch, workspace);
       expect({ removed: !fs.existsSync(workspace), branch: await branchExists(repoDir, branch), content: fs.readFileSync(path.join(restored, "archive-proof.txt"), "utf8") }).toEqual({ removed: true, branch: true, content: "preserved work" });
     });
@@ -362,21 +362,20 @@ describe("orchestrator-worktree", () => {
       expect(fs.existsSync(worktreePath)).toBe(true);
       expect(await branchExists(repoDir, `agent/${dirName}`)).toBe(true);
 
-      await removeWorktree(repoDir, taskId);
+      await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
 
       expect(fs.existsSync(worktreePath)).toBe(false);
       expect(await branchExists(repoDir, `agent/${dirName}`)).toBe(false);
     });
 
-    it("removes worktree by friendly name", async () => {
+    it("rejects a task ID that does not own its requested worktree", async () => {
       const taskId = `rm-name-${Date.now()}`;
       const worktreePath = await createWorktree(repoDir, taskId, "main");
       const dirName = path.basename(worktreePath);
 
-      await removeWorktree(repoDir, dirName);
-
-      expect(fs.existsSync(worktreePath)).toBe(false);
-      expect(await branchExists(repoDir, `agent/${dirName}`)).toBe(false);
+      await expect(removeWorktree({ id: dirName, repoPath: repoDir, worktreePath, branch: `agent/${dirName}` })).rejects.toThrow("ownership");
+      expect(fs.existsSync(worktreePath)).toBe(true);
+      expect(await branchExists(repoDir, `agent/${dirName}`)).toBe(true);
     });
 
     it("handles already-removed worktree gracefully", async () => {
@@ -384,10 +383,10 @@ describe("orchestrator-worktree", () => {
       const worktreePath = await createWorktree(repoDir, taskId, "main");
 
       // Remove it once.
-      await removeWorktree(repoDir, taskId);
+      await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
 
       // Second removal should not throw.
-      await expect(removeWorktree(repoDir, taskId)).resolves.toBeUndefined();
+      await expect(removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` })).resolves.toBeUndefined();
     });
   });
 
@@ -419,8 +418,8 @@ describe("orchestrator-worktree", () => {
         expect(ids).toContain(taskId1);
         expect(ids).toContain(taskId2);
       } finally {
-        await removeWorktree(repoDir, taskId1);
-        await removeWorktree(repoDir, taskId2);
+        await removeWorktree({ id: taskId1, repoPath: repoDir, worktreePath: wt1, branch: `agent/${path.basename(wt1)}` });
+        await removeWorktree({ id: taskId2, repoPath: repoDir, worktreePath: wt2, branch: `agent/${path.basename(wt2)}` });
       }
     });
   });
@@ -435,7 +434,7 @@ describe("orchestrator-worktree", () => {
         const name = getWorktreeName(repoDir, taskId);
         expect(name).toBe(expectedName);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
 
@@ -485,7 +484,7 @@ describe("orchestrator-worktree", () => {
         expect(pruned).not.toContain(taskId);
         expect(fs.existsSync(worktreePath)).toBe(true);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
 
@@ -508,7 +507,7 @@ describe("orchestrator-worktree", () => {
         expect(pruned).not.toContain(taskId);
         expect(fs.existsSync(worktreePath)).toBe(true);
       } finally {
-        await removeWorktree(repoDir, taskId);
+        await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
       }
     });
   });
@@ -537,7 +536,7 @@ describe("orchestrator-worktree", () => {
       expect(listed.some((w) => w.name === dirName)).toBe(true);
 
       // Remove.
-      await removeWorktree(repoDir, taskId);
+      await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath, branch: `agent/${path.basename(worktreePath)}` });
 
       // Verify clean.
       expect(fs.existsSync(worktreePath)).toBe(false);
