@@ -952,8 +952,8 @@ acceptance matrix above remains the completion boundary.
   close/reconnect, and reports failures through existing repository status
   errors. Unrelated profile failure cannot crash workspace orchestration.
 - A fresh optimized native pair was built after rebasing onto `crab-v2`
-  `0aadf7c4afb`, including its metadata/cache changes. The matching unsigned
-  macOS arm64 packaged smoke passes in 41.5 seconds: the empty home screen opens
+  `2f6d36ec12a`. The matching unsigned macOS arm64 packaged smoke passes in
+  22.4 seconds: the empty home screen opens
   the existing SSH Connections view without first opening a local repository,
   followed by real key-file authentication/trust, manual native deployment,
   failed restart with saved entries/selection intact, visible Retry, logical
@@ -963,13 +963,15 @@ acceptance matrix above remains the completion boundary.
   Working-tree and index pointers remain unchanged. The peer application was
   restored to its original idle workflow after each prepared smoke.
 - The real packaged bootstrap and native Crab/LFS transport checks pass in
-  34.2 seconds together, covering independent profiles, explicit/automatic
+  21.2 seconds together, covering independent profiles, explicit/automatic
   reconnect, repository replay, exact bytes, cancellation and drained cleanup.
-  The existing packaged progress/cancellation smoke also passes in 51.3 seconds.
+  The packaged progress/cancellation smoke passed in 51.3 seconds on
+  `0aadf7c4afb`; the later sync changes only forced-push visibility, with
+  identical desktop and captured-read sources.
   There are 160 passing focused cases across eight touched ownership/routing
   surfaces; renderer/Electron and strict integration-spec types pass. Evidence:
-  `desktop-reopen-synced-ui-proof-v3/`, `desktop-reopen-synced-ui-proof/`,
-  `desktop-reopen-synced-backend-proof/` and
+  `desktop-reopen-latest-ui-proof/`, `desktop-reopen-synced-ui-proof/`,
+  `desktop-reopen-latest-backend-proof/` and
   `desktop-reopen-qualification.json` in the external build directory.
 - This closes the saved-repository slice, not the acceptance matrix. Local
   native restart/captured-file recovery and separate single-file/bulk hydration
