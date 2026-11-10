@@ -1,4 +1,4 @@
-import { useEffect,useState,useCallback } from "react";
+import { createContext,useContext,useEffect,useState,useCallback } from "react";
 import clsx from "clsx";
 import {
 Bot,
@@ -19,7 +19,9 @@ Trash2,
 User,
 X
 } from "lucide-react";
-import { DEFAULT_SETTINGS,Settings,useSettings } from "../settings";
+import { DEFAULT_SETTINGS,Settings,useUserSettings } from "../settings";
+import { isWorkspaceSetting } from "../lib/workspace-settings-store";
+import { repositoryWorktree } from "../lib/repository-worktree";
 import { call,dialogs,mainProcess,rpc } from "../ipc";
 import { usePrefetchProfiles } from "../lib/prefetch-profiles";
 import { useActiveRepo } from "../state";
@@ -27,7 +29,6 @@ import { telemetry } from "../lib/telemetry";
 import { DARK_THEMES,LIGHT_THEMES } from "../lib/editor-themes";
 import { StorageConfigSection } from "./StorageConfigSection";
 import { importVsCodeTheme } from "../lib/vscode-theme-import";
-import { useWorkspaceTheme,ThemeValue } from "../hooks/useWorkspaceTheme";
 import { useWorkspaceSettings } from "../hooks/useWorkspaceSettings";
 import { ScopeChip } from "../components/ScopeChip";
 import { AgentManagerView } from "./AgentManagerView";
@@ -38,16 +39,6 @@ import { useSession } from "../lib/session-context";
 
 const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({ value: t.id, label: t.label }));
 const LIGHT_THEME_OPTIONS = LIGHT_THEMES.map((t) => ({ value: t.id, label: t.label }));
-
-function themeLabel(theme: ThemeValue): string {
-  switch (theme) {
-    case "dark": return "Dark";
-    case "light": return "Light";
-    case "hc-dark": return "HC Dark";
-    case "hc-light": return "HC Light";
-    case "system": return "System";
-  }
-}
 
 type SectionId = "appearance" | "workspace" | "git" | "storage" | "integrations" | "agents" | "ssh" | "diagnostics" | "general";
 
@@ -82,14 +73,15 @@ export function SettingsView() {
   const [section, setSection] = useState<SectionId>("appearance");
   const [scope, setScope] = useState<SettingsScope>("user");
   const activeRepo = useActiveRepo();
-  const hasRepo = activeRepo !== null && !!activeRepo.path;
+  const workspace = useWorkspaceSettings();
+  const hasRepo = workspace.hasRepo;
 
   // Reset to "user" scope when no repo is open
   useEffect(() => {
-    if (!hasRepo && scope === "workspace") {
+    if ((!activeRepo || !repositoryWorktree(activeRepo)) && scope === "workspace") {
       setScope("user");
     }
-  }, [hasRepo, scope]);
+  }, [activeRepo, scope]);
 
   // Listen for programmatic navigation to a specific section (e.g. from
   // the "Add Agent" button in the chat input).
@@ -135,6 +127,7 @@ export function SettingsView() {
   }, []);
 
   return (
+    <SettingsEditorContext.Provider value={scope}>
     <div className="flex h-full min-h-0 w-full bg-gx-bg-sub">
       <nav className="w-56 shrink-0 overflow-auto border-r border-gx-border bg-gx-surface py-2">
         <div className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gx-text">
@@ -169,6 +162,9 @@ export function SettingsView() {
             hasRepo={hasRepo}
             repoName={activeRepo?.label ?? null}
           />
+          {workspace.error && <div role="alert" className="mb-4 rounded border border-gx-error/40 p-3 text-xs text-gx-error">Workspace settings: {workspace.error} <button type="button" className="underline" onClick={workspace.reload}>Retry loading workspace settings</button></div>}
+          {scope === "workspace" && !["appearance", "git"].includes(section) && <p className="mb-4 text-xs text-gx-muted">These controls manage this device. Choose User to change them.</p>}
+          <fieldset disabled={scope === "workspace" && (!hasRepo || workspace.loading || !["appearance", "git"].includes(section))}>
           {section === "appearance" && <AppearanceAndEditor />}
           {section === "workspace" && <WorkspaceSection />}
           {section === "git" && <GitAndDiff />}
@@ -178,10 +174,23 @@ export function SettingsView() {
           {section === "ssh" && <SshSettings />}
           {section === "diagnostics" && <DiagnosticsSection />}
           {section === "general" && <GeneralSection />}
+          </fieldset>
         </div>
       </div>
     </div>
+    </SettingsEditorContext.Provider>
   );
+}
+
+const SettingsEditorContext = createContext<SettingsScope>("user");
+function useSettingsEditor() {
+  const user = useUserSettings(), workspace = useWorkspaceSettings();
+  const scope = useContext(SettingsEditorContext);
+  const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
+    if (scope === "workspace") void workspace.setWorkspaceSetting(key, value);
+    else user.update(key, value);
+  }, [scope, workspace.setWorkspaceSetting, user.update]);
+  return { ...user, settings: scope === "workspace" ? { ...user.settings, ...workspace.workspaceSettings } : user.settings, update };
 }
 
 // ---- Settings Scope Toggle -------------------------------------------
@@ -253,10 +262,8 @@ function SettingsScopeToggle({
 // ---- Section: Appearance & Editor ------------------------------------
 
 function AppearanceAndEditor() {
-  const { settings, update } = useSettings();
-  const { workspaceSettings } = useWorkspaceSettings();
+  const { settings, update } = useSettingsEditor();
   const [importStatus, setImportStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const { workspaceTheme, hasRepo, setForWorkspace, clearWorkspaceOverride } = useWorkspaceTheme();
 
   async function handleImportVsCodeTheme() {
     setImportStatus(null);
@@ -295,7 +302,7 @@ function AppearanceAndEditor() {
     <Section title="Appearance & Editor" subtitle="Theme, layout, and code editor preferences.">
       {/* Theme */}
       <SubSection title="Theme">
-        <Row label="Theme" hint="Light, Dark, or follow the OS setting." workspaceOverride={workspaceSettings != null && "theme" in workspaceSettings}>
+        <Row label="Theme" hint="Light, Dark, or follow the OS setting." setting="theme">
           <Select
             value={settings.theme}
             onChange={(v) => update("theme", v as Settings["theme"])}
@@ -308,7 +315,7 @@ function AppearanceAndEditor() {
             ]}
           />
         </Row>
-        <Row label="Show activity bar" hint="The 48 px icon column with Explorer / Search / Changes." workspaceOverride={workspaceSettings != null && "showActivityBar" in workspaceSettings}>
+        <Row label="Show activity bar" hint="The 48 px icon column with Explorer / Search / Changes." setting="showActivityBar">
           <Toggle
             checked={settings.showActivityBar}
             onChange={(v) => update("showActivityBar", v)}
@@ -339,59 +346,25 @@ function AppearanceAndEditor() {
             {importStatus.message}
           </div>
         )}
-        <Row
-          label="Per-workspace theme"
-          hint="Override the theme for the current repository. Stored in .crab/desktop/settings.json inside the repo."
-        >
-          <div className="flex items-center gap-2">
-            {workspaceTheme ? (
-              <>
-                <span className="inline-flex items-center gap-1 rounded-full bg-gx-accent/15 px-2.5 py-0.5 text-[11px] font-medium text-gx-accent">
-                  Workspace: {themeLabel(workspaceTheme)}
-                </span>
-                <button
-                  type="button"
-                  className="btn text-xs"
-                  onClick={() => void clearWorkspaceOverride()}
-                  aria-label="Clear workspace theme override"
-                  title="Clear workspace override"
-                >
-                  <X size={11} /> Clear
-                </button>
-              </>
-            ) : hasRepo ? (
-              <button
-                type="button"
-                className="btn text-xs"
-                onClick={() => void setForWorkspace(settings.theme)}
-                aria-label="Set current theme for this workspace"
-              >
-                Set for this workspace
-              </button>
-            ) : (
-              <span className="text-[11px] text-gx-muted">Open a repo to set a workspace theme</span>
-            )}
-          </div>
-        </Row>
       </SubSection>
 
       {/* Editor */}
       <SubSection title="Code Editor">
-        <Row label="Syntax theme (dark)" hint="Color scheme for code highlighting in dark mode." workspaceOverride={workspaceSettings != null && "editorThemeDark" in workspaceSettings}>
+        <Row label="Syntax theme (dark)" hint="Color scheme for code highlighting in dark mode." setting="editorThemeDark">
           <Select
             value={settings.editorThemeDark}
             onChange={(v) => update("editorThemeDark", v)}
             options={DARK_THEME_OPTIONS}
           />
         </Row>
-        <Row label="Syntax theme (light)" hint="Color scheme for code highlighting in light mode." workspaceOverride={workspaceSettings != null && "editorThemeLight" in workspaceSettings}>
+        <Row label="Syntax theme (light)" hint="Color scheme for code highlighting in light mode." setting="editorThemeLight">
           <Select
             value={settings.editorThemeLight}
             onChange={(v) => update("editorThemeLight", v)}
             options={LIGHT_THEME_OPTIONS}
           />
         </Row>
-        <Row label="Font size" hint="Monaco editor font size." workspaceOverride={workspaceSettings != null && "editorFontSize" in workspaceSettings}>
+        <Row label="Font size" hint="Monaco editor font size." setting="editorFontSize">
           <NumberInput
             value={settings.editorFontSize}
             onChange={(v) => update("editorFontSize", clamp(v, 10, 20))}
@@ -401,13 +374,13 @@ function AppearanceAndEditor() {
             suffix="px"
           />
         </Row>
-        <Row label="Word wrap" workspaceOverride={workspaceSettings != null && "editorWordWrap" in workspaceSettings}>
+        <Row label="Word wrap" setting="editorWordWrap">
           <Toggle
             checked={settings.editorWordWrap}
             onChange={(v) => update("editorWordWrap", v)}
           />
         </Row>
-        <Row label="Show minimap" hint="The scrollable code thumbnail on the right edge." workspaceOverride={workspaceSettings != null && "editorMinimap" in workspaceSettings}>
+        <Row label="Show minimap" hint="The scrollable code thumbnail on the right edge." setting="editorMinimap">
           <Toggle
             checked={settings.editorMinimap}
             onChange={(v) => update("editorMinimap", v)}
@@ -420,7 +393,7 @@ function AppearanceAndEditor() {
         <Row
           label="Max preview size"
           hint="Files larger than this won't auto-preview. Higher values use more memory."
-          workspaceOverride={workspaceSettings != null && "maxPreviewKib" in workspaceSettings}
+          setting="maxPreviewKib"
         >
           <NumberInput
             value={settings.maxPreviewKib}
@@ -431,7 +404,7 @@ function AppearanceAndEditor() {
             suffix="KiB"
           />
         </Row>
-        <Row label="Parquet preview rows" hint="Rows fetched for the data grid." workspaceOverride={workspaceSettings != null && "parquetPreviewRows" in workspaceSettings}>
+        <Row label="Parquet preview rows" hint="Rows fetched for the data grid." setting="parquetPreviewRows">
           <Select
             value={String(settings.parquetPreviewRows)}
             onChange={(v) =>
@@ -453,7 +426,7 @@ function AppearanceAndEditor() {
 // ---- Section: Workspace (merged: Workspace + Session Persistence) ----
 
 function WorkspaceSection() {
-  const { settings, update } = useSettings();
+  const { settings, update } = useSettingsEditor();
   const sessionManager = useSession();
   const sp = settings.sessionPersistence;
 
@@ -571,8 +544,7 @@ function WorkspaceSection() {
 // ---- Section: Git & Diff (merged: Diff + Commit) --------------------
 
 function GitAndDiff() {
-  const { settings, update } = useSettings();
-  const { workspaceSettings } = useWorkspaceSettings();
+  const { settings, update } = useSettingsEditor();
   return (
     <Section title="Git & Diff" subtitle="Diff display, commit helpers, and file staging behavior.">
       {/* Diff */}
@@ -580,7 +552,7 @@ function GitAndDiff() {
         <Row
           label="Prefer crab diff"
           hint="Use crab's chunk-aware diff for pointer files when available. Falls back to git diff for regular files."
-          workspaceOverride={workspaceSettings != null && "preferCrabDiff" in workspaceSettings}
+          setting="preferCrabDiff"
         >
           <Toggle
             checked={settings.preferCrabDiff}
@@ -590,7 +562,7 @@ function GitAndDiff() {
         <Row
           label="Confirm before large discard"
           hint="Show a modal before discarding a hunk or file when the change touches more than this many lines. Set to 0 to skip the dialog entirely."
-          workspaceOverride={workspaceSettings != null && "discardConfirmThreshold" in workspaceSettings}
+          setting="discardConfirmThreshold"
         >
           <NumberInput
             value={settings.discardConfirmThreshold}
@@ -608,7 +580,7 @@ function GitAndDiff() {
         <Row
           label="Conventional commits"
           hint="Replace the plain subject input with a structured helper: type / scope / breaking-change dropdowns that compose the subject line automatically."
-          workspaceOverride={workspaceSettings != null && "conventionalCommits" in workspaceSettings}
+          setting="conventionalCommits"
         >
           <Toggle
             checked={settings.conventionalCommits}
@@ -618,7 +590,7 @@ function GitAndDiff() {
         <Row
           label="Strip notebook outputs before commit"
           hint="When staged files include .ipynb notebooks, automatically strip cell outputs and execution counts from the staged version. The working tree file is untouched."
-          workspaceOverride={workspaceSettings != null && "stripNotebookOutputs" in workspaceSettings}
+          setting="stripNotebookOutputs"
         >
           <Toggle
             checked={settings.stripNotebookOutputs}
@@ -628,7 +600,7 @@ function GitAndDiff() {
         <Row
           label="Large file warning threshold"
           hint="Warn when staging non-pointer files larger than this threshold. Set to 0 to disable."
-          workspaceOverride={workspaceSettings != null && "largeFileThresholdMb" in workspaceSettings}
+          setting="largeFileThresholdMb"
         >
           <Select
             value={String(settings.largeFileThresholdMb)}
@@ -1359,7 +1331,7 @@ function ForgeAuthentication() {
 // ---- Section: Storage & Cache (merged: Remote Storage + Cache + Memory + Prefetch) ----
 
 function StorageAndCache() {
-  const { settings, update } = useSettings();
+  const { settings, update } = useSettingsEditor();
   const { profiles, add, remove } = usePrefetchProfiles();
   const activeRepo = useActiveRepo();
   const [newName, setNewName] = useState("");
@@ -1515,8 +1487,7 @@ function StorageAndCache() {
 // ---- Section: Diagnostics (merged: Logs + PTY Daemon + Telemetry + Notifications) ----
 
 function DiagnosticsSection() {
-  const { settings, update } = useSettings();
-  const { workspaceSettings } = useWorkspaceSettings();
+  const { settings, update } = useSettingsEditor();
   const notif = settings.notifications;
   const [showPreview, setShowPreview] = useState(false);
   const [noTelemetryFlag, setNoTelemetryFlag] = useState(false);
@@ -1576,7 +1547,7 @@ function DiagnosticsSection() {
         <Row
           label="Mute job completion notifications"
           hint="Suppress toasts when background jobs (push, fetch, hydrate) finish."
-          workspaceOverride={workspaceSettings != null && "notifications" in workspaceSettings}
+          setting="notifications"
         >
           <Toggle
             checked={notif.muteJobCompletion}
@@ -1586,7 +1557,7 @@ function DiagnosticsSection() {
         <Row
           label="Mute PR update notifications"
           hint="Suppress toasts for pull request activity (comments, reviews, status changes)."
-          workspaceOverride={workspaceSettings != null && "notifications" in workspaceSettings}
+          setting="notifications"
         >
           <Toggle
             checked={notif.mutePrUpdates}
@@ -1596,7 +1567,7 @@ function DiagnosticsSection() {
         <Row
           label="Mute agent error notifications"
           hint="Suppress toasts for agent errors and unexpected crashes."
-          workspaceOverride={workspaceSettings != null && "notifications" in workspaceSettings}
+          setting="notifications"
         >
           <Toggle
             checked={notif.muteAgentErrors}
@@ -1606,7 +1577,7 @@ function DiagnosticsSection() {
         <Row
           label="Do not disturb"
           hint="Silence all notifications. When enabled, no toasts will appear regardless of per-type settings."
-          workspaceOverride={workspaceSettings != null && "notifications" in workspaceSettings}
+          setting="notifications"
         >
           <Toggle
             checked={notif.doNotDisturb}
@@ -1729,7 +1700,7 @@ interface AboutData {
 }
 
 function GeneralSection() {
-  const { update, reset } = useSettings();
+  const { update, reset } = useSettingsEditor();
   const [data, setData] = useState<AboutData | null>(null);
   const [aboutErr, setAboutErr] = useState<string | null>(null);
 
@@ -1829,7 +1800,7 @@ function GeneralSection() {
 // ---- Section: SSH Remote -----------------------------------------------
 
 function SshSettings() {
-  const { settings, update } = useSettings();
+  const { settings, update } = useSettingsEditor();
   const features = settings.features;
   const [knownHosts, setKnownHosts] = useState<Array<{ hostname: string; port: number; fingerprint: string; keyType: string; addedAt: number }>>([]);
   const [stats, setStats] = useState<{ successRate: number; avgLatencyMs: number; reconnections: number } | null>(null);
@@ -2023,25 +1994,28 @@ function SubSection({
 function Row({
   label,
   hint,
-  workspaceOverride,
+  setting,
   children,
 }: {
   label: string;
   hint?: string;
-  workspaceOverride?: boolean;
+  setting?: keyof Settings;
   children: React.ReactNode;
 }) {
+  const scope = useContext(SettingsEditorContext), workspace = useWorkspaceSettings();
+  const overridden = setting && workspace.workspaceSettings && Object.hasOwn(workspace.workspaceSettings, setting);
   return (
-    <div className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-gx-border/60 pb-4 last:border-b-0">
+    <fieldset aria-label={label} disabled={scope === "workspace" && (!setting || !isWorkspaceSetting(setting))} className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-gx-border/60 pb-4 last:border-b-0">
       <div>
         <div className="flex items-center text-sm text-gx-text">
           {label}
-          {workspaceOverride && <ScopeChip />}
+          {overridden && <ScopeChip />}
+          {scope === "workspace" && setting && overridden && <button type="button" className="ml-2 text-xs text-gx-accent" aria-label={`Use User value for ${label}`} onClick={() => void workspace.clearWorkspaceSetting(setting)}>Use User value</button>}
         </div>
         {hint && <div className="mt-1 max-w-md text-[11.5px] text-gx-muted">{hint}</div>}
       </div>
       <div className="min-w-[200px]">{children}</div>
-    </div>
+    </fieldset>
   );
 }
 

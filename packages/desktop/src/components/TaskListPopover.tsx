@@ -1,7 +1,8 @@
 import { CheckSquare, Link2, Plus, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { useTaskList, type TaskItem } from "../hooks/useTaskList";
+import { useTaskList } from "../hooks/useTaskList";
+import type { TaskItem } from "../lib/workspace-settings-store";
 import { formatAnchor, parseAnchor } from "../lib/task-anchor";
 
 interface TaskListPopoverProps {
@@ -19,12 +20,14 @@ interface TaskListPopoverProps {
  * an "Add task" input at the bottom.
  */
 export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPopoverProps) {
-  const { tasks, loading, addTask, toggleTask, removeTask, remaining, total } = useTaskList();
+  const { key: workspaceKey, tasks, loading, error, canEdit, reload, addTask, toggleTask, removeTask, remaining, total } = useTaskList();
   const [open, setOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const popoverRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const keyRef = useRef(workspaceKey); keyRef.current = workspaceKey;
+  useEffect(() => { setNewTitle(""); setOpen(false); }, [workspaceKey]);
 
   // Close on outside click.
   useEffect(() => {
@@ -63,9 +66,8 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
   const handleAdd = useCallback(async () => {
     const title = newTitle.trim();
     if (!title) return;
-    await addTask(title);
-    setNewTitle("");
-  }, [newTitle, addTask]);
+    if (await addTask(title) && keyRef.current === workspaceKey) setNewTitle(current => current === title ? "" : current);
+  }, [newTitle, addTask, workspaceKey]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -104,11 +106,11 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
           open ? "bg-gx-bg-sub text-gx-text" : "text-gx-muted",
         )}
         title="Task list"
-        aria-label={`Task list: ${done} of ${total} done`}
+        aria-label={error ? "Task list: unavailable" : `Task list: ${done} of ${total} done`}
       >
         <CheckSquare size={11} />
         <span className="tabular-nums">
-          {loading ? "…" : `${done}/${total}`}
+          {loading ? "…" : error ? "!" : `${done}/${total}`}
         </span>
       </button>
 
@@ -133,9 +135,11 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
             </button>
           </div>
 
+          {error && <div role="alert" className="px-3 py-2 text-xs text-gx-error">{error} <button type="button" className="underline" onClick={reload}>Retry loading tasks</button></div>}
           {/* Task list */}
+          <fieldset disabled={!canEdit || loading}>
           <div className="max-h-64 overflow-y-auto">
-            {tasks.length === 0 && !loading && (
+            {tasks.length === 0 && !loading && !error && canEdit && (
               <div className="px-3 py-4 text-center text-xs text-gx-muted">
                 No tasks yet. Add one below.
               </div>
@@ -168,7 +172,7 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
               <button
                 type="button"
                 onClick={handleAdd}
-                disabled={!newTitle.trim()}
+                disabled={!canEdit || loading || !newTitle.trim()}
                 className="text-xs text-gx-accent hover:text-gx-accent/80 disabled:opacity-40"
                 aria-label="Add task"
               >
@@ -176,6 +180,7 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
               </button>
             </div>
           </div>
+          </fieldset>
         </div>
       )}
     </div>

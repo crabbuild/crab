@@ -44,8 +44,8 @@ integrations, and system diagnostics.
 - **Editor theme** — syntax highlighting theme (One Dark Pro,
   Solarized, Monokai, Nord, etc.)
 - **Font size** — global UI font size
-- **Workspace theme** — per-repo theme override (useful for
-  distinguishing multiple open repos)
+- **Workspace theme** — choose Workspace scope, then set Theme for the
+  current working copy; Use User value clears its override
 
 ### Editor
 
@@ -183,12 +183,28 @@ Health & Diagnostics is part of Settings and has no separate activity-bar button
 
 ## Scope System
 
-Settings can be scoped:
-- **User** (global) — applies to all repositories
-- **Workspace** — applies only to the current repository
+Choose the scope above the settings form:
 
-A scope chip next to each setting shows its current scope. Workspace
-settings override user settings.
+- **User** — preferences for this device, used when a workspace has no override.
+- **Workspace** — supported appearance, editor, preview and Git workflow settings
+  for the selected local or SSH working copy. Storage snapshots are read-only.
+
+A Workspace chip identifies an override. **Use User value** removes that key
+and immediately restores the User preference. Changing a User value preserves
+an existing workspace override. Effective values reach the editor, previews,
+diffs and application theme together.
+
+Device paths, credentials, agent execution, telemetry, connection management and
+global services stay in User scope. Their controls are disabled in Workspace
+scope; repository files cannot enable these device-level capabilities.
+
+Workspace preferences and tasks share `.crab/desktop/settings.json`. Updates
+read the complete current document, preserve other keys and serialize saves.
+Only a missing document creates an empty one. Failed, malformed or oversized
+reads block mutation and show an error. The document limit is 64 KiB. Local
+preferences remain writable while native repository services are unavailable;
+SSH updates require the live repository connection. Saves do not stage the file.
+The task input stays intact after a failed action so it can be retried.
 
 ## Persistence
 

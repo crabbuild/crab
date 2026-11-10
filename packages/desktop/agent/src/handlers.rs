@@ -2792,6 +2792,8 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
 /// path as the key since it's what users expect to click in the UI.
 async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
+    let physical_root = tokio::fs::canonicalize(&work_dir).await?;
+    let publications = file_write::status_snapshot(&physical_root).await;
     let out = crate::shellout::git_command()
         .args(["status", "--porcelain=v1", "-z", "-uall"])
         .current_dir(&work_dir)
@@ -2804,6 +2806,7 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
+    let owned_temporaries = publications.finish().await;
     let mut entries: Vec<Value> = Vec::new();
     // -z splits every record (including rename pairs) with NUL. The
     // first two bytes are the XY status codes; then a space; then the
@@ -2825,7 +2828,11 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
         let code = std::str::from_utf8(xy).unwrap_or("??").trim().to_owned();
         // Skip the rename "old path" companion record when present.
         let is_rename = xy[0] == b'R' || xy[0] == b'C' || xy[1] == b'R' || xy[1] == b'C';
-        entries.push(json!({ "path": path, "code": code }));
+        // Internal publication names must not become transient untracked rows.
+        // Exact ownership preserves user files, even with the same name prefix.
+        if code != "??" || !owned_temporaries.contains(&physical_root.join(&path)) {
+            entries.push(json!({ "path": path, "code": code }));
+        }
         i = path_end + 1;
         if is_rename {
             let old_end = out.stdout[i..]

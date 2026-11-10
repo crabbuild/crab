@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { mainProcess, rpc } from "../ipc";
 import { OpenRepo } from "../state";
+import { repositoryWorktree } from "../lib/repository-worktree";
 
 /** A pattern parsed from `.gitattributes` that has `filter=crab`. */
 export interface TrackedPattern {
@@ -25,11 +26,11 @@ export interface UseTrackedPatterns {
 /**
  * Read the repo's `.gitattributes` patterns marked with `filter=crab`
  * and any prefetch profiles defined in `.crab/prefetch.toml`. Local
- * repos read from disk via `mainProcess.fsReadFile`; remote repos
- * fall back to `rpc.readText`.
+ * worktrees use their filesystem provider; SDK snapshots use captured native
+ * reads. Failed or truncated reads remain visible instead of becoming defaults.
  *
- * Both files are optional — a missing file yields an empty result
- * rather than an error. The hook refreshes on mount and exposes a
+ * Missing physical files yield an empty result. Snapshot failures remain
+ * visible until their native source establishes absence. The hook exposes a
  * manual `refresh()` for callers that just edited tracking state.
  */
 export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPatterns {
@@ -69,19 +70,14 @@ export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPa
 // ── File reading ────────────────────────────────────────────────────
 
 async function readRepoFile(repo: OpenRepo, relPath: string): Promise<string | null> {
-  if (repo.path) {
-    const res = await mainProcess.fsReadFile(`${repo.path}/${relPath}`);
+  const root = repositoryWorktree(repo);
+  if (root) {
+    const res = await mainProcess.fsReadFile(repo.repo_id, `${root.replace(/[\\/]$/, "")}/${relPath}`, 256 * 1024);
     return res.exists ? res.content : null;
   }
-  if (repo.is_remote) {
-    try {
-      const res = await rpc.readText(repo.repo_id, relPath, { max_bytes: 256 * 1024 });
-      return res.text ?? null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  const result = await rpc.readText(repo.repo_id, relPath, { max_bytes: 256 * 1024 });
+  if (result.truncated || result.text === null) throw new Error(result.reason ?? "The tracking configuration was not read completely.");
+  return result.text;
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────

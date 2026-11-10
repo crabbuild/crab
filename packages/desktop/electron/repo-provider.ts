@@ -108,7 +108,7 @@ export interface RepoProvider {
   fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
 
   /** Read text content from a file. */
-  fsRead(repoId: string, path: string): Promise<FsReadResult>;
+  fsRead(repoId: string, path: string, maxBytes?: number): Promise<FsReadResult>;
 
   // ── Capabilities ─────────────────────────────────────────────
 
@@ -150,7 +150,7 @@ export abstract class BaseProvider extends EventEmitter implements ProviderEvent
   abstract fsRename(repoId: string, oldPath: string, newPath: string): Promise<FsRenameResult>;
   abstract fsDelete(repoId: string, path: string, useTrash?: boolean): Promise<FsDeleteResult>;
   abstract fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
-  abstract fsRead(repoId: string, path: string): Promise<FsReadResult>;
+  abstract fsRead(repoId: string, path: string, maxBytes?: number): Promise<FsReadResult>;
   abstract capabilities(repoId: string): Promise<CapabilitySet>;
   abstract dispose(): void;
 }

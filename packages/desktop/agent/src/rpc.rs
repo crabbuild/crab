@@ -203,7 +203,7 @@ impl From<crate::AgentError> for RpcError {
                     "remediation": remediation,
                 })),
             ),
-            E::PathNotFound { .. } => (1004, None),
+            E::PathNotFound { .. } => (1004, Some(serde_json::json!({ "kind": "path_not_found" }))),
             E::Storage(_)
             | E::Cache(_)
             | E::Utf8(_)
@@ -230,6 +230,19 @@ impl From<crate::AgentError> for RpcError {
 mod tests {
     use super::*;
     use crate::AgentError;
+
+    #[test]
+    fn missing_file_is_distinct_from_an_unavailable_repository() {
+        let missing = RpcError::from(AgentError::PathNotFound {
+            path: "settings.json".into(),
+        });
+        let unavailable = RpcError::from(AgentError::RepoNotOpen("workspace".into()));
+        assert_ne!(missing.data, unavailable.data);
+        assert_eq!(
+            missing.data,
+            Some(serde_json::json!({ "kind": "path_not_found" }))
+        );
+    }
 
     #[test]
     fn cancelled_setup_with_failed_cleanup_remains_a_terminal_failure() {

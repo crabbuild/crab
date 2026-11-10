@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { Agent } from "../electron/agent";
 import { LocalProvider } from "../electron/local-provider";
+import { captureFilePublications } from "../electron/file-write";
 
 vi.mock("electron", () => ({ shell: { trashItem: vi.fn() } }));
 
@@ -75,6 +76,22 @@ describe("local repository file publication", () => {
     expect(await fs.promises.readFile(file, "utf8")).toBe("ORIGINAL");
   });
 
+  it("status ownership captures an admitted temporary without reserving user filename prefixes", async () => {
+    const foreign = path.join(root, ".crab-write-user-file");
+    await fs.promises.writeFile(foreign, "USER");
+    const entered = deferred(), release = deferred(), original = fs.promises.writeFile.bind(fs.promises);
+    vi.spyOn(fs.promises, "writeFile").mockImplementationOnce(async (...args) => { await original(...args); entered.resolve(); await release.promise; });
+    const snapshot = captureFilePublications(await fs.promises.realpath(root));
+    const saving = provider.fsWrite("repo", file, "REPLACEMENT");
+    let owned: Set<string>;
+    try { await entered.promise; owned = await snapshot.finish(); }
+    finally { release.resolve(); await saving; }
+    expect([...owned!]).toHaveLength(1);
+    expect(owned!.has(await fs.promises.realpath(foreign))).toBe(false);
+    const completed = await captureFilePublications(await fs.promises.realpath(root)).finish();
+    expect([...owned!].some(path => completed.has(path))).toBe(false);
+  });
+
   it("exclusive-open failure never removes another owner's entry", async () => {
     const open = fs.promises.open.bind(fs.promises);
     let foreign: string | undefined;
@@ -82,9 +99,31 @@ describe("local repository file publication", () => {
       if (args[1] === "wx") { foreign = String(args[0]); await fs.promises.writeFile(foreign, "FOREIGN"); }
       return open(...args);
     });
+    const snapshot = captureFilePublications(await fs.promises.realpath(root));
     await expect(provider.fsWrite("repo", file, "REPLACEMENT")).rejects.toMatchObject({ code: "EEXIST" });
+    expect((await snapshot.finish()).has(foreign!)).toBe(false);
     expect(await fs.promises.readFile(foreign!, "utf8")).toBe("FOREIGN");
     expect(await fs.promises.readFile(file, "utf8")).toBe("ORIGINAL");
+  });
+
+  it("a pending exclusive open cannot delay another worktree's status snapshot", async () => {
+    const held = path.join(root, "held"), independent = path.join(root, "independent");
+    await fs.promises.mkdir(held); await fs.promises.mkdir(independent);
+    const entered = deferred(), release = deferred(), open = fs.promises.open.bind(fs.promises);
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      if (args[1] === "wx") { entered.resolve(); await release.promise; }
+      return open(...args);
+    });
+    const saving = provider.fsWrite("held", path.join(held, "note.txt"), "HELD");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await entered.promise;
+      const paths = await Promise.race([
+        captureFilePublications(await fs.promises.realpath(independent)).finish(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Another worktree's acquisition blocked status")), 1000); }),
+      ]);
+      expect(paths.size).toBe(0);
+    } finally { clearTimeout(timer); release.resolve(); await saving; }
   });
 
   it("empty and UTF-8 saves acknowledge persisted bytes without native services", async () => {

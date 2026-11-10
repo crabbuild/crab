@@ -304,24 +304,10 @@ contextBridge.exposeInMainWorld("crab", {
   },
   fsOpenExternal: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-open-external", fullPath),
-  // Overloaded: fsWriteFile(fullPath, content) or fsWriteFile(repoId, fullPath, content)
-  fsWriteFile: (...args: [string, string] | [string, string, string]) => {
-    if (args.length === 3) {
-      // New overload: (repoId, fullPath, content)
-      return ipcRenderer.invoke("crab:fs-write-file", args[0], args[1], args[2]);
-    }
-    // Legacy: (fullPath, content)
-    return ipcRenderer.invoke("crab:fs-write-file", args[0], args[1]);
-  },
-  // Overloaded: fsReadFile(fullPath) or fsReadFile(repoId, fullPath)
-  fsReadFile: (...args: [string] | [string, string]) => {
-    if (args.length === 2) {
-      // New overload: (repoId, fullPath)
-      return ipcRenderer.invoke("crab:fs-read-file", args[0], args[1]) as Promise<{ exists: boolean; content: string | null }>;
-    }
-    // Legacy: (fullPath)
-    return ipcRenderer.invoke("crab:fs-read-file", args[0]) as Promise<{ exists: boolean; content: string | null }>;
-  },
+  fsWriteFile: (repoId: string, fullPath: string, content: string) =>
+    ipcRenderer.invoke("crab:fs-write-file", repoId, fullPath, content),
+  fsReadFile: (...args: [string] | [string, string, number?]) =>
+    ipcRenderer.invoke("crab:fs-read-file", ...args) as Promise<{ exists: boolean; content: string | null }>,
   fsReadImage: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-read-image", fullPath) as Promise<{
       exists: boolean;

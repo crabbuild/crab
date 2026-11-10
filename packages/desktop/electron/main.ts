@@ -38,7 +38,7 @@ import { parseRepoId } from "./ssh-types";
 import { RpcRouter } from "./ssh-router";
 import { getProviderRegistry } from "./provider-registry";
 import { LocalProvider } from "./local-provider";
-import { writeTextAtomically } from "./file-write";
+import { readTextFile } from "./file-read";
 import { RemoteProvider } from "./remote-provider";
 import { AgentDeployer } from "./ssh-deployer";
 import { RemoteFileBrowser } from "./ssh-file-browser";
@@ -825,84 +825,20 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
     await shell.openPath(fullPath);
   });
 
-  // Write text content to a file (creates parent directories as needed).
-  // Accepts an optional repoId first parameter for provider-based routing.
-  ipcMain.handle(
-    "crab:fs-write-file",
-    async (_evt, firstArg: string, secondArg: string, thirdArg?: string) => {
-      const registry = getProviderRegistry();
+  ipcMain.handle("crab:fs-write-file", async (_evt, repoId: string, fullPath: string, content: string) => {
+    const provider = getProviderRegistry().resolve(repoId);
+    if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
+    return provider.fsWrite(repoId, fullPath, content);
+  });
 
-      // Detect whether the caller passed repoId as the first argument.
-      // If thirdArg is present, the signature is (repoId, fullPath, content).
-      // Local workspace configuration currently uses (fullPath, content).
-      let repoId: string | null;
-      let fullPath: string;
-      let content: string;
-
-      if (thirdArg !== undefined) {
-        repoId = firstArg;
-        fullPath = secondArg;
-        content = thirdArg;
-      } else {
-        repoId = null;
-        fullPath = firstArg;
-        content = secondArg;
-      }
-
-      if (repoId !== null) {
-        const provider = registry.resolve(repoId);
-        if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
-        return provider.fsWrite(repoId, fullPath, content);
-      }
-
-      // Existing local configuration callers share the atomic writer. Their
-      // repository-aware routing is separate from filesystem publication.
-      const written = await writeTextAtomically(fullPath, content);
-      return { path: fullPath, written };
-    },
-  );
-
-  // Read text content from a file on disk.
-  // Accepts an optional repoId first parameter for provider-based routing.
-  ipcMain.handle(
-    "crab:fs-read-file",
-    async (_evt, firstArg: string, secondArg?: string) => {
-      const registry = getProviderRegistry();
-
-      // Detect whether the caller passed repoId as the first argument.
-      // If secondArg is present, the signature is (repoId, fullPath).
-      // Otherwise, the signature is (fullPath) for backward compat.
-      let repoId: string | null;
-      let fullPath: string;
-
-      if (secondArg !== undefined) {
-        repoId = firstArg;
-        fullPath = secondArg;
-      } else {
-        repoId = null;
-        fullPath = firstArg;
-      }
-
-      // If repoId is provided, resolve the provider and delegate.
-      if (repoId) {
-        const provider = registry.resolve(repoId);
-        if (provider) {
-          return provider.fsRead(repoId, fullPath);
-        }
-      }
-
-      // Fallback: local filesystem operations (existing behavior).
-      if (!fs.existsSync(fullPath)) {
-        return { exists: false, content: null };
-      }
-      const stat = fs.statSync(fullPath);
-      if (stat.isDirectory()) {
-        return { exists: true, content: null };
-      }
-      const content = fs.readFileSync(fullPath, "utf8");
-      return { exists: true, content };
-    },
-  );
+  ipcMain.handle("crab:fs-read-file", async (_evt, firstArg: string, secondArg?: string, maxBytes?: number) => {
+    // The task file viewer still supplies a worktree path without a repo handle.
+    // Repository documents always resolve a provider and cannot fall through.
+    if (secondArg === undefined) return readTextFile(firstArg, maxBytes);
+    const provider = getProviderRegistry().resolve(firstArg);
+    if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
+    return provider.fsRead(firstArg, secondArg, maxBytes);
+  });
 
   // Read binary content from a file on disk and return it as a
   // base64-encoded data URL plus the inferred MIME type. Used by the

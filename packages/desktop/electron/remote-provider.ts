@@ -8,7 +8,7 @@
  *
  * Connection loss handling:
  * - Write operations reject immediately with SSH_RECONNECTING
- * - Read operations return stale cached data when available
+ * - Mutable reads reject unavailable sessions rather than returning stale data
  * - Capabilities downgrade to noCapabilities() on disconnect
  *
  * File watching:
@@ -64,9 +64,6 @@ export class RemoteProvider extends BaseProvider {
   private readonly fileEditor: RemoteFileEditor;
   private readonly capabilityNegotiator: CapabilityNegotiator;
   private readonly sessionManager: SshSessionManager;
-
-  /** Cached read results for stale fallback during reconnection. */
-  private readCache = new Map<string, { content: string; timestamp: number }>();
 
   /** Polling interval handle for agents that don't support native file watching. */
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -260,51 +257,28 @@ export class RemoteProvider extends BaseProvider {
       throw new Error("The remote file save did not write the complete buffer.");
     }
 
-    // Cache the write for stale fallback
-    this.readCache.set(`${repoId}:${path}`, { content, timestamp: Date.now() });
-
     this.emit("fs/changed", { type: "fs/changed" as const, repoPath: repoId });
     return { path, written: result.size };
   }
 
-  async fsRead(repoId: string, path: string): Promise<FsReadResult> {
-    const parsed = parseRepoId(repoId);
-    if (!parsed) {
-      throw new Error(`RemoteProvider.fsRead() called with non-remote repo_id: ${repoId}`);
+  async fsRead(repoId: string, path: string, maxBytes = 512 * 1024): Promise<FsReadResult> {
+    const parsed = this.assertRemoteAndConnected(repoId);
+    const relativePath = posix.relative(parsed.remotePath, path);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
+      throw new Error("The file must be inside the selected repository.");
     }
-
-    const status = this.getConnectionStatus(parsed.profileId);
-
-    // During reconnection, return stale cache if available
-    if (status === "reconnecting") {
-      const cached = this.readCache.get(`${repoId}:${path}`);
-      if (cached) {
-        return { exists: true, content: cached.content };
-      }
-      // No cache available — reject
-      const err = new Error("Connection lost: file read unavailable during reconnection");
-      (err as Error & { code?: string }).code = "SSH_RECONNECTING";
-      throw err;
-    }
-
-    if (status !== "connected") {
-      throw new Error(`SSH connection not available (status: ${status})`);
-    }
-
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 4 * 1024 * 1024) throw new Error("Invalid text read limit.");
     try {
-      const result = await this.fileEditor.readFile(parsed.profileId, path);
-
-      // Cache the read for stale fallback
-      this.readCache.set(`${repoId}:${path}`, { content: result.content, timestamp: Date.now() });
-
-      return { exists: true, content: result.content };
-    } catch (err) {
-      // If the error indicates file not found, return exists: false
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("ENOENT") || message.includes("not found") || message.includes("No such file")) {
-        return { exists: false, content: null };
-      }
-      throw err;
+      // Mutable documents must never merge a stale reconnect cache or a
+      // truncated prefix into a new write. Read through the live repo owner.
+      const result = await this.request("read_text", {
+        repo_id: repoId, path: relativePath, max_bytes: maxBytes, native_session_id: this.nativeSession(repoId),
+      }) as { text: string | null; truncated: boolean; reason?: string };
+      if (result.truncated !== false || typeof result.text !== "string") throw new Error(result.reason ?? "The remote file was not read completely.");
+      return { exists: true, content: result.text };
+    } catch (error) {
+      if (error instanceof Error && "data" in error && error.data && typeof error.data === "object" && "kind" in error.data && error.data.kind === "path_not_found") return { exists: false, content: null };
+      throw error;
     }
   }
 
@@ -352,7 +326,6 @@ export class RemoteProvider extends BaseProvider {
     this.watchedRepos.clear();
 
     this.stopPolling();
-    this.readCache.clear();
     this.removeAllListeners();
   }
 
@@ -533,7 +506,7 @@ export class RemoteProvider extends BaseProvider {
 
   /**
    * Assert that the repo_id is remote and the connection is active.
-   * Throws SSH_RECONNECTING for write operations during reconnection.
+   * Mutable-file reads and writes fail closed while the connection is unavailable.
    */
   private assertRemoteAndConnected(repoId: string): { profileId: string; remotePath: string } {
     const parsed = parseRepoId(repoId);
@@ -544,7 +517,7 @@ export class RemoteProvider extends BaseProvider {
     const status = this.getConnectionStatus(parsed.profileId);
 
     if (status === "reconnecting") {
-      const err = new Error("Connection lost: write operations are unavailable during reconnection");
+      const err = new Error("Connection lost: file operations are unavailable during reconnection");
       (err as Error & { code?: string }).code = "SSH_RECONNECTING";
       throw err;
     }

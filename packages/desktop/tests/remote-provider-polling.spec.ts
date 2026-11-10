@@ -89,6 +89,37 @@ describe("RemoteProvider polling fallback", () => {
     vi.useRealTimers();
   });
 
+  it("reads complete text through its admitted repository with a relative path and limit", async () => {
+    mockRouter.route.mockResolvedValue({ truncated: false, text: "🦀 café" });
+    expect(await provider.fsRead(REPO_ID, "/home/user/project/settings.json", 64 * 1024)).toEqual({ exists: true, content: "🦀 café" });
+    expect(mockRouter.route).toHaveBeenCalledWith(REPO_ID, "read_text", {
+      repo_id: REPO_ID, path: "settings.json", max_bytes: 64 * 1024, native_session_id: "ssh:1",
+    });
+  });
+
+  it("only typed path absence is a missing document, not repository or transport failure", async () => {
+    const missing = Object.assign(new Error("Fixture file missing"), { code: 1004, data: { kind: "path_not_found" } });
+    mockRouter.route.mockRejectedValueOnce(missing);
+    expect(await provider.fsRead(REPO_ID, "/home/user/project/settings.json")).toEqual({ exists: false, content: null });
+    const unavailable = Object.assign(new Error("Fixture repo unavailable"), { code: 1004 });
+    mockRouter.route.mockRejectedValueOnce(unavailable);
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json")).rejects.toBe(unavailable);
+  });
+
+  it("truncated remote text cannot become mutable document content", async () => {
+    mockRouter.route.mockResolvedValue({ truncated: true, text: null, reason: "Fixture limit exceeded" });
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json", 10)).rejects.toThrow("Fixture limit exceeded");
+  });
+
+  it("reconnection cannot return stale mutable content from a previous write", async () => {
+    mockRouter.route.mockResolvedValue({ written: true, size: 4 });
+    await provider.fsWrite(REPO_ID, "/home/user/project/settings.json", "text");
+    mockSessionManager.getStatus.mockReturnValue("reconnecting");
+    mockRouter.route.mockClear();
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json")).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+    expect(mockRouter.route).not.toHaveBeenCalled();
+  });
+
   it("writes through the admitted repository session with a relative path and UTF-8 acknowledgement", async () => {
     mockRouter.route.mockResolvedValue({ written: true, size: Buffer.byteLength("🦀 café", "utf8") });
     const result = await provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "🦀 café");

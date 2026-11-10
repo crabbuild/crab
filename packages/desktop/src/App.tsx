@@ -14,7 +14,6 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { TelemetryOptInModal } from "./components/TelemetryOptInModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { ToastManager } from "./components/ToastManager";
-import { WorkspaceThemeEffect } from "./components/WorkspaceThemeEffect";
 import { Welcome } from "./components/Welcome";
 import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
 import { SshView } from "./views/SshView";
@@ -609,7 +608,6 @@ function Shell() {
       </div>
       <ProgressDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <TelemetryOptInModal />
-      <WorkspaceThemeEffect />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

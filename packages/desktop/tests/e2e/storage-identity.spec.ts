@@ -445,6 +445,16 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       await dialog.getByRole("button", { name: "Open snapshot", exact: true }).click();
       await expect(dialog).toHaveCount(0);
       await view(page, "weights.safetensors", fixture.payloads[index].marker);
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+," : "Control+,");
+      await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveAttribute("aria-disabled", "true");
+      await page.getByRole("button", { name: /^Task list:/ }).click();
+      const tasks = page.getByRole("dialog", { name: "Task list", exact: true });
+      await expect(tasks.getByRole("textbox", { name: "New task title", exact: true })).toBeDisabled();
+      await expect(tasks.getByRole("button", { name: "Add task", exact: true })).toBeDisabled();
+      await tasks.getByRole("button", { name: "Close task list", exact: true }).click();
+      await page.getByRole("group", { name: "Theme", exact: true }).getByRole("combobox").selectOption("light");
+      await expect(page.locator("html")).toHaveClass(/theme-light/);
+      await view(page, "weights.safetensors", fixture.payloads[index].marker);
     }
     await expect.poll(async () => (await recent(page)).length).toBe(2);
     const bookmarks = await recent(page);
@@ -479,7 +489,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
     }
     expect((await recent(page)).map(bookmark => bookmark.repo_id).sort()).toEqual([...ids].sort());
     await page.screenshot({ path: test.info().outputPath("saved-sdk-snapshots.png") });
-    writeFileSync(test.info().outputPath("saved-sdk-snapshots-proof.json"), JSON.stringify({ blockedSdkCancelledBeforeStorageRelease: true, sameUrlDistinctIdentities: true, guiOpenedBothStores: true, activeSdkRestored: true, deferredSdkRestored: true, coldBytesExact: true, readOnlyCapabilities: true, ids, beforeRestart, afterRestart }, null, 2));
+    writeFileSync(test.info().outputPath("saved-sdk-snapshots-proof.json"), JSON.stringify({ blockedSdkCancelledBeforeStorageRelease: true, sameUrlDistinctIdentities: true, guiOpenedBothStores: true, activeSdkRestored: true, deferredSdkRestored: true, coldBytesExact: true, readOnlyCapabilities: true, workspaceSettingsAndTasksDisabled: true, userThemeStillWorks: true, ids, beforeRestart, afterRestart }, null, 2));
   } finally {
     try { await fetch(fixture.profiles[0].endpoint + "/__fixture_release"); }
     finally { await application?.close(); }

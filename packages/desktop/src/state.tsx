@@ -1,4 +1,5 @@
 import { fileBuffers } from "./lib/file-buffer-store";
+import { workspaceDocuments } from "./lib/workspace-settings-store";
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import { parseRepoId } from "../electron/ssh-types";
@@ -384,7 +385,7 @@ function reducer(state: AppState, action: Action): AppState {
           : state.repoOrder;
       // Deferred repos are sidebar placeholders — don't activate them
       // automatically. Activating a deferred repo causes every
-      // activeRepo-watching hook (useWorkspaceSettings, useWorkspaceTheme,
+      // activeRepo-watching hook (workspace settings, tracking patterns,
       // TimelineView, etc.) to fire RPCs against an id the agent has never
       // seen, producing "repository not open" errors and unbounded memory
       // growth from concurrent git_log / read_text calls.
@@ -691,7 +692,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     };
 
     const protectPendingEdits = (event: BeforeUnloadEvent) => {
-      if (!fileBuffers.pendingCount()) return;
+      if (!fileBuffers.pendingCount() && !workspaceDocuments.pendingCount()) return;
       event.preventDefault();
       event.returnValue = "";
     };

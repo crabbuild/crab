@@ -125,6 +125,11 @@ export class Agent extends EventEmitter {
 
   hasWorktree(repoId: string): boolean { return this.repositories.get(repoId)?.method === "open_local"; }
 
+  worktreePath(repoId: string): string | undefined {
+    const repository = this.repositories.get(repoId);
+    return repository?.method === "open_local" && typeof repository.params.path === "string" ? repository.params.path : undefined;
+  }
+
   private async prepare(run: Runtime): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

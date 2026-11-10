@@ -29,10 +29,9 @@ provider qualification run alongside each slice, rather than after all features.
 
 | Priority | Deliverable | Consolidation boundary | Closure proof |
 | --- | --- | --- | --- |
-| P0 | Repository-owned workspace state | One repository-owned settings document serves theme, settings and tasks; provider-correct reads/writes and serialized read-modify-write preserve sibling keys. | Three hooks independently update `.crab/desktop/settings.json`, swallow read failures and use path-only writes. Remote routing, failed/truncated reads, concurrent edits, shared theme propagation, read-only guards and actual Settings scope application remain open. Closure requires local/native-down and real SSH UI edits with unrelated keys/index preserved, visible failures and no writes to the wrong machine. |
 | P0 | Repository and native recovery | `ProviderRegistry` owns routing; local process and SSH bootstrap owners own readiness; each repository/capture belongs to its live native session. One encrypted vault notifies local/SDK and SSH owners when identities change. | Packaged local/SSH recovery, storage replacement/cold bindings, SDK bookmark restore, blocked SDK cancellation and Settings before native construction have bounded proof below. Queued metadata now joins its own repository admission independently; Changes status, selected comparisons and staging patches refresh by native epoch. One acknowledged text/Markdown buffer owner now retains failed edits across tab disposal, repository switching and SSH reconnect; cancelled quit preserves services. Remaining: repository-switch repeatability under suite load, notebook/kernel/query and media state, auxiliary comparison UI proof, live removal during admitted opening and real multi-hop cancellation. |
-| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eight native checks, eleven local filesystem cases and packaged macOS local/SSH proof pass. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
-| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. |
+| P0 | Physical write integrity | Native text/binary writes and Electron local text saves each have one publication owner at their filesystem boundary. Local saves remain independent of native readiness. | Native and local saves use unique same-directory temporaries, preserve modes, respect read-only targets and retain internal symlinks. Eleven native publication checks, thirteen local filesystem cases and packaged macOS local/SSH proof pass. Status snapshots exclude only exact owned temporaries overlapping a scan; user files remain visible, and unrelated worktrees remain independent. Full mutation workflows, filesystem metadata beyond POSIX modes and other platform/provider qualification remain open. |
+| P1 | Complete file and repository workflow | Native captured reads serve all views; physical file mutations have one provider owner; attribute routing selects Crab/LFS correctly. | Create/edit/rename/delete, track/stage/commit/push/lazy clone, bulk hydrate/dehydrate, then compare exact bytes and unchanged unrelated index entries. Remote create/rename/delete, task-worktree ownership and standalone file-editor RPC parity, ordinary Git captures, review/mode diffs and bounded plain-text pointers remain open. Optional SDK configuration reads still need typed path absence distinct from missing content objects. |
 | P1 | Recoverable transfers and safe storage | Repository-owned operations and verified read/cache owners; no component-owned retry queue or second reconstruction path. | Interrupt a cold transfer, close the view, disconnect/restart, retry from supported state, and prove cleanup/publication outcomes. Durable journals, network counters, budgets, SDK namespace eviction and offline retention remain open. |
 | P1 | Truthful inspection and bounded formats | Inspector data comes from captured native/storage metadata; parsers share decoded/query budgets. | Local/cache/available/pending bytes agree with storage; unknown values stay unknown; malformed/oversized inputs fail visibly without blocking the renderer. Other format comparisons and parser/query budgets remain open. |
 
@@ -42,20 +41,14 @@ repository operations for transfers. Files, Activity and Settings expose those
 capabilities without adding primary navigation destinations. A working read or
 materialization smoke does not imply mutation parity or durable recovery.
 
-The next data-integrity slice is repository-owned workspace state. Atomic
-publication protects a single submitted document; it does not prevent three
-independent read-modify-write callers from losing each other's keys. Keep that
-work with the existing repository/provider boundary, ahead of additional
-mutation entry points or transfer controls.
+Repository-owned workspace state now has the bounded local/SSH and read-only
+snapshot proof below. The next implementation work is recovery parity and the
+complete physical-file workflow; broader provider/platform qualification stays
+alongside each slice.
 
 ### Next bounded slices
 
-1. Consolidate repository-owned workspace settings before adding mutation paths.
-   The three document writers need provider-correct reads/writes, serialized
-   updates, failed/truncated-read protection and effective Settings scope.
-   Qualify concurrent theme/task/settings changes, local native failure and real
-   SSH edits before deleting their path-only writer.
-2. Finish recovery parity before extending transfer features. The shared working
+1. Finish recovery parity before extending transfer features. The shared working
    buffer now preserves pending text/Markdown through tab disposal/reopening,
    repository switching and SSH reconnect. It replaces both local save loops
    and the remote save hook, and writes through the existing provider. Next,
@@ -69,19 +62,23 @@ mutation entry points or transfer controls.
    broaden provider/profile coverage. Prove removal during an admitted opening
    against held real storage, and cancellation through actual jump hosts. Keep
    refreshes at their existing owner; add no component retry queue.
-3. Local and native publication/mode integrity have bounded proof below. Qualify
-   other platforms/providers and complete one real repository round trip for each Crab/LFS profile: physical
-   file create/edit/rename/delete, attribute setup, track, stage, commit, push,
-   lazy clone, bulk hydrate and dehydrate. Remote physical mutations need one
-   working provider path; unsupported native filesystem RPCs must not masquerade
+2. Local and native publication/mode integrity have bounded proof below. Qualify
+   other platforms/providers and complete one real repository round trip for each
+   Crab/LFS profile: physical file create/edit/rename/delete, attribute setup,
+   track, stage, commit, push, lazy clone, bulk hydrate and dehydrate. Remote
+   physical mutations and task file viewing need one
+   admitted worktree/provider owner; a remote task path must never become a local
+   filesystem read. Optional SDK configuration files need typed absence rather
+   than broad NotFound suppression. Complete these boundaries before claiming
+   editing parity; unsupported native filesystem RPCs must not masquerade
    as complete remote editing. Preserve content identities, unrelated index
    entries, executable modes and review/history source semantics.
-4. Deepen existing operation and cache owners: durable terminal state, supported
+3. Deepen existing operation and cache owners: durable terminal state, supported
    retry/resume after cold-transfer interruption, acknowledged cancellation,
    logical versus network counters, active-reader pins, budget enforcement and
    offline retention. Closing a view must not discard ownership or report a
    cancelled transfer before native cleanup finishes.
-5. Finish metadata and format bounds on the existing captured-reader path:
+4. Finish metadata and format bounds on the existing captured-reader path:
    physical/cache/available/pending bytes, decoded Parquet/query limits,
    bounded plain-text pointers and remaining format comparisons. Keep unknown
    measurements unknown and give oversized or malformed content a visible error.
@@ -94,6 +91,116 @@ They do not require additional primary navigation destinations or a second
 reconstruction, credential, retry or cache implementation. Every slice retains
 its own byte-identity, failure and packaged-action evidence; provider/profile
 and cross-platform CI qualification remains a release gate for the whole matrix.
+
+## Publication visibility checkpoint
+
+Concurrent native saves exposed a file-tree selection race in the packaged SSH
+flow: Git reported active same-directory publication temporaries as untracked
+files, then removed their rows as saves completed. Pointer-event and tree-row
+traces showed the requested row moving before pointerdown; the editor correctly
+opened the row actually clicked. Two of three instrumented repetitions failed.
+A separate deterministic local test held rename and proved the real status
+response included the acquired temporary while it existed.
+
+Native and Electron publication owners now retain exact temporary identities
+across overlapping status scans. Acquisition and registration are coordinated;
+a scan retains names observed before or during its Git query, including names
+already removed before the query returns. Only untracked entries with those
+exact identities are omitted. There is no filename-prefix blacklist: real user
+files named `.crab-write-*` remain visible. Native registries are scoped to the
+physical worktree; Node snapshots wait only for overlapping exclusive opens
+inside their physical root. A blocked repository cannot stall another one's
+status scan. Publication, checked cleanup, byte acknowledgement and native
+shutdown ownership retain the existing canonical paths.
+
+Eleven native publication checks and thirteen local filesystem checks pass.
+The packaged SSH failure scenario passes three consecutive runs, preserving
+exact bytes, modes and unrelated index entries while clicking the intended
+files. The packaged local test holds an actual save before rename, observes its
+temporary on disk, and confirms the real status response omits only that owned
+name while retaining the similarly named user file. Publication failure remains
+visible, and native-offline retry still persists the latest buffer. No forced
+click, filename blacklist or extra tree delay is used to obtain this proof.
+The broader workflow, recovery and provider/platform requirements above remain
+separate gates.
+
+## Shared workspace-document checkpoint
+
+Theme, settings and tasks now share one acknowledged document and one serialized
+read-modify-write owner in the application's renderer. Every mutation reads the
+current complete document after the preceding acknowledgement, so independent
+views and repeated task additions preserve sibling keys. Failed reads are never
+an empty-document default. Invalid JSON, invalid supported values/tasks,
+non-text sources and documents over 64 KiB block mutation visibly. Missing files
+are the explicit create case. Failed saves retain the acknowledged state; task
+input remains available for retry. Pending document saves participate in the
+existing quit decision before native teardown.
+
+Physical reads and writes use the selected repository provider. Local bounded
+Node reads/saves remain independent of native readiness. Remote reads use the
+required repository ID, relative path, byte limit and admitted native session.
+Only the typed missing-path response is absence; unavailable repositories,
+transport errors and truncated replies propagate. Mutable reads have no stale
+reconnect cache. A connection replacement before publication rejects the old
+read. Separate repositories have independent queues. Tracking configuration now
+uses this provider-correct physical read path too; SDK snapshot read failures
+stay visible, with missing optional SDK paths still requiring precise native
+classification in the broader workflow qualification.
+
+Settings scope reaches actual update handlers and effective consumers. User
+preferences persist separately; supported workspace overrides reach application
+theme, Monaco, previews, comparisons and other settings consumers together.
+Use User value removes one override. Device paths, credentials, agent execution,
+telemetry and global services remain User-controlled. Read-only SDK snapshots
+cannot enable workspace or task mutations. The separate workspace-theme hook
+and competing theme effect are removed, along with all path-only document
+writers and their write IPC overload. The task file viewer still has a path-only
+local read surface; canonical task-worktree/SSH ownership remains explicit
+follow-up work rather than a claim of complete editor parity.
+
+Fourteen document/filesystem cases cover concurrent theme/settings/task updates,
+missing versus unreadable/malformed/oversized data, failed publication, native
+owner replacement, per-repository queue independence and read-only/device
+boundaries. Seven focused suites pass 120 cases. Thirteen native RPC/publication
+cases pass, including typed path absence distinct from an unavailable repository
+and worktree-scoped temporary ownership.
+Project/spec types, Rust format, native/renderer/Electron builds and unsigned
+macOS arm64 packaging pass. The native CLI/agent pair and Darwin SSH archive are
+rebuilt for the changed error contract; all 909 renderer/Electron assets match.
+
+Packaged local and real SSH UI actions qualify setting/task serialization and
+consumer behavior. Local proof holds a settings publication, queues another
+field, cancels Quit with native ping still working, then preserves both fields
+and unrelated keys. User/theme override changes reach the actual app and editor
+font; Use User value restores the underlying preference. A real read failure
+retains the task input and original document; retry, toggle and delete persist.
+Editor and settings saves work while repository metadata is offline and native
+reopening is blocked. SSH creates a missing document, preserves externally
+updated keys and tasks, and edits again after reconnect with the correct
+repository/path on the native wire. Modes, index bytes and temporary cleanup
+remain qualified by these scenarios. All 22 packaged cases pass together in
+one grouped run, including native/media recovery, selected-source repair, device
+settings before native construction, local/SSH identity replacement, encrypted
+cold restoration and same-URL SDK bookmark restoration. The SDK GUI confirms
+workspace/task controls are disabled while the User theme still applies; the
+read-only proxies record zero writes. Suite-load repeatability remains a release gate. A later grouped run completed
+all cold-restart byte/pointer assertions but timed out while closing one app
+(21 passed, one failed). Three isolated lifecycle-instrumented repetitions
+passed with every observed shutdown owner completing; the grouped timeout
+cause remains unproven. It is not claimed fixed by publication filtering.
+
+Clippy is not passing: its production target retains the three existing forge/
+directory-scanner errors. All-target checking also reports existing test
+`unwrap`/`expect`/`panic` lints from the preceding checkpoint. The current
+production check confirms all three failing source locations are unchanged;
+the new publication owner and RPC changes add no production diagnostics. Current
+`origin/main` lacks these desktop paths, so no main-baseline pass is claimed.
+ESLint still lacks configuration. These checks are not reported as green.
+
+Cross-platform/provider profiles and the complete large-file acceptance matrix
+remain open. This owner serializes this application's writers; it does not add
+cross-process document locks, crash drafts or durable transfer journals. No
+dependency, lockfile, SDK API snapshot or inventory changes are introduced.
 
 ## Local file-publication and workspace-state checkpoint
 
@@ -141,30 +248,11 @@ modes are qualified; ACL/xattr/ownership and hardlink behavior are not. File
 synchronization does not claim power-loss durability of the directory rename.
 Cross-platform/provider proof and the complete acceptance matrix remain open.
 
-The settings caller audit found a distinct unfinished contract:
-
-- `useWorkspaceSettings`, `useWorkspaceTheme` and `useTaskList` independently
-  read the same 64 KiB-limited document, turn all read failures into an empty
-  document and ignore truncation. Concurrent updates or a failed read can erase
-  sibling keys. Local writes outlive the native reads they currently depend on.
-- Those three writers use two-argument path-only IPC, including when the repo
-  path is an SSH/storage URL. The absolute-path guard now prevents wrong-machine
-  writes, but does not supply remote settings functionality. `RemoteProvider`
-  reads still use the standalone editor's `read_text` call without its required
-  repository ID; converting only the writer is insufficient.
-- The Settings scope selector does not reach the section update handlers.
-  Workspace availability checks only for a path, not a writable physical
-  worktree. Theme consumers each load private hook state, and task/theme action
-  failures need visible retained state rather than unhandled rejections.
-
-Consolidate these into one repository-owned document with provider-correct
-bounded reads, serialized read-modify-write, shared acknowledged state and
-visible errors. Failed, truncated or malformed reads must block mutation;
-missing documents are the explicit create case. Apply scope through actual
-setting consumers, disable mutation for SDK snapshots and prove concurrent
-theme/task/settings changes, native-down local saves and SSH reconnect through
-real UI actions while preserving unrelated keys and index bytes. Remove the
-path-only writer after its three callers have a complete canonical path.
+That checkpoint's settings audit found three independent writers, swallowed
+read errors, path-only remote writes and a cosmetic scope selector. The shared
+workspace-document checkpoint above supersedes those implementations; its
+provider/platform limits remain explicit. Remote CRUD, the standalone editor
+and task-file ownership are separate unfinished workflow surfaces.
 
 ## Native file-publication checkpoint
 
@@ -291,7 +379,8 @@ buffer. Local text and Markdown saves use the existing repository provider,
 serialize writes and acknowledge only the content actually persisted. Failures
 retain pending content and offer Retry saving. A clean editor's blur is a no-op,
 so clicking repository Retry cannot submit an old unedited buffer. Generic
-workspace configuration writes retain their separate unscoped IPC use case.
+workspace configuration still used unscoped IPC at this checkpoint; the shared
+workspace-document owner above now replaces that path.
 At this earlier checkpoint, the remote save hook only rejected older
 acknowledgements and recorded active writes. The shared buffer checkpoint above
 replaces it and qualifies tab ownership and the repository-scoped SSH writer.

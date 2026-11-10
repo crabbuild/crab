@@ -14,7 +14,8 @@ import { shell } from "electron";
 
 import { fullCapabilities, noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
 import { Agent } from "./agent";
-import { writeTextAtomically } from "./file-write";
+import { captureFilePublications, writeTextAtomically } from "./file-write";
+import { readTextFile } from "./file-read";
 import {
   BaseProvider,
   FsCreateResult,
@@ -112,7 +113,15 @@ export class LocalProvider extends BaseProvider {
   // ── Core RPC dispatch ──────────────────────────────────────────
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
-    return this.agent.request(method, params);
+    const root = method === "git_status_porcelain" ? this.agent.worktreePath(String(params.repo_id)) : undefined;
+    if (!root) return this.agent.request(method, params);
+    const physical = await fs.promises.realpath(root);
+    const snapshot = captureFilePublications(physical);
+    let owned: Set<string>;
+    let result: { entries: Array<{ path: string; code: string }> };
+    try { result = await this.agent.request(method, params) as typeof result; }
+    finally { owned = await snapshot.finish(); }
+    return { ...result, entries: result.entries.filter(entry => entry.code !== "??" || !owned.has(path.join(physical, entry.path))) };
   }
 
   nativeSession(repoId: string): string | null { return this.agent.repositorySession(repoId); }
@@ -252,20 +261,9 @@ export class LocalProvider extends BaseProvider {
   async fsRead(
     _repoId: string,
     fullPath: string,
+    maxBytes?: number,
   ): Promise<FsReadResult> {
-    try {
-      const stat = await fs.promises.stat(fullPath);
-      if (stat.isDirectory()) {
-        return { exists: true, content: null };
-      }
-      const content = await fs.promises.readFile(fullPath, "utf8");
-      return { exists: true, content };
-    } catch (err: unknown) {
-      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
-        return { exists: false, content: null };
-      }
-      throw err;
-    }
+    return readTextFile(fullPath, maxBytes);
   }
 
   // ── Capabilities ───────────────────────────────────────────────

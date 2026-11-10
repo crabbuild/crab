@@ -1095,13 +1095,10 @@ declare global {
         (repoId: string, fullPath: string, useTrash?: boolean): Promise<{ deleted: string; trash: boolean }>;
       };
       fsOpenExternal: (fullPath: string) => Promise<void>;
-      fsWriteFile: {
-        (fullPath: string, content: string): Promise<{ path: string; written: number }>;
-        (repoId: string, fullPath: string, content: string): Promise<{ path: string; written: number }>;
-      };
+      fsWriteFile: (repoId: string, fullPath: string, content: string) => Promise<{ path: string; written: number }>;
       fsReadFile: {
         (fullPath: string): Promise<{ exists: boolean; content: string | null }>;
-        (repoId: string, fullPath: string): Promise<{ exists: boolean; content: string | null }>;
+        (repoId: string, fullPath: string, maxBytes?: number): Promise<{ exists: boolean; content: string | null }>;
       };
       fsReadImage: (fullPath: string) => Promise<{
         exists: boolean;
@@ -2976,12 +2973,9 @@ export const mainProcess = {
     (repoId: string, fullPath: string, useTrash?: boolean): Promise<{ deleted: string; trash: boolean }>;
   },
   fsOpenExternal: (fullPath: string) => window.crab.fsOpenExternal(fullPath),
-  fsWriteFile: (...args: [string, string] | [string, string, string]) => {
-    if (args.length === 3) return window.crab.fsWriteFile(args[0], args[1], args[2]);
-    return window.crab.fsWriteFile(args[0], args[1]);
-  },
-  fsReadFile: (fullPath: string) =>
-    window.crab.fsReadFile(fullPath),
+  fsWriteFile: (repoId: string, fullPath: string, content: string) => window.crab.fsWriteFile(repoId, fullPath, content),
+  fsReadFile: (...args: [string] | [string, string, number?]) => args.length === 1
+    ? window.crab.fsReadFile(args[0]) : window.crab.fsReadFile(args[0], args[1], args[2]),
   fsReadImage: (fullPath: string) =>
     window.crab.fsReadImage(fullPath),
   // File system watcher
