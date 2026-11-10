@@ -1682,3 +1682,28 @@ npm exec playwright -- test --project agent-requests --workers 1
 ```
 
 They use the existing Vite test server and an isolated installed-Chrome profile.
+
+## Command cancellation follow-up (2026-11-10)
+
+- An actual Node command leader that installs a TERM handler reproduces a
+  cancellation hang: the local process owner starts descendant retirement only
+  after leader exit, while command cancellation previously sent only TERM.
+  The new live regression fails before the fix and proves PID disappearance
+  after it. Its cleanup waits for the owned command even on assertion failure.
+  Node documents that [sending a signal does not prove termination](https://nodejs.org/download/release/v22.20.0/docs/api/child_process.html#subprocesskillsignal).
+- `runAgentCommand` escalates cancelled, timed-out, or over-limit commands to
+  KILL after five seconds. Repeated failure notifications do not restart that
+  deadline. Completion still requires physical closure; uncertain closure keeps
+  the existing checkpoint writer fence. Provider adapters retain their own
+  shutdown ladders; SSH commands keep the captured channel and native stop
+  receipt, without transmitting local credentials.
+- All 81 scoped command/checkpoint/SSH-detection checks and all three real local
+  process cases pass. The two timeout/output-limit cases also prove that sending
+  KILL does not itself release the writer. Production and touched-fixture types,
+  Electron build, and diff checks pass. Evidence: `command-leader-before.json`,
+  `command-leader-after.json`, and `command-leader-scoped.json`.
+- The packaged worktree-detail failure remains open. Two additional current
+  package probes pass, including compact-to-wide resizing and branch/worktree
+  navigation; neither reproduces or explains the earlier combined-suite failure.
+  Windows descendant ownership and packaged restart stability remain release
+  gates.

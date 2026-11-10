@@ -86,6 +86,8 @@ describe("owned workspace command capture", () => {
     if (reason === "timeout") await vi.advanceTimersByTimeAsync(30_000);
     else child.stderr.write(Buffer.alloc(1024 * 1024 + 1));
     expect({ settled, signals: child.kill.mock.calls }).toEqual({ settled: false, signals: [["SIGTERM"]] });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect({ settled, signals: child.kill.mock.calls }).toEqual({ settled: false, signals: [["SIGTERM"], ["SIGKILL"]] });
     finish();
     await expect(captured).rejects.toThrow(reason === "timeout" ? "timed out" : "output limit");
   });

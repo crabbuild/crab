@@ -128,8 +128,16 @@ export async function runAgentCommand(factory: AgentProcessFactory, binary: stri
   const output: Buffer[][] = [[], []];
   const sizes = [0, 0];
   let failure: Error | undefined;
+  let escalation: ReturnType<typeof setTimeout> | undefined;
   let exitCode: number | null = null;
-  const stop = (error: Error) => { failure ??= error; owner.process.kill("SIGTERM"); };
+  const stop = (error: Error) => {
+    if (failure) return;
+    failure = error;
+    owner.process.kill("SIGTERM");
+    // A command leader may ignore TERM and never enter exit-driven cleanup.
+    // Escalate once, retaining its owner until physical closure is confirmed.
+    escalation = setTimeout(() => owner.process.kill("SIGKILL"), 5000);
+  };
   owner.process.on("error", (error: Error) => stop(error));
   owner.process.once("close", (code: number | null) => { exitCode = code; });
   for (const [index, stream] of [owner.process.stdout, owner.process.stderr].entries()) stream?.on("data", (bytes: Buffer) => {
@@ -152,5 +160,5 @@ export async function runAgentCommand(factory: AgentProcessFactory, binary: stri
     if (failure) throw failure;
     if (exitCode !== 0) throw Object.assign(new Error(`${binary} exited with code ${exitCode}: ${stderr}`), { code: exitCode, stderr });
     return { stdout };
-  } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+  } finally { clearTimeout(timer); clearTimeout(escalation); signal?.removeEventListener("abort", abort); }
 }
