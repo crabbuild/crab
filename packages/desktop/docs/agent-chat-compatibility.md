@@ -1481,6 +1481,25 @@ does not contain the desktop adapter; sibling comparisons use `crab-v2`.
   This qualifies the inherited server environment on macOS loopback. Minimal
   account/login-shell PATH setup and cross-platform deployment remain gates.
 
+- Native Clippy's three fatal unwrap findings are resolved without suppressions.
+  Review comments group into typed nested maps, preserving their JSON path/line
+  keys and comment order. Repository size skips failed entry-type reads during
+  its existing best-effort scan instead of retrying metadata with a panic.
+  It continues to exclude symlinks, unlike the separate cache-size helper;
+  [DirEntry's contract](https://doc.rust-lang.org/std/fs/struct.DirEntry.html#method.file_type)
+  explains the platform-dependent metadata lookup and non-following behavior.
+  Current-source Clippy reproduces all three errors before the fix and passes
+  afterward; 164 existing sidecar warnings remain. Six forge tests and the new
+  symlink-boundary test pass. The rebuilt sidecar's actual RPCs return an exact
+  37-byte size delta while excluding a loop symlink, then preserve grouped
+  Unicode-path comments across two files and multiple lines through an owned
+  HTTP forge fixture. It closes with exit zero. Rust formatting and diff checks
+  pass; no dependency or lockfile changed. Evidence: `native-clippy-before-current.log`,
+  `native-clippy-fixed.log`, `native-size-test.log`, `native-forge-test.log`,
+  `native-clippy-agent-build.log` and `native-clippy-wire-smoke.json` in the owned
+  output. This removes the fatal Clippy blocker, not the remaining warning debt
+  or the desktop ESLint configuration gate.
+
 ## Remaining completion gates
 
 - Extend startup/cancellation qualification to the remaining supported OSes;

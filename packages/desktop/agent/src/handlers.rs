@@ -5469,6 +5469,20 @@ mod tests {
         (td, root)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn repository_size_excludes_symlinks() {
+        let root = TempDir::new().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("first"), b"abc").unwrap();
+        std::fs::write(nested.join("second"), b"de").unwrap();
+        std::os::unix::fs::symlink(root.path(), nested.join("loop")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("missing"), nested.join("broken")).unwrap();
+
+        assert_eq!(dir_size_bytes(root.path()), 5);
+    }
+
     #[tokio::test]
     async fn git_config_get_returns_set_values() {
         let (_td, root) = git_init_repo();
@@ -8192,9 +8206,10 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
     let mut total: u64 = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            let ft = entry
-                .file_type()
-                .unwrap_or_else(|_| std::fs::metadata(entry.path()).unwrap().file_type());
+            // Concurrent GC can remove entries during this best-effort scan.
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             if ft.is_file() {
                 total += entry.metadata().map(|m| m.len()).unwrap_or(0);
             } else if ft.is_dir() {
