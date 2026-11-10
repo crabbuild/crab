@@ -11,7 +11,7 @@
 //! regex. Keeping the agent dumb here avoids coupling desktop to the
 //! exact progress format.
 
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -27,6 +27,13 @@ pub(crate) fn git_command() -> Command {
     // commands that consume data supply their own stdin explicitly.
     command.stdin(Stdio::null());
     command
+}
+
+pub(crate) async fn output(command: &mut Command) -> std::io::Result<Output> {
+    #[cfg(unix)]
+    return crate::native_process::mutation::output(command).await;
+    #[cfg(not(unix))]
+    command.output().await
 }
 
 pub fn command() -> Result<Command> {

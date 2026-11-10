@@ -463,6 +463,12 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "task_apply" => {
             let p: TaskApplyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
+            #[cfg(unix)]
+            return state
+                .native_processes
+                .run_mutation(async move { task_apply(&work_dir, p).await })
+                .await;
+            #[cfg(not(unix))]
             task_apply(&work_dir, p).await
         }
         "task_discard" => {
@@ -1869,6 +1875,26 @@ async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
             remediation: "Restore its branch before applying changes".into(),
             source: Some(Box::new(source)),
         })?;
+    workspace.begin_apply()?;
+    let result =
+        apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await;
+    #[cfg(unix)]
+    let retain = crate::native_process::mutation::requires_recovery();
+    #[cfg(not(unix))]
+    let retain = false;
+    if !retain && let Err(error) = workspace.finish_apply() {
+        tracing::warn!(%error, "could not clear task Apply fence");
+    }
+    result
+}
+
+async fn apply_workspace(
+    repo_dir: &Path,
+    workspace: &crate::task_workspace::TaskWorkspace,
+    branch: &str,
+    target_branch: &str,
+    target_ref: &str,
+) -> Result<Value> {
     let wt = workspace.root();
     // Staging or commit failure cannot merge a stale task branch and then
     // delete the workspace containing the user's uncommitted changes.
@@ -1887,22 +1913,18 @@ async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
         .await?;
     }
 
-    let commit_msg = format!("Merge agent task branch '{}'", p.branch);
+    let commit_msg = format!("Merge agent task branch '{branch}'");
 
-    let current_ref = crate::git_ref_merge::current_branch_ref(&repo_dir).await?;
+    let current_ref = crate::git_ref_merge::current_branch_ref(repo_dir).await?;
 
     let mut merge_commit: Option<String> = None;
-    let merge_result = if current_ref.as_deref() == Some(target_ref.as_str()) {
-        run_git_cmd(
-            &repo_dir,
-            &["merge", &p.branch, "--no-ff", "-m", &commit_msg],
-        )
-        .await
+    let merge_result = if current_ref.as_deref() == Some(target_ref) {
+        run_git_cmd(repo_dir, &["merge", branch, "--no-ff", "-m", &commit_msg]).await
     } else {
         match crate::git_ref_merge::merge_commit_without_checkout(
-            &repo_dir,
-            &p.branch,
-            &target_branch,
+            repo_dir,
+            branch,
+            target_branch,
             &commit_msg,
         )
         .await?
@@ -1931,10 +1953,9 @@ async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
         let err_str = format!("{}", e);
         if err_str.contains("CONFLICT") || err_str.contains("Automatic merge failed") {
             // Abort the merge and report the conflict.
-            let _ = run_git_cmd(&repo_dir, &["merge", "--abort"]).await;
+            let _ = run_git_cmd(repo_dir, &["merge", "--abort"]).await;
             return Err(AgentError::Other(format!(
-                "Merge conflict when applying task branch '{}'. Merge aborted.",
-                p.branch
+                "Merge conflict when applying task branch '{branch}'. Merge aborted."
             )));
         }
         merge_result?;
@@ -2070,14 +2091,8 @@ async fn check_agent_running_in_worktree(worktree_path: &str) -> bool {
 // ─── Task Apply/Discard Helpers ─────────────────────────────────────
 /// Run a git command in the given directory and return stdout.
 async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
+    let mut command = shellout::git_command();
+    let out = shellout::output(command.args(args).current_dir(cwd)).await?;
 
     if !out.status.success() {
         let status = out.status.code().unwrap_or(-1);
@@ -2090,20 +2105,7 @@ async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
 
 /// Run a git command and return stdout, mapping failures to AgentError.
 pub(crate) async fn run_git_worktree_cmd(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
-        .args(args)
-        .current_dir(work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-
-    if !out.status.success() {
-        let status = out.status.code().unwrap_or(-1);
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        return Err(AgentError::Cli { status, stderr });
-    }
-
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(run_git_cmd(work_dir, args).await?.trim().to_owned())
 }
 
 // ─── Write text ─────────────────────────────────────────────────────

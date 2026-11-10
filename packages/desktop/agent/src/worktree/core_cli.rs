@@ -168,15 +168,14 @@ async fn run_worktree_mutation_json<T: DeserializeOwned>(
 
 async fn run_crab_json<T: DeserializeOwned>(work_dir: &Path, args: &[String]) -> Result<T> {
     let bin = resolved_crab_bin(work_dir);
-    let output = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .args(args)
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
+        .stderr(std::process::Stdio::piped());
+    let output = crate::shellout::output(&mut command).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

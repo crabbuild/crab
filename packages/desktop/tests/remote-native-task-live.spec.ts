@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -25,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-deleted", "apply-target-detached", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-deleted", "apply-target-detached", "apply-eof", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -46,7 +47,8 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
       CODEX_HOME: process.env.CODEX_HOME ?? path.join(homedir(), ".codex"), CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude") });
     const client = await server.connect();
-    const channel = await new Promise<ClientChannel>((resolve, reject) => client.exec(`exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
+    const openAgent = () => new Promise<ClientChannel>((resolve, reject) => client.exec(`exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
+    const channel = await openAgent();
     let diagnostics = ""; channel.stderr.on("data", (bytes: Buffer) => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
     const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
     const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
@@ -117,6 +119,65 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
             captured: mode === "apply-target-deleted" ? "main" : undefined, status: "stopped" });
           await orchestrator.discardTask(task.id);
         }
+      } else if (mode === "apply-eof") {
+        const worktree = task.worktreePath;
+        const head = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+        const started = path.join(root, "hook-pid");
+        const release = path.join(root, "release-hook");
+        const late = path.join(worktree, "late.txt");
+        await writeFile(path.join(worktree, "pending.txt"), "pending source bytes\n");
+        await mkdir(path.join(repo, ".git", "hooks"), { recursive: true });
+        await writeFile(path.join(repo, ".git", "hooks", "pre-commit"), `#!/bin/sh
+printf '%s\\n' "$$" > ${quote(started)}
+for i in $(seq 1 300); do
+  if [ -f ${quote(release)} ]; then
+    printf 'late write\\n' > ${quote(late)}
+    exit 0
+  fi
+  sleep 0.1
+done
+exit 1
+`, { mode: 0o755 });
+        const apply = orchestrator.applyTask(task.id).then(() => true, () => false);
+        let hookPid: number | undefined;
+        const hookAlive = () => {
+          if (!hookPid) return false;
+          try { process.kill(hookPid, 0); return true; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
+        };
+        try {
+          await vi.waitFor(async () => {
+            hookPid = Number((await readFile(started, "utf8")).trim());
+            expect(hookPid).toBeGreaterThan(1);
+          }, { timeout: 15_000 });
+          const discard = { repo_id: repoId, task_id: task.id, branch: task.branch, worktree_path: worktree };
+          await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_workspace_busy" } });
+          channel.end();
+          await closed;
+          expect({ reportedApplied: await apply, writerAlive: hookAlive(),
+            source: (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout,
+            target: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            bytes: await readFile(path.join(worktree, "pending.txt"), "utf8")
+          }).toEqual({ reportedApplied: false, writerAlive: false, source: head, target: head, bytes: "pending source bytes\n" });
+          const replacement = await openAgent();
+          replacement.stderr.resume();
+          const replacementClosed = new Promise<void>(resolve => replacement.once("close", resolve));
+          try {
+            router.attachChannel("fixture", replacement);
+            await router.restoreRepositories("fixture");
+            await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+            await expect(router.sendToRemoteAgent("fixture", "native_process_open", {
+              process_id: randomUUID(), task_id: task.id, executable: "/bin/true", args: [], cwd: worktree,
+            })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+          } finally {
+            replacement.end();
+            await replacementClosed;
+          }
+        } finally {
+          await writeFile(release, "release owned hook if still running\n");
+          await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
+        }
+        expect(existsSync(late)).toBe(false);
       } else if (mode === "checkpoints") {
         const saved = task;
         const factory = remoteAgentProcessFactory(router, "fixture");
@@ -256,12 +317,12 @@ wait "$child"
       if (mode === "codex") {
         await orchestrator.applyTask(task.id);
         expect({ status: task.status, file: await readFile(path.join(repo, "remote-proof.txt"), "utf8") }).toEqual({ status: "applied", file: "remote-three\n" });
-      } else if (!mode.startsWith("apply-target")) {
+      } else if (!mode.startsWith("apply-")) {
         await orchestrator.discardTask(task.id);
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local" || mode === "apply-target") expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-eof") expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

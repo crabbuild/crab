@@ -1,10 +1,9 @@
 use std::io;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use tokio::process::Child;
 use tokio_util::sync::CancellationToken;
-
-use super::Exit;
 
 pub(super) const GRACE: Duration = Duration::from_secs(5);
 
@@ -13,7 +12,7 @@ pub(super) async fn supervise(
     pid: u32,
     stop: &CancellationToken,
     force: &CancellationToken,
-) -> io::Result<Exit> {
+) -> io::Result<ExitStatus> {
     let status = tokio::select! {
         status = child.wait() => status?,
         _ = stop.cancelled() => {
@@ -46,14 +45,7 @@ pub(super) async fn supervise(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
-    Ok(Exit {
-        code: status.code(),
-        signal,
-    })
+    Ok(status)
 }
 
 async fn signal_group(pid: u32, signal: i32) -> io::Result<bool> {

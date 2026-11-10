@@ -10,6 +10,7 @@ use crate::handlers::run_git_worktree_cmd as git;
 use crate::{AgentError, Result};
 
 const OWNER_FILE: &str = "crab-desktop-task-owner.json";
+const APPLY_FENCE: &str = "crab-desktop-task-apply.pending";
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
 struct Identity {
@@ -86,6 +87,7 @@ impl TaskWorkspace {
             ));
         }
         verify_branch(root, &record.branch).await?;
+        require_no_pending_apply(&identity.git_dir)?;
         Ok(Self {
             record,
             _lease: lease,
@@ -96,8 +98,31 @@ impl TaskWorkspace {
         &self.record.identity.root
     }
 
+    pub(crate) fn begin_apply(&self) -> Result<()> {
+        // Publish the fence before launching any writer. The process lease
+        // alone cannot protect a replacement sidecar after an abrupt exit.
+        let git_dir = &self.record.identity.git_dir;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(git_dir.join(APPLY_FENCE))?
+            .sync_all()?;
+        #[cfg(unix)]
+        File::open(git_dir)?.sync_all()?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_apply(&self) -> Result<()> {
+        match std::fs::remove_file(self.record.identity.git_dir.join(APPLY_FENCE)) {
+            Ok(()) => Ok(()),
+            // A successful worktree removal also removes its private Git dir.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(crate) async fn remove(
-        self,
+        &self,
         repo: &Path,
         force: bool,
         delete_branch: bool,
@@ -128,6 +153,19 @@ impl TaskWorkspace {
                 })
             }
         }
+    }
+}
+
+fn require_no_pending_apply(git_dir: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(git_dir.join(APPLY_FENCE)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(AgentError::Managed {
+            kind: "task_apply_pending".into(),
+            message: "An interrupted Apply needs recovery".into(),
+            remediation: "Confirm its Git writers have stopped and inspect the worktree and target branch before retrying".into(),
+            source: None,
+        }),
     }
 }
 
@@ -247,5 +285,6 @@ pub(crate) async fn writer_lease(root: &Path, task_id: Option<uuid::Uuid>) -> Re
         ));
     }
     verify_branch(root, &record.branch).await?;
+    require_no_pending_apply(&git_dir)?;
     Ok(Some(lease))
 }

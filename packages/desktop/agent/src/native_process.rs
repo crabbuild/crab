@@ -1,7 +1,9 @@
 //! Owned native stdio processes. Provider protocol policy stays in Electron.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{Mutex, Semaphore, watch};
+use tokio::sync::{Mutex, Semaphore, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{AgentError, Result, SharedStdout};
@@ -21,6 +23,7 @@ use crate::{AgentError, Result, SharedStdout};
 const CHUNK_BYTES: usize = 16 * 1024;
 const MAX_PROCESSES: usize = 64;
 mod group;
+pub(crate) mod mutation;
 use group::supervise;
 #[cfg(test)]
 use group::{GRACE, group_exists};
@@ -114,6 +117,7 @@ struct Process {
 #[derive(Default)]
 struct Registry {
     closing: bool,
+    stop_mutations: CancellationToken,
     processes: HashMap<String, Arc<Process>>,
     tasks: tokio::task::JoinSet<()>,
 }
@@ -124,6 +128,29 @@ pub(crate) struct NativeProcesses {
 }
 
 impl NativeProcesses {
+    pub(crate) async fn run_mutation(
+        &self,
+        operation: impl Future<Output = Result<Value>> + Send + 'static,
+    ) -> Result<Value> {
+        let (send, receive) = oneshot::channel();
+        {
+            let mut registry = self.registry.lock().await;
+            if registry.closing {
+                return Err(AgentError::Other("Native process owner is closing".into()));
+            }
+            while let Some(result) = registry.tasks.try_join_next() {
+                result.map_err(io::Error::other)?;
+            }
+            // The reply can disappear on EOF. The registry still owns the
+            // operation and its workspace lease until its writer closes.
+            let stop = registry.stop_mutations.child_token();
+            registry.tasks.spawn(async move {
+                let _ = send.send(mutation::scope(stop, operation).await);
+            });
+        }
+        receive.await.map_err(io::Error::other)?
+    }
+
     pub(crate) async fn open(&self, p: Open, out: SharedStdout) -> Result<Value> {
         uuid::Uuid::parse_str(&p.process_id).map_err(|source| AgentError::Managed {
             kind: "native_process_identity".into(),
@@ -208,7 +235,12 @@ impl NativeProcesses {
                     result
                 })
             });
-            let result = supervise(&mut child, pid, &process.stop, &process.force).await;
+            let result = supervise(&mut child, pid, &process.stop, &process.force)
+                .await
+                .map(|status| Exit {
+                    code: status.code(),
+                    signal: status.signal(),
+                });
             if result.is_err() {
                 process.stop.cancel();
             }
@@ -327,6 +359,7 @@ impl NativeProcesses {
         let (processes, mut tasks) = {
             let mut registry = self.registry.lock().await;
             registry.closing = true;
+            registry.stop_mutations.cancel();
             let processes = registry.processes.values().cloned().collect::<Vec<_>>();
             let tasks = std::mem::take(&mut registry.tasks);
             (processes, tasks)

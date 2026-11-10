@@ -2167,9 +2167,35 @@ and `apply-contract-packaged.json`. Git documents the contracts for
 [`symbolic-ref`](https://git-scm.com/docs/git-symbolic-ref) and exact
 [`show-ref --verify`](https://git-scm.com/docs/git-show-ref) lookup.
 
-Apply still has two production blockers. A concurrent checkout between the
-active-branch read and `git merge` can advance the wrong ref while reporting the
-captured destination. Closing sidecar stdin during a source commit hook can
-leave the Git writer running after the sidecar exits and releases its workspace
-lease. Evidence: `apply-branch-race-before.json` and `apply-eof-before.json`.
-The destination preflight does not establish ownership across either boundary.
+A concurrent checkout between the active-branch read and `git merge` can still
+advance the wrong ref while reporting the captured destination. The test in
+`apply-branch-race-before.json` reproduces the race with real Git. Publication
+must coordinate the captured ref, target index and worktree.
+
+## SSH Apply writer shutdown (2026-11-10)
+
+Closing sidecar stdin during a source commit hook previously released the task
+lease while the hook could still write to the checkout. The Unix sidecar now
+registers the accepted Apply separately from its reply, supervises its Git and
+Crab command groups, and waits for them during shutdown. Before staging, Apply
+writes a pending record in the private Git directory. A second sidecar refuses
+to change that workspace after interruption until recovery.
+
+The live SSH regression failed on the old runtime and passes on the rebuilt
+one. It verifies that Discard is blocked during the hook, both refs and pending
+bytes survive EOF, the hook is gone at channel close, and a replacement rejects
+Discard and native writer opens. All eight selected cases passed, including the
+checkpoint and captured destination siblings. Evidence is recorded in
+`apply-eof-ssh-before.json` and `apply-eof-ssh-after.json`.
+
+The two-server SSH endpoint check, eight scoped Rust tests and five enabled
+macOS packaged smoke cases also passed. The storage case requires an isolated
+bucket. The package smoke confirms app startup and shutdown with the rebuilt
+runtime. The SSH fixture supplies the Apply-specific proof.
+
+A separate forced-exit probe confirms the pending record survives sidecar death
+and blocks Apply, Discard and native writer opens. It also confirms that an
+existing hook can survive a hard crash and write afterward. An independent
+process owner, escaped-session and Windows descendant coverage, and durable
+mutation recovery remain release gates. Evidence is recorded in
+`apply-hard-exit-probe.json`.

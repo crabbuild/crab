@@ -224,12 +224,8 @@ impl GitOutput {
 }
 
 async fn git_output(work_dir: &Path, args: &[&str]) -> Result<GitOutput> {
-    let output = crate::shellout::git_command()
-        .args(args)
-        .current_dir(work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
+    let mut command = crate::shellout::git_command();
+    let output = crate::shellout::output(command.args(args).current_dir(work_dir)).await?;
 
     Ok(GitOutput {
         status: output.status.code().unwrap_or(-1),

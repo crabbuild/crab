@@ -125,7 +125,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p "$RUNNER_TEMP/crab-native-task"
-          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-native-task-live.spec.ts -t 'checkpoint|availability|apply-target'
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-native-task-live.spec.ts -t 'checkpoint|availability|apply-target|apply-eof'
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-endpoint-live.spec.ts --maxWorkers 1
       - name: Build installers and unpacked application
         env:
