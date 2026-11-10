@@ -1717,3 +1717,38 @@ They use the existing Vite test server and an isolated installed-Chrome profile.
   cases and the fixture type check pass afterward. Assertions remain intact.
   Evidence: `goal-owner-before.json` and `goal-owner-after.json`. New-head broad
   CI is still required; macOS and Windows had not completed at this check.
+- Further packaged qualification uses an explicitly owned child home: the
+  complete repository/chat/settings/Git/worktree/cold-and-warm-terminal case
+  passes against the unchanged `1d687cd81ab` package. Its fixture sessions close,
+  and the owned daemon's birth time/entry match before graceful shutdown and
+  confirmed PID disappearance. Evidence: `packaged-isolated-current.json` and
+  `packaged-isolated-home.json`. An earlier default-home cold-terminal failure
+  used a pre-existing daemon from another checkout with an unpacked entry;
+  that run does not qualify a fresh current daemon. Existing-daemon upgrade and
+  packaged restart stability still need proof. A separate evaluator inspection
+  failed before module inspection and was discarded; its isolated process tree
+  was stopped and confirmed absent.
+- Windows job `129924483362` passes its native tests and packaged smoke, then
+  still fails packaged-storage fixture cleanup with `WinError 32` after four
+  passing cases. The held directory belongs to the terminal-isolation fixture.
+  Daemon transport is home-scoped while saved layouts are profile-scoped; the
+  profile switch alone does not establish which process retains the directory.
+  Source inspection and Linux success do not replace Windows owner proof.
+
+## Electron runtime release gate (2026-11-10)
+
+`package.json` selects Electron `^33.2.0`; the lockfile and installed package
+resolve to 33.4.11. Electron's [support policy](https://www.electronjs.org/docs/latest/tutorial/electron-timelines)
+covers its three latest stable majors. The [current release index](https://releases.electronjs.org/release?channel=stable)
+lists 43, 44, and 45, with 45.2.3 the newest stable version at this check.
+The current application runtime is outside that support window. Production
+release requires a supported-runtime upgrade with native module rebuilding,
+PTY daemon, preload/IPC, updater, packaged storage, and cross-OS qualification.
+The GNU CLI/sidecar ABI work does not satisfy this application-runtime gate.
+
+A read-only `npm audit --json` of the current lockfile reports 47 vulnerable
+package entries: three critical, 27 high, 15 moderate, and two low. These include
+build/test tools as well as Electron and the updater; the counts do not establish
+application exploitability. Evidence: `desktop-dependency-audit.json`. Upgrade
+and lockfile review remain required; no automatic fix, override, or audit
+suppression was applied.
