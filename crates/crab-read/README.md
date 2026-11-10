@@ -521,6 +521,13 @@ Protected-push admission uses the narrower
 atomic-activation checks but returns only requested refs and fetches no capsule
 or checkpoint payloads.
 
+`open_ref_view_from_root_for_push_discovery` serves Git `list for-push` and native
+`--follow-tags` publication. It resolves individually observed, current-epoch
+heads through fresh activation records without waiting for a stable full
+inventory. It supplies no captured publication tokens: publishers re-read edited
+heads and validate expected old OIDs before CAS. This view cannot authorize
+fetches or read-only previews; those retain stable capture APIs.
+
 Layered pack inventory includes both checkpoint sources and newer frontier
 sources, counting a repeated physical source only once. Pack counts, bytes,
 declared object totals, and visibility identity use the same member inventory.

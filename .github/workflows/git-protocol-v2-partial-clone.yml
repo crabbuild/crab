@@ -39,6 +39,9 @@ on:
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
+      - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -103,6 +106,9 @@ on:
       - "crab/scripts/e2e/test_run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/test_run_existing_ref_push_rustfs.py"
+      - "crab/scripts/e2e/run_rustfs_storage_control.py"
+      - "crab/scripts/e2e/run_push_preflight_control.py"
+      - "crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py"
       - "crab/scripts/e2e/run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/test_run_mixed_team_rustfs.py"
       - "crab/scripts/e2e/run_lfs_qualification.py"
@@ -133,6 +139,12 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      control_run:
+        description: Optional control release-artifact run for paired performance qualification
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -236,6 +248,7 @@ jobs:
         run: |
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_concurrent_push_smoke.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_existing_ref_push_rustfs.py
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py --help > /dev/null
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_mixed_team_rustfs.py
           python3 -m unittest discover -s crab/scripts/e2e -p test_run_lfs_qualification.py
           python3 crab/scripts/verify_git_capability_matrix.py
@@ -418,9 +431,21 @@ jobs:
           GIT_SHA="$(git rev-parse HEAD)" \
             cargo build -p crab --release --locked --features gix-transport
           test -x "${CARGO_TARGET_DIR}/release/crab"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/crab'
+          record = {
+              'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'compiler': subprocess.check_output(['rustc', '-Vv'], text=True),
+              'features': 'default,gix-transport',
+              'sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
+          }
+          (binary.parent / 'candidate-build.json').write_text(json.dumps(record, indent=2) + '\n')
+          PY
           # Artifact upload normalizes file modes, so tar preserves the executable bit.
           tar -C "${CARGO_TARGET_DIR}/release" \
-            -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab
+            -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab candidate-build.json
 
       - name: Upload shared release artifact
         uses: actions/upload-artifact@v4
@@ -517,13 +542,18 @@ jobs:
           dirname "$git_bin" >> "$GITHUB_PATH"
 
       - name: Fetch pinned previous release for rollback qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rollback="$RUNNER_TEMP/gc-fence-rollback"
           mkdir -p "$rollback"
-          curl --fail --location --silent --show-error --retry 3 \
-            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
-            --output "$rollback/crab-linux-x86_64.tar.gz"
+          asset_id="$(gh api repos/crabbuild/crab/releases/tags/v1.0.1 \
+            --jq '.assets[] | select(.name == "crab-linux-x86_64.tar.gz") | .id')"
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/crabbuild/crab/releases/assets/$asset_id" \
+            > "$rollback/crab-linux-x86_64.tar.gz"
           (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
           tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
           test -x "$rollback/crab"
@@ -768,7 +798,7 @@ jobs:
         run: |
           echo "CRAB_PERF_ROOT=$RUNNER_TEMP/crab-existing-ref-${{ matrix.client }}" >> "$GITHUB_ENV"
           sudo apt-get update -y
-          sudo apt-get install -y curl libfuse3-dev pipx
+          sudo apt-get install -y curl libfuse3-dev pipx sysstat
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -794,6 +824,7 @@ jobs:
           git -C "$curl_source" status --porcelain
 
       - name: Start RustFS
+        id: performance-store
         run: |
           mkdir -p "$CRAB_PERF_ROOT/rustfs-data"
           sudo chown 10001:10001 "$CRAB_PERF_ROOT/rustfs-data"
@@ -858,6 +889,31 @@ jobs:
               raise SystemExit("native push p50 must be below 500 ms at every measured concurrency")
           PY
 
+      - name: Isolate storage and client costs after latency qualification
+        if: always() && steps.performance-store.outcome == 'success'
+        run: |
+          pidstat -h -u -r -d -p ALL 1 > "$CRAB_PERF_ROOT/profile-resources.txt" &
+          profile_sampler_pid=$!
+          trap 'kill "$profile_sampler_pid" 2>/dev/null || true; wait "$profile_sampler_pid" 2>/dev/null || true' EXIT
+          python3 crab/scripts/e2e/run_rustfs_storage_control.py \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --output "$CRAB_PERF_ROOT/profile-storage.json"
+          CRAB_LOG=crab_write::capsule_protocol=info,crab::git::capsule_push=debug,crab::cmd::push=info \
+          GIT_TRACE2_EVENT="$CRAB_PERF_ROOT/profile-git-trace.jsonl" \
+            python3 crab/scripts/e2e/run_existing_ref_push_rustfs.py \
+              --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+              --source "$RUNNER_TEMP/Github/curl/curl" \
+              --root "$CRAB_PERF_ROOT" --run-id profile-writers-50 \
+              --bucket crab --endpoint-url "$AWS_ENDPOINT_URL" \
+              --push-client "${{ matrix.client }}" \
+              --agents 50 --branch-update-rounds 2 --max-parallel-pushes 50 \
+              --consumer-mode cold-final --skip-same-branch --no-request-capture \
+              --timeout 600 --push-timeout 600
+          python3 crab/scripts/e2e/run_push_preflight_control.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --root "$CRAB_PERF_ROOT/profile-writers-50" \
+            --output "$CRAB_PERF_ROOT/profile-preflight.json"
+
       - name: Capture RustFS logs and stop fixture
         if: always()
         run: |
@@ -873,8 +929,99 @@ jobs:
           path: |
             ${{ env.CRAB_PERF_ROOT }}/writers-*/artifacts/**
             ${{ env.CRAB_PERF_ROOT }}/writers-*/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/artifacts/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-writers-50/logs/**
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.json
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.jsonl
+            ${{ env.CRAB_PERF_ROOT }}/profile-*.txt
             ${{ env.CRAB_PERF_ROOT }}/latency.json
             ${{ env.CRAB_PERF_ROOT }}/rustfs.log
             ${{ env.CRAB_PERF_ROOT }}/rustfs-image.json
           if-no-files-found: warn
           retention-days: 14
+
+  paired-existing-ref-performance:
+    name: Paired existing-ref throughput (${{ matrix.client }})
+    if: github.event_name == 'workflow_dispatch' && inputs.control_run != ''
+    needs: [release-build]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [native, git]
+    env:
+      PAIR_CLIENT: ${{ matrix.client }}
+      PAIR_CONTROL_RUN: ${{ inputs.control_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fixture dependencies
+        run: |
+          {
+            echo "PAIR_ROOT=$RUNNER_TEMP/crab-paired-$PAIR_CLIENT"
+            echo "PAIR_SOURCE=$RUNNER_TEMP/Github/curl/curl"
+            echo "PAIR_CONTROL=$RUNNER_TEMP/paired-control/crab"
+            echo "PAIR_CANDIDATE=$RUNNER_TEMP/paired-candidate/crab"
+          } >> "$GITHUB_ENV"
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/candidate-archive
+      - uses: actions/download-artifact@v4
+        with:
+          name: crab-protocol-v2-linux-x86_64-${{ inputs.control_run }}
+          run-id: ${{ inputs.control_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/control-archive
+      - name: Verify artifact sources and prepare pinned Git history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$PAIR_CONTROL_RUN" =~ ^[0-9]+$ ]]
+          mkdir -p "$(dirname "$PAIR_CONTROL")" "$(dirname "$PAIR_CANDIDATE")" "$(dirname "$PAIR_SOURCE")"
+          tar -xzf "$RUNNER_TEMP/candidate-archive/${CRAB_RELEASE_ARCHIVE}" -C "$(dirname "$PAIR_CANDIDATE")"
+          tar -xzf "$RUNNER_TEMP/control-archive/crab-protocol-v2-linux-x86_64.tar.gz" -C "$(dirname "$PAIR_CONTROL")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PAIR_CONTROL_RUN" \
+            --jq '{head_sha: .head_sha, run_id: .id, path: .path}' > "$RUNNER_TEMP/control-source.json"
+          control_sha="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/control-source.json"))["head_sha"])')"
+          "$PAIR_CONTROL" version | grep -F "$control_sha"
+          "$PAIR_CANDIDATE" version | grep -F "$(git rev-parse HEAD)"
+          git clone --no-checkout https://github.com/curl/curl.git "$PAIR_SOURCE"
+          git -C "$PAIR_SOURCE" checkout --detach 70c084a0123b468fe7078e3fc72c78e1b66394b6
+      - name: Compare identical 1, 10 and 50-client workloads in ABBA order
+        run: python3 -B crab/scripts/e2e/run_paired_existing_ref_push_rustfs.py
+      - name: Enforce the original native median budget in both candidate trials
+        if: matrix.client == 'native'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = json.loads((Path(os.environ['PAIR_ROOT']) / 'results.json').read_text())
+          candidates = [row for row in rows if row['variant'] == 'candidate']
+          assert len(candidates) == 6
+          assert all(row['p50_ms'] < 500 for row in candidates), candidates
+          PY
+      - name: Stop only this comparison's fixtures
+        if: always()
+        run: |
+          docker ps -aq --filter "label=crab-paired=$GITHUB_RUN_ID-$PAIR_CLIENT" \
+            | xargs -r docker rm -f
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paired-push-${{ matrix.client }}-${{ github.run_id }}
+          path: |
+            ${{ env.PAIR_ROOT }}/*.json
+            ${{ env.PAIR_ROOT }}/*.log
+            ${{ env.PAIR_ROOT }}/*/paired-writers-*/artifacts/**
+            ${{ env.PAIR_ROOT }}/*/paired-writers-*/logs/**
+            ${{ runner.temp }}/control-source.json
+            ${{ runner.temp }}/paired-candidate/candidate-build.json
+          if-no-files-found: error

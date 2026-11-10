@@ -1164,6 +1164,153 @@ async fn capsule_push_publishes_reachable_lfs_dependencies() {
 }
 
 #[tokio::test]
+async fn advertised_sibling_dependencies_survive_ref_deletion_and_checkpoint() {
+    let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+    for lfs in [false, true] {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        commit(source.path(), "root");
+        git(source.path(), &["checkout", "-b", "side"]);
+        let content = b"newly visible sibling asset\n".to_vec();
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let blob = if lfs {
+            pointer.serialize()
+        } else {
+            content.clone()
+        };
+        std::fs::write(source.path().join("asset.bin"), &blob).unwrap();
+        git(source.path(), &["add", "asset.bin"]);
+        git(source.path(), &["commit", "-m", "sibling asset"]);
+        let tip = git(source.path(), &["rev-parse", "HEAD"]);
+        if lfs {
+            let storage =
+                crate::lfs::config::LfsConfig::resolve_storage_dir(source.path()).unwrap();
+            crate::lfs::cache::install_bytes(&storage, &pointer.oid, pointer.size, &content)
+                .unwrap();
+        }
+        let store = crate::storage::store::Store::new(Arc::new(InMemory::new()));
+        let router = crate::storage::StoreLayout::new(store.clone(), "repos/sibling".to_owned());
+        let layout =
+            crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/sibling".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let config = PushConfig {
+            git_dir: Some(source.path().join(".git")),
+            ..PushConfig::default()
+        };
+        let cancel = CancellationToken::new();
+        let publish = async |spec: PushSpec, advertised| {
+            let (result, _) = run(
+                &config,
+                &[spec],
+                &store,
+                &router,
+                advertised,
+                &[],
+                None,
+                None,
+                None,
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert!(result.all_ok());
+        };
+        for name in ["refs/heads/main", "refs/heads/side"] {
+            let spec = PushSpec {
+                force: false,
+                src: name.to_owned(),
+                dst: name.to_owned(),
+            };
+            publish(spec, None).await;
+        }
+        if lfs {
+            // An advertised sibling does not prove its out-of-band payload is
+            // still present. Newly visible pointers retain publication admission.
+            let path =
+                crab_lfs::LfsObjectStore::object_path_for_prefix("repos/sibling", &pointer.oid);
+            store.as_storage().delete(&path).await.unwrap();
+        }
+        git(source.path(), &["checkout", "main"]);
+        git(source.path(), &["merge", "--ff-only", "side"]);
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let advertised = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root)
+            .await
+            .unwrap();
+        let spec = PushSpec {
+            force: false,
+            src: "refs/heads/main".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        publish(spec, Some(advertised)).await;
+        let deletion = PushSpec {
+            force: false,
+            src: String::new(),
+            dst: "refs/heads/side".to_owned(),
+        };
+        publish(deletion, None).await;
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        crate::cmd::repack::run_repack_from_root(&store, "repos/sibling", root, false, &cancel)
+            .await
+            .unwrap();
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        let view = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .unwrap();
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&tip));
+        assert!(!view.refs().contains_key("refs/heads/side"));
+        let consumer = tempfile::tempdir().unwrap();
+        git(consumer.path(), &["init", "--bare"]);
+        crab_read::capsule_protocol::install_git_packs_from_store(
+            &view,
+            &layout,
+            consumer.path(),
+            16 * 1024 * 1024,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let actual = Command::new("git")
+            .arg("-C")
+            .arg(consumer.path())
+            .args(["cat-file", "blob", &format!("{tip}:asset.bin")])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(actual.status.success());
+        assert_eq!(actual.stdout, blob);
+        git(consumer.path(), &["fsck", "--full", "--strict"]);
+        if lfs {
+            let remote = crab_lfs::LfsObjectStore::new(store.as_storage().clone(), "repos/sibling");
+            assert_eq!(
+                remote.verify(&pointer.oid).await.unwrap(),
+                Bytes::from(content)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn real_git_incremental_push_round_trips_with_bounded_requests() {
     let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
     let source = tempfile::tempdir().expect("source repository");

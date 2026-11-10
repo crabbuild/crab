@@ -124,6 +124,12 @@ not widen that retry window. Current-state catalog lookups reuse that owner toge
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
+`load_ref_heads_for_push` performs one inventory for write-only discovery. It
+returns individually observed heads, not a stable reader snapshot. Callers
+resolve fresh activation records; publication re-reads edited heads, validates
+expected old OIDs and uses conditional writes. Unrelated ref movement therefore
+does not restart push discovery. Fetch and other reads retain stable captures.
+
 Checkpoint format 1 (`CRBCKP01`) includes an optional authenticated ref-head cache
 inside the existing checkpoint body. `capture_ref_head_snapshot` retains the
 exact committed/prepared heads and provider tokens for complete-view owners;
@@ -139,7 +145,8 @@ Writers require at least two identified heads: caching one head cannot save a
 request and would add a read after that head changes.
 
 Reuse requires the same resolved transport, ref prefix, repository and epoch,
-fresh matching strong ETags or non-null versions, and stable before/after LISTs.
+and fresh matching strong ETags or non-null versions. Stable reader captures
+also verify before/after LISTs; write-only discovery does not establish a snapshot.
 Scoped read/staging routes without prefix-wide target proof disable reuse.
 Activations are always read afresh, including for unchanged prepared heads.
 Selected missing/corrupt cache bytes remain errors. Restore filters retired
@@ -698,6 +705,7 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 | `file-index-reader` | Read-only file-index lookup sessions |
 | `local-index` | SQLite-backed local chunk index |
 | `remote-index` | SlateDB remote index readers and writers |
+| `slatedb-cache` | Byte-bounded SlateDB caches with coalesced concurrent loads |
 
 ## Reader and writer ownership
 
@@ -751,6 +759,16 @@ Each published Git object catalog checkpoint has a small identity marker written
 after SlateDB makes the checkpoint durable.
 `GitObjectLocatorSession::latest_published_identity` reads that marker without
 opening the large catalog.
+
+SlateDB consumers use `slatedb_cache` and `default_slatedb_cache`, backed by
+Moka's coalesced loading API. Concurrent cold requests for one block share one
+origin read; the built-in Moka adapter does not provide that behavior. Locator
+sessions retain a 16 MiB weighted cache, the CLI's shared metadb cache retains
+256 MiB, and default adapters retain separate 512 MiB block and 128 MiB metadata
+caches. This excludes Foyer storage's Linux x86 TSC calibration constructor.
+Shared load failures preserve their source chain and remain unavailable errors,
+matching the previous cache. Checkpoint identity, database durability and
+explicit reader/writer close ownership remain unchanged.
 
 Callers may use the identity only after proving its immutable pack inventory is
 covered by their pinned repository snapshot, then open the named checkpoint for

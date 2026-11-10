@@ -1181,7 +1181,22 @@ async fn prepare_ref_successor(
             generation,
             &retired,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            // Retry a mutable head race before ref visibility by refreshing
+            // admission. Conflicting immutable segment bytes must remain terminal.
+            crab_metadata::error::MetadataError::Storage {
+                source: StorageError::StateConflict { path },
+            } if object_store::path::Path::from(path.as_str())
+                .prefix_matches(&router.capsule_source_heads_prefix()) =>
+            {
+                WriteError::RefChanged {
+                    ref_name: edit.ref_name().to_owned(),
+                    path,
+                }
+            }
+            error => error.into(),
+        })?;
     }
     let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
@@ -3533,6 +3548,119 @@ mod tests {
             visible.visible.oid(),
             Some("2222222222222222222222222222222222222222")
         );
+    }
+
+    #[tokio::test]
+    async fn source_retention_conflict_retries_before_ref_visibility() {
+        let inner = Arc::new(InMemory::new());
+        let seed = StoreLayout::new(Store::new(inner.clone()), "repositories/test".to_owned());
+        let mut base = initialize(&seed, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut previous = None;
+        for sequence in 1..=3 {
+            let next = format!("{sequence:040x}");
+            let edit = transaction(&base, previous.as_deref(), &next);
+            base = publish(&seed, base, &edit, capsule(&edit)).await.unwrap();
+            previous = Some(next);
+        }
+        let fault = Arc::new(LostHeadReplyStore {
+            inner,
+            head_path: seed
+                .capsule_source_head_path(&blake3::hash(b"refs/heads/main").to_hex())
+                .to_string(),
+            lost: AtomicBool::new(false),
+            reject: AtomicBool::new(false),
+            reject_once: AtomicBool::new(false),
+        });
+        let router = StoreLayout::new(
+            Store::with_retry(
+                fault.clone(),
+                crab_storage::RetryPolicy {
+                    max_attempts: 2,
+                    base: std::time::Duration::ZERO,
+                    cap: std::time::Duration::ZERO,
+                },
+            ),
+            seed.repo_prefix().to_owned(),
+        );
+        let edit = transaction(&base, previous.as_deref(), &format!("{:040x}", 4));
+        let error = publish(&router, base.clone(), &edit, capsule(&edit))
+            .await
+            .expect_err("lost source-head creation reply must stop preparation");
+        assert!(fault.lost.load(Ordering::Acquire));
+        assert!(matches!(error, WriteError::RefChanged { .. }), "{error:?}");
+        let visible = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(visible.visible.oid(), previous.as_deref());
+        let published = publish(&router, base, &edit, capsule(&edit)).await.unwrap();
+        let visible = read_ref_head(&router, published.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(visible.visible.oid(), Some(format!("{:040x}", 4).as_str()));
+    }
+
+    #[tokio::test]
+    async fn conflicting_immutable_retention_bytes_remain_terminal() {
+        let store = Store::with_retry(
+            Arc::new(InMemory::new()),
+            crab_storage::RetryPolicy {
+                max_attempts: 1,
+                base: std::time::Duration::ZERO,
+                cap: std::time::Duration::ZERO,
+            },
+        );
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let mut base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut previous = None;
+        for sequence in 1..=3 {
+            let next = format!("{sequence:040x}");
+            let edit = transaction(&base, previous.as_deref(), &next);
+            base = publish(&router, base, &edit, capsule(&edit)).await.unwrap();
+            previous = Some(next);
+        }
+        let edit = transaction(&base, previous.as_deref(), &format!("{:040x}", 4));
+        let body = capsule(&edit);
+        let prepared = prepare_publication(&router, base.clone(), &edit, body.clone())
+            .await
+            .unwrap();
+        drop(prepared);
+        let head_path = router.capsule_source_head_path(&blake3::hash(b"refs/heads/main").to_hex());
+        let retained = crab_metadata::capsule_protocol::load_retained_capsule_sources(
+            &router,
+            std::slice::from_ref(&head_path),
+        )
+        .await
+        .unwrap();
+        let segment_path = retained
+            .paths()
+            .iter()
+            .find(|path| {
+                path.filename()
+                    .is_some_and(|hash| router.capsule_source_segment_path(hash) == **path)
+            })
+            .unwrap()
+            .clone();
+        // Replay the same preparation against an occupied immutable key, while
+        // leaving ref visibility and the independently stored segment identity intact.
+        router.store().delete(&head_path).await.unwrap();
+        router
+            .store()
+            .put_overwrite(&segment_path, Bytes::from_static(b"conflicting bytes"))
+            .await
+            .unwrap();
+        let error = prepare_publication(&router, base, &edit, body)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WriteError::Metadata(crab_metadata::error::MetadataError::Storage {
+                source: StorageError::StateConflict { path },
+            }) if path == segment_path.as_ref()
+        ));
     }
 
     #[tokio::test]

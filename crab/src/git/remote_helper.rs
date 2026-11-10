@@ -2352,7 +2352,11 @@ async fn read_remote_refs_for_push_with_snapshot(
         Some(root) => root,
         None => crab_write::capsule_protocol::open_root(&layout).await?,
     };
-    let view = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root).await?;
+    // Push admission re-reads selected refs before CAS; unrelated heads may move.
+    // Fetch discovery retains its stable capture for advertised object reads.
+    let view =
+        crab_read::capsule_protocol::open_ref_view_from_root_for_push_discovery(&layout, root)
+            .await?;
     Ok((list_output_from_ref_view(&view, hidden_ref_patterns), view))
 }
 
@@ -4472,6 +4476,89 @@ mod tests {
     async fn list_for_push_returns_empty_stub() {
         let output = run("list for-push\n").await;
         assert_eq!(output, "\n");
+    }
+
+    #[tokio::test]
+    async fn push_discovery_revalidates_selected_heads_after_one_inventory() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Lists(AtomicUsize);
+        impl StorageObserver for Lists {
+            fn started(&self, _operation: StorageOperation) {}
+            fn finished(&self, observation: StorageObservation) {
+                if observation.operation == StorageOperation::List
+                    && observation.outcome == StorageOutcome::Success
+                {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let lists = Arc::new(Lists::default());
+        let raw = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_storage_observer(lists.clone());
+        let store = crate::storage::store::Store::from_storage(raw);
+        let router = StoreLayout::new(store.clone(), "push-discovery".to_owned());
+        let name = "refs/heads/main";
+        let first_oid = "2".repeat(40);
+        let refs = std::collections::BTreeMap::from([
+            (name.to_owned(), first_oid.clone()),
+            ("refs/heads/feature".to_owned(), "3".repeat(40)),
+        ]);
+        publish_capsule_test_refs(&store, &router, &refs, name).await;
+        lists.0.store(0, Ordering::SeqCst);
+        let (_, advertised) = read_remote_refs_for_push_with_snapshot(&store, &router, &[], None)
+            .await
+            .unwrap();
+        assert_eq!(advertised.refs(), &refs);
+        assert_eq!(lists.0.load(Ordering::SeqCst), 1);
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let winner = CapsuleTransaction::new(
+            advertised.root_snapshot().record().digest(),
+            vec![CapsuleRefEdit::new(
+                name,
+                Some(first_oid.clone()),
+                Some("3".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&winner, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(
+            &layout,
+            advertised.root_snapshot().clone(),
+            &winner,
+            capsule,
+        )
+        .await
+        .unwrap();
+        let late = CapsuleTransaction::new(
+            advertised.root_snapshot().record().digest(),
+            vec![CapsuleRefEdit::new(
+                name,
+                Some(first_oid),
+                Some("4".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&late, Vec::new(), Vec::new()).unwrap();
+        let error = crab_write::capsule_protocol::publish_with_ref_head_bases(
+            &layout,
+            advertised.root_snapshot().clone(),
+            &late,
+            capsule,
+            advertised.push_ref_head_bases(),
+        )
+        .await
+        .expect_err("publication must revalidate the selected expected old value");
+        assert!(matches!(error, crab_write::WriteError::RefChanged { .. }));
     }
 
     #[tokio::test]

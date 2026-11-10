@@ -7,7 +7,6 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::DbReaderMode;
 use slatedb::config::{DbReaderOptions, ScanOptions};
-use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
     METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_BINDINGS_KEY,
@@ -61,7 +60,6 @@ const ORDINAL_SCAN_FETCH_TASKS: usize = 8;
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
 const SESSION_CACHE_BYTES: u64 = 16 * 1024 * 1024;
-const SESSION_CACHE_SHARDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LookupStrategy {
@@ -264,10 +262,7 @@ impl GitObjectLocatorSession {
             builder = builder.with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id));
         }
         let reader = match builder
-            .with_db_cache(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
-                max_capacity: SESSION_CACHE_BYTES,
-                shards: SESSION_CACHE_SHARDS,
-            })))
+            .with_db_cache(crate::slatedb_cache(SESSION_CACHE_BYTES))
             .build()
             .await
         {
@@ -1811,6 +1806,51 @@ mod tests {
             .expect("cached exact batch");
         assert_eq!(store.reads.load(Ordering::Relaxed), first_batch_reads);
         session.close().await.expect("close reader");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_batches_share_cold_sst_reads() {
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+
+        let inner = Arc::new(InMemory::new());
+        let (object_ids, inventory) = publish_many(inner.clone(), 4_096).await;
+        let requested = [*object_ids.last().expect("last object")];
+        let counted = Arc::new(ReadCountingStore {
+            inner,
+            reads: AtomicUsize::new(0),
+        });
+        let store: Arc<dyn ObjectStore> = Arc::new(ThrottledStore::new(
+            counted.clone(),
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_millis(5),
+                ..Default::default()
+            },
+        ));
+        let mut reads = Vec::new();
+        for clients in [1, 32] {
+            let session = GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+                .await
+                .expect("open cold reader");
+            counted.reads.store(0, Ordering::Relaxed);
+            let lookups =
+                stream::iter((0..clients).map(|_| session.lookup_batch(&requested, &inventory)))
+                    .buffer_unordered(clients)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .expect("concurrent exact batches");
+            reads.push(counted.reads.load(Ordering::Relaxed));
+            session.close().await.expect("close reader");
+            assert!(
+                lookups
+                    .iter()
+                    .all(|batch| matches!(batch.as_slice(), [GitObjectLookup::Hit(_)]))
+            );
+        }
+        assert!(reads[0] > 0, "fixture must miss the cold block cache");
+        assert_eq!(
+            reads[1], reads[0],
+            "concurrent batches duplicated cold reads"
+        );
     }
 
     #[tokio::test]

@@ -4212,26 +4212,8 @@ pub async fn open_ref_view_from_root_for_push(
     let heads = loaded
         .iter()
         .filter_map(|entry| entry.as_ref().map(|(head, _, _)| head.clone()))
-        .filter(|head| head.ref_epoch() == snapshot.record().root().ref_epoch())
-        .collect::<Vec<_>>();
-    let active = resolve_referenced_activations(router, &heads).await?;
-    for head in &heads {
-        let visible = head.visible(&active);
-        let base_oid = snapshot
-            .record()
-            .root()
-            .refs()
-            .get(head.ref_name())
-            .map(String::as_str);
-        if visible.transaction_id().is_none() && visible.oid() != base_oid {
-            return Err(corrupt_path(
-                "capsule-protocol ref heads",
-                "capsule ref head without a transaction differs from the compacted root",
-            ));
-        }
-    }
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
-        .map_err(metadata_control_error)?;
+        .collect();
+    let visible = materialize_push_ref_heads(router, snapshot.record().root(), heads).await?;
     let push_ref_head_bases = ref_names
         .iter()
         .cloned()
@@ -4260,6 +4242,50 @@ pub async fn open_ref_view_from_root_for_push(
             .collect(),
         push_ref_head_bases,
     })
+}
+
+/// Discover individually observed refs for push negotiation.
+///
+/// Publication must freshly validate selected refs and their expected old values.
+/// Read-only ref discovery uses [`open_ref_view_from_root`] instead.
+pub async fn open_ref_view_from_root_for_push_discovery(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<CapsuleRefView> {
+    let heads =
+        crab_metadata::capsule_protocol::load_ref_heads_for_push(router, snapshot.record().root())
+            .await?;
+    let visible = materialize_push_ref_heads(router, snapshot.record().root(), heads).await?;
+    Ok(CapsuleRefView {
+        root: snapshot,
+        refs: visible.refs,
+        peeled_refs: visible.peeled_refs,
+        visible_ref_transactions: visible.transactions,
+        push_ref_head_bases: BTreeMap::new(),
+    })
+}
+
+async fn materialize_push_ref_heads(
+    router: &StoreLayout<Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+) -> Result<crab_metadata::capsule_protocol::VisibleRefHeads> {
+    let heads = heads
+        .into_iter()
+        .filter(|head| head.ref_epoch() == root.ref_epoch())
+        .collect::<Vec<_>>();
+    let active = resolve_referenced_activations(router, &heads).await?;
+    for head in &heads {
+        let visible = head.visible(&active);
+        let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
+        if visible.transaction_id().is_none() && visible.oid() != base_oid {
+            return Err(corrupt_path(
+                "capsule-protocol ref heads",
+                "capsule ref head without a transaction differs from the compacted root",
+            ));
+        }
+    }
+    materialize_visible_ref_heads(root, &heads, &active).map_err(metadata_control_error)
 }
 
 /// Load the immutable objects named by one already authenticated root.
@@ -7354,6 +7380,53 @@ mod tests {
                 StorageOperation::List,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn push_discovery_keeps_checkpoint_refs_without_payload_reads() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let view = open_ref_view_from_root_for_push_discovery(&router, root)
+            .await
+            .unwrap();
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![StorageOperation::Get, StorageOperation::List]
+        );
+    }
+
+    #[tokio::test]
+    async fn push_discovery_resolves_prepared_transaction_visibility() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, false).await;
+            let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+            let root = load_root(&router).await.unwrap();
+            let view = open_ref_view_from_root_for_push_discovery(&router, root)
+                .await
+                .unwrap();
+            let expected = if committed {
+                BTreeMap::from([
+                    ("refs/heads/main".to_owned(), "2".repeat(40)),
+                    ("refs/heads/feature".to_owned(), "3".repeat(40)),
+                ])
+            } else {
+                BTreeMap::new()
+            };
+            assert_eq!(view.refs(), &expected);
+        }
     }
 
     #[tokio::test]

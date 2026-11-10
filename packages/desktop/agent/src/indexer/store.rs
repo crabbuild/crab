@@ -32,7 +32,9 @@ impl IndexStore {
                 .map_err(|e| IndexStoreError::Open(e.to_string()))?,
         );
 
-        let db = slatedb::Db::open(ObjectPath::from("/"), store)
+        let db = slatedb::Db::builder(ObjectPath::from("/"), store)
+            .with_db_cache(crab_metadata::default_slatedb_cache())
+            .build()
             .await
             .map_err(|e| IndexStoreError::Open(e.to_string()))?;
 

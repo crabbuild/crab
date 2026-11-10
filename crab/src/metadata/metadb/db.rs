@@ -34,7 +34,6 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::config::ScanOptions;
 use slatedb::db_cache::DbCache;
-use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use tracing::Instrument;
 
 use crate::core::error::{CrabError, MetaDbError, Result};
@@ -48,10 +47,7 @@ const DENSE_BATCH_SCAN_READ_AHEAD_BYTES: usize = 1024 * 1024;
 pub(super) const DB_CACHE_CAPACITY_BYTES: u64 = 256 * 1024 * 1024;
 
 pub(super) fn new_db_cache() -> Arc<dyn DbCache> {
-    Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
-        max_capacity: DB_CACHE_CAPACITY_BYTES,
-        ..FoyerCacheOptions::default()
-    }))
+    crab_metadata::slatedb_cache(DB_CACHE_CAPACITY_BYTES)
 }
 
 pub(crate) fn compactor_options(

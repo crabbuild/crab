@@ -418,6 +418,7 @@ impl FileIndexLookupSession {
             ObjectPath::from(path.as_str()),
             Arc::clone(self.storage.inner()),
         )
+        .with_db_cache(crate::default_slatedb_cache())
         .build()
         .await
         {

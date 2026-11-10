@@ -68,7 +68,8 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 
 # Background indexer cache — LSM over local filesystem.
-slatedb = "=0.15.0"
+slatedb = { workspace = true }
+crab-metadata = { workspace = true, features = ["slatedb-cache"] }
 object_store = { workspace = true, features = ["fs"] }
 
 # Cancellation tokens for cooperative task shutdown.
