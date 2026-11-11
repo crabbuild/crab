@@ -38,6 +38,10 @@ Open a file in **Files**, then use its preview or **File details**. Previews
 capture one version and use bounded native reads, including index and historical
 versions. Opening a preview does not replace a working pointer.
 
+SQLite uses its table metadata to choose the first SQL query. The editor remains
+usable while metadata loads. A query you type stays yours when the table lookup
+finishes; empty databases can still show their catalog.
+
 Audio/video playback and seeking use that captured source. A first LFS read can
 require verification of the complete object. Failures remain visible; **Reopen
 media** captures a fresh version. Codec support follows Electron's decoder.
