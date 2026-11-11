@@ -125,12 +125,17 @@ Configure which files to pre-download on clone/pull:
 - **Credentials** — AWS profile or explicit keys
 - **Encryption** — client-side encryption settings
 
-### Cache
+### Local Cache
 
-- **Cache directory** — where chunk cache lives
-- **Max cache size** — eviction threshold
-- **Cache stats** — current usage, hit rate
-- **Clear cache** — button to purge all cached data
+**Storage & Cache** reports the selected computer or SSH host's cache root,
+allocated/logical bytes, configured budget and inspection issues. Unknown or
+incomplete usage remains explicit.
+
+**Preview cleanup** reports eligible payloads without removing them. **Clean
+cache** removes reusable CLI and SDK cache payloads, including verified shards
+and decoded ranges. Active payloads, catalogs, query workspaces and unknown data
+remain retained. Reopening content can download it again. Editable retention
+budgets and offline retention remain open work.
 
 ### Memory
 

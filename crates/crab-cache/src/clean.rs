@@ -8,7 +8,7 @@ use crate::CacheError;
 use crate::Result;
 
 /// Cleanup totals; retained subtrees are counted once, without inspecting their contents.
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct CacheCleanReport {
     pub files_removed: u64,
     pub bytes_reclaimed: u64,
@@ -26,6 +26,41 @@ pub async fn clean_cache(
     root: &Path,
     dry_run: bool,
     cancel: &CancellationToken,
+) -> Result<CacheCleanReport> {
+    run_cleanup(root, dry_run, cancel, |pinned, root, dry_run, cancel| {
+        let mut removal = crate::catalog::PayloadRemoval::open(Some(pinned), root, dry_run)?;
+        pinned.clean(dry_run, cancel, &mut |relative, operation| {
+            removal.remove(relative, operation)
+        })
+    })
+    .await
+}
+
+/// Clean private hash-named cache namespaces without traversing unknown siblings.
+///
+/// Each namespace retains its own catalog and payload ownership. Missing roots
+/// remain missing; dry runs create no state. Cancellation drains the worker.
+pub async fn clean_cache_namespaces(
+    root: &Path,
+    dry_run: bool,
+    cancel: &CancellationToken,
+) -> Result<CacheCleanReport> {
+    run_cleanup(root, dry_run, cancel, |pinned, _, dry_run, cancel| {
+        pinned.clean_namespaces(dry_run, cancel)
+    })
+    .await
+}
+
+async fn run_cleanup(
+    root: &Path,
+    dry_run: bool,
+    cancel: &CancellationToken,
+    clean: fn(
+        &crate::private_fs::PinnedRoot,
+        &Path,
+        bool,
+        &CancellationToken,
+    ) -> Result<CacheCleanReport>,
 ) -> Result<CacheCleanReport> {
     let root = root.to_owned();
     crate::private_fs::run_blocking(cancel, move |cancel| {
@@ -47,10 +82,7 @@ pub async fn clean_cache(
         } else {
             Some(crate::lifecycle::CacheCleanGuard::acquire(&root, cancel)?)
         };
-        let mut removal = crate::catalog::PayloadRemoval::open(Some(&pinned), &root, dry_run)?;
-        pinned.clean(dry_run, cancel, &mut |relative, operation| {
-            removal.remove(relative, operation)
-        })
+        clean(&pinned, &root, dry_run, cancel)
     })
     .await
 }
@@ -109,7 +141,7 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     }
 }
 
-fn hex(value: &str, len: usize) -> bool {
+pub(crate) fn hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()
@@ -317,5 +349,96 @@ mod tests {
             .unwrap();
         assert_eq!(report.files_removed, 1);
         assert!(handle.cache.get(&key, &range).await.unwrap().is_none());
+    }
+}
+
+#[cfg(all(test, feature = "local-cache"))]
+mod namespace_tests {
+    use super::*;
+    use crate::{CacheCatalog, CacheKey, LocalCache};
+
+    #[tokio::test]
+    async fn namespace_cleanup_retires_payloads_in_each_catalog_and_keeps_unknown_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("content");
+        crate::ensure_private_cache_directory(&root).unwrap();
+        let key = CacheKey::RefTransaction(blake3::hash(b"data"));
+        let mut caches = Vec::new();
+        for namespace in ["ab", "cd"] {
+            let cache = LocalCache::new(root.join(namespace.repeat(32)));
+            cache.put(&key, b"data").await.unwrap();
+            caches.push(cache);
+        }
+        let retained = root.join("database-query/chunks/user-file");
+        crate::private_fs::atomic_write(&root, &retained, b"query state")
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let before = caches
+            .iter()
+            .map(|cache| CacheCatalog::read_only_stats(cache.root()).unwrap())
+            .collect::<Vec<_>>();
+        let preview = clean_cache_namespaces(&root, true, &cancel).await.unwrap();
+        assert_eq!((preview.files_removed, preview.bytes_reclaimed), (2, 8));
+        for (cache, stats) in caches.iter().zip(before) {
+            assert_eq!(CacheCatalog::read_only_stats(cache.root()).unwrap(), stats);
+            assert!(cache.contains(&key).await);
+        }
+        let report = clean_cache_namespaces(&root, false, &cancel).await.unwrap();
+        assert_eq!((report.files_removed, report.bytes_reclaimed), (2, 8));
+        for cache in &caches {
+            assert_eq!(
+                CacheCatalog::read_only_stats(cache.root()).unwrap().entries,
+                0
+            );
+            assert!(!cache.contains(&key).await);
+        }
+        assert_eq!(std::fs::read(retained).unwrap(), b"query state");
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_live_catalog_leases() {
+        for namespaced in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("content");
+            crate::ensure_private_cache_directory(&root).unwrap();
+            let namespace = if namespaced {
+                root.join("ab".repeat(32))
+            } else {
+                root.clone()
+            };
+            let cache = LocalCache::new(namespace.clone());
+            let hash = blake3::hash(b"data");
+            let key = CacheKey::RefTransaction(hash);
+            cache.put(&key, b"data").await.unwrap();
+            let hex = hash.to_hex();
+            let file = namespace
+                .join("ref-transactions")
+                .join(&hex[..2])
+                .join(hex.as_str());
+            let lease = CacheCatalog::new(namespace, None)
+                .lease(&file)
+                .await
+                .unwrap();
+            let cancel = CancellationToken::new();
+            for dry_run in [true, false] {
+                let report = if namespaced {
+                    clean_cache_namespaces(&root, dry_run, &cancel).await
+                } else {
+                    clean_cache(&root, dry_run, &cancel).await
+                }
+                .unwrap();
+                assert_eq!((report.files_removed, report.busy_entries), (0, 1));
+                assert!(cache.contains(&key).await);
+            }
+            drop(lease);
+            let report = if namespaced {
+                clean_cache_namespaces(&root, false, &cancel).await
+            } else {
+                clean_cache(&root, false, &cancel).await
+            }
+            .unwrap();
+            assert_eq!(report.files_removed, 1);
+        }
     }
 }

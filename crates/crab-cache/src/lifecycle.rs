@@ -139,12 +139,20 @@ fn open_lock(path: &Path, create: bool) -> Result<File> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    Ok(OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .read(true)
         .write(create)
         .create(create)
-        .truncate(false)
-        .open(path)?)
+        .truncate(false);
+    // Nested cache coordination markers are inspected with their private
+    // parent. Public permissions would make our own cleanup report unsafe.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
 }
 
 fn lock_exclusive(file: File, path: &Path) -> Result<HeldLock> {

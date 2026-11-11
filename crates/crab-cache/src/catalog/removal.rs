@@ -153,6 +153,7 @@ impl PayloadRead {
 pub(crate) struct PayloadRemoval {
     connection: Option<Database>,
     path: PathBuf,
+    dry_run: bool,
 }
 
 impl PayloadRemoval {
@@ -163,16 +164,21 @@ impl PayloadRemoval {
     ) -> Result<Self> {
         let path = display_root.join(CATALOG_FILE);
         // A standalone range directory need not have a private catalog parent.
-        // Never inspect that ambient parent or open SQLite during a dry run.
-        let connection = if let Some(root) = root.filter(|_| !dry_run) {
+        // Never inspect an ambient parent. Previews use the private read-only
+        // SQLite snapshot so logical leases stay protected without writes.
+        let mode = if dry_run {
+            DatabaseMode::ReadOnly
+        } else {
+            DatabaseMode::ReadWrite
+        };
+        let connection = if let Some(root) = root {
             match root
-                .open_database(
-                    Path::new(CATALOG_FILE),
-                    DatabaseMode::ReadWrite,
-                    std::time::Duration::ZERO,
-                )
+                .open_database(Path::new(CATALOG_FILE), mode, std::time::Duration::ZERO)
                 .and_then(|connection| {
-                    retain_catalog_wal(&connection).map_err(|source| index_error(&path, source))?;
+                    if !dry_run {
+                        retain_catalog_wal(&connection)
+                            .map_err(|source| index_error(&path, source))?;
+                    }
                     Ok(connection)
                 }) {
                 Ok(connection) => Some(connection),
@@ -186,7 +192,11 @@ impl PayloadRemoval {
         } else {
             None
         };
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            dry_run,
+        })
     }
 
     pub(crate) fn remove(
@@ -194,15 +204,21 @@ impl PayloadRemoval {
         relative: &Path,
         operation: impl FnOnce() -> Result<Option<u64>>,
     ) -> Result<Option<u64>> {
+        if self.dry_run {
+            if let Some(connection) = &self.connection {
+                let key = relative_path(Path::new(""), relative)?;
+                match check_owners(connection, &self.path, &key) {
+                    Ok(()) => {}
+                    Err(error) if unusable_catalog(&error) => unavailable(&self.path, &error),
+                    Err(error) => return Err(error),
+                }
+            }
+            return operation();
+        }
         let transaction = match self.connection.as_mut() {
             Some(connection) => match removal_transaction(connection, &self.path, relative) {
                 Ok(transaction) => Some(transaction),
-                Err(error)
-                    if matches!(&error, CacheError::Index { source, .. }
-                    if source.sqlite_error().is_some_and(|error|
-                        matches!(error.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
-                        || error.extended_code == rusqlite::ffi::SQLITE_ERROR)) =>
-                {
+                Err(error) if unusable_catalog(&error) => {
                     // These fixed statements also fail with SQLITE_ERROR when
                     // disposable tables/columns are missing. Generation and
                     // I/O errors are different codes and must stop deletion.
@@ -226,6 +242,13 @@ impl PayloadRemoval {
         }
         result
     }
+}
+
+fn unusable_catalog(error: &CacheError) -> bool {
+    matches!(error, CacheError::Index { source, .. }
+        if source.sqlite_error().is_some_and(|error|
+            matches!(error.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+            || error.extended_code == rusqlite::ffi::SQLITE_ERROR))
 }
 
 fn unavailable(path: &Path, error: &CacheError) {
@@ -258,14 +281,25 @@ pub(super) fn removal_transaction<'a>(
     path: &Path,
     relative: &Path,
 ) -> Result<Transaction<'a>> {
-    let relative = relative.to_str().ok_or_else(|| CacheError::UnsafeRoot {
-        path: relative.display().to_string(),
-        reason: "cache accounting key is not UTF-8".into(),
-    })?;
+    let relative = relative_path(Path::new(""), relative)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|source| index_error(path, source))?;
-    let protected: bool = transaction
+    check_owners(&transaction, path, &relative)?;
+    // Retire within the uncommitted writer transaction before filesystem I/O.
+    // Failed/declined removal rolls this back; publishers cannot register a
+    // replacement between the final owner check and commit.
+    transaction
+        .execute(
+            "DELETE FROM cache_entries WHERE relative_path = ?1",
+            [&relative],
+        )
+        .map_err(|source| index_error(path, source))?;
+    Ok(transaction)
+}
+
+fn check_owners(connection: &rusqlite::Connection, path: &Path, relative: &str) -> Result<()> {
+    let protected: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM leases WHERE relative_path = ?1)
              OR EXISTS(SELECT 1 FROM reservations WHERE relative_path = ?1)",
@@ -280,16 +314,7 @@ pub(super) fn removal_transaction<'a>(
         )
         .into());
     }
-    // Retire within the uncommitted writer transaction before filesystem I/O.
-    // Failed/declined removal rolls this back; publishers cannot register a
-    // replacement between the final owner check and commit.
-    transaction
-        .execute(
-            "DELETE FROM cache_entries WHERE relative_path = ?1",
-            [relative],
-        )
-        .map_err(|source| index_error(path, source))?;
-    Ok(transaction)
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

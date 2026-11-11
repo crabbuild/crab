@@ -28,6 +28,15 @@ semantics rather than treating every cache object as interchangeable.
 | Disk fill or cleanup | `crates/crab-cache/src/local_cache.rs` | `crates/crab-cache/src/lifecycle.rs` |
 | Remote client contract | `crates/crab-cache/src/cache_client.rs` | `crates/crab-cache-server/src/state.rs` |
 
+Namespace cleanup enters through `clean_cache_namespaces` in
+`crates/crab-cache/src/clean.rs`. The shared Unix/Windows implementation in
+`crates/crab-cache/src/private_fs/platform/cleanup.rs`
+keeps each child beneath the captured parent and uses that child's catalog.
+Never enumerate namespaces and reopen them by ambient pathname. Preview uses
+the private read-only catalog snapshot to preserve logical leases without writes.
+`clean::namespace_tests` covers catalog accounting, retained state and active
+leases; the pinned-directory replacement regression lives beside the traversal.
+
 ## Invariants
 
 - Xorb range resolution, identity verification, and reads share one open file. The size-aware resolver accepts caller policy but validates its returned bounds; `get_xorb_range_if_present` keeps exact-range semantics.

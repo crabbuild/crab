@@ -139,8 +139,10 @@ repository, including SSH repositories with verified transfers available.
 If repository services fail, use the visible recovery error and **Retry reopening
 repository**. A healthy sibling repository remains usable. Reader sessions are
 revoked on recovery or storage-identity replacement; reopen details to capture
-fresh content. Cache inspection/cleanup has its own Settings controls. Editable
-cache budgets and offline retention remain open work.
+fresh content. Settings previews and cleans reusable CLI and SDK payloads while
+retaining active reads, catalogs, query workspaces and unknown data. Reopening
+content after cleanup may download it again. Editable cache budgets and offline
+retention remain open work.
 
 ## Qualification boundary
 
@@ -149,5 +151,5 @@ track/publish/lazy-clone/hydrate/edit/synchronize/rename/removal workflow, neste
 missing-file restoration, confirmed index restoration, pending-editor protection,
 selected identities and bounded local/SSH recovery.
 The [completion record](../large-file-support.md) separates that evidence from
-interrupted SDK cache recovery, storage budgets, larger workload
+on-disk SDK fill interruption, storage budgets, larger workload
 profiles and cross-platform/provider release gates.
