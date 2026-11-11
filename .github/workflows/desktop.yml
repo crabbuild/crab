@@ -284,9 +284,9 @@ jobs:
         run: |
           export E2E_SMOKE=1
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+            xvfb-run -a npx playwright test tests/e2e/file-query.spec.ts tests/e2e/sqlite-default.spec.ts --project=e2e-smoke --workers=1
           else
-            npx playwright test tests/e2e/file-query.spec.ts --project=e2e-smoke --workers=1
+            npx playwright test tests/e2e/file-query.spec.ts tests/e2e/sqlite-default.spec.ts --project=e2e-smoke --workers=1
           fi
       - uses: actions/setup-python@v5
         with:

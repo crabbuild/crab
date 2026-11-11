@@ -114,9 +114,20 @@ preserve received-byte receipts through cancellation, native/main crashes, both
 publication/receipt gaps and cleanup failure, then explicitly retry remaining
 content. The selected-identity SSH fixture also proves cold received bytes and
 visible counters after retry. Ten transport tests, six shared-budget tests,
-33 native tests and 85 desktop tests pass, alongside types, formatting, scoped
+33 native tests and 89 desktop tests pass, alongside types, formatting, scoped
 Clippy, the approved three-entry SDK API snapshot and 857 packaged asset/runtime
 comparisons. Multi-GiB resource bounds and platform/provider parity remain open.
+
+The selected-identity rerun exposed a SQLite default-query race: entering SQL
+before table metadata arrived saved the catalog query instead of selecting the
+first table. The SQLite view now retains that metadata request while its default
+is unresolved. The editor stays usable, and later metadata cannot replace an
+explicit draft. Parquet keeps its metadata-independent default; an empty SQLite
+database still uses its catalog. A packaged regression delays the real native
+metadata response and verifies both default and explicit-query results. The
+existing SQL/WAL/revision, cancellation and native-crash smoke also passes.
+The desktop ESLint command remains blocked by its missing flat configuration;
+typechecks do not constitute a lint pass.
 
 ### Owned publication scratch and cold interruption
 

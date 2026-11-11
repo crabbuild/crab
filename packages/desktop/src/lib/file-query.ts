@@ -55,9 +55,9 @@ export class FileQuery {
   }
 
   startDefault(nativeSessionId: string, sql: string): void {
-    if (this.state.sql !== null) return;
+    if (this.state.sql !== null || !sql.trim()) return;
     this.setSql(sql);
-    if (sql.trim()) void this.run(nativeSessionId, sql);
+    void this.run(nativeSessionId, sql);
   }
 
   async run(nativeSessionId: string, sql: string): Promise<void> {

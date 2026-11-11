@@ -1108,6 +1108,9 @@ function renderCell(v: unknown): string {
 }
 
 function defaultQuery(filePath: string, tables?: TableMeta[]): string {
+  // An unresolved SQLite schema must not become a saved catalog query. Leave
+  // the editor usable while the captured table list selects its first default.
+  if (tables === undefined && /\.(db|sqlite|sqlite3)$/i.test(filePath)) return "";
   if (tables?.length) return `SELECT * FROM ${identifier(tables[0].name)} LIMIT 100;`;
   if (/\.(db|sqlite|sqlite3)$/i.test(filePath)) return "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name;";
   return "SELECT * FROM data LIMIT 100;";

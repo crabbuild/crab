@@ -113,13 +113,13 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     const run = page.getByRole("button", { name: "Run", exact: true });
     const sql = page.getByRole("button", { name: "SQL", exact: true });
     const cell = (value: string) => page.getByRole("cell", { name: value, exact: true });
-    const childPid = (parent: number, command: string) => {
+    const childPid = (parent: number, matches: (command: string) => boolean) => {
       const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
         .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
-        .find(row => row && Number(row[2]) === parent && row[3].includes(command));
+        .find(row => row && Number(row[2]) === parent && matches(row[3]));
       return native ? Number(native[1]) : undefined;
     };
-    const nativePid = () => childPid(application!.process().pid!, "/agent/crab-desktop-agent ");
+    const nativePid = () => childPid(application!.process().pid!, command => /\/agent\/crab-desktop-agent(?:\s|$)/.test(command));
     await open("data.sqlite");
     await expect(cell("before")).toBeVisible();
     await sql.click();
@@ -212,7 +212,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     if (process.platform !== "win32") {
       const native = nativePid();
       if (!native) throw new Error("Test application's native child was not found");
-      const sqliteWorker = () => childPid(native, "--sqlite-live-query");
+      const sqliteWorker = () => childPid(native, command => command.includes("--sqlite-live-query"));
       await editor.fill("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000000000) SELECT sum(n) FROM seq");
       await run.click();
       await expect.poll(() => sqliteWorker() !== undefined).toBe(true);
