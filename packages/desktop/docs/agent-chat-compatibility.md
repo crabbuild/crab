@@ -2635,3 +2635,26 @@ Evidence: `archive-source-before.json`, `archive-source-action-before.json`,
 `archive-source-final-worktree.json`, `archive-source-final-git.json`,
 `archive-source-final-orchestrator.json`, `archive-source-packaged.json` and
 `archive-source-fixture-type-baseline.json`. Cross-platform CI remains pending.
+
+### Sidebar fixture startup contract
+
+At `3619e522b3c`, macOS Intel passes type checking and build-tool tests, then
+times out in the first sidebar fixture launch at 15 seconds. The remaining
+five cases pass. Logs include failed GPU initialization, but do not establish
+its relationship to the timeout. Other runners are still queued.
+
+The fixture supplied an explicit Electron executable while launching a script.
+The pinned Playwright implementation only preloads its automation loader when
+it resolves Electron itself. That loader holds application readiness until
+Node and browser debugger connections are initialized and applies the shared
+automation switches. The fixture now uses the documented script-launch form,
+removing its explicit executable lookup. Its launch deadline and assertions
+are unchanged; no product flags or GPU workaround are added.
+
+All six local Electron cases pass, including visible restoration after reload;
+launch logs confirm six loader preloads and six clean process exits. Fixture
+types pass. Evidence: `sidebar-playwright-loader.json`,
+`sidebar-playwright-loader.log` and `sidebar-playwright-loader-types.log`.
+This establishes the dependency wiring, not macOS Intel qualification; that
+runner must pass on the next head. A targeted retry of its failed job was
+refused by GitHub because the containing workflow was still running.

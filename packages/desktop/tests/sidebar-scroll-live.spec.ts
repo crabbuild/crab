@@ -2,12 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { _electron as electron, expect as browserExpect, type ElectronApplication } from "@playwright/test";
 import { createServer, type ViteDevServer } from "vite";
 
 type Change = "workspace" | "unmount" | "filter" | "quit" | "refresh" | "discovery";
-const require = createRequire(import.meta.url);
 declare global {
   interface Window {
     sidebarScrollFixture: { action(mode: Change): { position: number; saved: number } };
@@ -48,7 +46,8 @@ describe.skipIf(!process.env.CRAB_AGENT_LIVE_ROOT)("Repository sidebar scroll pe
     delete env.ELECTRON_RUN_AS_NODE;
     let application: ElectronApplication | undefined;
     try {
-      application = await electron.launch({ executablePath: require("electron"), args: [entry, path.join(directory, mode), url], env, timeout: 15_000 });
+      // The script fixture needs Playwright's readiness barrier before window creation.
+      application = await electron.launch({ args: [entry, path.join(directory, mode), url], env, timeout: 15_000 });
       const page = await application.firstWindow();
       page.on("pageerror", error => console.error("Sidebar fixture:", error.message));
       await page.getByRole("button", { name: "Pin repo-49", exact: true }).first().waitFor();
