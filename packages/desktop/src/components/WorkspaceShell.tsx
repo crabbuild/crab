@@ -156,6 +156,39 @@ export function WorkspaceShell({
 
   const activeContent = views[activeView];
 
+  const groupNavigation = group && (
+    <nav
+      aria-label={group === "files" ? "Files" : "Git"}
+      className={clsx(
+        "flex shrink-0 gap-1 border-b border-gx-border bg-gx-surface px-2 py-1",
+        group === "files" ? "h-9 min-w-0 items-center overflow-x-auto" : "flex-wrap",
+      )}
+    >
+      {VIEW_GROUPS[group]
+        .filter((view) => !hiddenViews.includes(view))
+        .map((view) => (
+          <button
+            key={view}
+            type="button"
+            aria-pressed={activeView === view}
+            onClick={() => {
+              onViewChange(view);
+              setOpen(true);
+            }}
+            className={clsx(
+              "rounded px-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent",
+              group === "files" ? "shrink-0 py-1" : "py-1.5",
+              activeView === view
+                ? "bg-gx-accent/15 text-gx-text"
+                : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            )}
+          >
+            {VIEW_LABELS[view]}
+          </button>
+        ))}
+    </nav>
+  );
+
   return (
     <div className="flex h-full min-h-0 w-full">
       {showActivityBar && (
@@ -167,34 +200,7 @@ export function WorkspaceShell({
         />
       )}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {group && (
-          <nav
-            aria-label={group === "files" ? "Files" : "Git"}
-            className="flex shrink-0 flex-wrap gap-1 border-b border-gx-border bg-gx-surface px-2 py-1"
-          >
-            {VIEW_GROUPS[group]
-              .filter((view) => !hiddenViews.includes(view))
-              .map((view) => (
-                <button
-                  key={view}
-                  type="button"
-                  aria-pressed={activeView === view}
-                  onClick={() => {
-                    onViewChange(view);
-                    setOpen(true);
-                  }}
-                  className={clsx(
-                    "rounded px-2 py-1.5 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent",
-                    activeView === view
-                      ? "bg-gx-accent/15 text-gx-text"
-                      : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
-                  )}
-                >
-                  {VIEW_LABELS[view]}
-                </button>
-              ))}
-          </nav>
-        )}
+        {group === "git" && groupNavigation}
         <PanelGroup direction="horizontal" className="flex min-h-0 flex-1">
           <Panel
             ref={sidebarPanelRef}
@@ -221,9 +227,11 @@ export function WorkspaceShell({
               !sidebarVisible && "hidden",
             )}
           >
-            <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] uppercase tracking-wider text-gx-muted">
-              <span>{VIEW_LABELS[activeView]}</span>
-            </div>
+            {group === "files" ? groupNavigation : (
+              <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] uppercase tracking-wider text-gx-muted">
+                <span>{VIEW_LABELS[activeView]}</span>
+              </div>
+            )}
             <div className="flex min-h-0 flex-1 flex-col">
               {activeContent ?? (
                 <div className="p-3 text-xs text-gx-muted">Coming soon.</div>
