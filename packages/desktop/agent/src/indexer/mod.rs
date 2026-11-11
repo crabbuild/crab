@@ -1,8 +1,7 @@
 //! Background indexer for Crab Desktop.
 //!
-//! Maintains a SlateDB-backed cache at `~/.crab/desktop/indexer/`
-//! keyed by `(repo_id, kind, rev)`. The indexer runs as a background
-//! tokio task processing commands from an mpsc channel.
+//! Maintains a process-owned SlateDB cache keyed by `(repo_id, kind, rev)`.
+//! The background task closes the database before removing its private files.
 
 pub mod priority;
 mod store;
@@ -17,31 +16,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-use crate::handlers::State;
-
-/// Configuration for the background indexer.
-#[derive(Debug, Clone)]
-pub struct IndexerConfig {
-    /// Path to the SlateDB database directory.
-    pub db_path: PathBuf,
-    /// Whether the indexer is enabled.
-    pub enabled: bool,
-}
-
-impl Default for IndexerConfig {
-    fn default() -> Self {
-        let db_path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".crab")
-            .join("desktop")
-            .join("indexer");
-        Self {
-            db_path,
-            enabled: true,
-        }
-    }
-}
 
 /// Commands sent to the indexer background task.
 #[derive(Debug)]
@@ -87,19 +61,17 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// Spawn the background indexer task.
-    ///
-    /// Opens (or creates) a SlateDB instance at the configured path and
-    /// enters a loop processing commands from the returned channel.
-    /// Returns immediately — the actual DB open happens inside the
-    /// spawned task.
-    pub fn spawn(_state: State, config: IndexerConfig) -> Self {
+    /// Starts a process-owned derived cache; fails if its private directory cannot be created.
+    pub fn spawn() -> crate::Result<Self> {
+        // SlateDB permits one writer per path. Distinct sidecars and reconnects
+        // must not fence each other through an account-wide cache directory.
+        let cache = tempfile::Builder::new()
+            .prefix("crab-desktop-indexer-")
+            .tempdir()?;
         let (tx, rx) = mpsc::channel::<IndexerCommand>(64);
-
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(indexer_loop(config, rx, cancel.clone()));
-
-        Self { handle, tx, cancel }
+        let handle = tokio::spawn(indexer_loop(cache, rx, cancel.clone()));
+        Ok(Self { handle, tx, cancel })
     }
 
     /// Send a command to the indexer.
@@ -128,23 +100,14 @@ impl Indexer {
 /// The main indexer loop. Opens the store and processes commands until
 /// shutdown or channel close.
 async fn indexer_loop(
-    config: IndexerConfig,
+    cache: tempfile::TempDir,
     mut rx: mpsc::Receiver<IndexerCommand>,
     cancel: CancellationToken,
 ) {
-    if !config.enabled {
-        info!("indexer disabled by configuration");
-        // Drain any commands that arrive so senders don't block.
-        tokio::select! {
-            _ = cancel.cancelled() => {},
-            _ = async { while rx.recv().await.is_some() {} } => {},
-        }
-        return;
-    }
+    let db_path = cache.path().to_owned();
+    info!(db_path = %db_path.display(), "indexer: opening store");
 
-    info!(db_path = %config.db_path.display(), "indexer: opening store");
-
-    let store = match IndexStore::open(&config.db_path).await {
+    let store = match IndexStore::open(&db_path).await {
         Ok(s) => s,
         Err(e) => {
             error!(error = %e, "indexer: failed to open store, shutting down");
@@ -184,7 +147,7 @@ async fn indexer_loop(
             }
             Some(IndexerCommand::Status { reply }) => {
                 let status = IndexerStatus {
-                    db_path: config.db_path.clone(),
+                    db_path: db_path.clone(),
                     entries_cached: 0,
                     repos_indexed: 0,
                     running: true,
@@ -208,5 +171,41 @@ async fn indexer_loop(
         error!(error = %e, "indexer: error closing store");
     } else {
         info!("indexer: store closed cleanly");
+    }
+    // All database tasks and file handles must retire before directory cleanup,
+    // particularly on Windows where an open file prevents removing its parent.
+    if let Err(error) = cache.close() {
+        error!(%error, "indexer: failed to remove private cache");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn status(indexer: &Indexer) -> IndexerStatus {
+        let (reply, received) = tokio::sync::oneshot::channel();
+        indexer
+            .send(IndexerCommand::Status { reply })
+            .await
+            .unwrap();
+        received.await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_indexers_own_and_retire_independent_caches() {
+        let first = Indexer::spawn().unwrap();
+        let second = Indexer::spawn().unwrap();
+        let first_path = status(&first).await.db_path;
+        let second_path = status(&second).await.db_path;
+        let distinct = first_path != second_path;
+        first.shutdown().await;
+        let first_removed = !first_path.exists();
+        let second_alive = status(&second).await.running && second_path.exists();
+        second.shutdown().await;
+        assert_eq!(
+            (distinct, first_removed, second_alive, second_path.exists()),
+            (true, true, true, false)
+        );
     }
 }

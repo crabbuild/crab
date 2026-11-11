@@ -110,6 +110,22 @@ describe("CapabilityNegotiator", () => {
     });
   });
 
+  it.each([null, {}, { version: "invalid", features: fullCapabilities.features }, { version: "2.0.0", features: {} }])("rejects an incomplete capability response: %j", async response => {
+    const router = { route: async () => response } as unknown as ConstructorParameters<typeof CapabilityNegotiator>[0];
+    const negotiator = new CapabilityNegotiator(router);
+    await expect(negotiator.negotiate("profile")).rejects.toThrow("invalid capabilities");
+    expect(negotiator.getCached("profile")).toBeNull();
+  });
+
+  it("does not repopulate a cleared cache from an earlier channel's response", async () => {
+    let finish!: (value: AgentCapabilities) => void;
+    const router = { route: () => new Promise<AgentCapabilities>(resolve => { finish = resolve; }) } as unknown as ConstructorParameters<typeof CapabilityNegotiator>[0];
+    const negotiator = new CapabilityNegotiator(router);
+    const pending = negotiator.negotiate("profile"); negotiator.clearCache("profile"); finish(fullCapabilities);
+    await expect(pending).rejects.toThrow("owner changed");
+    expect(negotiator.getCached("profile")).toBeNull();
+  });
+
   describe("isSupported", () => {
     let negotiator: CapabilityNegotiator;
 

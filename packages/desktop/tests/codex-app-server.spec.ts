@@ -37,7 +37,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 12345,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),
@@ -156,7 +155,7 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
     // Server responds to turn/start
     serverWrite(stdout, {
       id: turnStartRequest!.id,
-      result: { turnId: "turn_001" },
+      result: { turn: { id: "turn_001" } },
     });
 
     // --- Step 4 (after handlers wired): Server sends `thread/started` notification ---
@@ -176,15 +175,15 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
 
     serverWrite(stdout, {
       method: "item/agentMessage/delta",
-      params: { delta: "Here is a ", threadId: "thr_test_123", turnId: "turn_001" },
+      params: { itemId: "item_001", delta: "Here is a ", threadId: "thr_test_123", turnId: "turn_001" },
     });
     serverWrite(stdout, {
       method: "item/agentMessage/delta",
-      params: { delta: "hello world ", threadId: "thr_test_123", turnId: "turn_001" },
+      params: { itemId: "item_001", delta: "hello world ", threadId: "thr_test_123", turnId: "turn_001" },
     });
     serverWrite(stdout, {
       method: "item/agentMessage/delta",
-      params: { delta: "function.", threadId: "thr_test_123", turnId: "turn_001" },
+      params: { itemId: "item_001", delta: "function.", threadId: "thr_test_123", turnId: "turn_001" },
     });
 
     // --- Step 8: Server sends `item/completed` notification ---
@@ -201,17 +200,34 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
       },
     });
 
-    // --- Step 9: Server sends `turn/completed` notification (status: completed, with usage) ---
+    // Usage is a separate notification in the official app-server protocol.
+    serverWrite(stdout, {
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "thr_test_123", turnId: "turn_001", tokenUsage: {
+        last: { inputTokens: 150, outputTokens: 42, cachedInputTokens: 10, reasoningOutputTokens: 0, totalTokens: 192 },
+        total: { inputTokens: 150, outputTokens: 42, cachedInputTokens: 10, reasoningOutputTokens: 0, totalTokens: 192 },
+      } },
+    });
+
+    // A repeated total is a replay; another identical-sized response changes
+    // total and must be counted even though last is identical.
+    for (const input of [150, 300]) {
+      serverWrite(stdout, { method: "thread/tokenUsage/updated", params: {
+        threadId: "thr_test_123", turnId: "turn_001", tokenUsage: {
+          last: { inputTokens: 150, outputTokens: 42, cachedInputTokens: 10 },
+          total: { inputTokens: input, outputTokens: input === 150 ? 42 : 84, cachedInputTokens: input === 150 ? 10 : 20, reasoningOutputTokens: 0, totalTokens: input === 150 ? 192 : 384 },
+        },
+      } });
+    }
+    serverWrite(stdout, { method: "thread/tokenUsage/updated", params: {
+      threadId: "thr_other", turnId: "turn_001", tokenUsage: { last: { inputTokens: 999 }, total: { inputTokens: 999 } },
+    } });
+
     serverWrite(stdout, {
       method: "turn/completed",
       params: {
         turn: { id: "turn_001", status: "completed" },
         threadId: "thr_test_123",
-        usage: {
-          input_tokens: 150,
-          output_tokens: 42,
-          cached_input_tokens: 10,
-        },
       },
     });
 
@@ -235,9 +251,10 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
 
     // Must include usage
     expect(eventTypes).toContain("usage");
+    expect(events.filter(event => event.type === "usage")).toHaveLength(2);
     const usageEvent = events.find((e) => e.type === "usage");
     expect(usageEvent!.usage).toEqual({
-      inputTokens: 150,
+      inputTokens: 140,
       outputTokens: 42,
       cacheCreationInputTokens: 0,
       cacheReadInputTokens: 10,
@@ -280,7 +297,7 @@ describe("CodexAppServerAdapter — Protocol Integration", () => {
     });
     serverWrite(stdout, {
       method: "item/agentMessage/delta",
-      params: { delta: "Second response.", threadId: "thr_test_123", turnId: "turn_002" },
+      params: { itemId: "item_001", delta: "Second response.", threadId: "thr_test_123", turnId: "turn_002" },
     });
     serverWrite(stdout, {
       method: "turn/completed",

@@ -3,6 +3,13 @@
 This document describes how Crab Desktop is built, tested, and
 packaged for distribution across macOS, Linux, and Windows.
 
+Electron 45 embeds Node 24. Build scripts run on Node 22.12+ within 22.x.
+Native Node modules use the Electron ABI; better-sqlite3 13 uses N-API, while
+the declared SSH addon dependency uses NAN 2.30 for current V8 APIs. The native
+installer calls electron-rebuild's public API and retains the macOS PTY source
+build that provides an executable spawn helper. The packaged macOS minimum is
+13.0, inherited from Electron rather than overridden in builder configuration.
+
 ## Build Pipeline
 
 The build process has three independent stages that can run in
@@ -27,7 +34,8 @@ parallel, followed by a packaging step:
 
 | Command | Description |
 |---------|-------------|
-| `npm run build:agent` | `cargo build --release -p crab-desktop-agent` |
+| `npm run build:agent` | Build, verify, and stage the CLI, NFS helper, Git helper, and sidecar |
+| `npm run build:agent -- --test` | Test the native integration using the build's toolchain and CLI |
 | `npm run build:renderer` | `vite build` (React app → `dist/`) |
 | `npm run build:electron` | `tsc -p tsconfig.electron.json` + rename to `.cjs` |
 | `npm run build` | All three in sequence |
@@ -36,25 +44,37 @@ parallel, followed by a packaging step:
 
 ## Agent Build
 
-The Rust agent is compiled as a standalone binary:
+The Rust agent and its CLI are built together:
 
 ```bash
-cargo build --release -p crab-desktop-agent
-# Output: target/release/crab-desktop-agent
+export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-desktop"
+npm run build:agent
+npm run build:agent -- --test
 ```
 
 ### Dependencies
 
-The agent links against several native libraries:
-- `better-sqlite3` (bundled) — for DuckDB/SQLite previews
-- `openssl` (via rustls) — TLS for forge API calls
+The native payload uses:
+- Bundled SQLite and DuckDB — table and analytics previews
+- Rustls and system certificate roots — TLS without an external OpenSSL library
 - `libc` — Unix statvfs for disk-free queries
+
+Azure and Google SDKs use Rustls while retaining their authentication, API-tag,
+and signing features. Reqwest also loads native certificate roots, including
+system/private CAs, alongside callers' existing WebPKI roots. This transport
+choice is shared with the CLI and server consumers in the Cargo workspace.
 
 ### Cross-Compilation
 
 For multi-platform builds:
-- macOS: Universal binary (aarch64 + x86_64) via `lipo`
-- Linux: Built on the target architecture (no cross-compile)
+- macOS: Separate ARM64 and x64 binaries built on matching native runners
+- Linux GNU: built on the target architecture against the glibc 2.28/GCC 8
+  runtime ABI in AlmaLinux 8, using GCC Toolset 14 for current C++ dependencies.
+  Hosts without that libc/compiler combination invoke Docker automatically; tests use the
+  same compiler. Staging checks every native binary with `readelf` before
+  producing release assets. CI runs real repository RPCs in AlmaLinux 8,
+  Debian 12, and Amazon Linux 2023. Alpine/musl and the Electron/native Node
+  module ABI remain separate release gates.
 - Windows: Built on Windows (MSVC toolchain)
 
 ## Renderer Build
@@ -164,7 +184,7 @@ In development:
 |---------|-----------|-------|
 | `npm run test` | Vitest | Unit tests (renderer utilities) |
 | `npm run test:a11y` | Playwright + axe-core | Accessibility |
-| `cargo test -p crab-desktop-agent` | Cargo | Agent unit tests |
+| `npm run build:agent -- --test` | Cargo | Native agent integration with the built CLI |
 
 ### Test Infrastructure
 

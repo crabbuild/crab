@@ -85,6 +85,25 @@ class StorageScopeTests(unittest.TestCase):
 
 
 class WorkspaceDependencyTests(unittest.TestCase):
+    def test_cloud_transports_keep_rustls_and_system_certificate_roots(self):
+        manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
+        cases = [("current transports", manifest, True)]
+        for name in ("azure_identity", "azure_mgmt_storage", "azure_storage",
+                     "azure_storage_blobs", "google-cloud-storage", "reqwest"):
+            entry = next(line for line in manifest.splitlines() if line.startswith(name + " = "))
+            declaration = ('{ version = "0.12", default-features = false, features = ["rustls-tls"] }'
+                           if name == "reqwest" else '"0.24"' if name == "google-cloud-storage" else '"0.21"')
+            cases.append((name, manifest.replace(entry, name + " = " + declaration), False))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, candidate, expected in cases:
+                with self.subTest(transport=name):
+                    (root / "Cargo.toml").write_text(candidate, encoding="utf-8")
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        provider = GATES.check_workspace_provider_sdk_dependency_sources(root, {"packages": []})
+                        shared = GATES.check_workspace_third_party_dependency_sources(root, {"packages": []})
+                    self.assertEqual(provider and shared, expected)
+
     def test_remote_fixture_dependency_does_not_admit_other_dependency_kinds(self):
         for name, kind, expected in (
             ("crab-storage", "dev", True),

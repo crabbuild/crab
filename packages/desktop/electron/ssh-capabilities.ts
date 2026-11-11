@@ -83,6 +83,7 @@ export function meetsMinVersion(version: string, minVersion: string): boolean {
 
 export class CapabilityNegotiator {
   private cache = new Map<string, CachedCapabilities>();
+  private pending = new Map<string, object>();
   private readonly router: RpcRouter;
 
   constructor(router: RpcRouter) {
@@ -95,18 +96,24 @@ export class CapabilityNegotiator {
    * is established.
    */
   async negotiate(profileId: string): Promise<AgentCapabilities> {
-    const repoId = `ssh://${profileId}/`;
-    const result = await this.router.route(repoId, "capabilities", {});
-
-    const capabilities = result as AgentCapabilities;
-
-    this.cache.set(profileId, {
-      profileId,
-      capabilities,
-      negotiatedAt: Date.now(),
-    });
-
-    return capabilities;
+    const owner = {};
+    this.pending.set(profileId, owner);
+    try {
+      const result = await this.router.route(`ssh://${profileId}/`, "capabilities", {});
+      if (this.pending.get(profileId) !== owner) throw new Error("Remote capability owner changed during negotiation");
+      if (!result || typeof result !== "object") throw new Error("Remote agent returned invalid capabilities");
+      const value = result as Record<string, unknown>;
+      const features = value.features;
+      if (typeof value.version !== "string" || !parseSemver(value.version) || !features || typeof features !== "object"
+        || Object.keys(CAPABILITY_MATRIX).some(feature => typeof (features as Record<string, unknown>)[feature] !== "boolean")) {
+        throw new Error("Remote agent returned invalid capabilities");
+      }
+      const capabilities = result as AgentCapabilities;
+      this.cache.set(profileId, { profileId, capabilities, negotiatedAt: Date.now() });
+      return capabilities;
+    } finally {
+      if (this.pending.get(profileId) === owner) this.pending.delete(profileId);
+    }
   }
 
   /**
@@ -146,6 +153,7 @@ export class CapabilityNegotiator {
    * Clear cached capabilities for a profile (e.g., on disconnect).
    */
   clearCache(profileId: string): void {
+    this.pending.delete(profileId);
     this.cache.delete(profileId);
   }
 }

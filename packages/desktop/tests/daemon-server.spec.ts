@@ -900,6 +900,20 @@ describe("DaemonServer", () => {
   // -------------------------------------------------------------------------
 
   describe("shutdown", () => {
+    it.each([true, false])("acknowledges shutdown before delegating killSessions=%s to the owner", async killSessions => {
+      const paths = createServerPaths(tmpDir);
+      const onShutdownRequested = vi.fn();
+      server = new DaemonServer({ ...paths, spawnSubprocess: spawner, idleTimeoutMs: 0, onShutdownRequested });
+      await server.start();
+      const socket = await connectSocket(paths.socketPath);
+      try {
+        await sendHello(socket, server.authToken);
+        const response = await sendRequest(socket, { id: "shutdown-owner", type: "shutdown", payload: { killSessions } });
+        expect(response).toEqual({ id: "shutdown-owner", ok: true, payload: { acknowledged: true } });
+        await vi.waitFor(() => expect(onShutdownRequested).toHaveBeenCalledWith("request", killSessions));
+      } finally { socket.destroy(); }
+    });
+
     it("shutdown with killSessions disposes all sessions", async () => {
       const paths = createServerPaths(tmpDir);
       server = new DaemonServer({
@@ -1110,7 +1124,7 @@ describe("outbound buffer cap", () => {
 // ---------------------------------------------------------------------------
 
 describe("idle timeout", () => {
-  it("fires onIdleShutdown when no clients and no sessions after timeout", () => {
+  it("requests owner shutdown when no clients and no sessions remain after timeout", () => {
     vi.useFakeTimers();
 
     const tmpDir2 = createTmpDir();
@@ -1122,7 +1136,7 @@ describe("idle timeout", () => {
       ...paths,
       spawnSubprocess: sp,
       idleTimeoutMs: 1000,
-      onIdleShutdown: onIdle,
+      onShutdownRequested: onIdle,
     });
 
     // Don't start the server (avoids socket creation in fake timer env)
@@ -1131,7 +1145,7 @@ describe("idle timeout", () => {
 
     vi.advanceTimersByTime(1000);
 
-    expect(onIdle).toHaveBeenCalledTimes(1);
+    expect(onIdle.mock.calls).toEqual([["idle-timeout", true]]);
 
     vi.useRealTimers();
     fs.rmSync(tmpDir2, { recursive: true, force: true });
@@ -1149,7 +1163,7 @@ describe("idle timeout", () => {
       ...paths,
       spawnSubprocess: sp,
       idleTimeoutMs: 0,
-      onIdleShutdown: onIdle,
+      onShutdownRequested: onIdle,
     });
 
     vi.advanceTimersByTime(100_000);

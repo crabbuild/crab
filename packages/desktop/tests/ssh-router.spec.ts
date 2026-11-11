@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, isWriteMethod, routeRpcCall } from "../electron/ssh-router";
+import { RpcRouter, parseRepoId, routeRpcCall } from "../electron/ssh-router";
 import type { RpcRouterOptions } from "../electron/ssh-router";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -113,34 +113,6 @@ describe("parseRepoId", () => {
   it("handles complex profile IDs", () => {
     const result = parseRepoId("ssh://my-gpu-server-123/data/models");
     expect(result).toEqual({ profileId: "my-gpu-server-123", remotePath: "/data/models" });
-  });
-});
-
-describe("isWriteMethod", () => {
-  it("identifies write methods", () => {
-    expect(isWriteMethod("git_commit")).toBe(true);
-    expect(isWriteMethod("git_stage")).toBe(true);
-    expect(isWriteMethod("git_checkout")).toBe(true);
-    expect(isWriteMethod("git_push")).toBe(true);
-    expect(isWriteMethod("git_pull")).toBe(true);
-    expect(isWriteMethod("git_stash_save")).toBe(true);
-    expect(isWriteMethod("git_branch_create")).toBe(true);
-    expect(isWriteMethod("git_branch_delete")).toBe(true);
-    expect(isWriteMethod("op_start")).toBe(true);
-    expect(isWriteMethod("op_continue")).toBe(true);
-  });
-
-  it("identifies read methods", () => {
-    expect(isWriteMethod("git_status_porcelain")).toBe(false);
-    expect(isWriteMethod("git_log")).toBe(false);
-    expect(isWriteMethod("git_diff_file")).toBe(false);
-    expect(isWriteMethod("list_refs")).toBe(false);
-    expect(isWriteMethod("repo_summary")).toBe(false);
-  });
-
-  it("matches prefixes for extended method names", () => {
-    expect(isWriteMethod("git_commit_amend")).toBe(true);
-    expect(isWriteMethod("git_push_force")).toBe(true);
   });
 });
 
@@ -337,7 +309,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     // This should be queued, not rejected
-    const promise = router.route("ssh://server/repo", "git_status", {});
+    const promise = router.route("ssh://server/repo", "git_status_porcelain", {});
 
     // Simulate reconnection success
     sm.setStatus("server", "connected");
@@ -355,6 +327,24 @@ describe("RpcRouter — call queuing during reconnection", () => {
     expect(result).toEqual({ status: "clean" });
   });
 
+  it.each(["git_worktree_list", "staging_stats", "pointer_info", "pointer_top", "forge_list_prs"].flatMap(method => ["repo", "profile", "batch"].map(entry => ({ method, entry }))))("replays supported $method reads through $entry admission", async ({ method, entry }) => {
+    const sm = new MockSessionManager(); const channel = new MockChannel();
+    const { router } = createRouter(sm); sm.setStatus("server", "reconnecting");
+    const repo = "ssh://server/repo"; const params = { repo_id: repo }; const response = { observed: method };
+    const pending = entry === "profile" ? router.sendToRemoteAgent("server", method, params)
+      : entry === "batch" ? router.batchRpc(repo, [{ method, params }]) : router.route(repo, method, params);
+    // Consume rejection immediately so a broken admission rule is a test failure,
+    // not an unhandled promise left behind while replay is inspected.
+    const result = pending.then(value => ({ value }), error => ({ error }));
+    const before = channel.written.length;
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel); router.attachChannel("server", channel.asChannel());
+    const replay = router.replayQueue("server");
+    const request = channel.written[0] ? JSON.parse(channel.written[0]) as { id: number; method: string; params: unknown } : undefined;
+    if (request) simulateResponse(channel, request.id, response);
+    await replay;
+    expect({ before, request: request && { method: request.method, params: request.params }, result: await result }).toEqual({ before: 0, request: { method, params }, result: { value: entry === "batch" ? [{ result: response }] : response } });
+  });
+
   it("rejects write operations immediately during reconnection", async () => {
     const sm = new MockSessionManager();
     sm.setStatus("server", "reconnecting");
@@ -363,7 +353,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     await expect(
       router.route("ssh://server/repo", "git_commit", { message: "test" }),
-    ).rejects.toThrow("Connection lost: write operations are unavailable during reconnection");
+    ).rejects.toThrow("Connection lost: mutating or unclassified operations are unavailable during reconnection");
   });
 
   it("drops oldest calls when queue overflows", async () => {
@@ -377,7 +367,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     // Queue 4 calls (max is 3, so first should be dropped)
     for (let i = 0; i < 4; i++) {
-      const p = router.route("ssh://server/repo", `method_${i}`, {});
+      const p = router.route("ssh://server/repo", "git_log", { i });
       p.catch((err) => rejections.push(err));
       promises.push(p);
     }
@@ -397,7 +387,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     const rejections: Error[] = [];
-    const p1 = router.route("ssh://server/repo", "git_status", {});
+    const p1 = router.route("ssh://server/repo", "git_status_porcelain", {});
     p1.catch((err) => rejections.push(err));
 
     router.clearQueue("server");
@@ -405,6 +395,47 @@ describe("RpcRouter — call queuing during reconnection", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(rejections).toHaveLength(1);
     expect(rejections[0].message).toContain("Connection lost permanently");
+  });
+});
+
+describe("RpcRouter — repository ownership across channels", () => {
+  it("reopens acknowledged repos but excludes failed and closed opens", async () => {
+    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
+    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
+    async function request(method: string, params: Record<string, string>, error = false) {
+      const pending = router.sendToRemoteAgent("server", method, params).catch((failure: unknown) => failure);
+      const frame = JSON.parse(first.written.at(-1)!) as { id: number };
+      if (error) simulateErrorResponse(first, frame.id, -32000, "Open failed"); else simulateResponse(first, frame.id, { repo_id: params.repo_id });
+      await pending;
+    }
+    await request("open_local", { repo_id: "kept", path: "/repo" });
+    await request("open_local", { repo_id: "another", path: "/another" });
+    await request("open_local", { repo_id: "failed", path: "/missing" }, true);
+    await request("open_local", { repo_id: "closed", path: "/closed" }); await request("close", { repo_id: "closed" });
+    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
+    const restored = router.restoreRepositories("server");
+    for (let i = 0; i < 2; i++) {
+      await vi.waitFor(() => expect(second.written.length).toBe(i + 1));
+      const frame = JSON.parse(second.written[i]) as { id: number }; simulateResponse(second, frame.id, {});
+    }
+    await restored;
+    expect(second.written.map(frame => { const { method, params } = JSON.parse(frame) as { method: string; params: unknown }; return { method, params }; })).toEqual([
+      { method: "open_local", params: { repo_id: "kept", path: "/repo" } }, { method: "open_local", params: { repo_id: "another", path: "/another" } },
+    ]);
+  });
+
+  it("rejects a retired restore and never writes its next open into the newer channel", async () => {
+    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
+    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
+    for (const id of ["first", "second"]) {
+      const opening = router.sendToRemoteAgent("server", "open_local", { repo_id: id, path: `/${id}` });
+      const request = JSON.parse(first.written.at(-1)!) as { id: number }; simulateResponse(first, request.id, {}); await opening;
+    }
+    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
+    const restoring = router.restoreRepositories("server").catch((error: unknown) => error);
+    const third = new MockChannel(); router.attachChannel("server", third.asChannel());
+    expect({ result: await restoring, writes: third.written }).toEqual({ result: expect.objectContaining({ message: expect.stringContaining("replaced") }), writes: [] });
+    router.forgetRepositories("server"); await router.restoreRepositories("server"); expect(third.written).toEqual([]);
   });
 });
 
@@ -458,7 +489,7 @@ describe("RpcRouter — notification forwarding", () => {
 });
 
 describe("RpcRouter — batch RPC", () => {
-  it("sends batch as JSON array and returns ordered results", async () => {
+  it("sends independent NDJSON requests and returns ordered results", async () => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();
     sm.setStatus("server", "connected");
@@ -475,11 +506,8 @@ describe("RpcRouter — batch RPC", () => {
 
     const promise = router.batchRpc("ssh://server/repo", calls);
 
-    // Verify batch was written as a JSON array
-    expect(channel.written).toHaveLength(1);
-    const parsed = JSON.parse(channel.written[0].trim());
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed).toHaveLength(3);
+    // Each NDJSON line must be accepted by the sidecar request dispatcher.
+    expect(channel.written.map(frame => JSON.parse(frame).method)).toEqual(calls.map(call => call.method));
 
     // Simulate individual responses (may arrive out of order)
     simulateResponse(channel, 2, { branches: ["main"] });
@@ -514,10 +542,10 @@ describe("RpcRouter — batch RPC", () => {
 
     const results = await promise;
     expect(results[0]).toEqual({ result: { name: "repo" } });
-    expect(results[1]).toEqual({ error: { code: -32000, message: "Method not found" } });
+    expect(results[1]).toEqual({ error: { code: -32601, message: "Method not found" } });
   });
 
-  it("falls back to sequential calls for local repos", async () => {
+  it("routes local calls through the local agent", async () => {
     const la = new MockLocalAgent();
     la.nextResult = "local-result";
     const { router } = createRouter(undefined, la);

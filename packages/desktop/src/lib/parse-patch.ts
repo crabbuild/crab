@@ -1,3 +1,5 @@
+import { decodeGitPath } from "../../electron/git-path";
+
 // Minimal unified-diff parser used by the Changes view's per-hunk
 // toolbar. We only need the hunk header positions and the raw hunk
 // body verbatim (the agent takes the body as-is and validates
@@ -286,14 +288,16 @@ export function lineToDiscardAnchor(
  *  Returns null for `/dev/null` (which means file creation/deletion
  *  sentinel — the caller should rely on the other side's path). */
 function stripABPrefix(raw: string): string | null {
-  let s = raw.trim();
+  let s = raw;
   // Strip the timestamp tail `\t<date>` that some diff producers
   // add. Git doesn't, but other tools do.
   const tab = s.indexOf("\t");
   if (tab !== -1) s = s.slice(0, tab);
   if (s === "/dev/null") return null;
   if (s.startsWith('"') && s.endsWith('"')) {
-    s = unquoteGitPath(s);
+    const decoded = decodeGitPath(s);
+    if (decoded === null) return null;
+    s = decoded;
   }
   if (s.startsWith("a/")) return s.slice(2);
   if (s.startsWith("b/")) return s.slice(2);
@@ -352,49 +356,4 @@ function findQuotedEnd(s: string, start: number): number {
     i += 1;
   }
   return -1;
-}
-
-/** Decode a git-style C-escaped path string (surrounding quotes
- *  included). Best-effort: we only handle the escapes git actually
- *  emits — `\n`, `\t`, `\\`, `\"`, and `\NNN` octal for non-ASCII. */
-function unquoteGitPath(s: string): string {
-  const inner = s.slice(1, -1);
-  let out = "";
-  let i = 0;
-  while (i < inner.length) {
-    const ch = inner[i];
-    if (ch !== "\\") {
-      out += ch;
-      i += 1;
-      continue;
-    }
-    const next = inner[i + 1];
-    if (next === "n") {
-      out += "\n";
-      i += 2;
-    } else if (next === "t") {
-      out += "\t";
-      i += 2;
-    } else if (next === "\\") {
-      out += "\\";
-      i += 2;
-    } else if (next === '"') {
-      out += '"';
-      i += 2;
-    } else if (next >= "0" && next <= "7") {
-      // Octal escape: git emits exactly three digits.
-      const oct = inner.slice(i + 1, i + 4);
-      if (/^[0-7]{3}$/.test(oct)) {
-        out += String.fromCharCode(parseInt(oct, 8));
-        i += 4;
-      } else {
-        out += next;
-        i += 2;
-      }
-    } else {
-      out += next;
-      i += 2;
-    }
-  }
-  return out;
 }

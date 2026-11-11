@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { StorageConnections } from "../electron/storage-connections";
+import type { SafeStorage } from "electron";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
 
 const fixture = (name = "Store", endpoint = "http://127.0.0.1:9000"): StorageConnectionInput => ({
@@ -14,18 +15,26 @@ const fixture = (name = "Store", endpoint = "http://127.0.0.1:9000"): StorageCon
 function encryption() {
   const key = randomBytes(32);
   return {
-    isEncryptionAvailable: vi.fn(() => true), getSelectedStorageBackend: vi.fn(() => "gnome_libsecret"),
-    encryptString: vi.fn((value: string) => {
+    isAsyncEncryptionAvailable: vi.fn(async () => true), getSelectedStorageBackend: vi.fn((): ReturnType<SafeStorage["getSelectedStorageBackend"]> => "gnome_libsecret"),
+    encryptStringAsync: vi.fn(async (value: string) => {
       const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key, iv);
       const encrypted = Buffer.concat([cipher.update(value), cipher.final()]);
       return Buffer.concat([iv, cipher.getAuthTag(), encrypted]);
     }),
-    decryptString: vi.fn((value: Buffer) => {
+    decryptStringAsync: vi.fn(async (value: Buffer) => {
       const decipher = createDecipheriv("aes-256-gcm", key, value.subarray(0, 12));
       decipher.setAuthTag(value.subarray(12, 28));
-      return Buffer.concat([decipher.update(value.subarray(28)), decipher.final()]).toString();
+      return { result: Buffer.concat([decipher.update(value.subarray(28)), decipher.final()]).toString(), shouldReEncrypt: false };
     }),
   };
+}
+
+function sender() {
+  return vi.fn(async (method: string, params: unknown): Promise<unknown> => {
+    const payload = params as Record<string, unknown>;
+    if (method === "open_local" || method === "open_url") return { repo_id: payload.repo_id, url: payload.url ?? "crab://test-bucket/repo", is_remote: method === "open_url" };
+    return { ok: true, latency_ms: 2 };
+  });
 }
 
 describe("built-in storage connections", () => {
@@ -33,7 +42,7 @@ describe("built-in storage connections", () => {
   let file: string;
   let crypto: ReturnType<typeof encryption>;
   let store: StorageConnections;
-  let send: ReturnType<typeof vi.fn>;
+  let send: ReturnType<typeof sender>;
   const call = (method: string, params: unknown = {}) => store.request(method, params, send);
   const save = (connection = fixture()) => call("storage_connections_save", { connection }) as Promise<StorageConnectionInfo>;
   const list = (repo_id?: string) => call("storage_connections_list", { repo_id }) as Promise<StorageConnectionStatus>;
@@ -43,10 +52,7 @@ describe("built-in storage connections", () => {
     file = path.join(directory, "connections.enc");
     crypto = encryption();
     store = new StorageConnections(file, crypto, "darwin");
-    send = vi.fn(async (method: string, params: Record<string, unknown>) => {
-      if (method === "open_local" || method === "open_url") return { repo_id: params.repo_id, url: params.url ?? "crab://test-bucket/repo", is_remote: method === "open_url" };
-      return { ok: true, latency_ms: 2 };
-    });
+    send = sender();
   });
   afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
 
@@ -66,8 +72,8 @@ describe("built-in storage connections", () => {
     expect((await list()).connections).toEqual([saved]);
   });
 
-  it("rejects Linux's plaintext-key backend while preserving local browsing", async () => {
-    crypto.getSelectedStorageBackend.mockReturnValue("basic_text");
+  it.each(["basic_text", "unknown"] as const)("rejects Linux's %s backend while preserving local browsing", async backend => {
+    crypto.getSelectedStorageBackend.mockReturnValue(backend);
     store = new StorageConnections(file, crypto, "linux");
     await expect(save()).rejects.toThrow("keyring");
     await call("open_local", { repo_id: "local", path: directory });
@@ -75,8 +81,48 @@ describe("built-in storage connections", () => {
     expect(send).toHaveBeenLastCalledWith("list", { repo_id: "local" });
   });
 
+  it("rotates ciphertext without changing the saved connection", async () => {
+    const saved = await save();
+    const previous = await readFile(file);
+    const decrypt = crypto.decryptStringAsync.getMockImplementation()!;
+    crypto.decryptStringAsync.mockImplementationOnce(async bytes => ({ ...await decrypt(bytes), shouldReEncrypt: true }));
+    store = new StorageConnections(file, crypto, "darwin");
+    const connections = (await list()).connections;
+    expect({ connections, rotated: !previous.equals(await readFile(file)) }).toEqual({ connections: [saved], rotated: true });
+  });
+
+  it("preserves connections saved while a rotation read is awaiting its key provider", async () => {
+    await save(fixture("First"));
+    const decrypt = crypto.decryptStringAsync.getMockImplementation()!;
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    crypto.decryptStringAsync.mockImplementationOnce(async bytes => {
+      await ready;
+      return { ...await decrypt(bytes), shouldReEncrypt: true };
+    });
+    store = new StorageConnections(file, crypto, "darwin");
+    const reading = list();
+    await vi.waitFor(() => expect(crypto.decryptStringAsync).toHaveBeenCalledOnce());
+    const saving = save(fixture("Second"));
+    release();
+    await Promise.all([reading, saving]);
+    store = new StorageConnections(file, crypto, "darwin");
+    expect((await list()).connections.map(item => item.name)).toEqual(["First", "Second"]);
+  });
+
+  it("preserves the previous ciphertext when rotation cannot encrypt its replacement", async () => {
+    await save();
+    const previous = await readFile(file);
+    const decrypt = crypto.decryptStringAsync.getMockImplementation()!;
+    crypto.decryptStringAsync.mockImplementationOnce(async bytes => ({ ...await decrypt(bytes), shouldReEncrypt: true }));
+    crypto.encryptStringAsync.mockRejectedValueOnce(new Error("Key provider unavailable"));
+    store = new StorageConnections(file, crypto, "darwin");
+    await expect(list()).rejects.toThrow("Key provider unavailable");
+    expect(await readFile(file)).toEqual(previous);
+  });
+
   it("does not require a keyring to select default credentials in a fresh repo", async () => {
-    crypto.isEncryptionAvailable.mockReturnValue(false);
+    crypto.isAsyncEncryptionAvailable.mockResolvedValue(false);
     await call("open_local", { repo_id: "local", path: directory });
     await expect(call("storage_connections_bind", { repo_id: "local", id: null })).resolves.toEqual({ ok: true });
   });

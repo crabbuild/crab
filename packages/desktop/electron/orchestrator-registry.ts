@@ -12,9 +12,11 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import { AgentAdapter } from "./orchestrator-adapters";
-import { ClaudeCodeAdapter, GenericAdapter, _setRegistry } from "./orchestrator-adapters";
+import { GenericAdapter, _setRegistry } from "./orchestrator-adapters";
+import { ClaudeCodeAdapter } from "./claude-code-adapter";
 import { CodexAppServerAdapter } from "./codex-app-server-adapter";
 import { validateManifest, ManifestAdapter } from "./orchestrator-manifest";
+import type { AgentProcessFactory } from "./agent-process";
 import type { AgentManifest } from "./orchestrator-manifest";
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -26,6 +28,7 @@ export interface AgentConfig {
   env?: Record<string, string>;
   /** Codex-specific: notification methods to suppress on the connection. */
   optOutNotifications?: string[];
+  processFactory?: AgentProcessFactory;
 }
 
 /** Declares what features an agent supports. */
@@ -183,7 +186,7 @@ export const agentRegistry = new AgentRegistry();
 agentRegistry.register({
   type: "claude-code",
   name: "Claude Code",
-  factory: (config?: AgentConfig) => new ClaudeCodeAdapter(config?.extraArgs),
+  factory: (config?: AgentConfig) => new ClaudeCodeAdapter(config?.extraArgs, config?.binaryPath, config?.processFactory),
   capabilities: {
     supportsPlanMode: true,
     supportsStreaming: true,
@@ -198,9 +201,9 @@ agentRegistry.register({
   type: "codex",
   name: "Codex",
   factory: (config?: AgentConfig) =>
-    new CodexAppServerAdapter(config?.extraArgs, config?.optOutNotifications),
+    new CodexAppServerAdapter(config?.extraArgs, config?.optOutNotifications, config?.binaryPath, config?.processFactory),
   capabilities: {
-    supportsPlanMode: false,
+    supportsPlanMode: true,
     supportsStreaming: true,
     supportsToolUse: true,
     supportsIteration: true,

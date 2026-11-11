@@ -21,6 +21,8 @@ import { useChatUIState } from "../../lib/chat-ui-state";
 export interface TurnHeaderProps {
   turn: Turn;
   taskId: string;
+  collapsed: boolean;
+  collapsible: boolean;
   onUndo?: () => void;
   onReview?: () => void;
   onApply?: () => void;
@@ -63,7 +65,7 @@ function usePrefersReducedMotion(): boolean {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export function TurnHeader({ turn, taskId, onUndo, onReview, onApply }: TurnHeaderProps) {
+export function TurnHeader({ turn, taskId, collapsed: isCollapsed, collapsible, onUndo, onReview, onApply }: TurnHeaderProps) {
   const store = useChatUIState();
   const prefersReducedMotion = usePrefersReducedMotion();
 
@@ -77,15 +79,6 @@ export function TurnHeader({ turn, taskId, onUndo, onReview, onApply }: TurnHead
   // Elapsed time counter for running turns (1 Hz)
   const [elapsedMs, setElapsedMs] = useState(0);
   const turnStartTimestamp = turn.events[0]?.timestamp ?? Date.now();
-
-  // Determine collapsed state from the store
-  const taskState = store.byTask.get(taskId);
-  const turnCollapseEntry = taskState?.turnCollapse[turn.turnIndex];
-
-  // Default: collapsed when complete (unless user overrode), expanded when running
-  const isCollapsed = turnCollapseEntry != null
-    ? turnCollapseEntry.collapsed
-    : turn.complete;
 
   // 1 Hz elapsed time counter while the turn is running
   useEffect(() => {
@@ -101,7 +94,7 @@ export function TurnHeader({ turn, taskId, onUndo, onReview, onApply }: TurnHead
 
   // Auto-collapse 400ms after done arrives (D11)
   useEffect(() => {
-    if (turn.complete && !prevCompleteRef.current && !autoCollapseTriggeredRef.current) {
+    if (collapsible && turn.complete && !prevCompleteRef.current && !autoCollapseTriggeredRef.current) {
       autoCollapseTriggeredRef.current = true;
 
       // Suppress animation if user clicked or reduced motion
@@ -119,13 +112,14 @@ export function TurnHeader({ turn, taskId, onUndo, onReview, onApply }: TurnHead
       }
     }
     prevCompleteRef.current = turn.complete;
-  }, [turn.complete, taskId, turn.turnIndex, prefersReducedMotion, store]);
+  }, [collapsible, turn.complete, taskId, turn.turnIndex, prefersReducedMotion, store]);
 
   // Toggle handler
   const handleToggle = useCallback(() => {
+    if (!collapsible) return;
     userClickedRef.current = true;
     store.setTurnCollapsed(taskId, turn.turnIndex, !isCollapsed);
-  }, [store, taskId, turn.turnIndex, isCollapsed]);
+  }, [collapsible, store, taskId, turn.turnIndex, isCollapsed]);
 
   // Count tool calls (all tool-type events)
   const toolCallCount = turn.events.filter((e) =>
@@ -167,10 +161,11 @@ export function TurnHeader({ turn, taskId, onUndo, onReview, onApply }: TurnHead
       <button
         type="button"
         onClick={handleToggle}
+        disabled={!collapsible}
         aria-expanded={!isCollapsed}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5",
-          "text-[11px] text-left cursor-pointer select-none",
+          "text-[11px] text-left cursor-pointer select-none disabled:cursor-default",
         )}
       >
         {/* Chevron indicator */}

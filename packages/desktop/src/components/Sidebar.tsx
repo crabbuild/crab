@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { matchesRepository, workspaceIdentity } from "../lib/workspace-sidebar";
 import { localPathName } from "../lib/local-path-name";
@@ -49,6 +49,7 @@ import { WorkspaceSidebar } from "./workspace/WorkspaceSidebar";
 import { WorkspaceSettings } from "./workspace/WorkspaceSettings";
 import { RemoteWorkspaceDialog } from "./workspace/RemoteWorkspaceDialog";
 import { useWorkspaceRepoSelect } from "../hooks/useWorkspaceRepoSelect";
+import { RepositorySidebarScroll } from "./RepositorySidebarScroll";
 
 interface Props {
   /** Invoked when the user hits the icon-only collapse button. */
@@ -66,26 +67,8 @@ export function Sidebar({ onCollapse }: Props) {
   const { state, dispatch, addRepo, removeRepo, setActive, pinRepo, unpinRepo, reorderRepos } = useStore();
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const scrollPosition = useRef(0);
-  const restoringScroll = useRef(false);
   const activeWorkspace = getActiveWorkspace(state);
   const scrollKey = `crab.repoSidebarScroll.${activeWorkspace ? workspaceIdentity(activeWorkspace) : "standalone"}`;
-  useLayoutEffect(() => {
-    scrollPosition.current = Number(localStorage.getItem(scrollKey)) || 0;
-    return () => localStorage.setItem(scrollKey, String(scrollPosition.current));
-  }, [scrollKey]);
-  useLayoutEffect(() => {
-    restoringScroll.current = true;
-    if (scrollRef.current) scrollRef.current.scrollTop = query.trim() ? 0 : scrollPosition.current;
-    const frame = requestAnimationFrame(() => { restoringScroll.current = false; });
-    return () => cancelAnimationFrame(frame);
-  }, [scrollKey, query, state.workspaces, state.repos]);
-  useEffect(() => {
-    const saveScroll = () => localStorage.setItem(scrollKey, String(scrollPosition.current));
-    window.addEventListener("beforeunload", saveScroll);
-    return () => window.removeEventListener("beforeunload", saveScroll);
-  }, [scrollKey]);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneTargetWorkspace, setCloneTargetWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -462,14 +445,7 @@ export function Sidebar({ onCollapse }: Props) {
           </button>
         )}
       </div>
-      <div
-        ref={scrollRef}
-        aria-label="Repository list"
-        className="min-h-0 flex-1 overflow-auto"
-        onScroll={(event) => {
-          if (!query.trim() && !restoringScroll.current) scrollPosition.current = event.currentTarget.scrollTop;
-        }}
-      >
+      <RepositorySidebarScroll storageKey={scrollKey} filtered={Boolean(query.trim())}>
         {/* ── Workspaces section (when any workspace is active) ── */}
         {state.workspaces.length > 0 && (
           <div>
@@ -626,7 +602,7 @@ export function Sidebar({ onCollapse }: Props) {
             </div>
           );
         })()}
-      </div>
+      </RepositorySidebarScroll>
 
       <CloneDialog
         open={cloneOpen}

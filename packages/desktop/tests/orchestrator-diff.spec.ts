@@ -6,7 +6,8 @@
  * and conflict detection.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs";
@@ -19,9 +20,13 @@ import {
   cherryPickFiles,
   discard,
   parseDiffOutput,
+  registerDiffIpc,
 } from "../electron/orchestrator-diff";
 import type { Task } from "../electron/orchestrator";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
 import { createWorktree, readTaskMetadata } from "../electron/orchestrator-worktree";
+import { parsePatch } from "../src/lib/parse-patch";
+import { groupPatchByFile } from "../src/lib/file-state";
 
 const execFile = promisify(execFileCb);
 
@@ -105,11 +110,27 @@ function createMockTask(
     branch: `agent/${taskId}`,
     worktreePath,
     baseRef,
+    baseBranch: "main",
     repoPath,
     createdAt: Date.now(),
     events: [],
     feedback: [],
+    todos: [],
   };
+}
+
+function diffIpc(task: Task) {
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>();
+  const send = vi.fn();
+  const owner = { getTask: (id: string) => id === task.id ? task : undefined, getRpcRouter: () => undefined, revertFile: vi.fn() };
+  const window = { isDestroyed: () => false, webContents: { send } } as unknown as BrowserWindow;
+  registerDiffIpc({ handle: (channel, handler) => { handlers.set(channel, handler); } } as IpcMain, owner, () => window);
+  const read = async (payload: { checkpointSha?: string; checkpointFromSha?: string } = {}) => {
+    const handler = handlers.get("orchestrator:get-diff");
+    if (!handler) throw new Error("Diff handler was not registered");
+    return await handler({} as IpcMainInvokeEvent, { taskId: task.id, ...payload }) as { success: boolean; diff?: Awaited<ReturnType<typeof computeDiff>>; error?: string };
+  };
+  return { read, send };
 }
 
 /** Cleans up a temporary repo directory. */
@@ -147,6 +168,23 @@ describe("orchestrator-diff", () => {
   });
 
   describe("parseDiffOutput", () => {
+    it("preserves trailing filename spaces in file rows and mutation anchors", () => {
+      const raw = "diff --git a/trailing  b/trailing \nnew file mode 100644\n--- /dev/null\n+++ b/trailing \t\n@@ -0,0 +1 @@\n+content\n";
+      expect({ files: parseDiffOutput(raw, "A\ttrailing \n").map(file => file.path), anchors: parsePatch(raw).hunks.map(hunk => hunk.path), staged: Object.keys(groupPatchByFile(raw)) })
+        .toEqual({ files: ["trailing "], anchors: ["trailing "], staged: ["trailing "] });
+    });
+    it("preserves quoted UTF-8 identity in remote files, hunk anchors, and staging state", () => {
+      const raw = 'diff --git "a/\\351\\233\\252\\tfile" "b/\\351\\233\\252\\tfile"\nnew file mode 100644\n--- /dev/null\n+++ "b/\\351\\233\\252\\tfile"\n@@ -0,0 +1 @@\n+content\n';
+      const files = parseDiffOutput(raw, 'A\t"\\351\\233\\252\\tfile"\n');
+      expect({ files: files.map(file => file.path), anchors: parsePatch(raw).hunks.map(hunk => hunk.path), staged: Object.keys(groupPatchByFile(raw)) })
+        .toEqual({ files: ["雪\tfile"], anchors: ["雪\tfile"], staged: ["雪\tfile"] });
+    });
+
+    it("counts changed content that begins with patch-header characters", () => {
+      const patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n---before\n+++after\n";
+      const [file] = parseDiffOutput(patch, "M\tfile\n");
+      expect({ additions: file.additions, deletions: file.deletions }).toEqual({ additions: 1, deletions: 1 });
+    });
     it("returns empty array for empty diff", () => {
       expect(parseDiffOutput("", "")).toEqual([]);
     });
@@ -186,7 +224,152 @@ rename to new-name.ts
     });
   });
 
+  describe("registered comparison IPC", () => {
+    it("routes saved and latest-turn comparisons through the same complete reader", async () => {
+      const task = createMockTask(repoDir, "ipc", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "saved turn\n");
+      const cp = await new CheckpointManager().createCheckpoint(task, 1);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "current turn\n");
+      fs.writeFileSync(path.join(repoDir, "latest.txt"), "new bytes\n");
+      const { read } = diffIpc(task);
+      const saved = await read({ checkpointSha: cp.sha });
+      const live = await read({ checkpointSha: "HEAD", checkpointFromSha: cp.sha });
+      expect({ saved: saved.diff?.files.map(file => file.path), live: live.diff?.files.map(file => file.path).sort(), savedPatch: saved.diff?.rawDiff.includes("+saved turn"), livePatch: live.diff?.rawDiff.includes("+current turn") })
+        .toEqual({ saved: ["README.md"], live: ["README.md", "latest.txt"], savedPatch: true, livePatch: true });
+    });
+
+    it("returns a visible failure without publishing a clean diff on Git errors", async () => {
+      const task = createMockTask(repoDir, "ipc-error", "missing-baseline", repoDir);
+      const { read, send } = diffIpc(task);
+      const result = await read();
+      expect({ success: result.success, missing: result.error?.includes("missing-baseline"), notices: send.mock.calls })
+        .toEqual({ success: false, missing: true, notices: [] });
+    });
+
+    it("rejects remote saved comparisons before any local filesystem access", async () => {
+      const task = { ...createMockTask("ssh://fixture/repo", "remote", "base", "/remote/worktree"), isRemote: true };
+      expect(await diffIpc(task).read({ checkpointSha: "saved-ref" })).toEqual({ success: false, error: "Saved-file comparisons require a local workspace" });
+    });
+  });
+
   describe("computeDiff", () => {
+    it("includes mixed tracked and untracked changes without changing the real index", async () => {
+      const task = createMockTask(repoDir, "mixed", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      fs.writeFileSync(path.join(repoDir, "new.txt"), "new bytes\n");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      const diff = await computeDiff(task);
+      expect({ paths: diff.files.map(file => file.path).sort(), index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+        .toEqual({ paths: ["new.txt", "src/index.ts"], index });
+    });
+
+    it("shows no net change when staged edits were undone in the working tree", async () => {
+      const task = createMockTask(repoDir, "net-change", await getHead(repoDir), repoDir);
+      const file = path.join(repoDir, "src/index.ts");
+      const original = fs.readFileSync(file);
+      fs.writeFileSync(file, "staged change\n");
+      await execFile("git", ["add", "src/index.ts"], { cwd: repoDir });
+      fs.writeFileSync(file, original);
+      expect((await computeDiff(task)).files).toEqual([]);
+    });
+
+    it.each([false, true])("compares a captured untracked baseline with changed bytes: %s", async changed => {
+      const task = createMockTask(repoDir, "baseline", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "user.txt"), "original user bytes\n");
+      task.baseRef = await new CheckpointManager().captureBase(task);
+      if (changed) fs.writeFileSync(path.join(repoDir, "user.txt"), "changed user bytes\n");
+      const files = (await computeDiff(task)).files;
+      expect(files.map(file => ({ path: file.path, status: file.status }))).toEqual(changed ? [{ path: "user.txt", status: "modified" }] : []);
+    });
+
+    it("rejects a missing baseline instead of comparing a different state", async () => {
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      await expect(computeDiff(createMockTask(repoDir, "invalid", "refs/heads/missing-baseline", repoDir))).rejects.toThrow();
+    });
+
+    it("preserves unusual paths, empty files, binary files, and symbolic links", async () => {
+      const task = createMockTask(repoDir, "paths", await getHead(repoDir), repoDir);
+      const unusual = process.platform === "win32" ? "snow 雪 space.txt" : "line\tbreak\n雪.txt";
+      fs.writeFileSync(path.join(repoDir, unusual), "content\n");
+      fs.writeFileSync(path.join(repoDir, "empty.txt"), "");
+      fs.writeFileSync(path.join(repoDir, "binary.bin"), Buffer.from([0, 1, 2]));
+      const names = ["binary.bin", "empty.txt", unusual];
+      if (process.platform !== "win32") {
+        fs.symlinkSync("../outside-user-file", path.join(repoDir, "link"));
+        names.push("link");
+      }
+      expect((await computeDiff(task)).files.map(file => ({ path: file.path, status: file.status })).sort((a, b) => a.path.localeCompare(b.path)))
+        .toEqual(names.map(filePath => ({ path: filePath, status: "added" })).sort((a, b) => a.path.localeCompare(b.path)));
+    });
+
+    it("preserves rename identity when Git quotes the new path", async () => {
+      const task = createMockTask(repoDir, "rename", await getHead(repoDir), repoDir);
+      const renamed = process.platform === "win32" ? "renamed 雪.ts" : "renamed\t雪.ts";
+      await execFile("git", ["mv", "src/utils.ts", renamed], { cwd: repoDir });
+      expect((await computeDiff(task)).files.map(file => ({ path: file.path, oldPath: file.oldPath, status: file.status })))
+        .toEqual([{ path: renamed, oldPath: "src/utils.ts", status: "renamed" }]);
+    });
+
+    it("keeps staged additions visible after an ignore rule matches them", async () => {
+      const task = createMockTask(repoDir, "staged-ignored", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "staged.txt"), "staged bytes\n");
+      await execFile("git", ["add", "staged.txt"], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, ".gitignore"), "staged.txt\n");
+      expect((await computeDiff(task)).files.map(file => file.path).sort()).toEqual([".gitignore", "staged.txt"]);
+    });
+
+    it("reads a split index without changing staged bytes", async () => {
+      const task = createMockTask(repoDir, "split-index", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "staged\n");
+      await execFile("git", ["add", "src/index.ts"], { cwd: repoDir });
+      await execFile("git", ["update-index", "--split-index"], { cwd: repoDir });
+      const staged = (await execFile("git", ["diff", "--cached"], { cwd: repoDir })).stdout;
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      fs.writeFileSync(path.join(repoDir, "src/index.ts"), "changed\n");
+      const diff = await computeDiff(task);
+      expect({ paths: diff.files.map(file => file.path), index: fs.readFileSync(path.join(repoDir, ".git/index")), staged: (await execFile("git", ["diff", "--cached"], { cwd: repoDir })).stdout })
+        .toEqual({ paths: ["src/index.ts"], index, staged });
+    });
+
+    it("compares an unborn workspace with a saved baseline without creating its index", async () => {
+      const unborn = path.join(repoDir, "unborn");
+      await execFile("git", ["init", "--initial-branch=main", unborn]);
+      const task = createMockTask(unborn, "unborn", "HEAD", unborn);
+      task.baseRef = await new CheckpointManager().captureBase(task);
+      fs.writeFileSync(path.join(unborn, "new.txt"), "new bytes\n");
+      expect({ paths: (await computeDiff(task)).files.map(file => file.path), index: fs.existsSync(path.join(unborn, ".git/index")) })
+        .toEqual({ paths: ["new.txt"], index: false });
+    });
+
+    it("surfaces required filter failures without changing the real index", async () => {
+      const task = createMockTask(repoDir, "filter", await getHead(repoDir), repoDir);
+      fs.writeFileSync(path.join(repoDir, ".gitattributes"), "*.bin filter=fixture\n");
+      fs.writeFileSync(path.join(repoDir, "payload.bin"), "new bytes\n");
+      await execFile("git", ["config", "filter.fixture.clean", "exit 17"], { cwd: repoDir });
+      await execFile("git", ["config", "filter.fixture.required", "true"], { cwd: repoDir });
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      await expect(computeDiff(task)).rejects.toThrow();
+      expect(fs.readFileSync(path.join(repoDir, ".git/index"))).toEqual(index);
+    });
+
+    it("rejects a recreated folder that would read its parent repository", async () => {
+      const task = createMockTask(repoDir, "replaced", await getHead(repoDir), repoDir);
+      task.worktreePath = path.join(repoDir, "recreated");
+      fs.mkdirSync(task.worktreePath);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "primary change\n");
+      await expect(computeDiff(task)).rejects.toThrow("no longer matches");
+    });
+
+    it("reads saved comparisons from repository objects after the worktree is gone", async () => {
+      const task = createMockTask(repoDir, "saved", await getHead(repoDir), repoDir);
+      const snapshots = new CheckpointManager();
+      const first = await snapshots.createCheckpoint(task, 0);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "next turn\n");
+      const second = await snapshots.createCheckpoint(task, 1);
+      task.worktreePath = path.join(repoDir, "absent");
+      expect((await computeDiff(task, first.sha, second.sha)).files.map(file => file.path)).toEqual(["README.md"]);
+    });
+
     it("computes a structured diff with file list and patches", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `diff-test-${Date.now()}`;
@@ -200,7 +383,7 @@ rename to new-name.ts
 
         expect(diff.taskId).toBe(taskId);
         expect(diff.baseRef).toBe(baseRef);
-        expect(diff.headRef).toMatch(/^[0-9a-f]{40}$/);
+        expect(diff.headRef).toBe("HEAD");
         expect(diff.files.length).toBeGreaterThan(0);
         expect(diff.rawDiff).toContain("diff --git");
 
@@ -261,6 +444,32 @@ rename to new-name.ts
   });
 
   describe("applyAll", () => {
+    it.each(["all", "selected"])("rejects %s Apply in the primary workspace without claiming a commit", async operation => {
+      const head = await getHead(repoDir);
+      const task = createMockTask(repoDir, "primary-apply", head, repoDir);
+      task.worktreeMode = "primary";
+      fs.writeFileSync(path.join(repoDir, "README.md"), "pending primary bytes\n");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      const result = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["README.md"], new CheckpointManager());
+      await expect(result).rejects.toThrow("already in the primary workspace");
+      expect({ head: await getHead(repoDir), index: fs.readFileSync(path.join(repoDir, ".git/index")), content: fs.readFileSync(path.join(repoDir, "README.md"), "utf8") })
+        .toEqual({ head, index, content: "pending primary bytes\n" });
+    });
+
+    it.each(["active", "inactive"])("includes untracked source files hidden by display settings for an %s target", async target => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `hidden-source-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });
+        fs.writeFileSync(path.join(worktreePath, "pending.txt"), "pending task bytes\n");
+        if (target === "inactive") await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        const result = await applyAll(createMockTask(repoDir, taskId, baseRef, worktreePath));
+        const tree = (await execFile("git", ["ls-tree", "--name-only", "refs/heads/main", "pending.txt"], { cwd: repoDir })).stdout;
+        expect({ result, tree }).toEqual({ result: { success: true }, tree: "pending.txt\n" });
+      } finally { cleanup(worktreePath); }
+    });
+
     it("merges agent branch into current branch cleanly", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `apply-test-${Date.now()}`;
@@ -402,7 +611,234 @@ rename to new-name.ts
     });
   });
 
+  describe("captured Apply contract", () => {
+    it.each(["active", "inactive", "selected"] as const)("applies the task branch to the %s destination when a tag shares its name", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `task-source-tag-${mode}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+        const file = "src/index.ts";
+        const expected = fs.readFileSync(path.join(worktreePath, file), "utf8");
+        await execFile("git", ["tag", task.branch, baseRef], { cwd: repoDir });
+        if (mode === "inactive") await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        if (mode === "selected") await cherryPickFiles(task, [file], new CheckpointManager());
+        else await expect(applyAll(task)).resolves.toEqual({ success: true });
+        expect((await execFile("git", ["show", `refs/heads/main:${file}`], { cwd: repoDir })).stdout).toBe(expected);
+        expect((await execFile("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repoDir })).stdout.trim()).toBe(baseRef);
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.each(["all", "selected"].flatMap(operation => ["missing", "deleted", "symbolic"].map(target => ({ operation, target }))))(
+      "refuses $operation Apply with a $target destination before changing either checkout", async ({ operation, target }) => {
+        const baseRef = await getHead(repoDir);
+        const taskId = `captured-target-${operation}-${target}`;
+        const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+        try {
+          await makeAgentChanges(worktreePath);
+          fs.writeFileSync(path.join(worktreePath, "pending.txt"), "retained pending work\n");
+          const sourceHead = await getHead(worktreePath);
+          await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+          if (target === "deleted") await execFile("git", ["branch", "-D", "main"], { cwd: repoDir });
+          if (target === "symbolic") {
+            await execFile("git", ["branch", "referent"], { cwd: repoDir });
+            await execFile("git", ["symbolic-ref", "refs/heads/main", "refs/heads/referent"], { cwd: repoDir });
+          }
+          const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: target === "missing" ? undefined : "main" };
+          const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
+          await expect(apply).rejects.toThrow();
+          expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8"),
+            applied: fs.existsSync(path.join(repoDir, "src/new-feature.ts")) }).toEqual({ target: baseRef, source: sourceHead, pending: "retained pending work\n", applied: false });
+          if (target === "symbolic") {
+            expect((await execFile("git", ["rev-parse", "refs/heads/referent"], { cwd: repoDir })).stdout.trim()).toBe(baseRef);
+          }
+        } finally { cleanup(worktreePath); }
+      },
+    );
+
+    it.skipIf(process.platform === "win32")("refuses an alias introduced after building the inactive merge candidate", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = "late-symbolic-target";
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), "crab-apply-ref-fixture-"));
+      const originalPath = process.env.PATH;
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      try {
+        await makeAgentChanges(worktreePath);
+        const source = await getHead(worktreePath);
+        await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        await execFile("git", ["branch", "referent"], { cwd: repoDir });
+        const git = (await execFile("which", ["git"])).stdout.trim();
+        fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh
+if [ "$1" = commit-tree ]; then
+  ${quote(git)} symbolic-ref refs/heads/main refs/heads/referent || exit 1
+fi
+exec ${quote(git)} "$@"
+`, { mode: 0o755 });
+        vi.stubEnv("PATH", `${bin}${path.delimiter}${originalPath ?? ""}`);
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        await expect(applyAll(task)).rejects.toThrow(/symbolic branch ref/i);
+        expect({ alias: (await execFile("git", ["symbolic-ref", "refs/heads/main"], { cwd: repoDir })).stdout.trim(),
+          referent: (await execFile("git", ["rev-parse", "refs/heads/referent"], { cwd: repoDir })).stdout.trim(),
+          source: await getHead(worktreePath) }).toEqual({ alias: "refs/heads/referent", referent: baseRef, source });
+      } finally {
+        vi.unstubAllEnvs();
+        cleanup(worktreePath);
+        cleanup(bin);
+      }
+    });
+
+    it.each(["all", "selected"])("refuses %s Apply after the source checkout changes branch", async operation => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `changed-source-${operation}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        await execFile("git", ["checkout", "-b", "user-work"], { cwd: worktreePath });
+        fs.writeFileSync(path.join(worktreePath, "pending.txt"), "user branch work\n");
+        const sourceHead = await getHead(worktreePath);
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
+        await expect(apply).rejects.toThrow(/branch/i);
+        expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8") })
+          .toEqual({ target: baseRef, source: sourceHead, pending: "user branch work\n" });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.skipIf(process.platform === "win32")("retains the target and pending work when its source commit hook rejects Apply", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = "rejected-source-commit";
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      const hook = path.join(repoDir, ".git/hooks/pre-commit");
+      try {
+        await makeAgentChanges(worktreePath);
+        const sourceHead = await getHead(worktreePath);
+        fs.writeFileSync(path.join(worktreePath, "src/new-feature.ts"), "pending task content\n");
+        fs.mkdirSync(path.dirname(hook), { recursive: true });
+        fs.writeFileSync(hook, "#!/bin/sh\nprintf 'fixture commit rejected\\n' >&2\nexit 1\n", { mode: 0o755 });
+        const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
+        await expect(applyAll(task)).rejects.toThrow(/fixture commit rejected/);
+        expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "src/new-feature.ts"), "utf8") })
+          .toEqual({ target: baseRef, source: sourceHead, pending: "pending task content\n" });
+      } finally { fs.rmSync(hook, { force: true }); cleanup(worktreePath); }
+    });
+  });
+
   describe("cherryPickFiles", () => {
+    it.each(["staged", "unstaged", "untracked", "ignored", "directory", "assume-unchanged", "skip-worktree"])("preserves %s target bytes instead of replacing them with the selection", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-target-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        const selection = ["staged", "unstaged", "assume-unchanged", "skip-worktree"].includes(mode) ? "src/index.ts" : "src/new-feature.ts";
+        const target = path.join(repoDir, selection);
+        if (mode === "directory") fs.mkdirSync(target);
+        const data = mode === "directory" ? path.join(target, "private.txt") : target;
+        fs.writeFileSync(data, "private target bytes\n");
+        if (mode === "staged") await execFile("git", ["add", "--", selection], { cwd: repoDir });
+        if (mode === "assume-unchanged" || mode === "skip-worktree") await execFile("git", ["update-index", `--${mode}`, "--", selection], { cwd: repoDir });
+        if (mode === "ignored") {
+          fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${selection}\n`);
+        }
+        await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });
+        const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+        const rejected = await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection], new CheckpointManager()).then(() => false, () => true);
+        expect({ rejected, head: await getHead(repoDir), bytes: fs.existsSync(data) ? fs.readFileSync(data, "utf8") : null, index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+          .toEqual({ rejected: true, head: baseRef, bytes: "private target bytes\n", index });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.skipIf(process.platform === "win32")("retains an untracked symlink above a selected target", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-parent-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        fs.mkdirSync(path.join(worktreePath, "nested"));
+        fs.writeFileSync(path.join(worktreePath, "nested/file.txt"), "selected source bytes\n");
+        await execFile("git", ["add", "nested"], { cwd: worktreePath });
+        await execFile("git", ["commit", "-m", "Source file"], { cwd: worktreePath });
+        const privatePath = path.join(repoDir, "private");
+        fs.mkdirSync(privatePath);
+        fs.writeFileSync(path.join(privatePath, "file.txt"), "private target bytes\n");
+        const link = path.join(repoDir, "nested");
+        fs.symlinkSync(privatePath, link);
+        const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+        const rejected = await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), ["nested/file.txt"], new CheckpointManager()).then(() => false, () => true);
+        expect({ rejected, head: await getHead(repoDir), link: fs.lstatSync(link).isSymbolicLink(),
+          bytes: fs.readFileSync(path.join(privatePath, "file.txt"), "utf8"), index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+          .toEqual({ rejected: true, head: baseRef, link: true, bytes: "private target bytes\n", index });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.each(["modified", "new", "deleted", "renamed", "staged ignored"])("applies the live %s selection while preserving the source index and unrelated files", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-live-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        const original = mode === "renamed" || mode === "deleted" ? "src/utils.ts" : mode === "modified" ? "src/index.ts" : mode === "staged ignored" ? "src/private.txt" : "src/pending [1].txt";
+        const selection = mode === "renamed" ? "src/renamed.ts" : original;
+        const previous = fs.existsSync(path.join(worktreePath, original)) ? fs.readFileSync(path.join(worktreePath, original), "utf8") : "";
+        if (mode === "renamed") fs.renameSync(path.join(worktreePath, original), path.join(worktreePath, selection));
+        else if (mode === "deleted") fs.unlinkSync(path.join(worktreePath, original));
+        else fs.writeFileSync(path.join(worktreePath, selection), "selected live bytes\n");
+        if (mode === "staged ignored") {
+          await execFile("git", ["add", "--", selection], { cwd: worktreePath });
+          fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${selection}\n`);
+          expect((await execFile("git", ["check-ignore", "--no-index", "--", selection], { cwd: worktreePath })).stdout.trim()).toBe(selection);
+          fs.writeFileSync(path.join(worktreePath, selection), "selected live bytes\nupdated after staging\n");
+        }
+        fs.writeFileSync(path.join(worktreePath, "README.md"), "private staged work\n");
+        await execFile("git", ["add", "README.md"], { cwd: worktreePath });
+        fs.writeFileSync(path.join(worktreePath, "README.md"), "private unstaged work\n");
+        const indexPath = (await execFile("git", ["rev-parse", "--git-path", "index"], { cwd: worktreePath })).stdout.trim();
+        const sourceIndex = fs.readFileSync(path.resolve(worktreePath, indexPath));
+        const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+        expect((await computeDiff(task)).files.map(file => file.path)).toContain(selection);
+        await cherryPickFiles(task, [selection], new CheckpointManager());
+        const appliedHead = await getHead(repoDir);
+        await cherryPickFiles(task, [selection], new CheckpointManager());
+        expect(await getHead(repoDir)).toBe(appliedHead);
+        const target = path.join(repoDir, selection);
+        expect({ target: fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null,
+          originalRemoved: !fs.existsSync(path.join(repoDir, original)), sourceHead: await getHead(worktreePath),
+          sourceIndex: fs.readFileSync(path.resolve(worktreePath, indexPath)), targetReadme: fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
+          sourceReadme: fs.readFileSync(path.join(worktreePath, "README.md"), "utf8") }).toEqual({
+          target: mode === "deleted" ? null : mode === "renamed" ? previous : mode === "staged ignored" ? "selected live bytes\nupdated after staging\n" : "selected live bytes\n",
+          originalRemoved: mode === "deleted" || mode === "renamed", sourceHead: baseRef, sourceIndex,
+          targetReadme: "# Test Repo\n", sourceReadme: "private unstaged work\n",
+        });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.each(["new selection", "unchanged selection"])("preserves unrelated staged changes for %s", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `cherry-staged-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        const unchanged = mode === "unchanged selection";
+        const selection = unchanged ? "src/index.ts" : "src/new-feature.ts";
+        if (!unchanged) await makeAgentChanges(worktreePath);
+        const readme = path.join(repoDir, "README.md");
+        fs.writeFileSync(readme, "staged user work\n");
+        await execFile("git", ["add", "--", "README.md"], { cwd: repoDir });
+        fs.writeFileSync(readme, "unstaged user work\n");
+
+        await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection], new CheckpointManager());
+
+        const { stdout: committed } = await execFile("git", ["diff", "--name-only", baseRef, "HEAD"], { cwd: repoDir });
+        const { stdout: staged } = await execFile("git", ["show", ":README.md"], { cwd: repoDir });
+        expect({ committed, staged, working: fs.readFileSync(readme, "utf8") }).toEqual({
+          committed: unchanged ? "" : `${selection}\n`, staged: "staged user work\n", working: "unstaged user work\n",
+        });
+      } finally {
+        await execFile("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoDir });
+      }
+    });
+
     it("commits only the selected files from the agent branch", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `cherry-pick-${Date.now()}`;
@@ -414,7 +850,7 @@ rename to new-name.ts
         const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
 
         // Only cherry-pick the new file, not the modification or deletion.
-        await cherryPickFiles(task, ["src/new-feature.ts"]);
+        await cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
 
         // The new file should exist.
         expect(fs.existsSync(path.join(repoDir, "src/new-feature.ts"))).toBe(true);
@@ -453,7 +889,7 @@ rename to new-name.ts
       try {
         const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
         // Should not throw.
-        await expect(cherryPickFiles(task, [])).resolves.toBeUndefined();
+        await expect(cherryPickFiles(task, [], new CheckpointManager())).resolves.toBeUndefined();
       } finally {
         cleanup(worktreePath);
         try {
@@ -479,6 +915,7 @@ rename to new-name.ts
       expect(await branchExists(repoDir, branch)).toBe(true);
 
       const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+      task.branch = branch;
       await discard(task);
 
       // Both should be gone.
@@ -540,7 +977,7 @@ rename to new-name.ts
         expect(diff.files.length).toBe(3);
 
         // Cherry-pick only the modified file.
-        await cherryPickFiles(task, ["src/index.ts"]);
+        await cherryPickFiles(task, ["src/index.ts"], new CheckpointManager());
 
         // Only the modified file should have agent changes.
         const content = fs.readFileSync(path.join(repoDir, "src/index.ts"), "utf-8");

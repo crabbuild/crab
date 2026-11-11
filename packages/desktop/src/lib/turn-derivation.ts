@@ -50,6 +50,7 @@ export interface Turn {
   complete: boolean;
   /** Wall-clock duration in ms; null while running. */
   durationMs: number | null;
+  outcome?: AgentEvent["outcome"];
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -128,7 +129,7 @@ function isToolEvent(event: AgentEvent): boolean {
          event.type === "file_read" || event.type === "command" ||
          event.type === "command_run" || event.type === "search" ||
          event.type === "web" || event.type === "task" ||
-         event.type === "generic" || event.type === "approval_request";
+         event.type === "generic" || event.type === "approval_request" || event.type === "input_request";
 }
 
 /**
@@ -146,54 +147,57 @@ function isToolEvent(event: AgentEvent): boolean {
  */
 export function deriveToolGroups(events: AgentEvent[], turnComplete?: boolean): ToolGroup[] {
   const groups: ToolGroup[] = [];
-  let currentGroup: ToolGroup | null = null;
+  type TrackedGroup = { group: ToolGroup; completeAt: number };
+  const itemGroups = new Map<string, TrackedGroup>();
+  const firstResults = new Map<string, number>();
+  let current: TrackedGroup | undefined;
+  let latest: TrackedGroup | undefined;
+
+  // First-result positions bound pairing work without treating a future receipt
+  // as already delivered. Repeated item updates still belong to the latest group.
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if (event.type !== "tool_result") continue;
+    const id = event.itemId;
+    if (id && !firstResults.has(id)) firstResults.set(id, i);
+  }
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
-
     if (isToolEvent(event)) {
-      if (!currentGroup) {
-        currentGroup = {
-          groupId: "", // placeholder — caller assigns via deriveGroupId
-          eventIndices: [i],
+      if (!current) {
+        const group: ToolGroup = {
+          groupId: "",
+          eventIndices: [],
           complete: false,
           startedAt: event.timestamp,
           endedAt: null,
         };
-      } else {
-        currentGroup.eventIndices.push(i);
+        current = { group, completeAt: -1 };
+        latest = current;
+        groups.push(group);
       }
-    } else if (event.type === "text" && event.content) {
-      // Non-empty text event breaks the current group
-      if (currentGroup) {
-        groups.push(currentGroup);
-        currentGroup = null;
+      current.group.eventIndices.push(i);
+      const id = event.itemId;
+      if (id) {
+        itemGroups.set(id, current);
+        current.completeAt = Math.max(current.completeAt, firstResults.get(id) ?? Infinity);
+        // A new outstanding call reopens the batch even if an earlier call ended.
+        if (current.completeAt > i) current.group.complete = false;
       }
     } else if (event.type === "tool_result") {
-      // tool_result updates the most recent group containing a
-      // matching tool_use. It is NOT a group member itself.
-      const target = findGroupForResult(event, groups, currentGroup, events);
+      const id = event.itemId;
+      // AgentEvent permits receipts without IDs; those still update the active batch.
+      const target = (id ? itemGroups.get(id) : undefined) ?? current ?? latest;
       if (target) {
-        target.endedAt = event.timestamp;
-        target.complete = isGroupComplete(target, events, i);
+        target.group.endedAt = event.timestamp;
+        target.group.complete = target.completeAt <= i;
       }
-    } else if (event.type === "done") {
-      // Turn boundary ends the current group
-      if (currentGroup) {
-        groups.push(currentGroup);
-        currentGroup = null;
-      }
+    } else if (event.type === "done" || (event.type === "text" && event.content)) {
+      current = undefined;
     }
-    // Other event types (thinking, error, etc.) do NOT
-    // break a tool group — only non-empty `text` events do.
   }
 
-  // Flush any trailing open group
-  if (currentGroup) {
-    groups.push(currentGroup);
-  }
-
-  // If the turn is complete, mark all groups as complete
   if (turnComplete) {
     for (const group of groups) {
       group.complete = true;
@@ -205,71 +209,6 @@ export function deriveToolGroups(events: AgentEvent[], turnComplete?: boolean): 
   }
 
   return groups;
-}
-
-/**
- * Find the group that a tool_result belongs to by matching itemId.
- */
-function findGroupForResult(
-  resultEvent: AgentEvent,
-  finishedGroups: ToolGroup[],
-  currentGroup: ToolGroup | null,
-  events: AgentEvent[],
-): ToolGroup | null {
-  if (resultEvent.itemId) {
-    // Check current group first (most likely match)
-    if (currentGroup) {
-      for (const idx of currentGroup.eventIndices) {
-        if (events[idx].itemId === resultEvent.itemId) {
-          return currentGroup;
-        }
-      }
-    }
-    // Check finished groups in reverse order
-    for (let g = finishedGroups.length - 1; g >= 0; g--) {
-      for (const idx of finishedGroups[g].eventIndices) {
-        if (events[idx].itemId === resultEvent.itemId) {
-          return finishedGroups[g];
-        }
-      }
-    }
-  }
-
-  // Fallback: associate with the current group or the most recent one
-  return currentGroup ?? finishedGroups[finishedGroups.length - 1] ?? null;
-}
-
-/**
- * Check if all tool_use members in a group have a matching tool_result
- * in the events seen so far (up to index `upToIdx`).
- */
-function isGroupComplete(
-  group: ToolGroup,
-  events: AgentEvent[],
-  upToIdx: number,
-): boolean {
-  for (const memberIdx of group.eventIndices) {
-    const toolUseEvent = events[memberIdx];
-    if (!toolUseEvent.itemId) {
-      // Without itemId we can't definitively pair — use heuristic:
-      // if endedAt is set, consider the group complete for single-member
-      // groups. For multi-member groups without itemIds, we can't be sure.
-      if (group.eventIndices.length === 1) {
-        return group.endedAt !== null;
-      }
-      continue;
-    }
-    // Check if a tool_result with the same itemId exists up to upToIdx
-    let found = false;
-    for (let j = 0; j <= upToIdx; j++) {
-      if (events[j].type === "tool_result" && events[j].itemId === toolUseEvent.itemId) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) return false;
-  }
-  return true;
 }
 
 // ─── Turn derivation ─────────────────────────────────────────────────────────
@@ -321,9 +260,29 @@ function buildTurn(
   turnEvents: AgentEvent[],
   feedback: string[],
 ): Turn {
+  const openingMessage = turnEvents[0]?.type === "user_message" ? turnEvents[0] : undefined;
+  if (openingMessage) turnEvents = turnEvents.slice(1);
+  const textIndices = new Map<string, number>();
+  const normalized: AgentEvent[] = [];
+  for (const event of turnEvents) {
+    if ((event.type === "text" || event.type === "thinking") && event.itemId) {
+      const key = `${event.type}:${event.itemId}`;
+      const index = textIndices.get(key);
+      if (index !== undefined) {
+        const previous = normalized[index];
+        normalized[index] = { ...previous, content: event.textMode === "replace" ? event.content : (previous.content ?? "") + (event.content ?? "") };
+        continue;
+      }
+      textIndices.set(key, normalized.length);
+    }
+    normalized.push(event);
+  }
+  turnEvents = normalized;
+
   // Determine completion first so we can pass it to deriveToolGroups
   const lastEvent = turnEvents[turnEvents.length - 1];
   const complete = lastEvent?.type === "done";
+  const outcome = complete ? lastEvent.outcome : undefined;
 
   const toolGroups = deriveToolGroups(turnEvents, complete);
 
@@ -333,9 +292,7 @@ function buildTurn(
   }
 
   // Turn 0 has no user message. Turn N (N > 0) uses feedback[N - 1].
-  const userMessage = turnIndex > 0
-    ? (feedback[turnIndex - 1] ?? null)
-    : null;
+  const userMessage = openingMessage?.content ?? (turnIndex > 0 ? feedback[turnIndex - 1] ?? null : null);
 
   // Aggregate file edit stats
   const pathSet = new Set<string>();
@@ -370,6 +327,7 @@ function buildTurn(
     totalAdded,
     totalRemoved,
     complete,
+    outcome,
     durationMs,
   };
 }

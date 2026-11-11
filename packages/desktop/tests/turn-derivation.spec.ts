@@ -139,6 +139,39 @@ describe("deriveTurns", () => {
 // ─── Unit tests: deriveToolGroups ────────────────────────────────────────────
 
 describe("deriveToolGroups", () => {
+  it.each([false, true])("bounds item reads for a long stream with split groups: %s", split => {
+    let reads = 0;
+    const events = Array.from({ length: 256 }, (_, index) => {
+      const id = `tool-${index}`;
+      const pair = [makeToolUse(id), makeToolResult(id)];
+      for (const event of pair) Object.defineProperty(event, "itemId", { get: () => { reads += 1; return id; } });
+      return split ? [...pair, makeText("Next tool")] : pair;
+    }).flat();
+    deriveToolGroups(events);
+    expect(reads).toBeLessThanOrEqual(events.length * 8);
+  });
+
+  it("keeps a group pending when another identified tool starts after a completed call", () => {
+    const groups = deriveToolGroups([makeToolUse("first"), makeToolResult("first"), makeToolUse("second")]);
+    expect(groups.map(group => group.complete)).toEqual([false]);
+  });
+
+  it("pairs late results with their identified group across text boundaries", () => {
+    const groups = deriveToolGroups([
+      makeToolUse("first", 1), makeText("Starting another tool", 2),
+      makeToolUse("second", 3), makeToolResult("first", 4),
+    ]);
+    expect(groups.map(group => [group.complete, group.endedAt])).toEqual([[true, 4], [false, null]]);
+  });
+
+  it("does not use a future receipt to complete an earlier group when an item moves", () => {
+    const groups = deriveToolGroups([
+      makeToolUse("first", 1), makeToolUse("shared", 2), makeToolResult("first", 3),
+      makeText("Another batch", 4), makeToolUse("shared", 5), makeToolResult("shared", 6),
+    ]);
+    expect(groups.map(group => [group.complete, group.endedAt])).toEqual([[false, 3], [true, 6]]);
+  });
+
   it("alternating `tool_use` / `text` → multiple singleton groups", () => {
     const events: AgentEvent[] = [
       makeToolUse("a", 1000),

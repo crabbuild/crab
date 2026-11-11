@@ -1,18 +1,8 @@
-/**
- * Iterate / steer test for CodexAppServerAdapter.
- *
- * Sub-tests:
- *   1. Completed turn → iterate sends plain `turn/start`
- *   2. Active turn → iterate sends `turn/steer` with expectedTurnId
- *   3. Server rejects `turn/steer` → adapter sends `turn/interrupt`,
- *      awaits `turn/completed`, then `turn/start`
- *
- * Validates: Requirements CA9.6, CA4.4
- */
+/** Codex follow-up and live steering behavior. */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PassThrough } from "node:stream";
-import type { AgentEvent } from "../electron/orchestrator-adapters";
+import { AgentSubmissionUncertainError, type AgentEvent } from "../electron/orchestrator-adapters";
 
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
@@ -34,7 +24,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 12345,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),
@@ -106,7 +95,7 @@ async function completeHandshake(
     turnStartReq = more.find((f) => f.method === "turn/start");
   }
   const turnStartId = turnStartReq!.id as number;
-  serverWrite(stdout, { id: turnStartId, result: { turnId: "turn_001" } });
+  serverWrite(stdout, { id: turnStartId, result: { turn: { id: "turn_001" } } });
 
   // 4. Server sends thread/started and turn/started notifications
   serverWrite(stdout, { method: "thread/started", params: { thread: { id: "thr_iter_test" } } });
@@ -151,19 +140,22 @@ describe("CodexAppServerAdapter — Iterate / Steer", () => {
     drainFrames(stdin);
 
     // Now call iterate with a follow-up message
-    adapter.iterate("follow-up message");
+    const iteration = adapter.iterate("follow-up message", { model: "configured-model" });
 
     // The adapter should send a turn/start (no active turn)
     const frames = await waitForFrames(stdin);
     const turnStart = frames.find((f) => f.method === "turn/start");
     expect(turnStart).toBeDefined();
     expect(turnStart!.id).toBeDefined();
+    expect(turnStart!.params).toMatchObject({ model: "configured-model" });
     expect((turnStart!.params as any).input).toEqual([
       { type: "text", text: "follow-up message" },
     ]);
     // Should NOT be a turn/steer
     const turnSteer = frames.find((f) => f.method === "turn/steer");
     expect(turnSteer).toBeUndefined();
+    serverWrite(stdout, { id: turnStart!.id, result: { turn: { id: "turn_002" } } });
+    await iteration;
   });
 
   it("active turn → iterate sends turn/steer with expectedTurnId", async () => {
@@ -183,73 +175,70 @@ describe("CodexAppServerAdapter — Iterate / Steer", () => {
     drainFrames(stdin);
 
     // Call iterate while the turn is still active
-    adapter.iterate("steer message");
+    const iteration = adapter.iterate("steer message");
 
     // The adapter should send a turn/steer request
     const frames = await waitForFrames(stdin);
     const turnSteer = frames.find((f) => f.method === "turn/steer");
     expect(turnSteer).toBeDefined();
     expect(turnSteer!.id).toBeDefined();
-    expect((turnSteer!.params as any).turnId).toBe("turn_001");
+    expect(turnSteer!.params).toMatchObject({ expectedTurnId: "turn_001" });
+    expect(turnSteer!.params).not.toHaveProperty("turnId");
     expect((turnSteer!.params as any).input).toEqual([
       { type: "text", text: "steer message" },
     ]);
+    serverWrite(stdout, { id: turnSteer!.id, result: { turnId: "turn_001" } });
+    await iteration;
   });
 
-  it("server rejects turn/steer → adapter sends turn/interrupt, awaits turn/completed, then turn/start", async () => {
+  it("surfaces a rejected steer without interrupting the running turn", async () => {
     const { fakeProc, stdin, stdout } = createFakeProcess();
-    mockedSpawn.mockReturnValue(fakeProc as any);
-
+    mockedSpawn.mockReturnValue(fakeProc as ReturnType<typeof spawn>);
     const adapter = new CodexAppServerAdapter();
-    const events: AgentEvent[] = [];
-    adapter.onEvent((e) => events.push(e));
-
     adapter.spawn("initial prompt", "/tmp/test");
-
-    // Complete the handshake — turn is active
     await completeHandshake(stdin, stdout, "initial prompt");
-
-    // Drain any pending frames
     drainFrames(stdin);
+    const iteration = adapter.iterate("steer message");
+    const rejected = expect(iteration).rejects.toThrow("method not found");
+    const frames = await waitForFrames(stdin);
+    const request = frames.find(frame => frame.method === "turn/steer");
+    serverWrite(stdout, { id: request!.id, error: { code: -32601, message: "method not found" } });
+    await rejected;
+    expect(drainFrames(stdin)).toEqual([]);
+  });
 
-    // Call iterate while the turn is active
-    adapter.iterate("steer message");
+  it("starts a new turn when the previous turn completes before the steer is rejected", async () => {
+    const { fakeProc, stdin, stdout } = createFakeProcess();
+    mockedSpawn.mockReturnValue(fakeProc as ReturnType<typeof spawn>);
+    const adapter = new CodexAppServerAdapter();
+    adapter.spawn("initial prompt", "/tmp/test");
+    await completeHandshake(stdin, stdout, "initial prompt");
+    drainFrames(stdin);
+    const iteration = adapter.iterate("next input");
+    const frames = await waitForFrames(stdin);
+    const request = frames.find(frame => frame.method === "turn/steer");
+    serverWrite(stdout, { method: "turn/completed", params: { threadId: "thr_iter_test", turn: { id: "turn_001", status: "completed" } } });
+    serverWrite(stdout, { id: request!.id, error: { code: -32000, message: "No active turn" } });
+    const next = await waitForFrames(stdin);
+    const start = next.find(frame => frame.method === "turn/start");
+    serverWrite(stdout, { id: start!.id, result: { turn: { id: "turn_002" } } });
+    await iteration;
+    expect(next.map(frame => frame.method)).toEqual(["turn/start"]);
+  });
 
-    // Read the turn/steer request from stdin
-    let frames = await waitForFrames(stdin);
-    const turnSteer = frames.find((f) => f.method === "turn/steer");
-    expect(turnSteer).toBeDefined();
-    const steerId = turnSteer!.id as number;
-
-    // Server rejects turn/steer with method-not-found error
-    serverWrite(stdout, {
-      id: steerId,
-      error: { code: -32601, message: "method not found" },
-    });
-
-    // Wait for the adapter to process the rejection and send turn/interrupt
-    frames = await waitForFrames(stdin);
-    const turnInterrupt = frames.find((f) => f.method === "turn/interrupt");
-    expect(turnInterrupt).toBeDefined();
-    expect((turnInterrupt!.params as any).turnId).toBe("turn_001");
-
-    // Server sends turn/completed (status: interrupted)
-    serverWrite(stdout, {
-      method: "turn/completed",
-      params: {
-        turn: { id: "turn_001", status: "interrupted" },
-        threadId: "thr_iter_test",
-      },
-    });
-
-    // Wait for the adapter to process turn/completed and send a new turn/start
-    await new Promise((r) => setTimeout(r, 30));
-    frames = await waitForFrames(stdin);
-    const turnStart = frames.find((f) => f.method === "turn/start");
-    expect(turnStart).toBeDefined();
-    expect(turnStart!.id).toBeDefined();
-    expect((turnStart!.params as any).input).toEqual([
-      { type: "text", text: "steer message" },
-    ]);
+  it.each(["turn/start", "turn/steer"])("reports uncertain delivery when %s loses its response without resubmitting", async method => {
+    const { fakeProc, stdin, stdout } = createFakeProcess();
+    mockedSpawn.mockReturnValue(fakeProc as ReturnType<typeof spawn>);
+    const adapter = new CodexAppServerAdapter();
+    adapter.spawn("Initial", "/tmp/test");
+    await completeHandshake(stdin, stdout, "Initial");
+    if (method === "turn/start") serverWrite(stdout, { method: "turn/completed", params: { threadId: "thr_iter_test", turn: { id: "turn_001", status: "completed" } } });
+    drainFrames(stdin);
+    const failed = adapter.iterate("Possibly accepted").catch((error: unknown) => error);
+    const requests = await waitForFrames(stdin);
+    stdout.end();
+    const error = await failed;
+    fakeProc.emit("close", 1);
+    expect({ uncertain: error instanceof AgentSubmissionUncertainError, methods: [...requests, ...drainFrames(stdin)].map(frame => frame.method) }).toEqual({ uncertain: true, methods: [method] });
   });
 });

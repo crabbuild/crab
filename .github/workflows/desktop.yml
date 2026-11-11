@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Electron's node-gyp recognizes Visual Studio 2022, not the 2026 toolset.
+        # Use the qualified Visual Studio 2022 workload for Windows native addons.
         os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2022]
     env:
       CARGO_INCREMENTAL: 0
@@ -72,7 +72,7 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
       - name: Install macOS SSH terminal test dependency
         if: runner.os == 'macOS'
         run: command -v tmux || brew install tmux
@@ -108,15 +108,41 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
+      - name: Qualify repository sidebar scroll persistence
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-sidebar-scroll"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          fi
+      - name: Qualify local native process group ownership
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-native-owner"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-owner" npm test -- tests/agent-process-live.spec.ts
       - name: Build desktop runtime and application
         run: npm run build
       - name: Test native desktop integration
-        # Worktree integration tests invoke the same CLI bundled with the app.
+        # Linux tests use the same baseline toolchain and CLI as the build.
+        run: npm run build:agent -- --test
+      - name: Qualify selected Apply through the task view
         run: |
-          extension=
-          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
-          CRAB_BIN="$CARGO_TARGET_DIR/release/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked
+          mkdir -p "$RUNNER_TEMP/crab-selected-apply"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          fi
+      - name: Qualify Linux runtime ABI and repository operations
+        if: runner.os == 'Linux'
+        run: node scripts/qualify-linux-runtime.mjs
+      - name: Qualify checkpoint ownership and remote availability
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-native-task"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-native-task-live.spec.ts -t 'checkpoint|availability|apply-source|apply-target|apply-eof|apply-sidecar-kill'
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-endpoint-live.spec.ts --maxWorkers 1
       - name: Build installers and unpacked application
         env:
           CSC_LINK: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
@@ -169,6 +195,18 @@ jobs:
       - name: Qualify native v2 storage through the packaged app
         if: matrix.os == 'macos-15' || runner.os == 'Windows'
         run: python scripts/qualify-v2.py
+      - name: Qualify SSH runtime upload and startup
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npm test -- tests/ssh-deployer.spec.ts --maxWorkers 1
+      - name: Upload remote runtime assets
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crab-remote-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: packages/desktop/release/remote-runtime/*
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: Crab-desktop-${{ runner.os }}-${{ runner.arch }}
@@ -185,7 +223,7 @@ jobs:
             packages/desktop/release/rc*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
-        run: npm test -- --maxWorkers 2 --minWorkers 1
+        run: npm test -- --maxWorkers 2
       - name: Retain packaged app failure context
         if: failure()
         uses: actions/upload-artifact@v4
@@ -196,3 +234,51 @@ jobs:
           path: |
             packages/desktop/test-results/**/error-context.md
             packages/desktop/test-results/**/*.png
+
+  remote-arm64:
+    name: Remote runtime (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: 0
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Set isolated Cargo target directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-remote-target" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Build and verify remote CLI and sidecar
+        run: npm run build:agent
+      - name: Test native remote runtime
+        run: npm run build:agent -- --test
+      - name: Qualify Linux runtime ABI and repository operations
+        run: node scripts/qualify-linux-runtime.mjs
+      - name: Install SSH qualification dependencies
+        # This fixture uses only JavaScript modules; no Electron native ABI is loaded.
+        run: npm ci --ignore-scripts
+      - name: Qualify native ARM64 SSH runtime upload and startup
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Crab-remote-runtime-Linux-ARM64-diagnostics
+          path: ${{ runner.temp }}/crab-ssh-runtime
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && hashFiles('packages/desktop/release/remote-runtime/*') != '' }}
+        with:
+          name: Crab-remote-runtime-Linux-ARM64
+          path: packages/desktop/release/remote-runtime/*
+          if-no-files-found: error

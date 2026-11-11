@@ -49,7 +49,7 @@ interface ConnectionFormProps {
   onCancel: () => void;
 }
 
-type TestResult = { success: true } | { success: false; error: string; remediation?: string };
+type TestResult = { success: true } | { success: false; error: string };
 
 const COLOURS = ["gray", "blue", "green", "purple", "orange", "red", "pink", "cyan"];
 
@@ -169,14 +169,13 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
     setTestResult(null);
     try {
       const data = buildFormData();
-      const result = await (window as any).crab.ssh.testConnection(data);
-      if (result?.ok || result?.success) {
+      const result = await window.crab.ssh.testConnection(data);
+      if (result.ok) {
         setTestResult({ success: true });
       } else {
         setTestResult({
           success: false,
-          error: result?.error ?? "Connection failed",
-          remediation: result?.remediation,
+          error: result.error ?? "Connection failed",
         });
       }
     } catch (err) {
@@ -561,9 +560,6 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               ) : (
                 <div>
                   <span className="font-medium">{testResult.error}</span>
-                  {testResult.remediation && (
-                    <p className="mt-1 text-[11px] opacity-80">{testResult.remediation}</p>
-                  )}
                 </div>
               )}
             </div>

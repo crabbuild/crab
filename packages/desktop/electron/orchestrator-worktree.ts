@@ -66,8 +66,21 @@ export interface Task {
 
 const WORKTREES_DIR = ".crab/worktrees";
 const BRANCH_PREFIX = "agent/";
-const METADATA_FILE = ".crab-task.json";
+const METADATA_FILE = "crab-desktop-task.json";
 const DEFAULT_RETENTION_DAYS = 7;
+
+/** Reads the checked-out branch; detached HEAD has no branch, while Git failures reject. */
+export async function currentBranch(repoPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFile("git", ["symbolic-ref", "--quiet", "--no-recurse", "HEAD"], { cwd: repoPath });
+    const ref = stdout.trim();
+    // Git's --short output depends on which tags and other refs exist.
+    return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : undefined;
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return undefined;
+    throw error;
+  }
+}
 
 interface CrabEnvelope<T> {
   data?: T;
@@ -158,14 +171,25 @@ export function generateFriendlyName(existing: Set<string>): string {
 
 // ─── Metadata ────────────────────────────────────────────────────────────────
 
+function metadataPath(worktreePath: string): string {
+  // Relative gitdir pointers use the physical checkout, including symlinked paths.
+  const workspace = fs.realpathSync.native(worktreePath);
+  const gitPath = path.join(workspace, ".git");
+  if (fs.statSync(gitPath).isDirectory()) return path.join(gitPath, METADATA_FILE);
+  const pointer = fs.readFileSync(gitPath, "utf-8").trim();
+  if (!pointer.startsWith("gitdir:")) throw new Error("Workspace has an invalid Git directory pointer");
+  const gitDir = pointer.slice("gitdir:".length).trim();
+  if (!gitDir) throw new Error("Workspace has an empty Git directory pointer");
+  return path.join(path.resolve(workspace, gitDir), METADATA_FILE);
+}
+
 /**
- * Reads task metadata from a worktree's `.crab-task.json`.
+ * Reads task metadata from the worktree's private Git administration directory.
  * Returns undefined if the file is missing or unreadable.
  */
 export function readTaskMetadata(worktreePath: string): TaskMetadata | undefined {
-  const metaPath = path.join(worktreePath, METADATA_FILE);
   try {
-    const content = fs.readFileSync(metaPath, "utf-8");
+    const content = fs.readFileSync(metadataPath(worktreePath), "utf-8");
     return JSON.parse(content) as TaskMetadata;
   } catch {
     return undefined;
@@ -173,11 +197,33 @@ export function readTaskMetadata(worktreePath: string): TaskMetadata | undefined
 }
 
 /**
- * Writes task metadata to a worktree's `.crab-task.json`.
+ * Writes task metadata outside the working tree so snapshots cannot commit it.
  */
 export function writeTaskMetadata(worktreePath: string, metadata: TaskMetadata): void {
-  const metaPath = path.join(worktreePath, METADATA_FILE);
-  fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(metadataPath(worktreePath), JSON.stringify(metadata, null, 2) + "\n", "utf-8");
+}
+
+/** Moves the tagged source-file ownership format into Git administration storage. */
+export function migrateWorktreeMetadata(taskId: string, worktreePath: string): void {
+  // v2.0.0-alpha.1 stored control data in source. Migrate that shipped format
+  // once; ordinary readers only use the private Git administration directory.
+  const legacyPath = path.join(worktreePath, ".crab-task.json");
+  if (!fs.existsSync(legacyPath)) return;
+  const current = readTaskMetadata(worktreePath);
+  let legacy: TaskMetadata;
+  try { legacy = JSON.parse(fs.readFileSync(legacyPath, "utf-8")) as TaskMetadata; } catch (cause: unknown) {
+    if (current?.taskId === taskId) return;
+    throw new Error("Workspace ownership metadata could not be migrated", { cause });
+  }
+  const matches = legacy?.taskId === taskId && typeof legacy.name === "string" && typeof legacy.originalBranch === "string"
+    && typeof legacy.baseRef === "string" && typeof legacy.createdAt === "string" && typeof legacy.status === "string";
+  if (!matches) {
+    if (current?.taskId === taskId) return;
+    throw new Error("Workspace ownership metadata does not match its task");
+  }
+  if (current && current.taskId !== taskId) throw new Error("Git administration metadata belongs to another task");
+  if (!current) writeTaskMetadata(worktreePath, legacy);
+  fs.unlinkSync(legacyPath);
 }
 
 /**
@@ -307,109 +353,118 @@ export async function createWorktree(
   return worktreePath;
 }
 
-/**
- * Removes an agent worktree and its associated branch.
- *
- * Accepts either a friendly name or a task ID for backwards compatibility.
- * Runs `git worktree remove --force` followed by `git branch -D`.
- * Handles the case where the worktree or branch has already been removed
- * (idempotent cleanup).
- */
-export async function removeWorktree(
-  repoPath: string,
-  nameOrTaskId: string,
-): Promise<void> {
-  // Resolve the worktree path — try as friendly name first, then as task ID.
-  const worktreePath = await resolveWorktreePath(repoPath, nameOrTaskId);
-  if (!worktreePath) {
-    // Nothing to remove — already gone.
-    return;
+/** Recreates a task workspace on its saved local branch; a missing branch is an error. */
+export async function restoreWorktree(repoPath: string, taskId: string, branch: string, previousPath: string): Promise<string> {
+  // Restore the saved branch exactly. Creating from a base ref could silently
+  // replace archived work with HEAD or attach the task to a different branch.
+  await execFile("git", ["show-ref", "--verify", `refs/heads/${branch}`], { cwd: repoPath });
+  if (fs.existsSync(previousPath)) throw new Error("The previous workspace still exists");
+  // Git records canonical paths. Resolve the surviving ancestors too when a
+  // deleted workspace was reached through a symlink such as macOS /var.
+  let ancestor = path.resolve(previousPath);
+  const suffix: string[] = [];
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error("Cannot resolve the missing workspace path");
+    suffix.unshift(path.basename(ancestor));
+    ancestor = parent;
   }
-
-  // Read metadata to get the branch name (may have been renamed).
-  const metadata = readTaskMetadata(worktreePath);
-  const branch = metadata?.renamedTo ?? metadata?.originalBranch ?? `${BRANCH_PREFIX}${nameOrTaskId}`;
-
-  // Safety check before any destructive operation.
-  if (!validateWorktreePath(worktreePath, repoPath)) {
-    throw new Error(
-      `Refusing to remove worktree: path "${worktreePath}" is outside the expected worktrees directory`,
-    );
-  }
-
-  // Remove the worktree. --force handles dirty working trees.
-  try {
-    await execCrabWorktreeJson(repoPath, [
-      "worktree",
-      "--json",
-      "remove",
-      "--force",
-      worktreePath,
-    ]);
-  } catch (err: unknown) {
-    // Tolerate "not a working tree" or "does not exist" errors —
-    // the worktree may have already been removed manually.
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      !message.includes("is not a working tree") &&
-      !message.includes("No such file or directory") &&
-      !message.includes("is not a valid path")
-    ) {
-      throw err;
-    }
-  }
-
-  // Prune stale worktree references so git doesn't complain.
-  try {
-    await execCrabWorktreeJson(repoPath, ["worktree", "--json", "prune"]);
-  } catch {
-    // Non-fatal — prune is best-effort.
-  }
-
-  // Delete the branch.
-  try {
-    await execFile("git", ["branch", "-D", branch], { cwd: repoPath });
-  } catch (err: unknown) {
-    // Tolerate "not found" — branch may have already been deleted.
-    const message = err instanceof Error ? err.message : String(err);
-    if (!message.includes("not found")) {
-      throw err;
-    }
-  }
+  const previous = path.join(fs.realpathSync.native(ancestor), ...suffix);
+  const { stdout } = await execFile("git", ["worktree", "list", "--porcelain", "-z"], { cwd: repoPath });
+  const registered = stdout.split("\0\0").some(record => {
+    const fields = record.split("\0");
+    const recordedPath = fields.find(field => field.startsWith("worktree "))?.slice("worktree ".length);
+    return recordedPath !== undefined && path.normalize(recordedPath) === path.normalize(previous) && fields.includes(`branch refs/heads/${branch}`);
+  });
+  // Remove only this absent checkout's registration. Git retains locked and
+  // live-worktree safeguards; broad pruning could affect unrelated workspaces.
+  if (registered) await execCrabWorktreeJson(repoPath, ["worktree", "--json", "remove", previous]);
+  const worktreesDir = ensureWorktreesDir(repoPath);
+  const existing = await getExistingNames(repoPath);
+  const name = generateFriendlyName(existing);
+  const worktreePath = path.join(worktreesDir, name);
+  await execCrabWorktreeJson(repoPath, ["worktree", "--json", "add", worktreePath, branch]);
+  writeTaskMetadata(worktreePath, { name, taskId, createdAt: new Date().toISOString(), status: "active", baseRef: branch, originalBranch: branch });
+  return worktreePath;
 }
 
-/**
- * Resolves a worktree path from either a friendly name or a task ID.
- * Returns undefined if no matching worktree is found.
- */
-async function resolveWorktreePath(
-  repoPath: string,
-  nameOrTaskId: string,
+/** Validates the actual Git root, repository and private index before workspace operations. */
+export async function assertWorkspace(task: { repoPath: string; worktreePath: string }): Promise<void> {
+  const [root, common, repository, gitDir, repositoryGitDir] = await Promise.all([
+    gitDirectory(task.worktreePath, "--show-toplevel"),
+    gitDirectory(task.worktreePath, "--git-common-dir"),
+    gitDirectory(task.repoPath, "--git-common-dir"),
+    gitDirectory(task.worktreePath, "--absolute-git-dir"),
+    gitDirectory(task.repoPath, "--absolute-git-dir"),
+  ]);
+  // Git walks parents after a checkout loses its .git pointer. A saved path
+  // must retain its own root and private index before it can authorize writes.
+  // Native resolution also expands Windows short names to match Git paths.
+  if (root !== fs.realpathSync.native(task.worktreePath)) throw new Error("Task directory is not its Git worktree root");
+  if (common !== repository) throw new Error("Workspace belongs to a different Git repository");
+  if (root !== fs.realpathSync.native(task.repoPath) && gitDir === repositoryGitDir) throw new Error("Workspace shares the primary Git index");
+}
+
+async function gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir" | "--absolute-git-dir"): Promise<string> {
+  const { stdout } = await execFile("git", ["rev-parse", option], { cwd });
+  return fs.realpathSync.native(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
+}
+
+/** Removes a verified disposable workspace; returns warnings for retained branch cleanup. */
+export async function removeWorktree(
+  task: { id: string; repoPath: string; worktreePath: string; branch: string },
+  options: { preserveBranch?: boolean } = {},
 ): Promise<string | undefined> {
-  const worktreesDir = path.join(repoPath, WORKTREES_DIR);
-
-  // Try as friendly name (direct directory lookup).
-  const directPath = path.join(worktreesDir, nameOrTaskId);
-  if (fs.existsSync(directPath)) {
-    return directPath;
+  const { id, repoPath, worktreePath, branch: savedBranch } = task;
+  if (!validateWorktreePath(worktreePath, repoPath)) throw new Error("Refusing to remove a workspace outside its repository's worktree directory");
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(worktreePath); } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (options.preserveBranch) return;
+    // A missing checkout has no remaining ownership record. Retain any branch
+    // rather than infer permission to delete it from a friendly name or old ID.
+    const ref = `refs/heads/${savedBranch}`;
+    const { stdout } = await execFile("git", ["for-each-ref", "--format=%(refname)", ref], { cwd: repoPath });
+    if (stdout.split("\n").includes(ref)) return `Workspace is absent; branch cleanup needs attention: retained "${savedBranch}" for recovery`;
+    return;
   }
-
-  // Try as task ID (scan metadata files).
-  try {
-    const entries = fs.readdirSync(worktreesDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const wtPath = path.join(worktreesDir, entry.name);
-      const meta = readTaskMetadata(wtPath);
-      if (meta?.taskId === nameOrTaskId) {
-        return wtPath;
+  if (!stat.isDirectory()) throw new Error("Task workspace was replaced; recover its ownership before removal");
+  await assertWorkspace({ repoPath, worktreePath });
+  migrateWorktreeMetadata(id, worktreePath);
+  const metadata = JSON.parse(fs.readFileSync(metadataPath(worktreePath), "utf8")) as TaskMetadata;
+  const branch = metadata?.renamedTo ?? metadata?.originalBranch;
+  if (metadata?.taskId !== id || typeof branch !== "string" || !branch) throw new Error("Task workspace ownership does not match its saved identity or branch");
+  // Archive captures the live branch after draining writers and preserves it.
+  // Only branch deletion requires the recorded assignment to remain unchanged.
+  if (!options.preserveBranch && branch !== savedBranch) throw new Error("Task workspace ownership does not match its saved branch");
+  const { stdout } = await execFile("git", ["symbolic-ref", "HEAD"], { cwd: worktreePath });
+  if (stdout.trim() !== `refs/heads/${savedBranch}`) throw new Error("Task workspace branch changed; recover its ownership before removal");
+  if (options.preserveBranch) {
+    // Git's removal check honors display settings and omits ignored data.
+    // Archive may delete only bytes represented by its preserved commit.
+    const { stdout: status } = await execFile("git", ["--no-optional-locks", "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none"], { cwd: worktreePath });
+    if (status.length) throw new Error("Archive retained modified, untracked or ignored source files. Save or move them before archiving.");
+    const { stdout: entries } = await execFile("git", ["ls-files", "-v", "-z", "--full-name"], { cwd: worktreePath, encoding: "buffer" });
+    for (const entry of new TextDecoder("utf-8", { fatal: true }).decode(entries).split("\0")) {
+      if (!/^[a-zS] /.test(entry)) continue;
+      // Missing sparse files contain no source bytes. Materialized excluded
+      // files can hide edits from status and must retain their checkout.
+      try { fs.lstatSync(path.join(worktreePath, entry.slice(2))); }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
       }
+      throw new Error("Archive retained files excluded by index flags. Save or move them before archiving.");
     }
-  } catch {
-    // Directory doesn't exist — nothing to resolve.
   }
-
-  return undefined;
+  await execCrabWorktreeJson(repoPath, ["worktree", "--json", "remove", ...(options.preserveBranch ? [] : ["--force"]), worktreePath]);
+  if (options.preserveBranch) return;
+  try { await execFile("git", ["branch", "-D", "--", branch], { cwd: repoPath }); }
+  catch (error: unknown) {
+    // Directory removal is already confirmed. Surface retained cleanup without
+    // turning that completed user action into an unconfirmed deletion.
+    return `Workspace removed; branch cleanup needs attention: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 /**
@@ -511,8 +566,8 @@ export async function pruneOldWorktrees(
     }
 
     try {
-      await removeWorktree(repoPath, task.id);
-      pruned.push(task.id);
+      const warning = await removeWorktree({ id: task.id, repoPath, worktreePath: task.worktreePath, branch: task.branch });
+      if (!warning) pruned.push(task.id);
     } catch {
       // Best-effort pruning — log but don't fail the batch.
     }

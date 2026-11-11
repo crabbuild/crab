@@ -32,6 +32,19 @@ The gap was the wiring:
 This ADR records the four architectural decisions that drove the completion
 work.
 
+### Structured chat ownership clarification (2026-11)
+
+These durability decisions apply to interactive PTY sessions. Structured Codex
+and Claude Code chats use their native stdio adapters and persisted provider
+session identities. They do not create daemon-owned PTYs, including in the
+`v2.0.0-alpha.1` adapter factories. Terminal-only launches return before creating
+an orchestrator task row and retain their own daemon metadata and restoration.
+
+The main-process task-to-PTY reattach loop was removed: a completed native chat
+has no matching daemon session, so that loop incorrectly changed `reviewing`
+to `failed` after startup. Native task recovery belongs to the orchestrator and
+chat journal; terminal restoration remains with TermRouter and TerminalView.
+
 ---
 
 ## Decision 1: Per-Session Routing Replaces Global Mode

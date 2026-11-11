@@ -12,16 +12,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
+import { useWorkspaceSnapshots } from "../../lib/use-workspace-snapshots";
 import clsx from "clsx";
 import { OrchestratorTask } from "./TaskCard";
 
 // ── Types ───────────────────────────────────────────────────────────
-
-interface Checkpoint {
-  ref: string;
-  turnNumber: number;
-  sha: string;
-}
 
 export interface CheckpointDiffRange {
   fromSha: string;
@@ -31,48 +26,17 @@ export interface CheckpointDiffRange {
 
 interface Props {
   task: OrchestratorTask;
-  onRevert?: (turnNumber: number) => void;
+  onRestore?: () => void;
   onSelectTurn?: (range: CheckpointDiffRange | null) => void;
   selectedTurn?: number | null;
 }
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function CheckpointTimeline({ task, onRevert, onSelectTurn, selectedTurn }: Props) {
-  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
-  const [loading, setLoading] = useState(true);
+export function CheckpointTimeline({ task, onRestore, onSelectTurn, selectedTurn }: Props) {
+  const { checkpoints, backups, loading, restoring, error, restore, reload } = useWorkspaceSnapshots(task);
   const [hoveredTurn, setHoveredTurn] = useState<number | null>(null);
-  const [reverting, setReverting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    (window as any).crab.orchestrator
-      ?.listCheckpoints?.(task.id)
-      .then((result: { success: boolean; checkpoints?: Checkpoint[] }) => {
-        setCheckpoints(result?.success && result.checkpoints ? result.checkpoints : []);
-      })
-      .catch(() => setCheckpoints([]))
-      .finally(() => setLoading(false));
-  }, [task.id, task.status]);
-
-  useEffect(() => {
-    const handler = (data: { taskId: string; turnNumber: number; ref: string; sha?: string }) => {
-      if (data.taskId !== task.id) return;
-      setCheckpoints((prev) => {
-        const existing = prev.find((c) => c.turnNumber === data.turnNumber);
-        if (existing) {
-          if (!existing.sha && data.sha) {
-            return prev.map((c) => c.turnNumber === data.turnNumber ? { ...c, sha: data.sha! } : c);
-          }
-          return prev;
-        }
-        return [...prev, { ref: data.ref, turnNumber: data.turnNumber, sha: data.sha ?? "" }];
-      });
-    };
-    const unsubscribe = (window as any).crab?.orchestrator?.onCheckpointCreated?.(handler);
-    return () => { if (typeof unsubscribe === "function") unsubscribe(); };
-  }, [task.id]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -85,6 +49,7 @@ export function CheckpointTimeline({ task, onRevert, onSelectTurn, selectedTurn 
     return sorted.map((cp, idx) => {
       const next = sorted[idx + 1];
       return {
+        ref: cp.ref,
         turnNumber: cp.turnNumber,
         fromSha: cp.sha,
         toSha: next ? next.sha : null,
@@ -103,21 +68,11 @@ export function CheckpointTimeline({ task, onRevert, onSelectTurn, selectedTurn 
     });
   }, [onSelectTurn]);
 
-  const handleRevert = useCallback(async (turnNumber: number) => {
-    setReverting(true);
-    try {
-      const result = await (window as any).crab.orchestrator?.revertCheckpoint(task.id, turnNumber);
-      if (result?.success) {
-        onRevert?.(turnNumber);
-      }
-    } catch {
-      // Handled by parent.
-    } finally {
-      setReverting(false);
-    }
-  }, [task.id, onRevert]);
+  const handleRestore = async (sourceRef: string) => {
+    if (await restore(sourceRef)) onRestore?.();
+  };
 
-  if (loading || turns.length === 0) return null;
+  if (loading || (!error && turns.length === 0 && backups.length === 0)) return null;
 
   return (
     <div className="flex shrink-0 items-center gap-3 px-4 py-2">
@@ -205,14 +160,14 @@ export function CheckpointTimeline({ task, onRevert, onSelectTurn, selectedTurn 
                         {turn.fromSha.slice(0, 7)}
                       </span>
                     </div>
-                    {!turn.isLatest && (
+                    {turn.hasSha && (
                       <button
                         type="button"
-                        disabled={reverting}
-                        onClick={(e) => { e.stopPropagation(); handleRevert(turn.turnNumber); }}
+                        disabled={restoring}
+                        onClick={(e) => { e.stopPropagation(); void handleRestore(turn.ref); }}
                         className="flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[9px] text-gx-error hover:bg-gx-error/10 disabled:opacity-50 transition"
                       >
-                        <RotateCcw size={8} /> Revert
+                        <RotateCcw size={8} /> Restore files
                       </button>
                     )}
 
@@ -225,6 +180,11 @@ export function CheckpointTimeline({ task, onRevert, onSelectTurn, selectedTurn 
           })}
       </div>
 
+      {error && <div className="text-xs text-gx-error"><p role="alert">{error}</p><button type="button" onClick={reload}>Reload saved file states</button></div>}
+      {backups.length > 0 && <select aria-label="Restore saved file backup" disabled={restoring} value="" onChange={event => void handleRestore(event.target.value)}>
+        <option value="">Backups</option>
+        {backups.map(backup => <option key={backup.ref} value={backup.ref}>{new Date(backup.createdAt).toLocaleString()}</option>)}
+      </select>}
       {/* Right: turn counter */}
       <div className="ml-auto shrink-0 text-[10px] tabular-nums text-gx-muted/60">
         {selectedTurn != null ? `Turn ${selectedTurn}` : `${turns.length} turn${turns.length !== 1 ? "s" : ""}`}

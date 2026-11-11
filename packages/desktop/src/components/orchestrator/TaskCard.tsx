@@ -2,22 +2,11 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { CheckCircle2, ExternalLink, Trash2, Clock, XCircle, Pin, GitBranch, FolderPlus, Pencil } from "lucide-react";
 import { AgentIcon, agentAccentColor, agentProviderLabel } from "./AgentIcon";
+import type { TaskStatus } from "../../../electron/orchestrator";
 
 // ── Types ───────────────────────────────────────────────────────────
 
-export type TaskStatus =
-  | "created"
-  | "running"
-  | "planning"
-  | "reviewing"
-  | "iterating"
-  | "queued"
-  | "applied"
-  | "archived"
-  | "failed"
-  | "stopped"
-  | "interrupted"
-  | "discarded";
+export type { TaskStatus };
 
 /** Statuses that represent terminal (completed) states where deletion is allowed. */
 export const TERMINAL_STATUSES: Set<TaskStatus> = new Set([
@@ -25,14 +14,19 @@ export const TERMINAL_STATUSES: Set<TaskStatus> = new Set([
   "applied",
   "failed",
   "stopped",
+  "interrupted",
   "archived",
   "discarded",
 ]);
 
 export interface OrchestratorTask {
+  pendingCreation?: boolean;
   id: string;
   title: string;
   agentName: string;
+  model?: string;
+  reasoningLevel?: string;
+  planFirst?: boolean;
   status: TaskStatus;
   createdAt: number;
   completedAt?: number;
@@ -44,8 +38,6 @@ export interface OrchestratorTask {
   /** PR metadata if a PR has been created. */
   prUrl?: string;
   prNumber?: number;
-  /** Agent IDs for multi-agent workspaces. */
-  agents?: Array<{ id: string; type: string; role?: string; status?: string; childTaskId?: string }>;
   /** The filesystem path to the agent workspace. */
   worktreePath?: string;
   /** How the task workspace was chosen. */
@@ -249,7 +241,7 @@ export function TaskCard({ task, isSelected, onClick, compact, onDelete, onToggl
               <XCircle size={9} />
               <span>{elapsed}</span>
             </span>
-          ) : task.status === "stopped" || task.status === "discarded" ? (
+          ) : task.status === "stopped" || task.status === "interrupted" || task.status === "discarded" ? (
             <span className="shrink-0 flex items-center gap-1 text-gx-muted">
               <Clock size={9} />
               <span>{elapsed}</span>

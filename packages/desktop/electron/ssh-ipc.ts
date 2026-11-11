@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import { ipcMain, BrowserWindow } from "electron";
 import { setPassword } from "./keychain";
+import type { KnownHostsManager } from "./ssh-known-hosts";
 import type { SshProfileManager } from "./ssh-profiles";
 import type { SshSessionManager, SshProfile } from "./ssh-manager";
 import type { RemoteTerminalManager } from "./ssh-terminal";
@@ -19,7 +20,6 @@ import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { SystemHealthMonitor, HealthAlert } from "./ssh-health";
 import type { SshLatencyMonitor } from "./ssh-latency-monitor";
 import type { RpcRouter } from "./ssh-router";
-import type { AgentDeployer } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { WorkspaceSyncEngine } from "./ssh-workspace-sync";
 import type { FileTransferManager } from "./ssh-file-transfer";
@@ -31,11 +31,15 @@ import type { FileTransferManager } from "./ssh-file-transfer";
 export function registerSshIpcHandlers(
   profileManager: SshProfileManager,
   sessionManager: SshSessionManager,
+  knownHosts: KnownHostsManager,
   terminalManager?: RemoteTerminalManager,
   portForwardManager?: PortForwardManager,
   fileBrowser?: RemoteFileBrowser,
   fileEditor?: RemoteFileEditor,
 ): void {
+  ipcMain.handle("ssh:list-known-hosts", () => knownHosts.list());
+  ipcMain.handle("ssh:remove-known-host", (_event, hostname: string, port: number, keyType: string) => knownHosts.remove(hostname, port, keyType));
+
   ipcMain.handle("ssh:list-profiles", async () => {
     return profileManager.list();
   });
@@ -495,13 +499,11 @@ export type SshEnhancedPushChannel = (typeof SSH_ENHANCED_PUSH_CHANNELS)[number]
  * Call once during app initialization alongside `registerSshIpcHandlers()`.
  */
 export function registerSshEnhancedIpcHandlers(opts?: {
-  agentDeployer?: AgentDeployer;
   capabilityNegotiator?: CapabilityNegotiator;
   rpcRouter?: RpcRouter;
   sessionManager?: SshSessionManager;
   workspaceSyncEngine?: WorkspaceSyncEngine;
 }): void {
-  const agentDeployer = opts?.agentDeployer;
   const capabilityNegotiator = opts?.capabilityNegotiator;
   const sessionManager = opts?.sessionManager;
   const workspaceSyncEngine = opts?.workspaceSyncEngine;
@@ -794,14 +796,8 @@ export function registerSshEnhancedIpcHandlers(opts?: {
   // ─── Agent Deployment ──────────────────────────────────────────
 
   ipcMain.handle("ssh:deploy-agent", async (_event, profileId: string) => {
-    if (!agentDeployer || !sessionManager) {
-      throw new Error("ssh:deploy-agent not available — AgentDeployer or SessionManager not provided");
-    }
-    const conn = sessionManager.getConnection(profileId);
-    if (!conn || !conn.client) {
-      throw new Error(`No active SSH connection for profile: ${profileId}`);
-    }
-    await agentDeployer.ensureAgent(conn.client);
+    if (!sessionManager) throw new Error("ssh:deploy-agent not available — SessionManager not provided");
+    await sessionManager.deployAgent(profileId);
   });
 
   ipcMain.handle("ssh:agent-status", async (_event, profileId: string) => {

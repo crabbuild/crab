@@ -46,6 +46,7 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
   const stackRef = useRef<NavEntry[]>([{ view: "explorer" }]);
   const indexRef = useRef(0);
   const [, forceRender] = useState(0);
+  const [restoreEntry, setRestoreEntry] = useState<NavEntry>();
   const onRepoSwitchRef = useRef(options?.onRepoSwitch);
   onRepoSwitchRef.current = options?.onRepoSwitch;
 
@@ -87,7 +88,7 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
       ) {
         onRepoSwitchRef.current(newEntry.repoPath);
       }
-      forceRender((n) => n + 1);
+      setRestoreEntry({ ...newEntry });
     }
   }, []);
 
@@ -113,7 +114,7 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
       ) {
         onRepoSwitchRef.current(newEntry.repoPath);
       }
-      forceRender((n) => n + 1);
+      setRestoreEntry({ ...newEntry });
     }
   }, []);
 
@@ -137,13 +138,16 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
       adjustedIndex = Math.max(0, Math.min(adjustedIndex, trimmed.length - 1));
       stackRef.current = trimmed.length > 0 ? trimmed : [{ view: "explorer" }];
       indexRef.current = trimmed.length > 0 ? adjustedIndex : 0;
-      forceRender((n) => n + 1);
+      setRestoreEntry({ ...stackRef.current[indexRef.current] });
     },
     [],
   );
 
   return {
     current: stackRef.current[indexRef.current] as NavEntry | undefined,
+    // Recorded pushes are observations, not commands to replace a newer view.
+    // Each explicit restore gets a fresh snapshot even when revisiting an entry.
+    restoreEntry,
     canBack: indexRef.current > 0,
     canForward: indexRef.current < stackRef.current.length - 1,
     push,

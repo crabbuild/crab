@@ -6,7 +6,7 @@ export type { NewTaskData } from "./NewTaskDialog";
 export { NewChatLanding } from "./NewChatLanding";
 export type { NewChatSubmission, WorktreeChoice } from "./NewChatLanding";
 export { ChatTab } from "./ChatTab";
-export type { ChatMessage, ToolEvent } from "./ChatTab";
+export type { ChatMessage, ToolEvent } from "../../../electron/agent-chat-messages";
 export { ChatInput } from "./ChatInput";
 export type {
   ChatInputAgent,
@@ -62,7 +62,7 @@ export { CheckpointMarker } from "./CheckpointMarker";
 export { CheckpointDropdown } from "./CheckpointDropdown";
 export { RevertCheckpointDialog } from "./RevertCheckpointDialog";
 export type { RevertCheckpointDialogProps } from "./RevertCheckpointDialog";
-export type { Checkpoint } from "./ChatTab";
+export type { Checkpoint } from "../../../electron/agent-chat-messages";
 export { SuggestedActions, getSuggestedActions } from "./SuggestedActions";
 export type { SuggestedAction, SuggestedActionsProps, AutoFixInfo } from "./SuggestedActions";
 export { CostBadge } from "./CostBadge";

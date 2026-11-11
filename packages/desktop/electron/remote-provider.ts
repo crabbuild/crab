@@ -301,20 +301,7 @@ export class RemoteProvider extends BaseProvider {
     // Connected — resolve capabilities from the negotiator
     const agentCaps = this.capabilityNegotiator.getCached(parsed.profileId);
 
-    if (!agentCaps) {
-      // Capabilities not yet negotiated — return conservative defaults
-      return {
-        canEdit: true,
-        canWatch: false,
-        canStageHunks: true,
-        canWorktree: true,
-        canForge: true,
-        canHydrate: false,
-        canSearch: false,
-        canExec: false,
-        canTrash: false,
-      };
-    }
+    if (!agentCaps) return noCapabilities();
 
     return {
       canEdit: true,

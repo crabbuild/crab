@@ -40,15 +40,19 @@ generated state out of Git changes; existing tracked files and ignore rules rema
 
 ## Build
 
-Requirements: Node 22, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
+Requirements: Node 22.12+ within 22.x, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
 by Cargo and Electron native modules. Build each OS and architecture on its
 native runner. The desktop CLI enables NFS and the release provider/workflow
 features; it does not require a FUSE driver.
-Windows native modules require Visual Studio 2022 with the C++ desktop workload;
-the current Electron rebuild tooling does not recognize Visual Studio 2026.
+Windows CI uses Visual Studio 2022 with the C++ desktop workload.
 Native installation rebuilds node-pty from source on macOS because its prebuilt
 spawn helper lacks executable permissions. The matching helper must be executable
 in development and in the packaged application.
+
+The desktop uses Electron 45 and its embedded Node 24 runtime. Electron downloads
+on first use rather than through its package's install hook. macOS packages
+require macOS 13 or later; this requirement comes from Electron's application
+metadata. Native CLI/sidecar runtime qualification is separate from GUI support.
 
 On macOS, mount the Workspace volume and give the **Codex process running the
 commands** access to it. Each checkout needs its own Cargo target directory.
@@ -73,9 +77,18 @@ scratch directory instead of the developer's Workspace volume.
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
 
-Run native integration tests after building the runtime, with `CRAB_BIN` set to
-`$CARGO_TARGET_DIR/release/crab` (`crab.exe` on Windows). Worktree tests invoke
-the real CLI, so building only the sidecar is insufficient.
+Run `npm run build:agent -- --test` after building the runtime. It sets
+`CRAB_BIN` to the built CLI; worktree tests invoke that real binary.
+
+Linux GNU builds run the native compiler and tests in
+`scripts/linux-native.Dockerfile` through Docker unless the host already has
+glibc 2.28 and GCC 14 or newer. The image uses AlmaLinux 8,
+GCC Toolset 14, and the pinned Rust toolchain; its Cargo cache and artifacts stay
+in the checkout's external target directory. Staging rejects binaries requiring newer
+glibc/GCC runtime symbols or external OpenSSL. `node scripts/qualify-linux-runtime.mjs`
+then exercises the real CLI and sidecar repository writes/reads on AlmaLinux 8,
+Debian 12, and Amazon Linux 2023. This gate covers the GNU native payload;
+Alpine/musl and Electron/native Node modules need separate qualification.
 
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses
@@ -197,7 +210,7 @@ staged v2 CLI. Tests run under Electron to match the installed native-module ABI
 ```bash
 npm run typecheck
 npm run test:build
-npm test -- --maxWorkers 2 --minWorkers 1
+npm test -- --maxWorkers 2
 cargo test -p crab-desktop-agent --locked
 npm run package:dir
 npm run test:e2e-smoke
@@ -220,6 +233,10 @@ Windows daemon terminals use named pipes and the Windows command processor
 when no shell executable is supplied. Live descriptor handoff and POSIX file
 mode checks run on macOS and Linux. Windows still runs the common terminal
 tests and packaged storage qualification.
+
+Long Unix home paths use a bounded socket address in a private, user-owned
+directory under `/tmp`. Daemon authentication and PID files retain their home
+location; existing Unix addresses that fit the OS limit remain unchanged.
 
 ## v2 behavior
 

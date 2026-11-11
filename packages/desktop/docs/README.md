@@ -68,7 +68,7 @@ npm run dev           # vite + electron with hot reload
 └────────────────────────┬────────────────────────────────┘
                          │ contextBridge IPC
 ┌────────────────────────▼────────────────────────────────┐
-│  Main Process (Electron 33, Node.js)                    │
+│  Main Process (Electron 45, Node 24)                    │
 │  Agent supervisor, Orchestrator, Terminal pool, LSP     │
 └────────────────────────┬────────────────────────────────┘
                          │ NDJSON-RPC over stdio

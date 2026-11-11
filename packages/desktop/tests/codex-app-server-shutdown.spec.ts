@@ -36,7 +36,6 @@ function createFakeProcess() {
   proc.stdin = stdin;
   proc.stdout = stdout;
   proc.stderr = stderr;
-  proc.pid = 99999;
   proc.kill = vi.fn();
   return { proc, stdin, stdout, stderr };
 }
@@ -200,7 +199,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
     // Verify the approval_request event was emitted
     const approvalEvent = events.find(e => e.type === "approval_request");
     expect(approvalEvent).toBeDefined();
-    expect(approvalEvent!.approval!.requestId).toBe("req-shutdown-1");
+    expect(approvalEvent!.approval!.requestId).toBe("42");
 
     // Drain any frames from the handshake/approval processing
     drainFrames(fakeProc.stdin);
@@ -275,13 +274,26 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
     expect(fakeProc.proc.kill).toHaveBeenCalledTimes(2);
   });
 
+  it("handles a rejected interrupt and process close without a false failure", async () => {
+    events.length = 0;
+    adapter.cancel();
+    await vi.advanceTimersByTimeAsync(0);
+    const interrupt = drainFrames(fakeProc.stdin).find(frame => frame.method === "turn/interrupt");
+    serverWrite(fakeProc.stdout, { id: interrupt?.id, error: { code: -32000, message: "Turn already ended" } });
+    fakeProc.proc.emit("close", 0);
+    await vi.runAllTimersAsync();
+    expect({ errors: events.filter(event => event.type === "error"), outcomes: events.filter(event => event.type === "done").map(event => event.outcome), killed: fakeProc.proc.kill.mock.calls }).toEqual({ errors: [], outcomes: ["interrupted"], killed: [] });
+  });
+
   it("cancel() is idempotent — second call is a no-op", async () => {
     // Drain frames from handshake
     drainFrames(fakeProc.stdin);
 
     // Call cancel twice
-    adapter.cancel();
-    adapter.cancel();
+    const stopped = adapter.cancel();
+    expect(adapter.cancel()).toBe(stopped);
+    let closed = false;
+    void stopped.then(() => { closed = true; });
 
     // Allow microtasks to flush
     await vi.advanceTimersByTimeAsync(0);
@@ -318,5 +330,9 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
 
     // Only 2 kill calls total (SIGTERM + SIGKILL), not doubled
     expect(fakeProc.proc.kill).toHaveBeenCalledTimes(2);
+    expect(closed).toBe(false);
+    fakeProc.proc.emit("close", 1);
+    await stopped;
+    expect(closed).toBe(true);
   });
 });

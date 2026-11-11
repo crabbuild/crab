@@ -6,23 +6,17 @@ const WEBHOOK_PORT = 17789;
 
 export class AgentWorkflowWebhookServer {
   private server: http.Server | null = null;
-  private triggerStore: AgentWorkflowTriggerStore;
-  private definitionStore: AgentWorkflowDefinitionStore;
-  private runner: AgentWorkflowRunner;
+  private ready?: Promise<void>;
 
   constructor(
-    triggerStore: AgentWorkflowTriggerStore,
-    definitionStore: AgentWorkflowDefinitionStore,
-    runner: AgentWorkflowRunner,
-  ) {
-    this.triggerStore = triggerStore;
-    this.definitionStore = definitionStore;
-    this.runner = runner;
-  }
+    private readonly triggerStore: Pick<AgentWorkflowTriggerStore, "list">,
+    private readonly definitionStore: Pick<AgentWorkflowDefinitionStore, "get">,
+    private readonly runner: Pick<AgentWorkflowRunner, "startRun">,
+  ) {}
 
-  start(): void {
-    if (this.server) return;
-    this.server = http.createServer((req, res) => {
+  start(): Promise<void> {
+    if (this.ready) return this.ready;
+    const server = http.createServer((req, res) => {
       if (req.method !== "POST") {
         res.writeHead(405).end(JSON.stringify({ error: "Method not allowed" }));
         return;
@@ -59,19 +53,30 @@ export class AgentWorkflowWebhookServer {
         }
       });
     });
-    this.server.listen(WEBHOOK_PORT, "127.0.0.1", () => {
-      console.log(`[agent-workflow] Webhook server listening on http://127.0.0.1:${WEBHOOK_PORT}`);
+    this.server = server;
+    // Binding is asynchronous. Its caller must see refusal before publishing
+    // an enabled endpoint; a failed attempt must permit an explicit retry.
+    this.ready = new Promise((resolve, reject) => {
+      server.once("error", error => {
+        this.server = null;
+        this.ready = undefined;
+        reject(new Error(`Workflow webhooks could not listen on 127.0.0.1:${WEBHOOK_PORT}: ${error.message}`, { cause: error }));
+      });
+      server.listen(WEBHOOK_PORT, "127.0.0.1", resolve);
     });
+    return this.ready;
   }
 
   getUrl(token: string): string {
     return `http://127.0.0.1:${WEBHOOK_PORT}/${token}`;
   }
 
-  stop(): void {
-    if (this.server) {
-      this.server.close();
-      this.server = null;
-    }
+  async stop(): Promise<void> {
+    const server = this.server;
+    if (!server) return;
+    await this.ready;
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    this.server = null;
+    this.ready = undefined;
   }
 }

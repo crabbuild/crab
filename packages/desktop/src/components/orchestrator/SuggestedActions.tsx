@@ -76,6 +76,8 @@ export function getSuggestedActions(
       ];
 
     case "failed":
+    case "stopped":
+    case "interrupted":
       return [
         { label: "View logs", action: "open-activity", icon: <FileText size={14} />, primary: true },
         { label: "Retry", action: "retry", icon: <Play size={14} /> },

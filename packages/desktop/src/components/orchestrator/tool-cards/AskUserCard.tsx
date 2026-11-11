@@ -1,216 +1,93 @@
-/**
- * Specialized renderer for AskUserQuestion tool calls.
- *
- * Shows the question with multiple-choice options in a clean
- * card format. When the question hasn't been answered yet (no
- * tool result), shows interactive buttons so the user can respond
- * directly from the activity feed. The response is sent as
- * iteration feedback to the orchestrator.
- *
- * Highlights the selected answer if available in the tool result.
- */
-
-import { useCallback, useState } from "react";
-import clsx from "clsx";
-import {
-  ChevronDown,
-  ChevronRight,
-  HelpCircle,
-  CircleDot,
-  CheckCircle2,
-  Send,
-} from "lucide-react";
-import type { ToolCardRendererProps } from "./types";
+import { useState } from "react";
+import { HelpCircle, Send } from "lucide-react";
+import type { AgentQuestionInput } from "../../../../electron/orchestrator-adapters";
+import { useHunkActions } from "./HunkActionsContext";
+import { ElicitationCard } from "./ElicitationCard";
+import type { AgentElicitationInput } from "../../../../electron/agent-elicitation";
 import { CollapsedCardLine } from "./CollapsedCardLine";
+import type { ToolCardRendererProps } from "./types";
 
-// ── Component ───────────────────────────────────────────────────────
-
-export function AskUserCard({ event, collapsed: collapsedProp, onToggleCollapse, collapsedSummary }: ToolCardRendererProps) {
-  const [expanded, setExpanded] = useState(true); // Default expanded for questions
-  const [freeformText, setFreeformText] = useState("");
-
-  const input = event.input as Record<string, unknown> | undefined;
-  const question = String(input?.question ?? input?.text ?? input?.prompt ?? "");
-  const choices = parseChoices(input?.choices ?? input?.options);
-  const selectedAnswer = event.detail ?? "";
-  const isAnswered = selectedAnswer.length > 0;
-
-  // Collapsed one-liner branch. Only collapse if answered — unanswered
-  // questions should stay visible like ApprovalCard.
-  const collapsed = isAnswered ? (collapsedProp ?? false) : false;
-  if (collapsed) {
-    const defaultSummary = (
-      <>
-        <CheckCircle2 size={11} className="shrink-0 text-gx-success" />
-        <span className="font-medium text-gx-text/80">Question (answered)</span>
-        <span className="truncate text-gx-text/70">{question.slice(0, 50)}</span>
-      </>
-    );
-    return (
-      <CollapsedCardLine
-        summary={collapsedSummary ?? defaultSummary}
-        onExpand={() => onToggleCollapse?.(false)}
-        ariaLabel={`Question: ${question.slice(0, 50)}`}
-      />
-    );
+export function AskUserCard(props: ToolCardRendererProps) {
+  const input = props.event.input;
+  if (input && typeof input === "object" && "kind" in input && input.kind === "elicitation") {
+    return <ElicitationCard {...props} request={input as AgentElicitationInput} />;
   }
+  return <QuestionCard {...props} />;
+}
 
-  // Callback to handle choice selection — dispatches a custom event
-  // that the parent ChatTab/AgentTasksView can listen for and route
-  // to the orchestrator's iterate() method.
-  const handleChoiceSelect = useCallback((choice: string) => {
-    window.dispatchEvent(
-      new CustomEvent("orchestrator:answer-question", {
-        detail: { answer: choice },
-      }),
-    );
-  }, []);
+function QuestionCard({ event, collapsed, onToggleCollapse }: ToolCardRendererProps) {
+  const taskId = useHunkActions()?.taskId;
+  const payload = (event.input ?? {}) as Partial<AgentQuestionInput>;
+  const questions = (payload.questions ?? []).map((question, index) => ({ ...question, id: question.id ?? String(index) }));
+  const [selected, setSelected] = useState<Record<string, string[]>>({});
+  const [freeform, setFreeform] = useState<Record<string, string>>({});
+  const [sent, setSent] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resolved = sent || payload.resolved || Boolean(event.detail);
+  const resolvedLabel = payload.resolutionReason ?? "Question resolved";
+  const readOnly = resolved || !payload.requestId;
+  const answers = Object.fromEntries(questions.map(question => {
+    const text = freeform[question.id];
+    const choices = selected[question.id] ?? [];
+    return [question.id, text ? question.multiSelect ? [...choices, text] : [text] : choices];
+  }));
+  const ready = questions.length > 0 && questions.every(question => answers[question.id].length > 0);
 
-  const handleFreeformSubmit = useCallback(() => {
-    if (!freeformText.trim()) return;
-    window.dispatchEvent(
-      new CustomEvent("orchestrator:answer-question", {
-        detail: { answer: freeformText.trim() },
-      }),
-    );
-    setFreeformText("");
-  }, [freeformText]);
+  const submit = async (cancel: boolean) => {
+    if (!taskId || !payload.requestId || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await window.crab.orchestrator.respondInput(taskId, payload.requestId, { kind: "questions", answers: cancel ? {} : answers });
+      if (!result.success) throw new Error(result.error ?? "Could not send the answer");
+      setSent(true);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not send the answer");
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
+  if (resolved && collapsed) {
+    return <CollapsedCardLine summary={resolvedLabel} onExpand={() => onToggleCollapse?.(false)} ariaLabel={resolvedLabel} />;
+  }
   return (
-    <div className={clsx(
-      "rounded-md border overflow-hidden",
-      isAnswered
-        ? "border-gx-border/40"
-        : "border-gx-warning/40 bg-gx-warning/5",
-    )}>
-      {/* Header */}
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left hover:bg-gx-surface-hover transition cursor-pointer"
-      >
-        <HelpCircle size={11} className={clsx(
-          "shrink-0",
-          isAnswered ? "text-gx-muted" : "text-gx-warning",
-        )} />
-        <span className={clsx(
-          "shrink-0 font-medium",
-          isAnswered ? "text-gx-muted" : "text-gx-warning",
-        )}>
-          {isAnswered ? "Question (answered)" : "Question (awaiting response)"}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-gx-text/80">
-          {question.slice(0, 80)}{question.length > 80 ? "…" : ""}
-        </span>
-
-        {isAnswered && (
-          <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
-        )}
-
-        {expanded
-          ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-          : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        }
-      </button>
-
-      {/* Expanded: question + choices */}
-      {expanded && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2 space-y-2">
-          {/* Full question */}
-          {question.length > 80 && (
-            <p className="text-[10px] text-gx-text/80 leading-relaxed">{question}</p>
+    <div className="rounded-md border border-gx-border bg-gx-surface px-3 py-2 text-xs space-y-3">
+      <div className="flex items-center gap-2 font-medium text-gx-text">
+        <HelpCircle size={14} />
+        {resolved ? resolvedLabel : payload.requestId ? "Your answer is needed" : "Agent question"}
+      </div>
+      {questions.map(question => (
+        <fieldset key={question.id} disabled={Boolean(readOnly || submitting)} className="space-y-2">
+          <legend className="text-gx-text">{question.header && <span className="font-medium">{question.header}: </span>}{question.question}</legend>
+          {question.options?.map(option => (
+            <label key={option.label} className="flex items-start gap-2 text-gx-text/80">
+              <input type={question.multiSelect ? "checkbox" : "radio"} name={`${payload.requestId}-${question.id}`} checked={(selected[question.id] ?? []).includes(option.label)}
+                onChange={() => setSelected(previous => {
+                  const choices = previous[question.id] ?? [];
+                  const next = question.multiSelect ? choices.includes(option.label) ? choices.filter(choice => choice !== option.label) : [...choices, option.label] : [option.label];
+                  return { ...previous, [question.id]: next };
+                })} />
+              <span>{option.label}{option.description && <span className="block text-gx-muted">{option.description}</span>}</span>
+            </label>
+          ))}
+          {(question.allowFreeform || !question.options?.length) && !readOnly && (
+            <input type={question.isSecret ? "password" : "text"} value={freeform[question.id] ?? ""}
+              onChange={event => setFreeform(previous => ({ ...previous, [question.id]: event.target.value }))}
+              aria-label={`Answer: ${question.question}`} placeholder={question.options?.length ? "Or enter another answer" : "Type your answer"}
+              className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-gx-text focus:border-gx-accent focus:outline-none" />
           )}
-
-          {/* Choices */}
-          {choices.length > 0 && (
-            <div className="space-y-1">
-              {choices.map((choice, idx) => {
-                const isSelected = selectedAnswer.includes(choice) ||
-                  selectedAnswer.includes(String(idx + 1));
-                return (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => !isAnswered && handleChoiceSelect(choice)}
-                    disabled={isAnswered}
-                    className={clsx(
-                      "flex w-full items-center gap-2 rounded px-2 py-1.5 text-[10px] border transition text-left",
-                      isSelected
-                        ? "border-gx-accent/40 bg-gx-accent/10 text-gx-text"
-                        : isAnswered
-                          ? "border-gx-border/30 text-gx-text/70 cursor-default"
-                          : "border-gx-border/30 text-gx-text/70 hover:border-gx-accent/30 hover:bg-gx-accent/5 cursor-pointer",
-                    )}
-                  >
-                    <CircleDot size={10} className={clsx(
-                      isSelected ? "text-gx-accent" : "text-gx-muted/50",
-                    )} />
-                    <span className="flex-1">{choice}</span>
-                    {isSelected && (
-                      <span className="text-[8px] font-medium text-gx-accent">selected</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Free-form answer input (when no choices or not yet answered) */}
-          {!isAnswered && choices.length === 0 && (
-            <div className="flex items-center gap-1.5">
-              <input
-                type="text"
-                value={freeformText}
-                onChange={(e) => setFreeformText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleFreeformSubmit();
-                }}
-                placeholder="Type your answer…"
-                className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1 text-[10px] text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
-                aria-label="Answer to agent question"
-              />
-              <button
-                type="button"
-                onClick={handleFreeformSubmit}
-                disabled={!freeformText.trim()}
-                className={clsx(
-                  "rounded p-1 transition",
-                  freeformText.trim()
-                    ? "text-gx-accent hover:bg-gx-accent/10 cursor-pointer"
-                    : "text-gx-muted/40 cursor-default",
-                )}
-                aria-label="Send answer"
-              >
-                <Send size={12} />
-              </button>
-            </div>
-          )}
-
-          {/* Answered: show the response */}
-          {isAnswered && choices.length === 0 && (
-            <div className="flex items-center gap-2 rounded border border-gx-success/30 bg-gx-success/5 px-2 py-1.5 text-[10px] text-gx-text/80">
-              <CheckCircle2 size={10} className="text-gx-success shrink-0" />
-              <span>{selectedAnswer}</span>
-            </div>
-          )}
+        </fieldset>
+      ))}
+      {error && <p role="alert" className="text-gx-error">{error}</p>}
+      {!readOnly && (
+        <div className="flex gap-2">
+          <button type="button" onClick={() => void submit(false)} disabled={!ready || submitting}
+            className="inline-flex items-center gap-1 rounded border border-gx-accent/30 px-2 py-1 text-gx-accent disabled:opacity-50"><Send size={12} />Send answers</button>
+          <button type="button" onClick={() => void submit(true)} disabled={submitting} className="rounded border border-gx-border px-2 py-1 text-gx-muted">Cancel</button>
         </div>
       )}
     </div>
   );
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-function parseChoices(raw: unknown): string[] {
-  if (Array.isArray(raw)) {
-    return raw.map((item) => {
-      if (typeof item === "string") return item;
-      if (typeof item === "object" && item !== null) {
-        const obj = item as Record<string, unknown>;
-        return String(obj.label ?? obj.text ?? obj.value ?? JSON.stringify(item));
-      }
-      return String(item);
-    });
-  }
-  return [];
 }

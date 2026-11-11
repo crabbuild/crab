@@ -26,6 +26,8 @@ use crate::{
 /// repositories keyed by a desktop-assigned id.
 #[derive(Clone)]
 pub struct State {
+    #[cfg(unix)]
+    pub(crate) native_processes: crate::native_process::NativeProcesses,
     repos: Arc<RwLock<HashMap<String, OpenRepo>>>,
     /// Channel to the background indexer. `None` when the indexer is
     /// disabled or hasn't been spawned yet.
@@ -50,6 +52,8 @@ struct OpenRepo {
 impl State {
     pub fn new() -> Self {
         Self {
+            #[cfg(unix)]
+            native_processes: crate::native_process::NativeProcesses::default(),
             repos: Arc::new(RwLock::new(HashMap::new())),
             indexer_tx: Arc::new(RwLock::new(None)),
             cancel_registry: CancelRegistry::new(),
@@ -98,8 +102,12 @@ impl State {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let repos = std::mem::take(&mut *self.repos.write().await);
         let mut result = Ok(());
+        #[cfg(unix)]
+        if let Err(error) = self.native_processes.shutdown().await {
+            result = Err(error);
+        }
+        let repos = std::mem::take(&mut *self.repos.write().await);
         for repo in repos.into_values() {
             if let Err(error) = repo.handle.close().await {
                 result = Err(error);
@@ -138,7 +146,50 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
     let Request { method, params, .. } = req;
     crate::storage_auth::validate_target(state, &method, &params).await?;
     match method.as_str() {
+        #[cfg(unix)]
+        "native_process_open" => {
+            state
+                .native_processes
+                .open(decode(&method, params)?, out)
+                .await
+        }
+        #[cfg(unix)]
+        "native_process_write" => state.native_processes.write(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_close_input" => {
+            state
+                .native_processes
+                .close_input(decode(&method, params)?)
+                .await
+        }
+        #[cfg(unix)]
+        "native_process_ack" => state.native_processes.ack(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_stop" => state.native_processes.stop(decode(&method, params)?).await,
+        #[cfg(unix)]
+        "native_process_release" => {
+            state
+                .native_processes
+                .release(decode(&method, params)?)
+                .await
+        }
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
+        // These flags describe the extended SSH services, whose wire handlers
+        // are not implemented yet. Basic repository RPCs remain available.
+        "capabilities" => Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "features": {
+                "fileWatching": false,
+                "deltaSync": false,
+                "compression": false,
+                "processManagement": false,
+                "environmentManagement": false,
+                "debugging": false,
+                "search": false,
+                "buildRun": false,
+                "logTailing": false,
+            },
+        })),
         "managed_profiles" => crate::managed_service::profiles(),
         "managed_select_profile" => {
             crate::managed_service::select_profile(decode(&method, params)?)
@@ -406,16 +457,21 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             worktree_destroy(&work_dir, p).await
         }
         "task_compute_diff" => {
-            let p: TaskComputeDiffParams = decode(&method, params)?;
-            task_compute_diff(p).await
+            let p: crate::task_diff::Params = decode(&method, params)?;
+            crate::task_diff::compare(p).await
         }
         "task_apply" => {
             let p: TaskApplyParams = decode(&method, params)?;
-            task_apply(p).await
+            let work_dir = state.get_work_dir(&p.repo_id).await?;
+            #[cfg(unix)]
+            return state.native_processes.apply(work_dir, p).await;
+            #[cfg(not(unix))]
+            task_apply(&work_dir, p).await
         }
         "task_discard" => {
             let p: TaskDiscardParams = decode(&method, params)?;
-            task_discard(p).await
+            let work_dir = state.get_work_dir(&p.repo_id).await?;
+            task_discard(&work_dir, p).await
         }
         "task_check_orphaned" => {
             let p: TaskCheckOrphanedParams = decode(&method, params)?;
@@ -1657,8 +1713,7 @@ struct WorktreeCreateParams {
     branch: String,
     /// Base ref to branch from (commit SHA, branch name, or "HEAD").
     base_ref: String,
-    /// Task UUID — the first 8 characters are used for the worktree
-    /// directory name under `~/.crab/worktrees/`.
+    /// Task UUID used as the worktree directory name.
     task_id: String,
 }
 
@@ -1666,83 +1721,68 @@ struct WorktreeCreateParams {
 ///
 /// This is the remote counterpart to the local `createWorktree()` in
 /// `orchestrator-worktree.ts`. The worktree is placed at
-/// `~/.crab/worktrees/<task_id_short>` and a new branch is created
+/// `~/.crab/worktrees/<task_id>` and a new branch is created
 /// through the core Crab worktree contract.
 ///
-/// Returns `{ path, branch, base_ref }` where `base_ref` is the
-/// resolved SHA of the starting point.
+/// Returns the workspace, resolved baseline and the captured Apply branch.
 async fn worktree_create(work_dir: &Path, p: WorktreeCreateParams) -> Result<Value> {
-    let task_id_short = &p.task_id[..p.task_id.len().min(8)];
-
-    // Resolve the worktree path under ~/.crab/worktrees/<task_id_short>.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let worktrees_dir = PathBuf::from(&home).join(".crab").join("worktrees");
-
-    // Ensure the worktrees directory exists.
-    tokio::fs::create_dir_all(&worktrees_dir)
+    let base_branch = crate::git_ref_merge::current_branch_ref(work_dir)
+        .await?
+        .map(|branch| branch.trim_start_matches("refs/heads/").to_owned());
+    let task_id = uuid::Uuid::parse_str(&p.task_id).map_err(|source| AgentError::Managed {
+        kind: "task_identity".into(),
+        message: "Remote workspace creation requires a task UUID".into(),
+        remediation: "Start a new conversation with a new task identity".into(),
+        source: Some(Box::new(source)),
+    })?;
+    let baseline = format!("{}^{{commit}}", p.base_ref);
+    let resolved_base = run_git_worktree_cmd(
+        work_dir,
+        &["rev-parse", "--verify", "--end-of-options", &baseline],
+    )
+    .await?;
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .ok_or_else(|| AgentError::Other("Remote HOME is unavailable".into()))?;
+    let home = PathBuf::from(home);
+    if !home.is_absolute() {
+        return Err(AgentError::Other(
+            "Remote HOME must be an absolute path".into(),
+        ));
+    }
+    let worktrees_dir = home.join(".crab").join("worktrees");
+    let wt_path = worktrees_dir.join(task_id.to_string());
+    // A new conversation cannot authorize cleanup of a stale or colliding
+    // directory. Full UUIDs isolate tasks; an existing path requires recovery.
+    tokio::fs::create_dir_all(&worktrees_dir).await?;
+    tokio::fs::create_dir(&wt_path)
         .await
-        .map_err(AgentError::Io)?;
-
-    let wt_path = worktrees_dir.join(task_id_short);
-
-    // Check if the worktree path already exists (stale from a previous run).
+        .map_err(|source| AgentError::Managed {
+            kind: "task_workspace".into(),
+            message: format!("Cannot reserve remote workspace: {}", wt_path.display()),
+            remediation:
+                "Recover an existing workspace or repair directory permissions before retrying"
+                    .into(),
+            source: Some(Box::new(source)),
+        })?;
     let mgr = crate::worktree::WorktreeManager::new(work_dir.to_path_buf());
-    if wt_path.exists() {
-        // Attempt to remove the stale worktree first.
-        let _ = mgr.worktree_remove(&wt_path, true).await;
-        // If the directory still exists (not a git worktree), remove it.
-        if wt_path.exists() {
-            tokio::fs::remove_dir_all(&wt_path)
-                .await
-                .map_err(AgentError::Io)?;
-        }
-    }
-
-    // Resolve base_ref to a SHA before creating the worktree.
-    let resolved_base = resolve_ref_to_sha(work_dir, &p.base_ref).await?;
-
-    // Create the worktree through the core Crab worktree contract.
-    let wt_path_str = wt_path.to_string_lossy().to_string();
-    let result = mgr
+    if let Err(error) = mgr
         .worktree_add(&wt_path, &p.branch, true, Some(&resolved_base))
-        .await;
-
-    match result {
-        Ok(_) => {}
-        Err(AgentError::Cli { status, ref stderr }) => {
-            // Map common git errors to descriptive messages.
-            let lower = stderr.to_lowercase();
-            if lower.contains("already exists") {
-                return Err(AgentError::Other(format!(
-                    "Branch '{}' already exists. Choose a different branch name.",
-                    p.branch
-                )));
-            }
-            if lower.contains("permission denied") {
-                return Err(AgentError::Other(format!(
-                    "Permission denied creating worktree at '{}'. Check filesystem permissions.",
-                    wt_path_str
-                )));
-            }
-            if lower.contains("no space left") || lower.contains("disk full") {
-                return Err(AgentError::Other(format!(
-                    "Disk full: cannot create worktree at '{}'. Free up space on the remote.",
-                    wt_path_str
-                )));
-            }
-            // Re-raise the original error for other cases.
-            return Err(AgentError::Cli {
-                status,
-                stderr: stderr.clone(),
-            });
-        }
-        Err(e) => return Err(e),
+        .await
+    {
+        // Release only our empty reservation. A post-create failure can leave
+        // a real checkout; non-recursive removal preserves its files for recovery.
+        let _ = tokio::fs::remove_dir(&wt_path).await;
+        return Err(error);
     }
+
+    crate::task_workspace::TaskWorkspace::record(work_dir, &wt_path, task_id, &p.branch).await?;
 
     Ok(json!({
-        "path": wt_path_str,
+        "path": wt_path,
         "branch": p.branch,
         "base_ref": resolved_base,
+        "base_branch": base_branch,
     }))
 }
 
@@ -1764,238 +1804,184 @@ struct WorktreeDestroyParams {
 /// Removes the worktree directory and optionally deletes the associated
 /// branch. This is the cleanup counterpart for remote orchestrator tasks.
 async fn worktree_destroy(work_dir: &Path, p: WorktreeDestroyParams) -> Result<Value> {
-    // Remove the worktree. Ignore errors if it's already gone.
-    let mgr = crate::worktree::WorktreeManager::new(work_dir.to_path_buf());
-    let remove_path = PathBuf::from(&p.path);
-    let remove_result = mgr.worktree_remove(&remove_path, p.force).await;
-    let already_gone = match &remove_result {
-        Ok(_) => false,
-        Err(AgentError::Cli { stderr, .. }) => {
-            let lower = stderr.to_lowercase();
-            lower.contains("is not a working tree")
-                || lower.contains("no such file")
-                || lower.contains("not a valid directory")
-        }
-        Err(_) => false,
-    };
-
-    if !already_gone {
-        remove_result?;
-    }
-
-    // Delete the branch if specified.
-    let mut branch_deleted = false;
-    if let Some(ref branch) = p.branch {
-        let branch_result = run_git_worktree_cmd(work_dir, &["branch", "-D", branch]).await;
-        match branch_result {
-            Ok(_) => {
-                branch_deleted = true;
-            }
-            Err(AgentError::Cli { ref stderr, .. }) => {
-                // Ignore "not found" errors — branch may already be gone.
-                if !stderr.to_lowercase().contains("not found") {
-                    branch_result?;
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    // If the directory still exists on disk (e.g. worktree was already
-    // unregistered but files remain), clean it up.
-    let wt_path = PathBuf::from(&p.path);
-    if wt_path.exists() {
-        let _ = tokio::fs::remove_dir_all(&wt_path).await;
-    }
-
-    Ok(json!({
-        "removed": true,
-        "path": p.path,
-        "branch_deleted": branch_deleted,
-    }))
-}
-
-// ─── Task Compute Diff ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct TaskComputeDiffParams {
-    #[allow(dead_code)]
-    repo_id: String,
-    /// Path to the worktree where the agent made changes.
-    worktree_path: String,
-    /// Base ref (commit SHA) to diff against.
-    base_ref: String,
-    /// Branch name of the task (used as fallback).
-    #[serde(default)]
-    branch: Option<String>,
-}
-
-/// Compute the diff for a remote orchestrator task.
-///
-/// Runs `git diff` in the task's worktree against the base ref and returns
-/// the raw unified diff text, name-status output, and HEAD ref. The Electron
-/// main process parses this into structured `DiffFile[]` for the renderer.
-///
-/// Strategy (mirrors the local `computeDiff` in orchestrator-diff.ts):
-/// 1. `git diff <base_ref>` — committed + uncommitted changes from base.
-/// 2. If empty, `git diff` — unstaged working tree changes.
-/// 3. If empty, `git diff --cached` — staged changes only.
-/// 4. If empty, stage untracked files temporarily to capture new files.
-async fn task_compute_diff(p: TaskComputeDiffParams) -> Result<Value> {
-    let cwd = PathBuf::from(&p.worktree_path);
-
-    if !cwd.exists() {
-        return Err(AgentError::Other(format!(
-            "Worktree path does not exist: {}",
-            p.worktree_path
-        )));
-    }
-
-    let mut raw_diff = String::new();
-    let mut name_status = String::new();
-
-    // Strategy 1: diff from base ref to working tree.
-    if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", &p.base_ref]).await {
-        if !diff_out.trim().is_empty() {
-            raw_diff = diff_out;
-            if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--name-status", &p.base_ref]).await {
-                name_status = ns;
-            }
-        }
-    }
-
-    // Strategy 2: unstaged working tree changes.
-    if raw_diff.trim().is_empty() {
-        if let Ok(diff_out) = run_git_cmd(&cwd, &["diff"]).await {
-            if !diff_out.trim().is_empty() {
-                raw_diff = diff_out;
-                if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--name-status"]).await {
-                    name_status = ns;
-                }
-            }
-        }
-    }
-
-    // Strategy 3: staged changes.
-    if raw_diff.trim().is_empty() {
-        if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", "--cached"]).await {
-            if !diff_out.trim().is_empty() {
-                raw_diff = diff_out;
-                if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--cached", "--name-status"]).await {
-                    name_status = ns;
-                }
-            }
-        }
-    }
-
-    // Strategy 4: check for untracked files.
-    if raw_diff.trim().is_empty() {
-        if let Ok(status_out) = run_git_cmd(&cwd, &["status", "--porcelain"]).await {
-            if !status_out.trim().is_empty() {
-                // Stage all files temporarily to get a diff.
-                let _ = run_git_cmd(&cwd, &["add", "-A"]).await;
-                if let Ok(diff_out) = run_git_cmd(&cwd, &["diff", "--cached"]).await {
-                    raw_diff = diff_out;
-                    if let Ok(ns) = run_git_cmd(&cwd, &["diff", "--cached", "--name-status"]).await
-                    {
-                        name_status = ns;
-                    }
-                }
-                // Unstage to leave the worktree clean.
-                let _ = run_git_cmd(&cwd, &["reset", "HEAD"]).await;
-            }
-        }
-    }
-
-    // Get the HEAD ref.
-    let head_ref = run_git_cmd(&cwd, &["rev-parse", "HEAD"])
-        .await
-        .unwrap_or_else(|_| "unknown".to_owned());
-
-    Ok(json!({
-        "diff": raw_diff,
-        "name_status": name_status,
-        "head_ref": head_ref.trim(),
-    }))
+    let workspace = crate::task_workspace::TaskWorkspace::open(
+        work_dir,
+        Path::new(&p.path),
+        None,
+        p.branch.as_deref(),
+    )
+    .await?;
+    let cleanup = workspace
+        .remove(work_dir, p.force, p.branch.is_some())
+        .await?;
+    Ok(
+        json!({ "removed": true, "path": p.path, "branch_deleted": cleanup.branch_deleted, "cleanup_error": cleanup.error }),
+    )
 }
 
 // ─── Task Apply ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct TaskApplyParams {
-    #[allow(dead_code)]
+#[cfg_attr(unix, derive(serde::Serialize))]
+pub(crate) struct TaskApplyParams {
     repo_id: String,
-    #[allow(dead_code)]
     task_id: String,
     /// Branch name of the task to merge.
     branch: String,
-    /// Base ref (branch name or SHA) to merge into.
-    base_ref: String,
-    /// Preferred target branch captured when the task was created.
+    /// Required Apply destination captured when the task was created.
     #[serde(default)]
     base_branch: Option<String>,
     /// Path to the task worktree (for cleanup after merge).
-    #[serde(default)]
-    worktree_path: Option<String>,
+    worktree_path: String,
 }
 
 /// Apply a remote orchestrator task: merge the task branch into the base
 /// branch, then remove the worktree and delete the task branch.
 ///
 /// Steps:
-/// 1. Resolve the base branch (detect current branch if base_ref is a SHA).
+/// 1. Validate the captured target before staging source changes.
 /// 2. Commit any uncommitted changes in the worktree.
 /// 3. Merge in the active worktree when the target is current; otherwise
 ///    create the merge commit and update the target ref without checkout.
 /// 4. Remove the worktree.
 /// 5. Delete the task branch.
-async fn task_apply(p: TaskApplyParams) -> Result<Value> {
-    // Determine the main repo path from the worktree (parent of worktrees dir).
-    let wt_path = p.worktree_path.as_deref().unwrap_or("");
-    let repo_dir = find_main_repo_from_worktree(wt_path).await?;
+pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
+    #[cfg(unix)]
+    let workspace = crate::task_workspace::TaskWorkspace::open_for_apply(
+        repo_dir,
+        Path::new(&p.worktree_path),
+        Some(&p.task_id),
+        Some(&p.branch),
+    )
+    .await?;
+    #[cfg(not(unix))]
+    let workspace = crate::task_workspace::TaskWorkspace::open(
+        repo_dir,
+        Path::new(&p.worktree_path),
+        Some(&p.task_id),
+        Some(&p.branch),
+    )
+    .await?;
+    // The baseline describes source history, not the destination. An absent
+    // or deleted captured branch cannot authorize merging into today's checkout.
+    let target_branch = p
+        .base_branch
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: "Apply target was not recorded".into(),
+            remediation: "Recover the task's destination before applying changes".into(),
+            source: None,
+        })?;
+    let target_ref = crate::git_ref_merge::local_branch_ref(&target_branch);
+    run_git_cmd(repo_dir, &["show-ref", "--verify", "--", &target_ref])
+        .await
+        .map_err(|source| AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: "Saved Apply target is unavailable".into(),
+            remediation: "Restore its branch before applying changes".into(),
+            source: Some(Box::new(source)),
+        })?;
+    crate::git_ref_merge::require_direct_branch(repo_dir, &target_ref).await?;
+    #[cfg(unix)]
+    let recovered = if workspace.apply_pending()? {
+        let source_ref = crate::git_ref_merge::local_branch_ref(&p.branch);
+        crate::git_active_apply::recover(repo_dir, &target_ref, workspace.root(), &source_ref)
+            .await?
+    } else {
+        crate::git_active_apply::require_available(repo_dir).await?;
+        workspace.begin_apply()?;
+        None
+    };
+    #[cfg(not(unix))]
+    let recovered = {
+        workspace.begin_apply()?;
+        None
+    };
+    let result = if let Some(commit) = recovered {
+        complete_apply(repo_dir, &workspace, &target_branch, Some(commit), true).await
+    } else {
+        apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await
+    };
+    #[cfg(unix)]
+    let retain = crate::native_process::mutation::requires_recovery();
+    #[cfg(not(unix))]
+    let retain = false;
+    if !retain && let Err(error) = workspace.finish_apply() {
+        tracing::warn!(%error, "could not clear task Apply fence");
+    }
+    result
+}
 
-    // Commit any uncommitted changes in the worktree before merging.
-    if !wt_path.is_empty() {
-        let wt = PathBuf::from(wt_path);
-        if wt.exists() {
-            let status = run_git_cmd(&wt, &["status", "--porcelain"])
-                .await
-                .unwrap_or_default();
-            if !status.trim().is_empty() {
-                let _ = run_git_cmd(&wt, &["add", "-A"]).await;
-                let _ = run_git_cmd(
-                    &wt,
-                    &[
-                        "commit",
-                        "-m",
-                        "Agent work (auto-committed before apply)",
-                        "--allow-empty-message",
-                    ],
-                )
-                .await;
-            }
-        }
+async fn apply_workspace(
+    repo_dir: &Path,
+    workspace: &crate::task_workspace::TaskWorkspace,
+    branch: &str,
+    target_branch: &str,
+    target_ref: &str,
+) -> Result<Value> {
+    let wt = workspace.root();
+    // Staging or commit failure cannot merge a stale task branch and then
+    // delete the workspace containing the user's uncommitted changes.
+    // Display preferences cannot hide source changes from the Apply snapshot.
+    let status = run_git_cmd(
+        wt,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )
+    .await?;
+    if !status.trim().is_empty() {
+        run_git_cmd(wt, &["add", "-A"]).await?;
+        run_git_cmd(
+            wt,
+            &[
+                "commit",
+                "-m",
+                "Agent work (auto-committed before apply)",
+                "--allow-empty-message",
+            ],
+        )
+        .await?;
     }
 
-    let target_branch =
-        resolve_merge_target(&repo_dir, p.base_branch.as_deref(), &p.base_ref).await?;
-    let commit_msg = format!("Merge agent task branch '{}'", p.branch);
+    let source_ref = crate::git_ref_merge::local_branch_ref(branch);
+    if crate::git_ref_merge::current_branch_ref(wt)
+        .await?
+        .as_deref()
+        != Some(&source_ref)
+    {
+        return Err(AgentError::Other(
+            "Task workspace branch changed before Apply".into(),
+        ));
+    }
+    // Use the exact task ref's object. Git resolves a short tag name before
+    // a branch with the same name, even if the task branch is checked out.
+    let source = crate::git_ref_merge::exact_branch_oid(wt, &source_ref).await?;
+    let commit_msg = format!("Merge agent task branch '{branch}'");
 
-    let target_ref = crate::git_ref_merge::local_branch_ref(&target_branch);
-    let current_ref = crate::git_ref_merge::current_branch_ref(&repo_dir).await?;
+    let current_ref = crate::git_ref_merge::current_branch_ref(repo_dir).await?;
 
     let mut merge_commit: Option<String> = None;
-    let merge_result = if current_ref.as_deref() == Some(target_ref.as_str()) {
-        run_git_cmd(
-            &repo_dir,
-            &["merge", &p.branch, "--no-ff", "-m", &commit_msg],
-        )
-        .await
+    let merge_result = if current_ref.as_deref() == Some(target_ref) {
+        #[cfg(unix)]
+        {
+            merge_commit = Some(
+                crate::git_active_apply::merge(repo_dir, target_ref, &source, wt, &commit_msg)
+                    .await?,
+            );
+            Ok(String::new())
+        }
+        #[cfg(not(unix))]
+        run_git_cmd(repo_dir, &["merge", &source, "--no-ff", "-m", &commit_msg]).await
     } else {
         match crate::git_ref_merge::merge_commit_without_checkout(
-            &repo_dir,
-            &p.branch,
-            &target_branch,
+            repo_dir,
+            &source,
+            target_branch,
             &commit_msg,
         )
         .await?
@@ -2024,51 +2010,48 @@ async fn task_apply(p: TaskApplyParams) -> Result<Value> {
         let err_str = format!("{}", e);
         if err_str.contains("CONFLICT") || err_str.contains("Automatic merge failed") {
             // Abort the merge and report the conflict.
-            let _ = run_git_cmd(&repo_dir, &["merge", "--abort"]).await;
+            let _ = run_git_cmd(repo_dir, &["merge", "--abort"]).await;
             return Err(AgentError::Other(format!(
-                "Merge conflict when applying task branch '{}'. Merge aborted.",
-                p.branch
+                "Merge conflict when applying task branch '{branch}'. Merge aborted."
             )));
         }
         merge_result?;
     }
 
-    // Remove the worktree.
-    let mut worktree_removed = false;
-    if !wt_path.is_empty() {
-        let remove_result =
-            run_git_cmd(&repo_dir, &["worktree", "remove", "--force", wt_path]).await;
-        match remove_result {
-            Ok(_) => {
-                worktree_removed = true;
-            }
-            Err(_) => {
-                // Try filesystem cleanup if git worktree remove fails.
-                let wt = PathBuf::from(wt_path);
-                if wt.exists() {
-                    let _ = tokio::fs::remove_dir_all(&wt).await;
-                    worktree_removed = true;
-                }
-            }
-        }
-        // Prune stale worktree entries.
-        let _ = run_git_cmd(&repo_dir, &["worktree", "prune"]).await;
+    // A Git merge receipt alone cannot authorize deleting the task. Verify the
+    // captured branch contains the pinned source before removing the checkout.
+    if !crate::git_ref_merge::branch_contains(repo_dir, target_ref, &source).await? {
+        return Err(AgentError::Managed {
+            kind: "task_apply_target".into(),
+            message: format!(
+                "Saved Apply target '{target_branch}' does not contain the task commit"
+            ),
+            remediation: "Inspect the repository checkout and task workspace before retrying"
+                .into(),
+            source: None,
+        });
     }
 
-    // Delete the task branch.
-    let mut branch_deleted = false;
-    let branch_result = run_git_cmd(&repo_dir, &["branch", "-D", &p.branch]).await;
-    match branch_result {
-        Ok(_) => {
-            branch_deleted = true;
+    complete_apply(repo_dir, workspace, target_branch, merge_commit, false).await
+}
+
+async fn complete_apply(
+    repo_dir: &Path,
+    workspace: &crate::task_workspace::TaskWorkspace,
+    target_branch: &str,
+    merge_commit: Option<String>,
+    recovered: bool,
+) -> Result<Value> {
+    let cleanup = workspace.remove(repo_dir, false, true).await;
+    let (worktree_removed, branch_deleted, cleanup_error) = match cleanup {
+        Ok(cleanup) => (true, cleanup.branch_deleted, cleanup.error),
+        Err(error) => {
+            // Merge already succeeded. Report retained cleanup separately so
+            // the client does not retry or hide a merge that actually landed.
+            tracing::warn!(%error, "task applied; workspace retained");
+            (false, false, Some(error.to_string()))
         }
-        Err(ref e) => {
-            let err_str = format!("{}", e);
-            if !err_str.to_lowercase().contains("not found") {
-                // Non-fatal: branch may already be gone after merge.
-            }
-        }
-    }
+    };
 
     Ok(json!({
         "applied": true,
@@ -2076,6 +2059,8 @@ async fn task_apply(p: TaskApplyParams) -> Result<Value> {
         "merge_commit": merge_commit,
         "worktree_removed": worktree_removed,
         "branch_deleted": branch_deleted,
+        "cleanup_error": cleanup_error,
+        "recovery_warning": recovered.then_some("Apply recovered after interruption. Check whether the post-merge hook completed."),
     }))
 }
 
@@ -2083,15 +2068,12 @@ async fn task_apply(p: TaskApplyParams) -> Result<Value> {
 
 #[derive(Debug, Deserialize)]
 struct TaskDiscardParams {
-    #[allow(dead_code)]
     repo_id: String,
-    #[allow(dead_code)]
     task_id: String,
     /// Branch name of the task to delete.
     branch: String,
     /// Path to the task worktree to remove.
-    #[serde(default)]
-    worktree_path: Option<String>,
+    worktree_path: String,
 }
 
 /// Discard a remote orchestrator task: remove the worktree and delete
@@ -2100,52 +2082,18 @@ struct TaskDiscardParams {
 /// Steps:
 /// 1. Force-remove the worktree.
 /// 2. Delete the task branch.
-async fn task_discard(p: TaskDiscardParams) -> Result<Value> {
-    let wt_path = p.worktree_path.as_deref().unwrap_or("");
-    let repo_dir = find_main_repo_from_worktree(wt_path).await?;
-
-    // Force-remove the worktree.
-    let mut worktree_removed = false;
-    if !wt_path.is_empty() {
-        let remove_result =
-            run_git_cmd(&repo_dir, &["worktree", "remove", "--force", wt_path]).await;
-        match remove_result {
-            Ok(_) => {
-                worktree_removed = true;
-            }
-            Err(_) => {
-                // Try filesystem cleanup if git worktree remove fails.
-                let wt = PathBuf::from(wt_path);
-                if wt.exists() {
-                    let _ = tokio::fs::remove_dir_all(&wt).await;
-                    worktree_removed = true;
-                }
-            }
-        }
-        // Prune stale worktree entries.
-        let _ = run_git_cmd(&repo_dir, &["worktree", "prune"]).await;
-    }
-
-    // Delete the task branch (force delete since we're discarding).
-    let mut branch_deleted = false;
-    let branch_result = run_git_cmd(&repo_dir, &["branch", "-D", &p.branch]).await;
-    match branch_result {
-        Ok(_) => {
-            branch_deleted = true;
-        }
-        Err(ref e) => {
-            let err_str = format!("{}", e);
-            if !err_str.to_lowercase().contains("not found") {
-                // Non-fatal: branch may already be gone.
-            }
-        }
-    }
-
-    Ok(json!({
-        "discarded": true,
-        "worktree_removed": worktree_removed,
-        "branch_deleted": branch_deleted,
-    }))
+async fn task_discard(repo_dir: &Path, p: TaskDiscardParams) -> Result<Value> {
+    let workspace = crate::task_workspace::TaskWorkspace::open(
+        repo_dir,
+        Path::new(&p.worktree_path),
+        Some(&p.task_id),
+        Some(&p.branch),
+    )
+    .await?;
+    let cleanup = workspace.remove(repo_dir, true, true).await?;
+    Ok(
+        json!({ "discarded": true, "worktree_removed": true, "branch_deleted": cleanup.branch_deleted, "cleanup_error": cleanup.error }),
+    )
 }
 
 // ─── Task Check Orphaned ────────────────────────────────────────────
@@ -2223,127 +2171,10 @@ async fn check_agent_running_in_worktree(worktree_path: &str) -> bool {
 }
 
 // ─── Task Apply/Discard Helpers ─────────────────────────────────────
-
-/// Find the main repository directory from a worktree path.
-///
-/// Git worktrees have a `.git` file (not directory) that points back to
-/// the main repo's `.git/worktrees/<name>` directory. We follow this
-/// chain to find the main repo root.
-async fn find_main_repo_from_worktree(wt_path: &str) -> Result<PathBuf> {
-    if wt_path.is_empty() {
-        return Err(AgentError::Other(
-            "Cannot determine main repo: worktree_path is empty".to_owned(),
-        ));
-    }
-
-    let wt = PathBuf::from(wt_path);
-
-    // Use `git rev-parse --show-toplevel` from the worktree to find the
-    // main repo. If the worktree is gone, try the parent directory.
-    if wt.exists() {
-        if let Ok(toplevel) = run_git_cmd(&wt, &["rev-parse", "--git-common-dir"]).await {
-            let common_dir = PathBuf::from(toplevel.trim());
-            // git-common-dir returns the .git directory of the main repo.
-            // The repo root is its parent.
-            if let Some(repo_root) = common_dir.parent() {
-                if repo_root.exists() {
-                    return Ok(repo_root.to_path_buf());
-                }
-            }
-            // If it's a relative path, resolve from the worktree.
-            let resolved = wt.join(&common_dir);
-            if let Some(repo_root) = resolved.parent() {
-                if repo_root.exists() {
-                    return Ok(repo_root.to_path_buf());
-                }
-            }
-        }
-    }
-
-    // Fallback: worktrees are typically at <repo>/.crab/worktrees/<id>
-    // or <repo>/worktrees/<id>. Walk up to find a .git directory.
-    let mut candidate = wt.clone();
-    for _ in 0..5 {
-        if let Some(parent) = candidate.parent() {
-            candidate = parent.to_path_buf();
-            if candidate.join(".git").exists() {
-                return Ok(candidate);
-            }
-        } else {
-            break;
-        }
-    }
-
-    Err(AgentError::Other(format!(
-        "Cannot determine main repo from worktree path: {}",
-        wt_path
-    )))
-}
-
-/// Resolve the merge target branch from a base_ref.
-///
-/// If base_ref looks like a branch name (not a 40-char hex SHA), use it
-/// directly. Otherwise, detect the current branch in the main repo.
-async fn resolve_merge_target(
-    repo_dir: &Path,
-    base_branch: Option<&str>,
-    base_ref: &str,
-) -> Result<String> {
-    if let Some(branch) = base_branch.filter(|branch| !branch.trim().is_empty()) {
-        if local_branch_exists(repo_dir, branch).await {
-            return Ok(branch.to_owned());
-        }
-    }
-
-    // If it looks like a branch name (not a full SHA), use it directly.
-    let is_sha = base_ref.len() >= 7 && base_ref.chars().all(|c| c.is_ascii_hexdigit());
-
-    if !is_sha {
-        // Verify the branch exists.
-        if local_branch_exists(repo_dir, base_ref).await {
-            return Ok(base_ref.to_owned());
-        }
-    }
-
-    // Detect the current branch.
-    let current = run_git_cmd(repo_dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
-    let branch = current.trim();
-    if !branch.is_empty() && branch != "HEAD" {
-        return Ok(branch.to_owned());
-    }
-
-    // Last resort: use "main" or "master".
-    for name in &["main", "master"] {
-        if run_git_cmd(repo_dir, &["rev-parse", "--verify", name])
-            .await
-            .is_ok()
-        {
-            return Ok(name.to_string());
-        }
-    }
-
-    Err(AgentError::Other(
-        "Cannot determine target branch for merge".to_owned(),
-    ))
-}
-
-async fn local_branch_exists(repo_dir: &Path, branch: &str) -> bool {
-    let branch_ref = crate::git_ref_merge::local_branch_ref(branch);
-    run_git_cmd(repo_dir, &["show-ref", "--verify", "--quiet", &branch_ref])
-        .await
-        .is_ok()
-}
-
 /// Run a git command in the given directory and return stdout.
 async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
+    let mut command = shellout::git_command();
+    let out = shellout::output(command.args(args).current_dir(cwd)).await?;
 
     if !out.status.success() {
         let status = out.status.code().unwrap_or(-1);
@@ -2355,40 +2186,8 @@ async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Run a git command and return stdout, mapping failures to AgentError.
-async fn run_git_worktree_cmd(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
-        .args(args)
-        .current_dir(work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-
-    if !out.status.success() {
-        let status = out.status.code().unwrap_or(-1);
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        return Err(AgentError::Cli { status, stderr });
-    }
-
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
-/// Resolve a ref (branch name, tag, "HEAD", or SHA) to a full commit SHA.
-async fn resolve_ref_to_sha(work_dir: &Path, refspec: &str) -> Result<String> {
-    // Try direct resolution first.
-    match run_git_worktree_cmd(work_dir, &["rev-parse", refspec]).await {
-        Ok(sha) => return Ok(sha),
-        Err(_) => {}
-    }
-
-    // Try with origin/ prefix for remote tracking branches.
-    let with_origin = format!("origin/{refspec}");
-    match run_git_worktree_cmd(work_dir, &["rev-parse", &with_origin]).await {
-        Ok(sha) => return Ok(sha),
-        Err(_) => {}
-    }
-
-    // Fall back to HEAD.
-    run_git_worktree_cmd(work_dir, &["rev-parse", "HEAD"]).await
+pub(crate) async fn run_git_worktree_cmd(work_dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(run_git_cmd(work_dir, args).await?.trim().to_owned())
 }
 
 // ─── Write text ─────────────────────────────────────────────────────
@@ -5718,6 +5517,20 @@ mod tests {
         (td, root)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn repository_size_excludes_symlinks() {
+        let root = TempDir::new().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("first"), b"abc").unwrap();
+        std::fs::write(nested.join("second"), b"de").unwrap();
+        std::os::unix::fs::symlink(root.path(), nested.join("loop")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("missing"), nested.join("broken")).unwrap();
+
+        assert_eq!(dir_size_bytes(root.path()), 5);
+    }
+
     #[tokio::test]
     async fn git_config_get_returns_set_values() {
         let (_td, root) = git_init_repo();
@@ -6133,14 +5946,25 @@ mod tests {
         let _ = sh(&wt_path, &["add", "."]);
         let _ = sh(&wt_path, &["commit", "-m", "agent change"]);
 
-        let result = task_apply(TaskApplyParams {
-            repo_id: "repo".to_owned(),
-            task_id: "task".to_owned(),
-            branch: "agent/apply".to_owned(),
-            base_ref: base,
-            base_branch: Some("integration".to_owned()),
-            worktree_path: Some(wt_path.to_string_lossy().into_owned()),
-        })
+        let task_id = uuid::Uuid::new_v4().to_string();
+        crate::task_workspace::TaskWorkspace::record(
+            &root,
+            &wt_path,
+            uuid::Uuid::parse_str(&task_id).unwrap(),
+            "agent/apply",
+        )
+        .await
+        .unwrap();
+        let result = task_apply(
+            &root,
+            TaskApplyParams {
+                repo_id: "repo".to_owned(),
+                task_id,
+                branch: "agent/apply".to_owned(),
+                base_branch: Some("integration".to_owned()),
+                worktree_path: wt_path.to_string_lossy().into_owned(),
+            },
+        )
         .await
         .unwrap();
 
@@ -6168,6 +5992,150 @@ mod tests {
             .status
             .success(),
             "task branch should be deleted"
+        );
+    }
+
+    async fn apply_source_file(ignored: bool) {
+        let (_td, root) = git_init_repo();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        assert!(sh(&root, &["add", "."]).status.success());
+        assert!(sh(&root, &["commit", "-m", "baseline"]).status.success());
+        let worktree = root.parent().unwrap().join("source-files");
+        assert!(
+            sh(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "agent/source",
+                    worktree.to_str().unwrap()
+                ]
+            )
+            .status
+            .success()
+        );
+        let task_id = uuid::Uuid::new_v4();
+        crate::task_workspace::TaskWorkspace::record(&root, &worktree, task_id, "agent/source")
+            .await
+            .unwrap();
+        assert!(
+            sh(&root, &["config", "status.showUntrackedFiles", "no"])
+                .status
+                .success()
+        );
+        if ignored {
+            std::fs::create_dir_all(root.join(".git/info")).unwrap();
+            std::fs::write(root.join(".git/info/exclude"), "source.txt\n").unwrap();
+            std::fs::write(worktree.join("tracked.txt"), "after\n").unwrap();
+        }
+        std::fs::write(worktree.join("source.txt"), "task bytes\n").unwrap();
+        assert!(sh(&root, &["checkout", "-b", "other"]).status.success());
+        let result = task_apply(
+            &root,
+            TaskApplyParams {
+                repo_id: "owned-repo".into(),
+                task_id: task_id.to_string(),
+                branch: "agent/source".into(),
+                base_branch: Some("main".into()),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let content = sh(&root, &["show", "main:source.txt"]);
+        let applied = content
+            .status
+            .success()
+            .then(|| String::from_utf8(content.stdout).unwrap());
+        assert_eq!(
+            json!({ "applied": result["applied"], "removed": result["worktree_removed"], "branch_deleted": result["branch_deleted"],
+            "source": std::fs::read_to_string(worktree.join("source.txt")).ok(), "target": applied }),
+            json!({ "applied": true, "removed": !ignored, "branch_deleted": !ignored,
+                "source": ignored.then_some("task bytes\n"), "target": (!ignored).then_some("task bytes\n") })
+        );
+    }
+
+    #[tokio::test]
+    async fn task_apply_captures_untracked_source_hidden_by_status_settings() {
+        apply_source_file(false).await;
+    }
+
+    #[tokio::test]
+    async fn task_apply_retains_ignored_source_after_merging() {
+        apply_source_file(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_apply_preserves_workspace_when_commit_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_td, root) = git_init_repo();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        assert!(sh(&root, &["add", "."]).status.success());
+        assert!(sh(&root, &["commit", "-m", "baseline"]).status.success());
+        let base = run_git_cmd(&root, &["rev-parse", "HEAD"])
+            .await
+            .unwrap()
+            .trim()
+            .to_owned();
+        let branch = run_git_cmd(&root, &["branch", "--show-current"])
+            .await
+            .unwrap()
+            .trim()
+            .to_owned();
+        let worktree = root.parent().unwrap().join("rejected-apply");
+        assert!(
+            sh(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "agent/rejected",
+                    worktree.to_str().unwrap()
+                ]
+            )
+            .status
+            .success()
+        );
+        let task_id = uuid::Uuid::new_v4();
+        crate::task_workspace::TaskWorkspace::record(&root, &worktree, task_id, "agent/rejected")
+            .await
+            .unwrap();
+        std::fs::write(worktree.join("new.txt"), "retained task bytes\n").unwrap();
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf 'fixture commit rejected\\n' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = task_apply(
+            &root,
+            TaskApplyParams {
+                repo_id: "owned-repo".into(),
+                task_id: task_id.to_string(),
+                branch: "agent/rejected".into(),
+                base_branch: Some(branch),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (
+                error.to_string().contains("fixture commit rejected"),
+                run_git_cmd(&root, &["rev-parse", "HEAD"])
+                    .await
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+                std::fs::read_to_string(worktree.join("new.txt")).unwrap(),
+                root.join("new.txt").exists()
+            ),
+            (true, base, "retained task bytes\n".into(), false)
         );
     }
 
@@ -8355,9 +8323,10 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
     let mut total: u64 = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            let ft = entry
-                .file_type()
-                .unwrap_or_else(|_| std::fs::metadata(entry.path()).unwrap().file_type());
+            // Concurrent GC can remove entries during this best-effort scan.
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             if ft.is_file() {
                 total += entry.metadata().map(|m| m.len()).unwrap_or(0);
             } else if ft.is_dir() {

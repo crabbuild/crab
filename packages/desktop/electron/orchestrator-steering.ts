@@ -31,6 +31,29 @@ export interface AgentSessionControls {
   toolPermissions?: ToolPermissions;
 }
 
+export function buildAgentModelFlags(
+  agentType: string,
+  controls: { model?: string; reasoningLevel?: string },
+): string[] {
+  const flags: string[] = [];
+  if (controls.model) {
+    if (agentType === "codex") {
+      flags.push("-c", `model=${JSON.stringify(controls.model)}`);
+    } else {
+      flags.push("--model", controls.model);
+    }
+  }
+  if (controls.reasoningLevel) {
+    const effort = controls.reasoningLevel;
+    if (agentType === "claude-code") {
+      flags.push("--effort", effort);
+    } else if (agentType === "codex") {
+      flags.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+    }
+  }
+  return flags;
+}
+
 interface PersistedSteeringData {
   workspaces: Record<string, AgentSessionControls>;
 }
@@ -161,20 +184,9 @@ export class AgentSteering extends EventEmitter {
    */
   buildAgentFlags(workspaceId: string, agentType: string): string[] {
     const controls = this.getControls(workspaceId);
-    const flags: string[] = [];
+    const flags = buildAgentModelFlags(agentType, controls);
 
     if (agentType === "claude-code") {
-      // Model override.
-      if (controls.model) {
-        flags.push("--model", controls.model);
-      }
-
-      // Reasoning effort → Claude's thinking effort.
-      if (controls.reasoningLevel) {
-        // Claude Code CLI accepts --thinking-effort with values: low, medium, high.
-        flags.push("-c", `thinking_effort="${controls.reasoningLevel}"`);
-      }
-
       // Fast mode.
       if (controls.fastMode) {
         flags.push("--fast");
@@ -188,16 +200,6 @@ export class AgentSteering extends EventEmitter {
         }
       }
     } else if (agentType === "codex") {
-      // Model override.
-      if (controls.model) {
-        flags.push("--model", controls.model);
-      }
-
-      // Reasoning effort → Codex's model_reasoning_effort config.
-      if (controls.reasoningLevel) {
-        flags.push("-c", `model_reasoning_effort="${controls.reasoningLevel}"`);
-      }
-
       // Approval mode based on tool permissions.
       if (controls.toolPermissions) {
         const mode = this.buildCodexApprovalMode(controls.toolPermissions);

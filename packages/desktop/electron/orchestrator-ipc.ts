@@ -11,76 +11,28 @@ import { dialog } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { randomUUID } from "node:crypto";
 
-import { Orchestrator } from "./orchestrator";
+import { Orchestrator, type Task } from "./orchestrator";
 import type { PersistedChatUIState } from "./orchestrator";
 import { ChatDatabase } from "./orchestrator-chat-db";
-import { ensureInitialPromptMessage, type ChatHistoryMessage } from "./orchestrator-chat-history";
-import { computeDiff, computeRemoteDiff, applyAll, cherryPickFiles } from "./orchestrator-diff";
-import { detectAgents, getCachedAgents, prewarmAgents } from "./orchestrator-adapters";
+import { registerChatIpc } from "./orchestrator-chat";
+import { registerDiffIpc } from "./orchestrator-diff";
+import { detectAgents, type AgentEvent, type AgentInputResponse } from "./orchestrator-adapters";
 import { fetchGitHubIssues, fetchLinearIssues } from "./orchestrator-issues";
-import { CheckpointManager } from "./orchestrator-checkpoints";
 import { CostTracker, TokenUsage } from "./orchestrator-cost";
 import { agentRegistry } from "./orchestrator-registry";
 import { loadAgentConfig, saveAgentConfig } from "./orchestrator-settings";
-import {
-  loadScripts,
-  buildWorkspaceEnv,
-  runSetupScript,
-  runArchiveScript,
-  spawnRunScript,
-  allocatePort,
-} from "./orchestrator-scripts";
+import type { WorkspaceScriptEvent, WorkspaceScriptOptions } from "./orchestrator-scripts";
 import { TemplateManager, WorkspaceTemplate } from "./orchestrator-templates";
 import { SlashCommandManager } from "./orchestrator-commands";
 import { WorkspaceSearch } from "./orchestrator-search";
 import type { SearchFilters } from "./orchestrator-search";
 import { CIAutoFixer } from "./orchestrator-autofix";
-import { applyHunk, revertHunk, type HunkPatch } from "./orchestrator-hunks";
+import type { HunkPatch } from "./orchestrator-hunks";
+import { registerModelDiscoveryIpc } from "./orchestrator-models";
+import { registerAgentDetectionIpc } from "./ssh-agent-detection";
 import type { SkillManager } from "./skill-manager";
-
-const IPC_GIT_DIFF_TIMEOUT_MS = 10_000;
-
-function isRenderableAgentText(msg: ChatHistoryMessage): boolean {
-  return msg.role === "agent" && (msg.kind === "text" || msg.kind === "done" || msg.kind === undefined);
-}
-
-function dedupeLoadedChatMessages(messages: ChatHistoryMessage[]): ChatHistoryMessage[] {
-  const deduped: ChatHistoryMessage[] = [];
-
-  for (const msg of messages) {
-    const content = msg.content.trim();
-    if (content && isRenderableAgentText(msg)) {
-      let duplicateIdx = -1;
-      for (let i = deduped.length - 1; i >= 0; i--) {
-        const previous = deduped[i];
-        if (previous.role === "user") break;
-        if (!isRenderableAgentText(previous)) continue;
-        if (previous.content.trim() === content) {
-          duplicateIdx = i;
-          break;
-        }
-      }
-
-      if (duplicateIdx >= 0) {
-        const previous = deduped[duplicateIdx];
-        const previousEventCount = previous.events?.length ?? 0;
-        const incomingEventCount = msg.events?.length ?? 0;
-        if (
-          incomingEventCount > previousEventCount ||
-          (previousEventCount === 0 && incomingEventCount === 0 && previous.kind !== "done")
-        ) {
-          deduped[duplicateIdx] = msg;
-        }
-        continue;
-      }
-    }
-
-    deduped.push(msg);
-  }
-
-  return deduped;
-}
 
 /**
  * Registers all orchestrator IPC handlers on the given `ipcMain` instance.
@@ -88,93 +40,37 @@ function dedupeLoadedChatMessages(messages: ChatHistoryMessage[]): ChatHistoryMe
  * Creates an `Orchestrator` instance, wires renderer → main command handlers,
  * and relays orchestrator events to the renderer via `webContents.send()`.
  *
- * Returns the orchestrator instance so callers (e.g. the SSH subsystem) can
- * wire additional event sources like the RPC router's notification stream.
+ * Returns the orchestrator and shutdown of its native conversation services.
  */
 export function registerOrchestratorIpc(
   ipcMain: IpcMain,
   getMainWindow: () => BrowserWindow | null,
   skillManager?: SkillManager,
-): Orchestrator {
+): { orchestrator: Orchestrator; shutdown: () => Promise<void> } {
   const orchestrator = new Orchestrator();
 
-  // ─── Event Relay (Main → Renderer) ──────────────────────────────────────
+  const chatDb = new ChatDatabase();
+  const chat = registerChatIpc(ipcMain, orchestrator, chatDb, getMainWindow);
 
-  orchestrator.on("orchestrator:event", (payload: { taskId: string; event: unknown }) => {
+  const startCreatedTask = (task: Task) => {
+    // Creation must return the task ID before native startup asks for input.
+    // Following up on an existing chat can await the full startup result.
+    void orchestrator.startTask(task.id).catch((error: unknown) => {
+      if (["stopped", "discarded", "archived", "applied"].includes(task.status)) return;
+      orchestrator.emit("orchestrator:error", { taskId: task.id, message: error instanceof Error ? error.message : String(error) });
+    });
+  };
+
+  orchestrator.on("orchestrator:task-status", (payload: { taskId: string; status: import("./orchestrator").TaskStatus }) => {
     const win = getMainWindow();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send("orchestrator:event", payload);
-    }
-  });
-
-  // ─── Main-process chat persistence ─────────────────────────────────────
-  // Persist text and done events to the chat DB from the main process so
-  // messages are available even if the renderer is unmounted (e.g. user
-  // navigated away during streaming). Without this, events emitted while
-  // the renderer isn't listening are lost and the user sees a blank page
-  // on return.
-  //
-  // Strategy: accumulate streaming text per task. On `done`, check if the
-  // renderer has already saved messages for this task recently (within the
-  // last 3s). If so, skip — the renderer's save is authoritative. If not,
-  // persist the accumulated text as a fallback.
-  const mainProcessChatBuffer = new Map<string, { content: string; timestamp: number }>();
-  const lastRendererSave = new Map<string, number>();
-
-  orchestrator.on("orchestrator:event", (payload: { taskId: string; event: any }) => {
-    const { taskId, event } = payload;
-    if (!event?.type) return;
-
-    if (event.type === "text" && event.content) {
-      // Accumulate streaming text for this task.
-      const existing = mainProcessChatBuffer.get(taskId);
-      if (existing && Date.now() - existing.timestamp < 2000) {
-        existing.content += event.content;
-        existing.timestamp = Date.now();
-      } else {
-        mainProcessChatBuffer.set(taskId, { content: event.content, timestamp: Date.now() });
-      }
-    }
-
-    if (event.type === "done") {
-      // On turn completion, persist the accumulated text to the chat DB
-      // ONLY if the renderer hasn't saved recently (i.e. it was unmounted).
-      const buffered = mainProcessChatBuffer.get(taskId);
-      const content = event.content || buffered?.content || "";
-      mainProcessChatBuffer.delete(taskId);
-
-      const lastSave = lastRendererSave.get(taskId) ?? 0;
-      const rendererIsActive = Date.now() - lastSave < 3000;
-
-      if (content && !rendererIsActive) {
-        try {
-          const msgId = `${taskId}-main-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          chatDb.insertMessage({
-            id: msgId,
-            task_id: taskId,
-            role: "agent",
-            kind: "done",
-            content,
-            events: null,
-            timestamp: event.timestamp ?? Date.now(),
-          });
-        } catch {
-          // Best-effort persistence.
-        }
-      }
-    }
-  });
-
-  orchestrator.on("orchestrator:task-status", (payload: { taskId: string; status: string }) => {
-    const win = getMainWindow();
-    if (win && !win.isDestroyed()) {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send("orchestrator:task-status", payload);
     }
   });
 
   orchestrator.on("orchestrator:error", (payload: { taskId: string | null; message: string }) => {
     const win = getMainWindow();
-    if (win && !win.isDestroyed()) {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send("orchestrator:error", payload);
     }
   });
@@ -183,7 +79,7 @@ export function registerOrchestratorIpc(
     "orchestrator:iteration-warning",
     (payload: { taskId: string; iterations: number; message: string }) => {
       const win = getMainWindow();
-      if (win && !win.isDestroyed()) {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send("orchestrator:iteration-warning", payload);
       }
     },
@@ -193,25 +89,26 @@ export function registerOrchestratorIpc(
     "orchestrator:checkpoint-created",
     (payload: { taskId: string; turnNumber: number; ref: string; sha: string }) => {
       const win = getMainWindow();
-      if (win && !win.isDestroyed()) {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send("orchestrator:checkpoint-created", payload);
       }
     },
   );
 
+  orchestrator.on("orchestrator:files-changed", (payload: { taskIds: string[] }) => {
+    const win = getMainWindow();
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send("orchestrator:files-changed", payload);
+  });
+
   orchestrator.on(
     "orchestrator:nonconcurrent-stop",
     (payload: { stoppedTaskId: string; startedTaskId: string }) => {
       const win = getMainWindow();
-      if (win && !win.isDestroyed()) {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send("orchestrator:nonconcurrent-stop", payload);
       }
     },
   );
-
-  // ─── Checkpoint Manager ─────────────────────────────────────────────────
-
-  const checkpointManager = new CheckpointManager();
 
   // ─── Template Manager ─────────────────────────────────────────────────────
 
@@ -227,7 +124,7 @@ export function registerOrchestratorIpc(
   costTracker.load();
 
   // When a usage event arrives from an adapter, record it in the cost tracker.
-  orchestrator.on("orchestrator:event", (payload: { taskId: string; event: { type: string; usage?: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number } } }) => {
+  orchestrator.on("orchestrator:event", (payload: { taskId: string; event: AgentEvent }) => {
     if (payload.event.type !== "usage" || !payload.event.usage) return;
 
     const task = orchestrator.getTask(payload.taskId);
@@ -239,17 +136,19 @@ export function registerOrchestratorIpc(
       cacheReadTokens: payload.event.usage.cacheReadInputTokens,
       cacheWriteTokens: payload.event.usage.cacheCreationInputTokens,
       timestamp: Date.now(),
-      turnId: `${payload.taskId}-${Date.now()}`,
+      turnId: payload.event.turnId ?? `${payload.taskId}:${task.pendingInput?.turnNumber ?? task.turnNumber ?? 0}`,
+      sessionId: payload.event.usage.cumulative?.sessionId,
+      estimatedCostUsd: payload.event.usage.cumulative?.costUsd,
     };
 
-    costTracker.recordUsage(payload.taskId, usage, task.agentType, "");
+    costTracker.recordUsage(payload.taskId, usage, task.agentType, payload.event.usage.model ?? task.model ?? "");
     costTracker.persist();
 
     // Relay budget warnings to the renderer.
     const budgetCheck = costTracker.checkBudget(payload.taskId);
     if (budgetCheck.exceeded) {
       const win = getMainWindow();
-      if (win && !win.isDestroyed()) {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send("orchestrator:budget-warning", {
           workspaceId: payload.taskId,
           cost: budgetCheck.cost,
@@ -332,13 +231,7 @@ export function registerOrchestratorIpc(
                 ? "codex"
                 : "custom";
 
-        // When plan mode is enabled, prefix the prompt with planning instructions.
         let effectivePrompt = payload.prompt;
-        if (payload.planFirst) {
-          effectivePrompt =
-            "First, propose an implementation plan. List files to change, approach, and risks. Wait for approval before making changes.\n\nTask: " +
-            payload.prompt;
-        }
 
         // Inject skill content into the prompt when skills are provided.
         if (payload.skills && payload.skills.length > 0) {
@@ -385,11 +278,7 @@ export function registerOrchestratorIpc(
         // where events arrive under the real ID but the renderer is still
         // showing the optimistic ID. The task-status event will notify the
         // renderer when the agent is actually running.
-        orchestrator.startTask(task.id).then(() => {
-          console.log("[orchestrator] task started:", task.id);
-        }).catch((err: unknown) => {
-          console.error("[orchestrator] task start failed:", task.id, err);
-        });
+        startCreatedTask(task);
 
         return { success: true, task };
       } catch (err) {
@@ -413,40 +302,10 @@ export function registerOrchestratorIpc(
     },
   );
 
-  ipcMain.handle(
-    "orchestrator:iterate",
-    async (_evt, payload: { taskId: string; feedback: string }) => {
-      try {
-        await orchestrator.iterate(payload.taskId, payload.feedback);
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:approve-plan",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        await orchestrator.iterate(payload.taskId, "Plan approved. Proceed with implementation.");
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  // Records the user's response to a Codex sandbox approval request.
-  // The decision is stashed on the task and consumed by the next
-  // `iterate()` call as a "User decisions:" preamble. We do not
-  // re-spawn the agent here — `codex exec` is single-turn and the
-  // running process is already blocked or has surfaced the prompt.
+  // Decisions answer the original live request; they do not start another turn.
   ipcMain.handle(
     "orchestrator:respond-approval",
-    async (_evt, payload: { taskId: string; requestId: string; decision: "allow" | "allow_once" | "deny"; summary: string; note?: string }) => {
+    async (_evt, payload: { taskId: string; requestId: string; decision: string; summary: string; note?: string }) => {
       try {
         const ok = await orchestrator.recordApproval(payload.taskId, {
           requestId: payload.requestId,
@@ -455,7 +314,7 @@ export function registerOrchestratorIpc(
           note: payload.note,
         });
         if (!ok) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
+          return { success: false, error: "This approval is no longer pending" };
         }
         return { success: true };
       } catch (err) {
@@ -464,6 +323,16 @@ export function registerOrchestratorIpc(
       }
     },
   );
+
+  ipcMain.handle("orchestrator:respond-input", (_evt, payload: { taskId: string; requestId: string; response: AgentInputResponse }) => {
+    try {
+      return orchestrator.recordInput(payload.taskId, payload.requestId, payload.response)
+        ? { success: true }
+        : { success: false, error: "This input request is no longer pending" };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : "Could not send the answer" };
+    }
+  });
 
   ipcMain.handle(
     "orchestrator:reject-plan",
@@ -481,81 +350,20 @@ export function registerOrchestratorIpc(
     },
   );
 
-  ipcMain.handle(
-    "orchestrator:apply-all",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Remote tasks: the orchestrator.applyTask() handles the merge
-        // on the remote machine via RPC. No local git operations needed.
-        if (task.isRemote) {
-          await orchestrator.applyTask(payload.taskId);
-          return { success: true };
-        }
-
-        const result = await applyAll(task);
-        if (result.success) {
-          await orchestrator.applyTask(payload.taskId);
-        }
-        return { success: result.success, conflicts: result.conflicts };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:cherry-pick",
-    async (_evt, payload: { taskId: string; files: string[] }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        await cherryPickFiles(task, payload.files);
-        await orchestrator.applyTask(payload.taskId);
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
+  ipcMain.handle("orchestrator:apply-all", async (_event, payload: { taskId: string }) => {
+    try { return await orchestrator.applyTask(payload.taskId); }
+    catch (error: unknown) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  });
+  ipcMain.handle("orchestrator:cherry-pick", async (_event, payload: { taskId: string; files: string[] }) => {
+    try { return await orchestrator.applyTask(payload.taskId, payload.files); }
+    catch (error: unknown) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  });
 
   ipcMain.handle(
     "orchestrator:discard",
     async (_evt, payload: { taskId: string; archiveScript?: string; repoPath?: string; portRangeStart?: number; portRangeEnd?: number }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (task && payload.archiveScript?.trim()) {
-          // Run archive script before discarding.
-          const port = allocatedPorts.get(payload.taskId) ?? 3100;
-          const env = buildWorkspaceEnv(
-            task.worktreePath,
-            task.branch,
-            task.repoPath,
-            port,
-          );
-          await runArchiveScript(payload.archiveScript, task.worktreePath, env);
-        }
-
-        // Release allocated port.
-        allocatedPorts.delete(payload.taskId);
-
-        // Stop any running process.
-        const proc = runningProcesses.get(payload.taskId);
-        if (proc && !proc.killed) {
-          proc.kill("SIGTERM");
-          runningProcesses.delete(payload.taskId);
-        }
-        orchestrator.clearActiveRunTaskId(payload.taskId);
-
-        await orchestrator.discardTask(payload.taskId);
+        await orchestrator.discardTask(payload.taskId, payload);
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -581,242 +389,8 @@ export function registerOrchestratorIpc(
     },
   );
 
-  ipcMain.handle(
-    "orchestrator:get-diff",
-    async (_evt, payload: { taskId: string; checkpointSha?: string; checkpointFromSha?: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
+  registerDiffIpc(ipcMain, orchestrator, getMainWindow);
 
-        // If a checkpoint SHA is provided, compute diff for that specific turn.
-        let diff;
-        if (payload.checkpointSha) {
-          const { execFile: execFileCb } = await import("node:child_process");
-          const { promisify } = await import("node:util");
-          const execFileAsync = promisify(execFileCb);
-
-          // "from" is either the previous checkpoint SHA or the task's baseRef.
-          const fromRef = payload.checkpointFromSha || task.baseRef;
-          const isLatestTurn = payload.checkpointSha === "HEAD";
-
-          // For the latest turn, agents commonly leave new files uncommitted.
-          // A plain `git diff <fromSha> HEAD` misses those entirely, which is
-          // what makes time-travel on the newest node look broken. Build a
-          // live snapshot of the working tree (same shape as a real
-          // checkpoint) and diff against that so untracked + unstaged edits
-          // show up just like committed ones.
-          let toRef: string;
-          if (isLatestTurn) {
-            toRef = await checkpointManager.snapshotHead(task);
-            if (!toRef) {
-              return { success: false, error: "Could not snapshot current worktree" };
-            }
-          } else {
-            toRef = payload.checkpointSha;
-          }
-
-          // Use the worktree as primary cwd since that's where snapshots
-          // are created; fall back to repoPath if the worktree is gone.
-          const cwd = (task.worktreePath && fs.existsSync(task.worktreePath))
-            ? task.worktreePath
-            : task.repoPath;
-          let rawDiff = "";
-          let nameStatus = "";
-
-          // Resolve both refs to tree SHAs for a reliable tree-to-tree diff.
-          // Snapshot commits may share ancestry that confuses plain `git diff
-          // <commit> <commit>` in some git configurations. Using `git diff-tree`
-          // with explicit tree SHAs is more reliable.
-          let fromTree = "";
-          let toTree = "";
-          try {
-            const { stdout: ft } = await execFileAsync(
-              "git", ["rev-parse", `${fromRef}^{tree}`], { cwd, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-            );
-            fromTree = ft.trim();
-            const { stdout: tt } = await execFileAsync(
-              "git", ["rev-parse", `${toRef}^{tree}`], { cwd, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-            );
-            toTree = tt.trim();
-          } catch {
-            // Fall back to using commit SHAs directly if tree resolution fails.
-            fromTree = "";
-            toTree = "";
-          }
-
-          // Use tree SHAs if available (more reliable), otherwise commit SHAs.
-          const diffFrom = fromTree || fromRef;
-          const diffTo = toTree || toRef;
-
-          try {
-            const result = await execFileAsync(
-              "git", ["diff", diffFrom, diffTo],
-              { cwd, maxBuffer: 50 * 1024 * 1024, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-            );
-            rawDiff = result.stdout;
-            const nsResult = await execFileAsync(
-              "git", ["diff", "--name-status", diffFrom, diffTo],
-              { cwd, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-            );
-            nameStatus = nsResult.stdout;
-          } catch {
-            // Try the other cwd as a fallback.
-            const altCwd = cwd === task.worktreePath ? task.repoPath : (task.worktreePath || task.repoPath);
-            try {
-              const result = await execFileAsync(
-                "git", ["diff", diffFrom, diffTo],
-                { cwd: altCwd, maxBuffer: 50 * 1024 * 1024, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-              );
-              rawDiff = result.stdout;
-              const nsResult = await execFileAsync(
-                "git", ["diff", "--name-status", diffFrom, diffTo],
-                { cwd: altCwd, timeout: IPC_GIT_DIFF_TIMEOUT_MS, killSignal: "SIGTERM" },
-              );
-              nameStatus = nsResult.stdout;
-            } catch {
-              return { success: false, error: "Could not compute diff at checkpoint" };
-            }
-          }
-
-          const { parseDiffOutput } = await import("./orchestrator-diff.js");
-          const files = parseDiffOutput(rawDiff, nameStatus);
-          diff = {
-            taskId: task.id,
-            baseRef: fromRef,
-            // Expose "HEAD" to callers for the latest turn so the UI can tell
-            // this is a live snapshot; internally we already diffed against
-            // the real snapshot SHA above.
-            headRef: isLatestTurn ? "HEAD" : toRef,
-            files,
-            totalAdditions: files.reduce((s, f) => s + f.additions, 0),
-            totalDeletions: files.reduce((s, f) => s + f.deletions, 0),
-            rawDiff,
-          };
-        } else {
-          // For remote tasks, route diff computation to the remote agent.
-          if (task.isRemote && task.remoteProfileId) {
-            const router = orchestrator.getRpcRouter();
-            if (!router) {
-              return { success: false, error: "SSH router not configured for remote diff." };
-            }
-            diff = await computeRemoteDiff(task, router);
-          } else {
-            diff = await computeDiff(task);
-          }
-        }
-
-        // Also relay as a diff-ready event for any listeners.
-        const win = getMainWindow();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("orchestrator:diff-ready", {
-            taskId: task.id,
-            diff: diff.rawDiff,
-            files: diff.files,
-          });
-        }
-        return { success: true, diff };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:review-with-ai",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        let diff;
-        if (task.isRemote && task.remoteProfileId) {
-          const router = orchestrator.getRpcRouter();
-          if (!router) {
-            return { success: false, error: "SSH router not configured for remote diff." };
-          }
-          diff = await computeRemoteDiff(task, router);
-        } else {
-          diff = await computeDiff(task);
-        }
-        if (!diff.rawDiff) {
-          return { success: false, error: "No diff found for this task." };
-        }
-
-        // Build the review prompt.
-        const reviewPrompt = buildReviewPrompt(diff.rawDiff, task.prompt);
-
-        // Spawn the same agent CLI that ran the task in one-shot mode
-        // to perform the review. This avoids needing a separate AI provider.
-        const { getExpandedEnv } = await import("./orchestrator-adapters.js");
-        const { execFile: execFileCb } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execFileAsync = promisify(execFileCb);
-
-        const agentConfig = loadAgentConfig(task.agentType);
-        const agentEnv = getExpandedEnv(agentConfig.env);
-
-        let reviewText: string;
-
-        if (task.agentType === "codex") {
-          // Codex: `codex exec <prompt>` (no --json for plain text output)
-          const binary = agentConfig.binaryPath || "codex";
-          const { stdout } = await execFileAsync(
-            binary,
-            ["exec", "--sandbox", "none", reviewPrompt],
-            { cwd: task.worktreePath, env: agentEnv, timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
-          );
-          reviewText = stdout.trim();
-        } else {
-          // Claude Code (default): `claude --print <prompt>`
-          const binary = agentConfig.binaryPath || "claude";
-          const { stdout } = await execFileAsync(
-            binary,
-            ["--print", reviewPrompt],
-            { cwd: task.worktreePath, env: agentEnv, timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
-          );
-          reviewText = stdout.trim();
-        }
-
-        if (!reviewText) {
-          return { success: false, error: "Agent returned an empty review." };
-        }
-
-        return { success: true, reviewText };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:revert-file",
-    async (_evt, payload: { taskId: string; filePath: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        // Revert a single file in the worktree to the base ref state.
-        const { execFile: execFileCb } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execFile = promisify(execFileCb);
-        await execFile(
-          "git",
-          ["checkout", task.baseRef, "--", payload.filePath],
-          { cwd: task.worktreePath },
-        );
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
 
   ipcMain.handle(
     "orchestrator:get-commits",
@@ -853,33 +427,8 @@ export function registerOrchestratorIpc(
     },
   );
 
-  ipcMain.handle(
-    "orchestrator:detect-agents",
-    async (_event, payload?: { force?: boolean; cachedOnly?: boolean }) => {
-      try {
-        // `cachedOnly` lets the UI grab whatever's already known without
-        // waiting for a probe — used for the initial render path where
-        // responsiveness trumps freshness.
-        if (payload?.cachedOnly) {
-          const cached = getCachedAgents();
-          return {
-            success: true,
-            agents: cached ?? [],
-            cached: cached !== null,
-          };
-        }
-        const agents = await detectAgents({ force: payload?.force });
-        return { success: true, agents };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  // Fire off a probe in the background so the first UI request hits a
-  // warm cache. Any errors surface later through the regular handler.
-  prewarmAgents();
+  const stopAgentDetection = registerAgentDetectionIpc(ipcMain, () => orchestrator.getRpcRouter());
+  const stopModelDiscovery = registerModelDiscoveryIpc(ipcMain, orchestrator);
 
   ipcMain.handle("orchestrator:test-agent", async (_event, { agentType }: { agentType: string }) => {
     try {
@@ -1009,219 +558,33 @@ export function registerOrchestratorIpc(
     return res.filePaths;
   });
 
-  // ─── Workspace Scripts (Renderer → Main) ──────────────────────────────
+  orchestrator.on("orchestrator:workspace-script", (event: WorkspaceScriptEvent) => {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    if (event.type === "nonconcurrent-stop") {
+      win.webContents.send("orchestrator:nonconcurrent-stop", { stoppedTaskId: event.stoppedTaskId, startedTaskId: event.startedTaskId });
+    } else if (event.type === "exit") {
+      win.webContents.send("orchestrator:terminal-exit", { taskId: event.taskId, exitCode: event.exitCode });
+    } else if (event.kind === "run") {
+      win.webContents.send("orchestrator:terminal-data", { taskId: event.taskId, data: event.data });
+    } else {
+      win.webContents.send("orchestrator:event", { taskId: event.taskId,
+        event: { type: "command_run", timestamp: Date.now(), stdout: event.data, command: `${event.kind}-script` } });
+    }
+  });
 
-  /** Tracks allocated ports per workspace (taskId → port). */
-  const allocatedPorts = new Map<string, number>();
-  /** Tracks running workspace processes (taskId → ChildProcess). */
-  const runningProcesses = new Map<string, import("node:child_process").ChildProcess>();
-
-  ipcMain.handle(
-    "orchestrator:run-setup-script",
-    async (_evt, payload: { taskId: string; repoPath: string; setupScript?: string; runScript?: string; archiveScript?: string; portRangeStart?: number; portRangeEnd?: number }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        const settingsScripts = {
-          setupScript: payload.setupScript ?? "",
-          runScript: payload.runScript ?? "",
-          archiveScript: payload.archiveScript ?? "",
-        };
-
-        const scripts = loadScripts(payload.repoPath, settingsScripts);
-
-        if (!scripts.setupScript.trim()) {
-          return { success: true, output: "", skipped: true };
-        }
-
-        // Allocate a port for this workspace.
-        const usedPorts = new Set(allocatedPorts.values());
-        const port = allocatePort(
-          usedPorts,
-          payload.portRangeStart ?? 3100,
-          payload.portRangeEnd ?? 3199,
-        );
-        if (port !== -1) {
-          allocatedPorts.set(payload.taskId, port);
-        }
-
-        const env = buildWorkspaceEnv(
-          task.worktreePath,
-          task.branch,
-          task.repoPath,
-          port !== -1 ? port : 3100,
-        );
-
-        const win = getMainWindow();
-        const result = await runSetupScript(
-          scripts.setupScript,
-          task.worktreePath,
-          env,
-          (data) => {
-            if (win && !win.isDestroyed()) {
-              win.webContents.send("orchestrator:event", {
-                taskId: payload.taskId,
-                event: { type: "command_run", timestamp: Date.now(), stdout: data, command: "setup-script" },
-              });
-            }
-          },
-        );
-
-        return { success: result.success, output: result.output, exitCode: result.exitCode, error: result.error };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:run-workspace",
-    async (_evt, payload: { taskId: string; repoPath: string; command?: string; setupScript?: string; runScript?: string; archiveScript?: string; portRangeStart?: number; portRangeEnd?: number }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Load nonconcurrent run setting and stop the active run if needed.
-        orchestrator.loadNonconcurrentRunSetting(payload.repoPath);
-        const stoppedTaskId = await orchestrator.stopActiveRunIfNeeded(
-          payload.taskId,
-          runningProcesses,
-        );
-
-        if (stoppedTaskId) {
-          const win = getMainWindow();
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:nonconcurrent-stop", {
-              stoppedTaskId,
-              startedTaskId: payload.taskId,
-            });
-          }
-        }
-
-        // Stop any existing process for this workspace.
-        const existing = runningProcesses.get(payload.taskId);
-        if (existing && !existing.killed) {
-          existing.kill("SIGTERM");
-          runningProcesses.delete(payload.taskId);
-        }
-
-        const settingsScripts = {
-          setupScript: payload.setupScript ?? "",
-          runScript: payload.runScript ?? "",
-          archiveScript: payload.archiveScript ?? "",
-        };
-
-        const scripts = loadScripts(payload.repoPath, settingsScripts);
-        const command = payload.command ?? scripts.runScript;
-
-        if (!command.trim()) {
-          return { success: false, error: "No run script configured" };
-        }
-
-        // Ensure port is allocated.
-        if (!allocatedPorts.has(payload.taskId)) {
-          const usedPorts = new Set(allocatedPorts.values());
-          const port = allocatePort(
-            usedPorts,
-            payload.portRangeStart ?? 3100,
-            payload.portRangeEnd ?? 3199,
-          );
-          if (port !== -1) {
-            allocatedPorts.set(payload.taskId, port);
-          }
-        }
-
-        const port = allocatedPorts.get(payload.taskId) ?? 3100;
-        const env = buildWorkspaceEnv(task.worktreePath, task.branch, task.repoPath, port);
-
-        const proc = spawnRunScript(command, task.worktreePath, env);
-        if (!proc) {
-          return { success: false, error: "Failed to spawn run script" };
-        }
-
-        runningProcesses.set(payload.taskId, proc);
-
-        // Track this as the active run for nonconcurrent mode.
-        orchestrator.setActiveRunTaskId(payload.taskId);
-
-        const win = getMainWindow();
-        proc.stdout?.on("data", (chunk: Buffer) => {
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:terminal-data", {
-              taskId: payload.taskId,
-              data: chunk.toString(),
-            });
-          }
-        });
-
-        proc.stderr?.on("data", (chunk: Buffer) => {
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:terminal-data", {
-              taskId: payload.taskId,
-              data: chunk.toString(),
-            });
-          }
-        });
-
-        proc.on("close", (code) => {
-          runningProcesses.delete(payload.taskId);
-          orchestrator.clearActiveRunTaskId(payload.taskId);
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:terminal-exit", {
-              taskId: payload.taskId,
-              exitCode: code ?? 0,
-            });
-          }
-        });
-
-        return { success: true, port, stoppedTaskId };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:stop-workspace",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        const proc = runningProcesses.get(payload.taskId);
-        if (!proc || proc.killed) {
-          return { success: true };
-        }
-
-        // Send SIGHUP, wait 200ms, then SIGKILL if still running.
-        proc.kill("SIGHUP");
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            if (!proc.killed) {
-              proc.kill("SIGKILL");
-            }
-            resolve();
-          }, 200);
-
-          proc.on("close", () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-
-        runningProcesses.delete(payload.taskId);
-        orchestrator.clearActiveRunTaskId(payload.taskId);
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
+  ipcMain.handle("orchestrator:run-setup-script", async (_event, payload: WorkspaceScriptOptions & { taskId: string }) => {
+    try { return await orchestrator.runSetupScript(payload.taskId, payload); }
+    catch (error: unknown) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  });
+  ipcMain.handle("orchestrator:run-workspace", async (_event, payload: WorkspaceScriptOptions & { taskId: string }) => {
+    try { return { success: true, ...await orchestrator.runWorkspace(payload.taskId, payload) }; }
+    catch (error: unknown) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  });
+  ipcMain.handle("orchestrator:stop-workspace", async (_event, payload: { taskId: string }) => {
+    try { await orchestrator.stopWorkspace(payload.taskId); return { success: true }; }
+    catch (error: unknown) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  });
 
   ipcMain.handle(
     "orchestrator:spotlight-sync",
@@ -1291,31 +654,11 @@ export function registerOrchestratorIpc(
   // call reported it. We deliberately restrict writes to the task's
   // worktree to avoid editing unrelated files via this channel.
 
-  const resolveHunkPath = (
-    task: { worktreePath: string; repoPath: string },
-    filePath: string,
-  ): string => {
-    if (!filePath) throw new Error("Missing file path for hunk operation");
-    const absolute = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(task.worktreePath, filePath);
-    const worktree = path.resolve(task.worktreePath);
-    if (!absolute.startsWith(worktree + path.sep) && absolute !== worktree) {
-      throw new Error(`File ${filePath} is outside the task worktree`);
-    }
-    return absolute;
-  };
-
   ipcMain.handle(
     "orchestrator:apply-hunk",
     async (_evt, payload: { taskId: string; patch: HunkPatch }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        const resolvedPath = resolveHunkPath(task, payload.patch.filePath);
-        await applyHunk({ ...payload.patch, filePath: resolvedPath });
+        await orchestrator.editHunk(payload.taskId, payload.patch, "apply");
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1328,12 +671,7 @@ export function registerOrchestratorIpc(
     "orchestrator:revert-hunk",
     async (_evt, payload: { taskId: string; patch: HunkPatch }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        const resolvedPath = resolveHunkPath(task, payload.patch.filePath);
-        await revertHunk({ ...payload.patch, filePath: resolvedPath });
+        await orchestrator.editHunk(payload.taskId, payload.patch, "revert");
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1463,7 +801,7 @@ export function registerOrchestratorIpc(
         if (!task) {
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
-        const checkpoints = await checkpointManager.listCheckpoints(task);
+        const checkpoints = await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task));
         if (checkpoints.length === 0) {
           return { success: true, latest: null };
         }
@@ -1524,20 +862,10 @@ export function registerOrchestratorIpc(
   // ─── Checkpoints (Renderer → Main) ────────────────────────────────────
 
   ipcMain.handle(
-    "orchestrator:revert-checkpoint",
-    async (_evt, payload: { taskId: string; turnNumber: number }) => {
+    "orchestrator:restore-files",
+    async (_evt, payload: { taskId: string; sourceRef: string }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-        if (task.worktreeMode === "primary") {
-          return {
-            success: false,
-            error: "Checkpoint revert is disabled for primary-folder tasks because it would reset the main working directory.",
-          };
-        }
-        await checkpointManager.revertToCheckpoint(task, payload.turnNumber);
+        await orchestrator.restoreFiles(payload.taskId, payload.sourceRef);
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1550,12 +878,15 @@ export function registerOrchestratorIpc(
     "orchestrator:list-checkpoints",
     async (_evt, payload: { taskId: string }) => {
       try {
+        await orchestrator.recoverTaskInput(payload.taskId);
         const task = orchestrator.getTask(payload.taskId);
         if (!task) {
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
-        const checkpoints = await checkpointManager.listCheckpoints(task);
-        return { success: true, checkpoints };
+        const { checkpoints, backups } = await orchestrator.queryCheckpoints(task, async manager => ({
+          checkpoints: await manager.listCheckpoints(task), backups: await manager.listRestoreBackups(task),
+        }));
+        return { success: true, checkpoints, backups };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { success: false, error: message };
@@ -1815,32 +1146,7 @@ export function registerOrchestratorIpc(
     "orchestrator:archive-task",
     async (_evt, payload: { taskId: string }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Persist events before archiving
-        const { persistEvents } = await import("./orchestrator-events.js");
-        await persistEvents(task.id, task.events);
-
-        // Remove worktree but preserve branch + metadata
-        try {
-          const { removeWorktree } = await import("./orchestrator-worktree.js");
-          await removeWorktree(task.repoPath, task.id);
-        } catch {
-          // Worktree may already be gone
-        }
-
-        (task as any).status = "archived" as any;
-        task.completedAt = Date.now();
-        await orchestrator.persistTasks();
-
-        const win = getMainWindow();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("orchestrator:task-status", { taskId: task.id, status: "archived" });
-        }
-
+        await orchestrator.archiveTask(payload.taskId);
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1853,23 +1159,7 @@ export function registerOrchestratorIpc(
     "orchestrator:restore-task",
     async (_evt, payload: { taskId: string }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Re-create worktree from preserved branch
-        const { createWorktree } = await import("./orchestrator-worktree.js");
-        const worktreePath = await createWorktree(task.repoPath, task.id, task.branch);
-        task.worktreePath = worktreePath;
-        (task as any).status = "reviewing" as any;
-        await orchestrator.persistTasks();
-
-        const win = getMainWindow();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("orchestrator:task-status", { taskId: task.id, status: "reviewing" });
-        }
-
+        await orchestrator.restoreTask(payload.taskId);
         return { success: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1887,22 +1177,26 @@ export function registerOrchestratorIpc(
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
 
-        // Remove branch
-        try {
-          const { execFile: execFileCb } = await import("node:child_process");
-          const { promisify } = await import("node:util");
-          const execFileAsync = promisify(execFileCb);
-          await execFileAsync("git", ["branch", "-D", task.branch], { cwd: task.repoPath });
-        } catch {
-          // Branch may already be gone
+        await orchestrator.discardTask(task.id);
+        // Borrowed workspaces also borrow their branch. Deleting a child
+        // must not delete its parent's branch after the worktree is gone.
+        if (!task.worktreeMode || task.worktreeMode === "auto") {
+          try {
+            const { execFile: execFileCb } = await import("node:child_process");
+            const { promisify } = await import("node:util");
+            const execFileAsync = promisify(execFileCb);
+            await execFileAsync("git", ["branch", "-D", task.branch], { cwd: task.repoPath });
+          } catch {
+            // Branch may already be gone.
+          }
         }
 
-        // Remove persisted events
+        // Commit metadata deletion before removing history. A failed parent/
+        // child transaction must leave the original conversation reviewable.
+        await orchestrator.removeTask(payload.taskId);
         const { deleteEvents } = await import("./orchestrator-events.js");
         deleteEvents(task.id);
-
-        // Remove task from orchestrator
-        await orchestrator.removeTask(payload.taskId);
+        chat.delete(payload.taskId);
 
         return { success: true };
       } catch (err) {
@@ -1918,44 +1212,7 @@ export function registerOrchestratorIpc(
     "orchestrator:retry-task",
     async (_evt, payload: { taskId: string }) => {
       try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Reset the task to "created" and re-start it.
-        (task as any).status = "created";
-        task.completedAt = undefined;
-        task.exitCode = undefined;
-        await orchestrator.persistTasks();
-        await orchestrator.startTask(payload.taskId);
-
-        return { success: true };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:undo-apply",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        const task = orchestrator.getTask(payload.taskId);
-        if (!task) {
-          return { success: false, error: `Task not found: ${payload.taskId}` };
-        }
-
-        // Revert the task back to "reviewing" so the user can re-evaluate.
-        (task as any).status = "reviewing";
-        task.completedAt = undefined;
-        await orchestrator.persistTasks();
-
-        const win = getMainWindow();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("orchestrator:task-status", { taskId: task.id, status: "reviewing" });
-        }
+        await orchestrator.retryTask(payload.taskId);
 
         return { success: true };
       } catch (err) {
@@ -1976,67 +1233,20 @@ export function registerOrchestratorIpc(
           return { success: false, error: `Task not found: ${payload.taskId}` };
         }
 
-        const { createAdapter } = await import("./orchestrator-adapters.js");
-        const agentId = `agent-${Date.now().toString(36)}`;
-        const adapter = createAdapter(payload.agentType as any);
-
+        const agentId = randomUUID();
         const prompt = payload.role
           ? `You are the ${payload.role}. ${parentTask.prompt}`
           : parentTask.prompt;
         const childTask = orchestrator.createChildTaskForAgent(
           parentTask.id,
-          payload.agentType as any,
+          payload.agentType,
           prompt,
           payload.role,
           agentId,
         );
 
-        // Initialize agents array if not present.
-        if (!(parentTask as any).agents) {
-          (parentTask as any).agents = [];
-        }
-        (parentTask as any).agents.push({
-          id: agentId,
-          type: payload.agentType,
-          role: payload.role,
-          status: "running",
-          childTaskId: childTask.id,
-        });
-
-        // Wire event listener with agent ID tagging
-        adapter.onEvent((event: any) => {
-          const taggedEvent = { ...event, agentId, agentRole: payload.role };
-          const now = Date.now();
-          parentTask.lastActivityAt = now;
-          childTask.lastActivityAt = now;
-          parentTask.events.push(taggedEvent);
-          childTask.events.push(taggedEvent);
-          const win = getMainWindow();
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:event", { taskId: parentTask.id, event: taggedEvent });
-            win.webContents.send("orchestrator:event", { taskId: childTask.id, event: taggedEvent });
-          }
-        });
-
-        adapter.onExit(async () => {
-          const agents: any[] = (parentTask as any).agents ?? [];
-          const agent = agents.find((a: any) => a.id === agentId);
-          if (agent) agent.status = "done";
-          childTask.status = "reviewing";
-          childTask.completedAt = Date.now();
-          childTask.lastActivityAt = childTask.completedAt;
-          parentTask.lastActivityAt = childTask.completedAt;
-          await orchestrator.persistTasks();
-          const win = getMainWindow();
-          if (win && !win.isDestroyed()) {
-            win.webContents.send("orchestrator:task-status", { taskId: childTask.id, status: childTask.status });
-          }
-        });
-
-        // Spawn in the same worktree
-        adapter.spawn(prompt, parentTask.worktreePath);
-
         await orchestrator.persistTasks();
+        startCreatedTask(childTask);
         return { success: true, agentId, childTaskId: childTask.id };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -2208,7 +1418,7 @@ export function registerOrchestratorIpc(
     async (_evt, payload: { workspaceId: string }) => {
       try {
         const cost = costTracker.getCost(payload.workspaceId);
-        return { success: true, cost: cost ?? null };
+        return { success: true, cost: cost ?? null, turns: costTracker.getPerTurnCosts(payload.workspaceId) };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { success: false, error: message };
@@ -2276,13 +1486,7 @@ export function registerOrchestratorIpc(
           return { success: false, error: `Template not found: ${payload.templateName}` };
         }
 
-        // Build effective prompt with plan mode prefix if enabled.
         let effectivePrompt = payload.prompt;
-        if (resolved.planMode) {
-          effectivePrompt =
-            "First, propose an implementation plan. List files to change, approach, and risks. Wait for approval before making changes.\n\nTask: " +
-            payload.prompt;
-        }
 
         // Inject skill content from template skills.
         if (resolved.skills && resolved.skills.length > 0) {
@@ -2304,24 +1508,16 @@ export function registerOrchestratorIpc(
           baseRef,
         );
 
-        await orchestrator.startTask(task.id);
-
-        if (resolved.planMode) {
-          const t = orchestrator.getTask(task.id);
-          if (t) {
-            (t as any).status = "planning";
-            const win = getMainWindow();
-            if (win && !win.isDestroyed()) {
-              win.webContents.send("orchestrator:task-status", { taskId: task.id, status: "planning" });
-            }
-          }
-        }
+        task.planFirst = resolved.planMode;
+        task.model = resolved.model;
 
         // Apply budget limit from template if set.
         if (resolved.budgetLimit) {
           costTracker.setBudget(task.id, resolved.budgetLimit);
           costTracker.persist();
         }
+
+        startCreatedTask(task);
 
         return { success: true, task };
       } catch (err) {
@@ -2522,54 +1718,6 @@ export function registerOrchestratorIpc(
 
   // ─── Chat Persistence (SQLite) ──────────────────────────────────────
 
-  const chatDb = new ChatDatabase();
-
-  ipcMain.handle(
-    "orchestrator:save-chat",
-    async (_evt, payload: { taskId: string; messages: Array<{ id: string; role: string; kind?: string; content: string; events?: unknown[]; timestamp: number }> }) => {
-      try {
-        // Record that the renderer is actively saving for this task so
-        // the main-process fallback persistence doesn't create duplicates.
-        lastRendererSave.set(payload.taskId, Date.now());
-
-        const rows = payload.messages.map((msg) => ({
-          id: msg.id,
-          task_id: payload.taskId,
-          role: msg.role as "user" | "agent",
-          kind: msg.kind ?? null,
-          content: msg.content,
-          events: msg.events ? JSON.stringify(msg.events) : null,
-          timestamp: msg.timestamp,
-        }));
-        chatDb.saveMessages(payload.taskId, rows);
-        return { success: true };
-      } catch (err) {
-        return { success: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    "orchestrator:load-chat",
-    async (_evt, payload: { taskId: string }) => {
-      try {
-        const rows = chatDb.loadMessages(payload.taskId);
-        const messages = dedupeLoadedChatMessages(rows.map((row) => ({
-          id: row.id,
-          role: row.role,
-          kind: row.kind ?? undefined,
-          content: row.content,
-          events: row.events ? JSON.parse(row.events) : undefined,
-          timestamp: row.timestamp,
-        })));
-        const task = orchestrator.getTask(payload.taskId);
-        return { success: true, messages: ensureInitialPromptMessage(messages, task) };
-      } catch (err) {
-        return { success: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    },
-  );
-
   ipcMain.handle(
     "orchestrator:search-chat",
     async (_evt, payload: { query: string; taskId?: string; limit?: number }) => {
@@ -2593,8 +1741,8 @@ export function registerOrchestratorIpc(
     const autoArchiveDelay = 24 * 60 * 60 * 1000; // 24 hours
 
     for (const task of tasks) {
-      if ((task as any).status === "archived") continue;
-      const prNumber = (task as any).prNumber;
+      if (task.status === "archived") continue;
+      const prNumber = task.prNumber;
       if (!prNumber) continue;
 
       // Check if PR is merged and enough time has passed
@@ -2603,13 +1751,7 @@ export function registerOrchestratorIpc(
           const { getPRChecks } = await import("./orchestrator-pr.js");
           const result = await getPRChecks(task.repoPath, prNumber);
           if (result.success && result.data?.pr?.state === "MERGED") {
-            // Auto-archive
-            (task as any).status = "archived";
-            await orchestrator.persistTasks();
-            const win = getMainWindow();
-            if (win && !win.isDestroyed()) {
-              win.webContents.send("orchestrator:task-status", { taskId: task.id, status: "archived" });
-            }
+            await orchestrator.archiveTask(task.id);
           }
         } catch {
           // Best-effort
@@ -2623,16 +1765,6 @@ export function registerOrchestratorIpc(
   ipcMain.handle("orchestrator:fork-thread", async (_evt, payload: { taskId: string }) => {
     try {
       const result = await orchestrator.forkThread(payload.taskId);
-      return { success: true, ...result };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { success: false, error: message };
-    }
-  });
-
-  ipcMain.handle("orchestrator:rollback-thread", async (_evt, payload: { taskId: string; n: number }) => {
-    try {
-      const result = await orchestrator.rollbackThread(payload.taskId, payload.n);
       return { success: true, ...result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2670,10 +1802,10 @@ export function registerOrchestratorIpc(
     }
   });
 
-  ipcMain.handle("orchestrator:set-goal", async (_evt, payload: { taskId: string; goal: string }) => {
+  ipcMain.handle("orchestrator:set-goal", async (_evt, payload: { taskId: string; mutation: import("./orchestrator-adapters").CodexGoalMutation }) => {
     try {
-      await orchestrator.setGoal(payload.taskId, payload.goal);
-      return { success: true };
+      const goal = await orchestrator.setGoal(payload.taskId, payload.mutation);
+      return { success: true, goal };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message };
@@ -2682,8 +1814,8 @@ export function registerOrchestratorIpc(
 
   ipcMain.handle("orchestrator:get-goal", async (_evt, payload: { taskId: string }) => {
     try {
-      const result = await orchestrator.getGoal(payload.taskId);
-      return { success: true, ...result };
+      const goal = await orchestrator.getGoal(payload.taskId);
+      return { success: true, goal };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message };
@@ -2930,39 +2062,12 @@ export function registerOrchestratorIpc(
     }
   });
 
-  return orchestrator;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Builds a review-focused prompt for the AI SDK to review a diff.
- * The renderer calls `callAI` with this prompt to get inline review comments.
- */
-function buildReviewPrompt(rawDiff: string, taskDescription: string): string {
-  // Truncate very large diffs to avoid exceeding token limits.
-  const maxDiffLength = 12_000;
-  const truncatedDiff =
-    rawDiff.length > maxDiffLength
-      ? rawDiff.slice(0, maxDiffLength) + "\n\n[... diff truncated for review ...]"
-      : rawDiff;
-
-  return [
-    "Review the following diff and provide concise, actionable feedback.",
-    "Focus on: correctness, potential bugs, performance issues, security concerns, and code clarity.",
-    "",
-    "Format your response as markdown with sections:",
-    "- **Summary**: One-sentence overall assessment",
-    "- **Issues** (if any): List each issue with the file path, what's wrong, and how to fix it",
-    "- **Suggestions** (if any): Non-critical improvements",
-    "",
-    "Be concise. If the code looks good, say so briefly.",
-    "",
-    `Task description: ${taskDescription}`,
-    "",
-    "Diff:",
-    "```diff",
-    truncatedDiff,
-    "```",
-  ].join("\n");
+  return {
+    orchestrator,
+    shutdown: async () => {
+      const results = await Promise.allSettled([orchestrator.shutdown(), stopModelDiscovery(), stopAgentDetection()]);
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (errors.length) throw new AggregateError(errors.map(result => result.reason), "Agent services shutdown failed");
+    },
+  };
 }

@@ -1,131 +1,54 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import Sqlite from "better-sqlite3";
 import { ChatDatabase, type ChatMessageRow } from "../electron/orchestrator-chat-db";
 
-vi.mock("better-sqlite3", () => {
-  interface Row {
-    id: string;
-    task_id: string;
-    role: "user" | "agent";
-    kind: string | null;
-    content: string;
-    events: string | null;
-    timestamp: number;
-  }
-
-  class FakeDatabase {
-    private rows: Row[] = [];
-
-    pragma(): void {}
-    exec(): void {}
-
-    prepare(sql: string) {
-      if (sql.includes("SELECT name FROM sqlite_master")) {
-        return { get: () => ({ name: "messages_fts" }) };
-      }
-      if (sql.includes("INSERT OR REPLACE INTO messages")) {
-        return {
-          run: (
-            id: string,
-            taskId: string,
-            role: "user" | "agent",
-            kind: string | null,
-            content: string,
-            events: string | null,
-            timestamp: number,
-          ) => {
-            this.rows = this.rows.filter((row) => row.id !== id);
-            this.rows.push({ id, task_id: taskId, role, kind, content, events, timestamp });
-          },
-        };
-      }
-      if (sql.includes("DELETE FROM messages WHERE task_id = ?")) {
-        return {
-          run: (taskId: string) => {
-            this.rows = this.rows.filter((row) => row.task_id !== taskId);
-          },
-        };
-      }
-      if (sql.includes("SELECT * FROM messages WHERE task_id = ? ORDER BY timestamp ASC")) {
-        return {
-          all: (taskId: string) =>
-            this.rows
-              .filter((row) => row.task_id === taskId)
-              .sort((a, b) => a.timestamp - b.timestamp),
-        };
-      }
-      throw new Error(`Unexpected SQL in fake better-sqlite3: ${sql}`);
-    }
-
-    transaction<T extends unknown[]>(fn: (...args: T) => void) {
-      return (...args: T) => fn(...args);
-    }
-  }
-
-  return { default: FakeDatabase };
-});
-
-let tempDirs: string[] = [];
-
-function createDb(): ChatDatabase {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crab-chat-db-test-"));
-  tempDirs.push(dir);
-  return new ChatDatabase(path.join(dir, "agent-chats.sqlite"));
-}
-
-function message(overrides: Partial<ChatMessageRow>): ChatMessageRow {
-  return {
-    id: "msg",
-    task_id: "task-1",
-    role: "agent",
-    kind: "text",
-    content: "hello",
-    events: null,
-    timestamp: 1,
-    ...overrides,
-  };
-}
-
+const databases: Array<{ db: ChatDatabase; directory: string }> = [];
 afterEach(() => {
-  for (const dir of tempDirs) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-  tempDirs = [];
+  for (const { db, directory } of databases.splice(0)) { db.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+function database(): ChatDatabase {
+  const directory = mkdtempSync(path.join(tmpdir(), "crab-chat-db-"));
+  const db = new ChatDatabase(path.join(directory, "chats.sqlite"));
+  databases.push({ db, directory });
+  return db;
+}
+function message(id: string, content: string, taskId = "task"): ChatMessageRow {
+  return { id, task_id: taskId, role: "agent", kind: "text", content, events: null, timestamp: 1 };
+}
 
-describe("ChatDatabase", () => {
-  it("replaces a task transcript when saving renderer messages", () => {
-    const db = createDb();
+describe("durable chat rows", () => {
+  it("upserts changed messages without replacing prior history or another task", () => {
+    const db = database();
+    db.updateMessages("task", [message("first", "First"), message("second", "Partial")]);
+    db.updateMessages("other-task", [message("other", "Other", "other-task")]);
+    db.updateMessages("task", [{ ...message("second", "Completed"), metadata: JSON.stringify({ itemId: "block", sequence: 2 }) }]);
+    expect({ own: db.loadMessages("task").map(row => [row.id, row.content, row.metadata]), other: db.loadMessages("other-task").map(row => row.content) }).toEqual({
+      own: [["first", "First", null], ["second", "Completed", JSON.stringify({ itemId: "block", sequence: 2 })]], other: ["Other"],
+    });
+  });
 
-    db.insertMessage(message({
-      id: "task-1-main-fallback",
-      kind: "done",
-      content: "final answer",
-      timestamp: 1,
-    }));
-    db.insertMessage(message({
-      id: "other-task-message",
-      task_id: "task-2",
-      content: "keep me",
-      timestamp: 1,
-    }));
+  it("updates full-text search when a streamed snapshot replaces earlier text", () => {
+    const db = database();
+    db.insertMessage(message("block", "obsoleteword"));
+    db.insertMessage(message("block", "completedword"));
+    expect({ before: db.searchInTask("task", "obsoleteword").map(row => row.id), after: db.searchInTask("task", "completedword").map(row => row.id) }).toEqual({ before: [], after: ["block"] });
+  });
 
-    db.saveMessages("task-1", [
-      message({
-        id: "task-1-renderer-final",
-        kind: "done",
-        content: "final answer",
-        timestamp: 2,
-      }),
-    ]);
-
-    expect(db.loadMessages("task-1").map((row) => row.id)).toEqual([
-      "task-1-renderer-final",
-    ]);
-    expect(db.loadMessages("task-2").map((row) => row.id)).toEqual([
-      "other-task-message",
-    ]);
+  it("adds transcript metadata to an existing database while preserving its history and search index", () => {
+    const original = database();
+    original.insertMessage(message("existing", "Earlier history"));
+    const fixture = databases.pop();
+    if (!fixture) throw new Error("Database fixture was not registered");
+    original.close();
+    const location = path.join(fixture.directory, "chats.sqlite");
+    const old = new Sqlite(location);
+    old.exec("ALTER TABLE messages DROP COLUMN metadata");
+    old.close();
+    const upgraded = new ChatDatabase(location);
+    databases.push({ db: upgraded, directory: fixture.directory });
+    expect({ rows: upgraded.loadMessages("task").map(row => [row.content, row.metadata]), search: upgraded.searchInTask("task", "Earlier").map(row => row.id) }).toEqual({ rows: [["Earlier history", null]], search: ["existing"] });
   });
 });

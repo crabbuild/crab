@@ -1,3 +1,4 @@
+import type { DeployProgress as ProgressValue } from "../../../electron/ssh-deployer";
 /**
  * DeployProgressIndicator — self-contained component that listens for
  * `ssh:deploy-progress` and `ssh:agent-unavailable` IPC events and renders
@@ -11,14 +12,7 @@ import { DeployProgress } from "./DeployProgress";
 
 // ── Types ────────────────────────────────────────────────────────
 
-type DeployStage = "detecting" | "uploading" | "verifying" | "starting";
-
-interface DeployProgressPayload {
-  stage: string;
-  percent: number;
-  speed?: number;
-  eta?: number;
-}
+type DeployProgressPayload = ProgressValue & { profileId: string };
 
 interface AgentUnavailablePayload {
   profileId: string;
@@ -31,14 +25,6 @@ export interface DeployProgressIndicatorProps {
   profileId?: string;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────
-
-const VALID_STAGES: DeployStage[] = ["detecting", "uploading", "verifying", "starting"];
-
-function isValidStage(stage: string): stage is DeployStage {
-  return VALID_STAGES.includes(stage as DeployStage);
-}
-
 // ── Component ────────────────────────────────────────────────────
 
 export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorProps) {
@@ -48,8 +34,9 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
 
   // Listen for deploy progress events
   useEffect(() => {
-    const cleanup = (window as any).crab.ssh.onDeployProgress(
+    const cleanup = window.crab.ssh.onDeployProgress(
       (payload: DeployProgressPayload) => {
+        if (profileId && payload.profileId !== profileId) return;
         setProgress(payload);
         // Clear any previous unavailable warning when a new deploy starts
         setUnavailable(null);
@@ -57,11 +44,11 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
       },
     );
     return () => { cleanup(); };
-  }, []);
+  }, [profileId]);
 
   // Listen for agent unavailable events
   useEffect(() => {
-    const cleanup = (window as any).crab.ssh.onAgentUnavailable(
+    const cleanup = window.crab.ssh.onAgentUnavailable(
       (payload: AgentUnavailablePayload) => {
         // If filtering by profile, only show for matching profile
         if (profileId && payload.profileId !== profileId) return;
@@ -86,26 +73,26 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
     setWarningDismissed(true);
   }, []);
 
-  // Determine the validated stage for the progress component
-  const stage: DeployStage = progress && isValidStage(progress.stage)
-    ? progress.stage
-    : "detecting";
+  // Profile selection renders before passive subscriptions are replaced, so
+  // retained state must be scoped too, including a just-queued IPC event.
+  const currentProgress = progress && (!profileId || progress.profileId === profileId) ? progress : null;
+  const currentUnavailable = unavailable && (!profileId || unavailable.profileId === profileId) ? unavailable : null;
 
   return (
     <div className="space-y-2">
       {/* Deploy progress indicator */}
-      {progress && (
+      {currentProgress && (
         <DeployProgress
-          stage={stage}
-          percent={progress.percent}
-          speed={progress.speed}
-          eta={progress.eta}
+          stage={currentProgress.stage}
+          percent={currentProgress.percent}
+          speed={currentProgress.speed}
+          eta={currentProgress.eta}
           visible
         />
       )}
 
       {/* Agent unavailable warning banner */}
-      {unavailable && !warningDismissed && (
+      {currentUnavailable && !warningDismissed && (
         <div
           className="flex items-start gap-2 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2"
           role="alert"
@@ -117,7 +104,7 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
               Agent unavailable
             </p>
             <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
-              {unavailable.message}
+              {currentUnavailable.message}
             </p>
           </div>
           <button

@@ -147,7 +147,7 @@ export function OrchestratorSettings() {
           <code className="font-mono text-gx-text/80">crab-orchestrator.json</code>.
         </div>
 
-        <SettingsRow label="Setup script" hint="Runs after worktree creation (e.g. npm install).">
+        <SettingsRow label="Setup script" hint="Runs before the first agent turn in a new or restored worktree (e.g. npm install).">
           <textarea
             className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent resize-y min-h-[48px]"
             placeholder="npm install"
@@ -529,7 +529,7 @@ interface WorkspaceCost {
   workspaceId: string;
   agentType: string;
   model: string;
-  estimatedCostUsd: number;
+  estimatedCostUsd?: number;
 }
 
 function UsageSection() {
@@ -555,7 +555,8 @@ function UsageSection() {
     );
   }
 
-  const totalCost = costs.reduce((sum, c) => sum + (c.estimatedCostUsd ?? 0), 0);
+  const totalCost = costs.every(cost => cost.estimatedCostUsd !== undefined)
+    ? costs.reduce((sum, cost) => sum + cost.estimatedCostUsd!, 0) : undefined;
 
   if (costs.length === 0) {
     return (
@@ -568,7 +569,7 @@ function UsageSection() {
       <div className="flex items-center justify-between">
         <div>
           <div className="text-lg font-semibold text-gx-text">
-            ${totalCost.toFixed(2)}
+            {totalCost === undefined ? "Unavailable" : `$${totalCost.toFixed(2)}`}
           </div>
           <div className="text-[10px] text-gx-muted">
             Total across {costs.length} workspace{costs.length !== 1 ? "s" : ""}

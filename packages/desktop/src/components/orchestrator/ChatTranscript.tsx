@@ -16,8 +16,6 @@
  * Props:
  *   - taskId: the active task's identifier
  *   - messages: the ChatMessage[] array from the renderer's message state
- *   - feedback: the user feedback strings (one per iteration)
- *   - isStreaming: whether the task is currently streaming
  *   - onReview: callback to open the Diff tab
  */
 
@@ -25,7 +23,7 @@ import { useMemo, useRef, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { LayoutList } from "lucide-react";
 import type { AgentEvent } from "../../../electron/orchestrator-adapters";
-import type { ChatMessage, ToolEvent } from "./chat-types";
+import type { ChatMessage, ToolEvent } from "../../../electron/agent-chat-messages";
 import { deriveTurns } from "../../lib/turn-derivation";
 import { Turn } from "./Turn";
 import { TimelineRail } from "./TimelineRail";
@@ -38,10 +36,6 @@ export interface ChatTranscriptProps {
   taskId: string;
   /** The ChatMessage array from the renderer's message state. */
   messages: ChatMessage[];
-  /** User feedback strings (one per iteration after the first turn). */
-  feedback: string[];
-  /** Whether the task is currently streaming events. */
-  isStreaming?: boolean;
   /** Called when the user clicks Review on a TurnSummaryCard. */
   onReview?: () => void;
   /** Agent adapter name, used for left-border accent colour. */
@@ -60,79 +54,26 @@ export interface ChatTranscriptProps {
  */
 function messagesToAgentEvents(messages: ChatMessage[]): AgentEvent[] {
   const events: AgentEvent[] = [];
-
-  for (const msg of messages) {
-    if (msg.role === "user") {
-      // User messages don't map to AgentEvents — they're captured in feedback
+  let initialUser = true;
+  for (const message of messages) {
+    const base = { timestamp: message.timestamp, turnId: message.turnId, itemId: message.itemId };
+    if (message.role === "user") {
+      if (!initialUser) events.push({ ...base, type: "user_message", content: message.content });
+      if (message.deliveryError) events.push({ ...base, type: "error", error: `${message.deliveryError}. Check the conversation before sending it again.` });
+      initialUser = false;
       continue;
     }
-
-    // Agent text messages
-    if (msg.content && (msg.kind === "text" || msg.kind === undefined)) {
-      events.push({
-        type: "text",
-        timestamp: msg.timestamp,
-        content: msg.content,
-      });
+    if (message.providerEvent) events.push(message.providerEvent);
+    if (message.kind === "turn_started") events.push({ ...base, type: "turn_started" });
+    if (message.content && (message.kind === "text" || message.kind === undefined || message.kind === "done")) {
+      events.push({ ...base, type: "text", content: message.content, textMode: "replace" });
     }
-
-    // Done messages that carry content: emit the text first (so it
-    // renders in the turn body) then the done marker (so deriveTurns
-    // splits turns correctly). This handles the case where a streamed
-    // text message was later marked as `kind: "done"` by the dedup
-    // logic — without the text event, the content would vanish.
-    if (msg.kind === "done" && msg.content) {
-      events.push({
-        type: "text",
-        timestamp: msg.timestamp,
-        content: msg.content,
-      });
-      events.push({
-        type: "done",
-        timestamp: msg.timestamp,
-        content: msg.content,
-      });
-    }
-
-    // Done messages without content: just the boundary marker.
-    if (msg.kind === "done" && !msg.content) {
-      events.push({
-        type: "done",
-        timestamp: msg.timestamp,
-        content: "",
-      });
-    }
-
-    // Thinking messages
-    if (msg.kind === "thinking" && msg.content) {
-      events.push({
-        type: "thinking",
-        timestamp: msg.timestamp,
-        content: msg.content,
-      });
-    }
-
-    // Error messages
-    if (msg.kind === "error" && msg.content) {
-      events.push({
-        type: "error",
-        timestamp: msg.timestamp,
-        error: msg.content,
-        content: msg.content,
-      });
-    }
-
-    // Tool events attached to this message
-    if (msg.events && msg.events.length > 0) {
-      for (const toolEvt of msg.events) {
-        events.push(toolEventToAgentEvent(toolEvt, msg.timestamp));
-      }
-    }
+    if (message.kind === "thinking") events.push({ ...base, type: "thinking", content: message.content });
+    if (message.kind === "error") events.push({ ...base, type: "error", error: message.content });
+    for (const tool of message.events ?? []) events.push({ ...toolEventToAgentEvent(tool, message.timestamp), turnId: message.turnId });
+    if (message.toolResult) events.push(message.toolResult);
+    if (message.kind === "done") events.push({ ...base, type: "done", outcome: message.outcome, content: "" });
   }
-
-  // If there's no explicit done event but we have events, add a synthetic
-  // done at the end so deriveTurns produces at least one complete turn
-  // (unless the task is still streaming, in which case the turn is open)
   return events;
 }
 
@@ -145,8 +86,14 @@ function toolEventToAgentEvent(toolEvt: ToolEvent, fallbackTimestamp: number): A
     timestamp: fallbackTimestamp,
     tool: toolEvt.tool,
     input: toolEvt.input,
+    stdout: toolEvt.detail,
     itemId: toolEvt.itemId,
   };
+
+  if (toolEvt.tool === "AskUserQuestion" && (toolEvt.input as { requestId?: string } | undefined)?.requestId) {
+    return { ...base, type: "input_request", inputRequest: toolEvt.input as AgentEvent["inputRequest"] };
+  }
+  if (toolEvt.tool === "CodexApproval") return { ...base, type: "approval_request", approval: toolEvt.input as AgentEvent["approval"] };
 
   // Map ToolEvent types back to AgentEvent types
   switch (toolEvt.type) {
@@ -236,8 +183,6 @@ const OVERSCAN_COUNT = 5;
 export function ChatTranscript({
   taskId,
   messages,
-  feedback,
-  isStreaming,
   onReview,
   agentName,
 }: ChatTranscriptProps) {
@@ -255,91 +200,7 @@ export function ChatTranscript({
     [messages],
   );
 
-  // Extract user feedback from messages (user messages after the first)
-  const derivedFeedback = useMemo(() => {
-    if (feedback.length > 0) return feedback;
-    // Fallback: extract from user messages in the message array
-    const userMessages = messages
-      .filter((m) => m.role === "user")
-      .map((m) => m.content);
-    // Skip the first user message (it's the initial prompt, not feedback)
-    return userMessages.slice(1);
-  }, [feedback, messages]);
-
-  const rawTurns = useMemo(
-    () => deriveTurns(agentEvents, derivedFeedback),
-    [agentEvents, derivedFeedback],
-  );
-
-  // Fix turn completion status:
-  // 1. ALL turns except the last one are always marked complete (they
-  //    finished before the current turn started, even if they lack a
-  //    `done` event in the messages array).
-  // 2. The last turn is marked complete only when `isStreaming` is false
-  //    (task finished) and it doesn't already have a `done` event.
-  const turns = useMemo(() => {
-    if (rawTurns.length === 0) return rawTurns;
-
-    let needsFix = false;
-
-    // Check if any non-last turn is incomplete (shouldn't be, but fix it)
-    for (let i = 0; i < rawTurns.length - 1; i++) {
-      if (!rawTurns[i].complete) {
-        needsFix = true;
-        break;
-      }
-    }
-
-    // Check if the last turn needs the isStreaming override
-    const lastTurn = rawTurns[rawTurns.length - 1];
-    if (!isStreaming && !lastTurn.complete) {
-      needsFix = true;
-    }
-
-    if (!needsFix) return rawTurns;
-
-    const fixed = rawTurns.map((turn, idx) => {
-      const isLast = idx === rawTurns.length - 1;
-
-      // Non-last turns: always complete
-      if (!isLast && !turn.complete) {
-        const events = turn.events;
-        const firstTs = events[0]?.timestamp ?? Date.now();
-        const lastTs = events[events.length - 1]?.timestamp ?? Date.now();
-        return {
-          ...turn,
-          complete: true,
-          durationMs: lastTs - firstTs,
-          toolGroups: turn.toolGroups.map((g) => ({
-            ...g,
-            complete: true,
-            endedAt: g.endedAt ?? lastTs,
-          })),
-        };
-      }
-
-      // Last turn: only mark complete when streaming has stopped
-      if (isLast && !isStreaming && !turn.complete) {
-        const events = turn.events;
-        const firstTs = events[0]?.timestamp ?? Date.now();
-        const lastTs = events[events.length - 1]?.timestamp ?? Date.now();
-        return {
-          ...turn,
-          complete: true,
-          durationMs: lastTs - firstTs,
-          toolGroups: turn.toolGroups.map((g) => ({
-            ...g,
-            complete: true,
-            endedAt: g.endedAt ?? lastTs,
-          })),
-        };
-      }
-
-      return turn;
-    });
-
-    return fixed;
-  }, [rawTurns, isStreaming]);
+  const turns = useMemo(() => deriveTurns(agentEvents, []), [agentEvents]);
 
   // Count total events across all turns to decide virtualisation
   const totalEventCount = useMemo(
@@ -396,7 +257,7 @@ export function ChatTranscript({
             <TimelineRail
               taskId={taskId}
               events={agentEvents}
-              feedback={derivedFeedback}
+              feedback={[]}
               onScrollTo={handleScrollTo}
             />
           )}
@@ -436,7 +297,7 @@ export function ChatTranscript({
               <TimelineRail
                 taskId={taskId}
                 events={agentEvents}
-                feedback={derivedFeedback}
+                feedback={[]}
                 onScrollTo={handleScrollTo}
               />
             )}
@@ -464,7 +325,7 @@ export function ChatTranscript({
 
   return (
     <HunkActionsProvider value={{ taskId }}>
-      <div className="relative">
+      <div className="relative" role="log" aria-label="Chat transcript">
         {timelineRail !== "off" && (
           <TimelineRailDensityToggle
             taskId={taskId}
@@ -482,7 +343,7 @@ export function ChatTranscript({
             <TimelineRail
               taskId={taskId}
               events={agentEvents}
-              feedback={derivedFeedback}
+              feedback={[]}
               onScrollTo={handleScrollTo}
             />
           )}
@@ -508,28 +369,7 @@ export function ChatTranscript({
                 />
               </div>
             ))}
-            {/* Pending user message: renders immediately when the user
-                sends a follow-up but no new turn exists yet (the AI
-                hasn't started responding). Feedback index `turns.length - 1`
-                is the message for the *next* turn that doesn't exist yet. */}
-            {derivedFeedback.length > turns.length - 1 && turns[turns.length - 1]?.complete && (() => {
-              const pending = derivedFeedback[turns.length - 1];
-              // Don't render if the last turn already shows this message
-              // (happens when deriveTurns created the turn but it's still open).
-              if (!pending) return null;
-              const lastTurn = turns[turns.length - 1];
-              if (lastTurn?.userMessage === pending) return null;
-              return (
-                <>
-                  <div className="my-3 border-t border-gx-border/30" />
-                  <div className="flex justify-end py-1">
-                    <div className="max-w-[85%] rounded-lg bg-gx-accent/10 border border-gx-accent/20 px-3 py-2 text-sm text-gx-text">
-                      {pending}
-                    </div>
-                  </div>
-                </>
-              );
-            })()}
+
           </div>
         </div>
       </div>

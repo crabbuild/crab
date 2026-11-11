@@ -16,8 +16,8 @@
  *     before executing this suite. The test reads the packaged binary path from
  *     the CRAB_PACKAGED_APP env var, or falls back to the platform default under
  *     `release/`.
- *   - The daemon entry must be present at `resources/app.asar/dist-electron/daemon/daemon-main.cjs`
- *     inside the packaged app (placed there by electron-builder extraResources).
+ *   - The daemon entry must be present at
+ *     `resources/app.asar/dist-electron/daemon/daemon-main.cjs` in the package.
  */
 
 import { test, expect } from "@playwright/test";

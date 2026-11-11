@@ -1,3 +1,5 @@
+import { decodeGitPath } from "../../electron/git-path";
+
 // Tri-state checkbox derivation for the Changes view.
 //
 // Each file in the status list has three possible states relative
@@ -182,7 +184,8 @@ function extractNewPath(line: string): string | null {
   if (after.startsWith('"')) {
     const rightEnd = findQuotedEnd(after, 0);
     if (rightEnd === -1) return null;
-    return unquoteAndStrip(after.slice(0, rightEnd + 1));
+    const decoded = decodeGitPath(after.slice(0, rightEnd + 1));
+    return decoded === null ? null : stripB(decoded);
   }
   return stripB(after);
 }
@@ -192,48 +195,6 @@ function stripB(s: string): string | null {
   return s || null;
 }
 
-function unquoteAndStrip(quoted: string): string | null {
-  const inner = quoted.slice(1, -1);
-  // Decode the git C-escape variants we actually care about for
-  // path matching: `\n`, `\t`, `\\`, `\"`, plus three-digit octal.
-  let out = "";
-  let i = 0;
-  while (i < inner.length) {
-    const ch = inner[i];
-    if (ch !== "\\") {
-      out += ch;
-      i += 1;
-      continue;
-    }
-    const next = inner[i + 1];
-    if (next === "n") {
-      out += "\n";
-      i += 2;
-    } else if (next === "t") {
-      out += "\t";
-      i += 2;
-    } else if (next === "\\") {
-      out += "\\";
-      i += 2;
-    } else if (next === '"') {
-      out += '"';
-      i += 2;
-    } else if (next >= "0" && next <= "7") {
-      const oct = inner.slice(i + 1, i + 4);
-      if (/^[0-7]{3}$/.test(oct)) {
-        out += String.fromCharCode(parseInt(oct, 8));
-        i += 4;
-      } else {
-        out += next;
-        i += 2;
-      }
-    } else {
-      out += next;
-      i += 2;
-    }
-  }
-  return stripB(out);
-}
 
 function findQuotedEnd(s: string, start: number): number {
   if (s[start] !== '"') return -1;

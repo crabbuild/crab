@@ -425,6 +425,21 @@ describe("AgentWorkflowRunner", () => {
     expect(run.nodeRuns.find((nodeRun) => nodeRun.nodeId === "standard-review")?.status).toBe("skipped");
   });
 
+  it.each(["codex", "claude-code"] as const)("passes %s workflow plan and model settings without rewriting the prompt", async (agentType) => {
+    const orchestrator = new FakeOrchestrator();
+    const store = new MemoryRunStore();
+    const runner = new AgentWorkflowRunner(orchestrator as unknown as Orchestrator, store as unknown as AgentWorkflowRunStore);
+    await runner.startRun("/tmp/repo", definition({
+      nodes: [{ id: "plan", type: "agent_task", title: "Plan", instructions: "Keep these instructions", agentType,
+        planFirst: true, model: "selected-model", intelligence: "high" }], edges: [],
+    }));
+    const task = Array.from(orchestrator.tasks.values())[0];
+    expect({ promptStart: task.prompt.split("\n")[0], instructions: task.prompt.includes("Instructions:\n\nKeep these instructions"),
+      plan: task.planFirst, model: task.model, effort: task.reasoningLevel }).toEqual({
+      promptStart: "Workflow: Workflow", instructions: true, plan: true, model: "selected-model", effort: "high",
+    });
+  });
+
   it("reconciles a missed planning event into needs_review", async () => {
     const orchestrator = new FakeOrchestrator();
     const store = new MemoryRunStore();

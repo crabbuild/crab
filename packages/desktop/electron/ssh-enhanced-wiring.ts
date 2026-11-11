@@ -24,7 +24,6 @@ import type { RemoteEnvironmentManager } from "./ssh-environment-manager";
 import type { RemoteToolManager } from "./ssh-tool-manager";
 import type { ConnectionQualityMonitor } from "./ssh-connection-quality";
 import type { BookmarkManager } from "./ssh-bookmarks";
-import type { AgentDeployer } from "./ssh-deployer";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { RemoteWorkspaceManager } from "./ssh-remote-workspace";
 import type { RemoteGitManager } from "./ssh-remote-git";
@@ -47,7 +46,6 @@ export interface EnhancedModules {
   toolManager: RemoteToolManager;
   connectionQualityMonitor: ConnectionQualityMonitor;
   bookmarkManager: BookmarkManager;
-  agentDeployer: AgentDeployer;
   capabilityNegotiator: CapabilityNegotiator;
   workspaceManager: RemoteWorkspaceManager;
   gitManager: RemoteGitManager;
@@ -114,7 +112,6 @@ export function wireEnhancedIpcHandlers(modules: EnhancedModules): void {
     toolManager,
     connectionQualityMonitor,
     bookmarkManager,
-    agentDeployer,
     capabilityNegotiator,
     workspaceManager,
     gitManager,
@@ -569,11 +566,7 @@ export function wireEnhancedIpcHandlers(modules: EnhancedModules): void {
 
   ipcMain.handle("ssh:deploy-agent", async (_event, profileId: string) => {
     return wrapHandler(async () => {
-      const conn = sessionManager.getConnection(profileId);
-      if (!conn || !conn.client) {
-        throw new Error(`No active SSH connection for profile: ${profileId}`);
-      }
-      await agentDeployer.ensureAgent(conn.client);
+      await sessionManager.deployAgent(profileId);
     });
   });
 

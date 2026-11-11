@@ -47,7 +47,7 @@ for (const platform of [Platform.MAC, Platform.WINDOWS, Platform.LINUX]) {
         info: { config }, appInfo: { updaterCacheDirName: "crab-desktop-updater" },
         expandMacro: value => value, getResourcesDir: () => root,
         isForceCodeSigningVerification: true,
-        signtoolManager: { value: Promise.resolve({ computedPublisherName: { value: Promise.resolve(["Crab"]) } }) },
+        signingManager: { value: Promise.resolve({ computedPublisherName: { value: Promise.resolve(["Crab"]) } }) },
       };
       await configureUpdater({ arch: 1, appOutDir: root, packager });
       const actual = parse(await readFile(path.join(root, "app-update.yml"), "utf8"));

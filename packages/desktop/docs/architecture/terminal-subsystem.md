@@ -23,8 +23,20 @@ owns routing and renderer attachments. Closing an app window, quitting, or
 upgrading disconnects the client without killing daemon PTYs. The next app
 instance probes and reuses the live daemon even when its application entry path
 has changed. An explicitly requested in-process terminal remains ephemeral.
+The packaged daemon launches through its logical
+`app.asar/dist-electron/daemon/daemon-main.cjs` entry. Electron resolves its native
+modules into the unpacked files; using the physical `.unpacked` entry makes
+node-pty expand its helper path twice and prevents macOS shell creation.
 Live daemon replacement is deferred while PTYs exist: the adopted-fd backend
 cannot resize those PTYs. Application updates can reuse the existing owner.
+
+Daemon control files remain home-scoped. Unix socket paths that fit retain
+the address shipped in v2.0.0-alpha.1. Longer paths use a hash of the complete
+control path in a private, user-owned directory under `/tmp`; tokens and PID
+metadata stay in the home directory. Startup rejects public or symlinked
+socket directories. Clients, stale cleanup and daemon shutdown resolve the
+same address, so long homes do not lose terminals or collide through pathname
+truncation. Windows uses its separate hashed named-pipe namespace.
 
 Each terminal has a UUID-based renderer ID. Daemon IDs combine the repository
 or task owner with that ID; creating a terminal after a restart cannot reuse a

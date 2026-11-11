@@ -19,6 +19,7 @@ import { EventEmitter } from "node:events";
 
 import { Orchestrator, Task } from "../electron/orchestrator";
 import { SshConnectionRecovery, RecoveryPrompt } from "../electron/ssh-connection-recovery";
+import { RpcRouter } from "../electron/ssh-router";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -81,7 +82,17 @@ class MockSshSessionManager extends EventEmitter {
 
 // ─── Mock RPC Router ─────────────────────────────────────────────────────────
 
+const fixtureEndpoint = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:fixture" };
+
 class MockRpcRouter extends EventEmitter {
+  private readonly owner = {};
+  remoteEndpoint(_profileId: string) { return { ...fixtureEndpoint }; }
+  assertRemoteEndpoint = RpcRouter.prototype.assertRemoteEndpoint;
+  remoteChannelOwner(_profileId: string) { return this.owner; }
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (owner !== this.owner) return Promise.reject(new Error("Fixture channel changed"));
+    return this.sendToRemoteAgent(profileId, method, params);
+  }
   calls: Array<{ profileId: string; method: string; params: unknown }> = [];
   nextResult: unknown = {};
   shouldFail = false;
@@ -137,6 +148,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     todos: [],
     isRemote: true,
     remoteProfileId: "gpu-server",
+    remoteEndpoint: fixtureEndpoint,
     ...overrides,
   };
 
@@ -155,6 +167,7 @@ describe("SSH Connection Recovery", () => {
 
   beforeEach(() => {
     persistPath = createTempPersistPath();
+    vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(path.dirname(persistPath), "settings.json"));
     mockRouter = new MockRpcRouter();
     mockSessionManager = new MockSshSessionManager();
     orchestrator = new Orchestrator({
@@ -170,6 +183,7 @@ describe("SSH Connection Recovery", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     cleanupPath(persistPath);
   });
 
@@ -195,6 +209,19 @@ describe("SSH Connection Recovery", () => {
       await recovery.handleDisconnection("gpu-server");
 
       expect(task.status).toBe("interrupted");
+    });
+
+    it("marks all affected tasks before persistence can yield to reconnect", async () => {
+      const first = injectRemoteTask(orchestrator, { status: "running" });
+      const second = injectRemoteTask(orchestrator, { status: "iterating" });
+      let finish!: () => void;
+      vi.spyOn(orchestrator, "persistTasks").mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+      const events: Array<{ taskId: string; status: string }> = [];
+      orchestrator.on("orchestrator:task-status", payload => events.push(payload));
+      const interrupted = recovery.handleDisconnection("gpu-server");
+      const statuses = [first.status, second.status];
+      second.status = "reviewing"; finish(); await interrupted;
+      expect({ statuses, events }).toEqual({ statuses: ["interrupted", "interrupted"], events: [{ taskId: first.id, status: "interrupted" }] });
     });
 
     it("does not affect tasks in other statuses", async () => {
@@ -403,11 +430,11 @@ describe("SSH Connection Recovery", () => {
   });
 
   describe("event-driven disconnection/reconnection", () => {
-    it("interrupts tasks when ssh:status-changed emits disconnected", async () => {
+    it.each(["disconnected", "reconnecting"])("interrupts tasks when ssh:status-changed emits %s", async status => {
       const task = injectRemoteTask(orchestrator, { status: "running" });
 
       // Simulate disconnection event
-      mockSessionManager.setStatus("gpu-server", "disconnected");
+      mockSessionManager.setStatus("gpu-server", status);
 
       // Allow async handler to complete
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -442,21 +469,18 @@ describe("SSH Connection Recovery", () => {
   });
 
   describe("resumeTask", () => {
-    it("re-spawns the agent in the existing worktree", async () => {
-      const task = injectRemoteTask(orchestrator, { status: "interrupted" });
-
-      await recovery.resumeTask(task.id);
-
-      expect(task.status).toBe("running");
-      // Should have sent task_spawn RPC
-      const spawnCall = mockRouter.calls.find((c) => c.method === "task_spawn");
-      expect(spawnCall).toBeDefined();
-      expect(spawnCall!.params).toEqual({
-        task_id: task.id,
-        prompt: task.prompt,
-        agent_type: task.agentType,
-        worktree_path: task.worktreePath,
-      });
+    it("resumes through the shared lifecycle with its saved workspace and native session", async () => {
+      const task = injectRemoteTask(orchestrator, { status: "interrupted", claudeSessionId: "saved-native-session" });
+      const workspace = task.worktreePath;
+      let admittedStatus: string | undefined;
+      const start = vi.spyOn(orchestrator, "startTask").mockImplementation(async id => { admittedStatus = orchestrator.getTask(id)?.status; });
+      try {
+        await recovery.resumeTask(task.id);
+        const saved = new Orchestrator({ persistPath }).getTask(task.id);
+        expect({ calls: start.mock.calls, admittedStatus, workspace: saved?.worktreePath, session: saved?.claudeSessionId, persistedStatus: saved?.status, remoteCalls: mockRouter.calls }).toEqual({
+          calls: [[task.id]], admittedStatus: "created", workspace, session: "saved-native-session", persistedStatus: "created", remoteCalls: [],
+        });
+      } finally { start.mockRestore(); }
     });
 
     it("throws if task is not in interrupted status", async () => {
@@ -477,6 +501,7 @@ describe("SSH Connection Recovery", () => {
   describe("discardTask", () => {
     it("removes the worktree on the remote and marks task discarded", async () => {
       const task = injectRemoteTask(orchestrator, { status: "interrupted" });
+      mockRouter.nextResult = { discarded: true, worktree_removed: true, branch_deleted: true };
 
       await recovery.discardTask(task.id);
 

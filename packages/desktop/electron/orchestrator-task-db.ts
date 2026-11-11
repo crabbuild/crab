@@ -31,11 +31,19 @@ type TaskRow = {
   started_at: number | null;
   completed_at: number | null;
   exit_code: number | null;
+  turn_number: number | null;
+  pending_input_json: string | null;
+  last_input_kind: PersistedTask["lastInputKind"] | null;
+  goal_json: string | null;
+  pending_completions_json: string | null;
+  workspace_setup: PersistedTask["workspaceSetup"] | null;
   pr_url: string | null;
   pr_number: number | null;
   is_remote: number;
   remote_profile_id: string | null;
+  remote_endpoint_json: string | null;
   codex_thread_id: string | null;
+  claude_session_id: string | null;
   ui_state_json: string | null;
   workflow_run_id: string | null;
   workflow_node_run_id: string | null;
@@ -50,15 +58,6 @@ type TaskRow = {
   last_activity_at: number | null;
   sidebar_label: string | null;
   sidebar_group: string | null;
-};
-
-type AgentRow = {
-  id: string;
-  task_id: string;
-  type: string;
-  role: string | null;
-  status: string | null;
-  child_task_id: string | null;
 };
 
 type SqliteStatement = {
@@ -163,13 +162,6 @@ export class OrchestratorTaskDatabase {
 
   loadTasks(): PersistedTask[] {
     const rows = this.db.prepare("SELECT * FROM tasks ORDER BY created_at ASC").all() as TaskRow[];
-    const agentsByTask = new Map<string, AgentRow[]>();
-    for (const row of this.db.prepare("SELECT * FROM task_agents ORDER BY task_id, rowid ASC").all() as AgentRow[]) {
-      const list = agentsByTask.get(row.task_id) ?? [];
-      list.push(row);
-      agentsByTask.set(row.task_id, list);
-    }
-
     const feedbackByTask = new Map<string, string[]>();
     for (const row of this.db.prepare("SELECT task_id, text FROM task_feedback ORDER BY task_id, position ASC").all() as Array<{ task_id: string; text: string }>) {
       const list = feedbackByTask.get(row.task_id) ?? [];
@@ -200,20 +192,21 @@ export class OrchestratorTaskDatabase {
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined,
       exitCode: row.exit_code ?? undefined,
+      turnNumber: row.turn_number || undefined,
+      pendingInput: decodeJson<PersistedTask["pendingInput"]>(row.pending_input_json, undefined),
+      lastInputKind: row.last_input_kind ?? undefined,
+      goal: decodeJson<PersistedTask["goal"]>(row.goal_json, undefined),
+      pendingCompletions: decodeJson<PersistedTask["pendingCompletions"]>(row.pending_completions_json, undefined),
+      workspaceSetup: row.workspace_setup ?? undefined,
       feedback: feedbackByTask.get(row.id) ?? [],
       todos: todosByTask.get(row.id) ?? [],
       prUrl: row.pr_url ?? undefined,
       prNumber: row.pr_number ?? undefined,
-      agents: (agentsByTask.get(row.id) ?? []).map((agent) => ({
-        id: agent.id,
-        type: agent.type,
-        role: agent.role ?? undefined,
-        status: agent.status ?? undefined,
-        childTaskId: agent.child_task_id ?? undefined,
-      })),
       isRemote: row.is_remote === 1 || undefined,
       remoteProfileId: row.remote_profile_id ?? undefined,
+      remoteEndpoint: decodeJson<PersistedTask["remoteEndpoint"]>(row.remote_endpoint_json, undefined),
       codexThreadId: row.codex_thread_id ?? undefined,
+      claudeSessionId: row.claude_session_id ?? undefined,
       uiState: decodeJson<PersistedTask["uiState"]>(row.ui_state_json, undefined),
       workflowRunId: row.workflow_run_id ?? undefined,
       workflowNodeRunId: row.workflow_node_run_id ?? undefined,
@@ -237,21 +230,21 @@ export class OrchestratorTaskDatabase {
         id, title, prompt, agent_type, status, branch, worktree_path,
         worktree_mode, base_ref, base_branch, repo_path, created_at,
         started_at, completed_at, exit_code, pr_url, pr_number, is_remote,
-        remote_profile_id, codex_thread_id, ui_state_json,
+        remote_profile_id, remote_endpoint_json, codex_thread_id, claude_session_id, ui_state_json,
         workflow_run_id, workflow_node_run_id, plan_first, model,
         reasoning_level, pinned_at, parent_task_id, root_task_id,
         spawned_by_agent_id, spawned_role, last_activity_at, sidebar_label,
-        sidebar_group, updated_at
+        sidebar_group, turn_number, pending_input_json, last_input_kind, goal_json, pending_completions_json, workspace_setup, updated_at
       ) VALUES (
         @id, @title, @prompt, @agent_type, @status, @branch,
         @worktree_path, @worktree_mode, @base_ref, @base_branch, @repo_path,
         @created_at, @started_at, @completed_at, @exit_code, @pr_url,
-        @pr_number, @is_remote, @remote_profile_id, @codex_thread_id,
+        @pr_number, @is_remote, @remote_profile_id, @remote_endpoint_json, @codex_thread_id, @claude_session_id,
         @ui_state_json, @workflow_run_id,
         @workflow_node_run_id, @plan_first, @model, @reasoning_level,
         @pinned_at, @parent_task_id, @root_task_id, @spawned_by_agent_id,
         @spawned_role, @last_activity_at, @sidebar_label, @sidebar_group,
-        @updated_at
+        @turn_number, @pending_input_json, @last_input_kind, @goal_json, @pending_completions_json, @workspace_setup, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
@@ -272,7 +265,9 @@ export class OrchestratorTaskDatabase {
         pr_number = excluded.pr_number,
         is_remote = excluded.is_remote,
         remote_profile_id = excluded.remote_profile_id,
+        remote_endpoint_json = excluded.remote_endpoint_json,
         codex_thread_id = excluded.codex_thread_id,
+        claude_session_id = excluded.claude_session_id,
         ui_state_json = excluded.ui_state_json,
         workflow_run_id = excluded.workflow_run_id,
         workflow_node_run_id = excluded.workflow_node_run_id,
@@ -287,11 +282,13 @@ export class OrchestratorTaskDatabase {
         last_activity_at = excluded.last_activity_at,
         sidebar_label = excluded.sidebar_label,
         sidebar_group = excluded.sidebar_group,
+        turn_number = excluded.turn_number,
+        pending_input_json = excluded.pending_input_json,
+        last_input_kind = excluded.last_input_kind,
+        goal_json = excluded.goal_json,
+        pending_completions_json = excluded.pending_completions_json,
+        workspace_setup = excluded.workspace_setup,
         updated_at = excluded.updated_at
-    `);
-    const insertAgent = this.db.prepare(`
-      INSERT INTO task_agents (task_id, id, type, role, status, child_task_id)
-      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const insertFeedback = this.db.prepare(`
       INSERT INTO task_feedback (task_id, position, text)
@@ -331,7 +328,9 @@ export class OrchestratorTaskDatabase {
           pr_number: task.prNumber ?? null,
           is_remote: task.isRemote ? 1 : 0,
           remote_profile_id: task.remoteProfileId ?? null,
+          remote_endpoint_json: encodeJson(task.remoteEndpoint),
           codex_thread_id: task.codexThreadId ?? null,
+          claude_session_id: task.claudeSessionId ?? null,
           ui_state_json: encodeJson(task.uiState),
           workflow_run_id: task.workflowRunId ?? null,
           workflow_node_run_id: task.workflowNodeRunId ?? null,
@@ -346,18 +345,20 @@ export class OrchestratorTaskDatabase {
           last_activity_at: task.lastActivityAt ?? null,
           sidebar_label: task.sidebarLabel ?? null,
           sidebar_group: task.sidebarGroup ?? null,
+          turn_number: task.turnNumber ?? 0,
+          pending_input_json: encodeJson(task.pendingInput),
+          last_input_kind: task.lastInputKind ?? null,
+          goal_json: encodeJson(task.goal),
+          pending_completions_json: encodeJson(task.pendingCompletions),
+          workspace_setup: task.workspaceSetup ?? null,
           updated_at: Date.now(),
         });
 
         this.db.prepare("DELETE FROM task_feedback WHERE task_id = ?").run(task.id);
         this.db.prepare("DELETE FROM task_todos WHERE task_id = ?").run(task.id);
-        this.db.prepare("DELETE FROM task_agents WHERE task_id = ?").run(task.id);
       }
 
       for (const task of nextTasks) {
-        for (const agent of task.agents ?? []) {
-          insertAgent.run(task.id, agent.id, agent.type, agent.role ?? null, agent.status ?? null, agent.childTaskId ?? null);
-        }
         for (const [index, text] of (task.feedback ?? []).entries()) {
           insertFeedback.run(task.id, index, text);
         }
@@ -392,11 +393,19 @@ export class OrchestratorTaskDatabase {
         started_at INTEGER,
         completed_at INTEGER,
         exit_code INTEGER,
+        turn_number INTEGER NOT NULL DEFAULT 0,
+        pending_input_json TEXT,
+        last_input_kind TEXT,
+        goal_json TEXT,
+        pending_completions_json TEXT,
+        workspace_setup TEXT,
         pr_url TEXT,
         pr_number INTEGER,
         is_remote INTEGER NOT NULL DEFAULT 0,
         remote_profile_id TEXT,
+        remote_endpoint_json TEXT,
         codex_thread_id TEXT,
+        claude_session_id TEXT,
         ui_state_json TEXT,
         workflow_run_id TEXT,
         workflow_node_run_id TEXT,
@@ -421,16 +430,6 @@ export class OrchestratorTaskDatabase {
       CREATE INDEX IF NOT EXISTS idx_tasks_pinned
         ON tasks(pinned_at DESC);
 
-      CREATE TABLE IF NOT EXISTS task_agents (
-        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-        id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        role TEXT,
-        status TEXT,
-        child_task_id TEXT,
-        PRIMARY KEY (task_id, id)
-      );
-
       CREATE TABLE IF NOT EXISTS task_feedback (
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         position INTEGER NOT NULL,
@@ -452,14 +451,32 @@ export class OrchestratorTaskDatabase {
     this.ensureColumn("tasks", "title", "TEXT");
     this.ensureColumn("tasks", "base_branch", "TEXT");
     this.ensureColumn("tasks", "worktree_mode", "TEXT");
+    // v2.0.0-alpha.1 coordinators referenced the primary checkout without
+    // recording ownership. They must never acquire disposable-worktree policy.
+    this.db.exec("UPDATE tasks SET worktree_mode = 'primary' WHERE agent_type = 'workflow' AND worktree_mode IS NULL");
     this.ensureColumn("tasks", "started_at", "INTEGER");
     this.ensureColumn("tasks", "completed_at", "INTEGER");
     this.ensureColumn("tasks", "exit_code", "INTEGER");
+    this.ensureColumn("tasks", "turn_number", "INTEGER");
+    this.ensureColumn("tasks", "pending_input_json", "TEXT");
+    this.ensureColumn("tasks", "last_input_kind", "TEXT");
+    this.ensureColumn("tasks", "goal_json", "TEXT");
+    this.ensureColumn("tasks", "pending_completions_json", "TEXT");
+    this.ensureColumn("tasks", "workspace_setup", "TEXT");
+    // Tagged versions saved feedback but omitted its checkpoint counter. Fill
+    // the new column once so restart cannot overwrite an earlier checkpoint.
+    this.db.exec(`UPDATE tasks SET turn_number = (
+      SELECT COUNT(*) FROM task_feedback WHERE task_id = tasks.id
+    ) WHERE turn_number IS NULL`);
     this.ensureColumn("tasks", "pr_url", "TEXT");
     this.ensureColumn("tasks", "pr_number", "INTEGER");
     this.ensureColumn("tasks", "is_remote", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tasks", "remote_profile_id", "TEXT");
+    // Older rows never captured a verified destination. Inferring one from
+    // an editable profile could redirect their saved work to another host.
+    this.ensureColumn("tasks", "remote_endpoint_json", "TEXT");
     this.ensureColumn("tasks", "codex_thread_id", "TEXT");
+    this.ensureColumn("tasks", "claude_session_id", "TEXT");
     this.ensureColumn("tasks", "ui_state_json", "TEXT");
     this.ensureColumn("tasks", "workflow_run_id", "TEXT");
     this.ensureColumn("tasks", "workflow_node_run_id", "TEXT");
@@ -475,12 +492,9 @@ export class OrchestratorTaskDatabase {
     this.ensureColumn("tasks", "sidebar_label", "TEXT");
     this.ensureColumn("tasks", "sidebar_group", "TEXT");
     this.ensureColumn("tasks", "updated_at", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("task_agents", "role", "TEXT");
-    this.ensureColumn("task_agents", "status", "TEXT");
-    this.ensureColumn("task_agents", "child_task_id", "TEXT");
   }
 
-  private ensureColumn(table: "tasks" | "task_agents", column: string, definition: string): void {
+  private ensureColumn(table: "tasks", column: string, definition: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (rows.some((row) => row.name === column)) return;
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);

@@ -25,8 +25,7 @@ export interface ValidationResult {
  * in `~/.crab/desktop/ssh-profiles.json` and credentials in the OS
  * keychain (never in the JSON file).
  *
- * Follows the same persistence pattern as `KnownHostsManager`:
- * load on construction, save after every mutation.
+ * Profiles load on construction and save after every mutation.
  */
 export class SshProfileManager {
   private profilesPath: string;

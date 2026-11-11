@@ -47,7 +47,7 @@ interface Props {
   turn: Turn;
   /** Called when the user clicks Review — opens the Diff tab. */
   onReview?: () => void;
-  /** Called when the user clicks "Agent Review" — triggers codex review mode. */
+  /** Called after the user requests a review in the owning conversation. */
   onAgentReview?: () => void;
   /** Called when user rates this turn (thumbs up/down). */
   onFeedback?: (rating: number) => void;
@@ -140,6 +140,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
       .filter((e) => e.type === "file_edit" && e.path)
       .reverse();
 
+    let reverted = 0;
     try {
       for (const event of fileEditEvents) {
         const input = event.input as Record<string, unknown> | undefined;
@@ -161,23 +162,23 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
         );
 
         if (!result?.success) {
-          // Continue reverting other files even if one fails
-          console.warn(`Revert failed for ${filePath}: ${result?.error ?? "unknown"}`);
+          throw new Error(result?.error ?? `Could not undo ${filePath}`);
         }
+        reverted++;
       }
 
       setUndoState("reverted");
       publishToast({
         kind: "success",
-        title: "Turn reverted",
+        title: "File edits undone",
         body: `${fileEditEvents.length} file edit(s) reverted`,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       setUndoState("error");
       publishToast({
         kind: "error",
         title: "Undo failed",
-        body: err?.message ?? String(err),
+        body: `${reverted ? `${reverted} edit(s) were undone before the failure. ` : ""}${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }, [turn.events, hunkContext]);
@@ -189,13 +190,13 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
     onReview?.();
   }, [onReview]);
 
-  /** Trigger codex agent review mode on the live connection. */
+  /** Review task changes through their conversation owner. */
   const handleAgentReview = useCallback(async () => {
     if (!taskId) return;
     try {
       const result = await window.crab.orchestrator.startReview(taskId);
       if (!result.success) throw new Error(result.error ?? "Could not start agent review");
-      publishToast({ kind: "success", title: "Agent review started", body: "Codex will review the changes and provide feedback." });
+      publishToast({ kind: "success", title: "Agent review started", body: "The agent will review the task changes in this conversation." });
     } catch (err: unknown) {
       publishToast({ kind: "error", title: "Review failed", body: err instanceof Error ? err.message : "Could not start agent review" });
     }
@@ -207,12 +208,13 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
   const handleFeedback = useCallback(async (rating: number) => {
     if (!taskId || feedbackSent) return;
     try {
-      await (window as any).crab?.orchestrator?.uploadFeedback?.(taskId, { rating, comment: rating >= 4 ? "Good" : "Needs improvement" });
+      const result = await window.crab.orchestrator.uploadFeedback(taskId, { rating, comment: rating >= 4 ? "Good" : "Needs improvement" });
+      if (!result.success) throw new Error(result.error ?? "Could not send feedback");
       setFeedbackSent(true);
-    } catch {
-      // Best-effort — feedback is non-critical.
+      onFeedback?.(rating);
+    } catch (err: unknown) {
+      publishToast({ kind: "error", title: "Feedback failed", body: err instanceof Error ? err.message : "Could not send feedback" });
     }
-    onFeedback?.(rating);
   }, [taskId, feedbackSent, onFeedback]);
 
   /** Short filename for display. */
@@ -261,7 +263,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
             disabled={undoState === "reverting" || !hunkContext?.taskId}
             onClick={() => void handleUndo()}
             className="inline-flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[10px] text-gx-error hover:bg-gx-error/15 transition disabled:opacity-50"
-            title="Revert all edits in this turn"
+            title="Undo these file edits"
           >
             <Undo2 size={10} />
             Undo
@@ -297,7 +299,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
           type="button"
           onClick={handleAgentReview}
           className="inline-flex items-center gap-1 rounded border border-gx-info/30 bg-gx-info/5 px-1.5 py-0.5 text-[10px] text-gx-info hover:bg-gx-info/15 transition"
-          title="Ask Codex to review the changes"
+          title="Ask the agent to review the task changes"
         >
           <SearchCheck size={10} />
           Agent Review

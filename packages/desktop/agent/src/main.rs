@@ -17,6 +17,8 @@ mod conflicts;
 mod credential_store;
 mod experiments;
 mod forge;
+#[cfg(unix)]
+mod git_active_apply;
 mod git_branches;
 mod git_commit;
 mod git_hunks;
@@ -26,6 +28,8 @@ mod git_worktree;
 mod handlers;
 mod indexer;
 mod managed_service;
+#[cfg(unix)]
+mod native_process;
 mod notebook_strip;
 mod ops;
 mod preview;
@@ -34,6 +38,8 @@ mod rpc;
 mod shellout;
 mod storage_auth;
 mod system_health;
+mod task_diff;
+mod task_workspace;
 mod watcher;
 mod workflow;
 mod workspace_discovery;
@@ -132,6 +138,10 @@ pub enum AgentError {
 
     #[error("{0}")]
     Other(String),
+
+    #[cfg(unix)]
+    #[error("{}", .0.message)]
+    ApplyWorker(RpcError),
 }
 
 pub type Result<T> = std::result::Result<T, AgentError>;
@@ -141,14 +151,28 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 /// when a `hydrate` notification races with a `list` response.
 pub type SharedStdout = Arc<Mutex<tokio::io::Stdout>>;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(result) = git_active_apply::run_if_hook() {
+        return result;
+    }
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(native_process::mutation::worker::ARG))
+    {
+        init_tracing(None);
+        return native_process::mutation::worker::serve();
+    }
     // Handle --version early, before any other initialization.
     if std::env::args().any(|a| a == "--version") {
         println!("crab-desktop-agent {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    run_sidecar()
+}
 
+#[tokio::main]
+async fn run_sidecar() -> std::io::Result<()> {
     let log_file = parse_log_file_arg();
     init_tracing(log_file.as_deref());
     info!(
@@ -163,14 +187,19 @@ async fn main() -> std::io::Result<()> {
     // Spawn the background indexer. It opens its SlateDB instance and
     // waits for commands. The sender is stored in State so handlers
     // (indexer_status, open_local) can communicate with it.
-    let indexer_config = indexer::IndexerConfig::default();
-    let indexer_handle = indexer::Indexer::spawn(state.clone(), indexer_config);
+    let indexer_handle = indexer::Indexer::spawn().map_err(std::io::Error::other)?;
     state.set_indexer_tx(indexer_handle.tx_clone()).await;
 
     let mut requests = tokio::task::JoinSet::new();
     let mut reader = BufReader::new(stdin).lines();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     let read_result = loop {
-        let line = match reader.next_line().await {
+        let input = tokio::select! {
+            input = reader.next_line() => input,
+            result = &mut shutdown => break result,
+        };
+        let line = match input {
             Ok(Some(line)) => line,
             Ok(None) => break Ok(()),
             Err(error) => break Err(error),
@@ -192,18 +221,37 @@ async fn main() -> std::io::Result<()> {
         });
     };
 
-    info!("stdin closed; agent shutting down");
+    info!("agent shutting down");
     requests.abort_all();
     while let Some(result) = requests.join_next().await {
         if let Err(error) = result {
             error!(%error, "request task failed");
         }
     }
+    #[cfg(unix)]
+    if let Err(error) = state.native_processes.shutdown().await {
+        error!(%error, "native process shutdown failed");
+    }
     indexer_handle.shutdown().await;
     if let Err(error) = state.shutdown().await {
         error!(%error, "SDK shutdown failed");
     }
     read_result
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    tokio::select! { _ = term.recv() => {}, _ = hangup.recv() => {}, _ = interrupt.recv() => {} }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    std::future::pending().await
 }
 
 /// Parse one NDJSON line as a JSON-RPC request, dispatch it, and

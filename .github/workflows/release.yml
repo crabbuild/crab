@@ -1503,6 +1503,11 @@ jobs:
       - name: Install release metadata dependency
         working-directory: packages/desktop
         run: npm ci --omit=dev --ignore-scripts
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: Crab-remote-runtime-*
+          path: desktop-input/remote-runtimes
+          merge-multiple: true
       - name: Verify and assemble desktop release assets
         run: node packages/desktop/scripts/assemble-release.mjs '${{ needs.prepare.outputs.version }}' desktop-input dist/desktop
 

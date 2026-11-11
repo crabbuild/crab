@@ -90,7 +90,7 @@ export class SshConnectionRecovery extends EventEmitter {
       status: SshConnectionStatus;
       error?: string;
     }) => {
-      if (payload.status === "disconnected" || payload.status === "error") {
+      if (payload.status === "disconnected" || payload.status === "error" || payload.status === "reconnecting") {
         this.handleDisconnection(payload.profileId).catch((err) => {
           console.error(
             "[ssh-connection-recovery] Error handling disconnection:",
@@ -124,14 +124,17 @@ export class SshConnectionRecovery extends EventEmitter {
         (task.status === "running" || task.status === "iterating"),
     );
 
+    if (runningRemoteTasks.length === 0) return;
+    // Mark siblings before yielding so a fast reconnect sees the entire set.
+    // Recovery may advance while persistence waits; do not publish stale state.
     for (const task of runningRemoteTasks) {
       task.status = "interrupted";
       task.completedAt = undefined;
-      await this.orchestrator.persistTasks();
-      this.orchestrator.emit("orchestrator:task-status", {
-        taskId: task.id,
-        status: "interrupted",
-      });
+    }
+    await this.orchestrator.persistTasks();
+    for (const task of runningRemoteTasks) {
+      if (task.status !== "interrupted") continue;
+      this.orchestrator.emit("orchestrator:task-status", { taskId: task.id, status: "interrupted" });
     }
   }
 

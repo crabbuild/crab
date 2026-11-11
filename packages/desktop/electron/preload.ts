@@ -1,3 +1,5 @@
+import type { DeployProgress } from "./ssh-deployer";
+import type { KnownHost } from "./ssh-known-hosts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 // Whitelist of RPC method names the renderer is allowed to invoke.
@@ -603,10 +605,13 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("ssh:connect", profileId),
     disconnect: (profileId: string) =>
       ipcRenderer.invoke("ssh:disconnect", profileId),
-    testConnection: (profileId: string) =>
-      ipcRenderer.invoke("ssh:test-connection", profileId),
+    testConnection: (profile: unknown) =>
+      ipcRenderer.invoke("ssh:test-connection", profile) as Promise<{ ok: boolean; error?: string }>,
     getStatus: (profileId: string) =>
       ipcRenderer.invoke("ssh:get-status", profileId),
+    listKnownHosts: () => ipcRenderer.invoke("ssh:list-known-hosts") as Promise<KnownHost[]>,
+    removeKnownHost: (hostname: string, port: number, keyType: string) =>
+      ipcRenderer.invoke("ssh:remove-known-host", hostname, port, keyType) as Promise<boolean>,
     // Remote terminal
     openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) =>
       ipcRenderer.invoke("ssh:open-terminal", profileId, cols, rows, cwd, resumeId, ownerPath) as Promise<{ terminalId: string }>,
@@ -801,8 +806,8 @@ contextBridge.exposeInMainWorld("crab", {
     },
 
     // Deploy progress events (on/off pairs)
-    onDeployProgress: (listener: (payload: { stage: string; percent: number; speed?: number; eta?: number }) => void) => {
-      const handler = (_e: unknown, payload: { stage: string; percent: number; speed?: number; eta?: number }) => listener(payload);
+    onDeployProgress: (listener: (payload: DeployProgress & { profileId: string }) => void) => {
+      const handler = (_e: unknown, payload: DeployProgress & { profileId: string }) => listener(payload);
       ipcRenderer.on("ssh:deploy-progress", handler);
       return () => { ipcRenderer.removeListener("ssh:deploy-progress", handler); };
     },
@@ -1009,8 +1014,10 @@ contextBridge.exposeInMainWorld("crab", {
       }),
     cancelTask: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:cancel-task", { taskId }),
-    iterate: (taskId: string, feedback: string) =>
-      ipcRenderer.invoke("orchestrator:iterate", { taskId, feedback }),
+    listModels: (agentType: string, cwd: string, requestId: string, taskId?: string) => ipcRenderer.invoke("orchestrator:list-models", { agentType, cwd, requestId, taskId }),
+    cancelModelDiscovery: (requestId: string) => ipcRenderer.invoke("orchestrator:cancel-model-discovery", requestId),
+    iterate: (taskId: string, feedback: string, options?: import("./orchestrator-adapters").AgentTurnOptions, messageId?: string) =>
+      ipcRenderer.invoke("orchestrator:iterate", { taskId, feedback, options, messageId }),
     applyAll: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:apply-all", { taskId }),
     cherryPick: (taskId: string, files: string[]) =>
@@ -1021,13 +1028,11 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("orchestrator:list-tasks", payload),
     getDiff: (taskId: string, checkpointSha?: string, checkpointFromSha?: string) =>
       ipcRenderer.invoke("orchestrator:get-diff", { taskId, checkpointSha, checkpointFromSha }),
-    reviewWithAi: (taskId: string) =>
-      ipcRenderer.invoke("orchestrator:review-with-ai", { taskId }),
     revertFile: (taskId: string, filePath: string) =>
       ipcRenderer.invoke("orchestrator:revert-file", { taskId, filePath }),
     getCommits: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:get-commits", { taskId }),
-    detectAgents: (options?: { force?: boolean; cachedOnly?: boolean }) =>
+    detectAgents: (options?: { force?: boolean; cachedOnly?: boolean; repoId?: string }) =>
       ipcRenderer.invoke("orchestrator:detect-agents", options),
     testAgent: (agentType: string) =>
       ipcRenderer.invoke("orchestrator:test-agent", { agentType }),
@@ -1047,7 +1052,7 @@ contextBridge.exposeInMainWorld("crab", {
       taskId: string,
       payload: {
         requestId: string;
-        decision: "allow" | "allow_once" | "deny";
+        decision: string;
         summary: string;
         note?: string;
       },
@@ -1106,11 +1111,9 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.invoke("orchestrator:restore-task", { taskId }),
     deletePermanently: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:delete-permanently", { taskId }),
-    // Retry & Undo
+    // Retry
     retryTask: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:retry-task", { taskId }),
-    undoApply: (taskId: string) =>
-      ipcRenderer.invoke("orchestrator:undo-apply", { taskId }),
     // Multi-Agent
     addAgent: (taskId: string, agentType: string, role?: string) =>
       ipcRenderer.invoke("orchestrator:add-agent", { taskId, agentType, role }),
@@ -1148,8 +1151,8 @@ contextBridge.exposeInMainWorld("crab", {
     exportCostsCsv: () =>
       ipcRenderer.invoke("orchestrator:export-costs-csv"),
     // Checkpoints
-    revertCheckpoint: (taskId: string, turnNumber: number) =>
-      ipcRenderer.invoke("orchestrator:revert-checkpoint", { taskId, turnNumber }),
+    restoreFiles: (taskId: string, sourceRef: string) =>
+      ipcRenderer.invoke("orchestrator:restore-files", { taskId, sourceRef }),
     listCheckpoints: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:list-checkpoints", { taskId }),
     onCheckpointCreated: (listener: (payload: { taskId: string; turnNumber: number; ref: string; sha: string }) => void) => {
@@ -1174,13 +1177,20 @@ contextBridge.exposeInMainWorld("crab", {
     scaffoldCommand: (payload: { name: string; description: string; argumentHint?: string; category?: string }) =>
       ipcRenderer.invoke("orchestrator:scaffold-command", payload),
     // Chat persistence
-    saveChat: (taskId: string, messages: unknown[]) =>
-      ipcRenderer.invoke("orchestrator:save-chat", { taskId, messages }),
+    appendChatNote: (taskId: string, content: string, kind?: "text" | "error") =>
+      ipcRenderer.invoke("orchestrator:append-chat-note", { taskId, content, kind }),
+    onChatUpdate: (listener: (update: import("./agent-chat-messages").ChatUpdate) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, update: import("./agent-chat-messages").ChatUpdate) => listener(update);
+      ipcRenderer.on("orchestrator:chat-update", handler);
+      return () => { ipcRenderer.removeListener("orchestrator:chat-update", handler); };
+    },
     loadChat: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:load-chat", { taskId }),
     searchChat: (query: string, taskId?: string, limit?: number) =>
       ipcRenderer.invoke("orchestrator:search-chat", { query, taskId, limit }),
     // Chat UI state persistence
+    respondInput: (taskId: string, requestId: string, response: import("./orchestrator-adapters").AgentInputResponse) =>
+      ipcRenderer.invoke("orchestrator:respond-input", { taskId, requestId, response }),
     setTaskUIState: (taskId: string, state: unknown) =>
       ipcRenderer.invoke("orchestrator:set-task-ui-state", { taskId, state }),
     getTaskUIState: (taskId: string) =>
@@ -1189,16 +1199,14 @@ contextBridge.exposeInMainWorld("crab", {
     // ─── Thread Operations (Codex app-server) ──────────────────────────
     forkThread: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:fork-thread", { taskId }),
-    rollbackThread: (taskId: string, n: number) =>
-      ipcRenderer.invoke("orchestrator:rollback-thread", { taskId, n }),
     compactThread: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:compact-thread", { taskId }),
     startReview: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:start-review", { taskId }),
     setThreadName: (taskId: string, name: string) =>
       ipcRenderer.invoke("orchestrator:set-thread-name", { taskId, name }),
-    setGoal: (taskId: string, goal: string) =>
-      ipcRenderer.invoke("orchestrator:set-goal", { taskId, goal }),
+    setGoal: (taskId: string, mutation: import("./orchestrator-adapters").CodexGoalMutation) =>
+      ipcRenderer.invoke("orchestrator:set-goal", { taskId, mutation }),
     getGoal: (taskId: string) =>
       ipcRenderer.invoke("orchestrator:get-goal", { taskId }),
     clearGoal: (taskId: string) =>
@@ -1268,10 +1276,15 @@ contextBridge.exposeInMainWorld("crab", {
       ipcRenderer.on("orchestrator:event", handler);
       return () => { ipcRenderer.removeListener("orchestrator:event", handler); };
     },
-    onTaskStatus: (listener: (payload: { taskId: string; status: string }) => void) => {
-      const handler = (_e: unknown, payload: { taskId: string; status: string }) => listener(payload);
+    onTaskStatus: (listener: (payload: { taskId: string; status: import("./orchestrator").TaskStatus }) => void) => {
+      const handler = (_e: unknown, payload: { taskId: string; status: import("./orchestrator").TaskStatus }) => listener(payload);
       ipcRenderer.on("orchestrator:task-status", handler);
       return () => { ipcRenderer.removeListener("orchestrator:task-status", handler); };
+    },
+    onFilesChanged: (listener: (payload: { taskIds: string[] }) => void) => {
+      const handler = (_e: unknown, payload: { taskIds: string[] }) => listener(payload);
+      ipcRenderer.on("orchestrator:files-changed", handler);
+      return () => { ipcRenderer.removeListener("orchestrator:files-changed", handler); };
     },
     onDiffReady: (listener: (payload: { taskId: string; diff: string; files: unknown[] }) => void) => {
       const handler = (_e: unknown, payload: { taskId: string; diff: string; files: unknown[] }) => listener(payload);

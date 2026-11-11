@@ -1,26 +1,30 @@
 /**
  * Diff Computation & Apply for the Crab Desktop Orchestrator.
  *
- * Computes structured diffs between the base ref and agent branch HEAD,
+ * Computes structured diffs for saved trees and complete live workspaces,
  * applies changes via merge or cherry-pick, and handles conflict detection.
  */
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as os from "node:os";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import type { BrowserWindow, IpcMain } from "electron";
 
-import type { Task } from "./orchestrator";
-import { removeWorktree } from "./orchestrator-worktree";
+import type { Orchestrator, Task } from "./orchestrator";
+import { assertWorkspace, currentBranch, removeWorktree } from "./orchestrator-worktree";
 import type { RpcRouter } from "./ssh-router";
+import { decodeGitPath } from "./git-path";
+import type { CheckpointManager } from "./orchestrator-checkpoints";
 
 const execFile = promisify(execFileCb);
 const GIT_DIFF_TIMEOUT_MS = 10_000;
-const MAX_UNTRACKED_DIFF_BYTES = 256 * 1024;
 
 async function gitForDiff(
   args: string[],
-  options: { cwd: string; maxBuffer?: number },
+  options: { cwd: string; maxBuffer?: number; indexFile?: string },
 ): Promise<{ stdout: string; stderr: string }> {
   return execFile("git", args, {
     cwd: options.cwd,
@@ -30,6 +34,7 @@ async function gitForDiff(
     env: {
       ...process.env,
       GIT_OPTIONAL_LOCKS: "0",
+      ...(options.indexFile ? { GIT_INDEX_FILE: options.indexFile } : {}),
     },
   });
 }
@@ -65,8 +70,9 @@ type RefMergeResult =
   | { kind: "conflict"; conflicts: string[] }
   | { kind: "target-checked-out"; targetBranch: string };
 
-function isPrimaryWorkspaceTask(task: Task): boolean {
-  return task.worktreeMode === "primary";
+/** Rejects Apply when edits already belong to the primary workspace. */
+export function requireApplyWorkspace(task: Pick<Task, "worktreeMode">): void {
+  if (task.worktreeMode === "primary") throw new Error("Changes are already in the primary workspace. Commit them in Git Changes.");
 }
 
 function execErrorText(err: unknown): string {
@@ -82,17 +88,46 @@ function shortBranch(branch: string): string {
   return branch.replace(/^refs\/heads\//, "");
 }
 
-async function currentBranch(repoPath: string): Promise<string | null> {
+async function applyTarget(task: Task): Promise<string> {
+  if (!task.baseBranch) throw new Error("Apply target was not recorded. Recover the task's destination before applying changes.");
+  await assertWorkspace(task);
+  await taskBranchRef(task);
+  const target = localBranchRef(task.baseBranch);
+  try { await execFile("git", ["show-ref", "--verify", "--", target], { cwd: task.repoPath }); }
+  catch (cause: unknown) { throw new Error("Saved Apply target is unavailable. Restore its branch before applying changes.", { cause }); }
+  await requireDirectBranch(task.repoPath, target);
+  return shortBranch(target);
+}
+
+async function taskBranchRef(task: Task): Promise<string> {
+  const ref = localBranchRef(task.branch);
+  if (await currentBranch(task.worktreePath) !== shortBranch(ref)) throw new Error("Task workspace branch changed. Recover its ownership before applying changes.");
+  await requireDirectBranch(task.worktreePath, ref);
+  return ref;
+}
+
+async function requireDirectBranch(repoPath: string, branchRef: string): Promise<void> {
   try {
-    const { stdout } = await execFile(
-      "git",
-      ["symbolic-ref", "-q", "--short", "HEAD"],
-      { cwd: repoPath },
-    );
-    const branch = stdout.trim();
-    return branch || null;
-  } catch {
-    return null;
+    await execFile("git", ["symbolic-ref", "-q", "--no-recurse", branchRef], { cwd: repoPath });
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return;
+    throw error;
+  }
+  throw new Error(`Apply branch "${branchRef}" is a symbolic branch ref. Restore its original direct branch before applying changes.`);
+}
+
+async function exactBranchOid(repoPath: string, branchRef: string): Promise<string> {
+  const { stdout } = await execFile("git", ["show-ref", "--verify", "--hash", "--", branchRef], { cwd: repoPath });
+  return stdout.trim();
+}
+
+async function isAncestor(repoPath: string, source: string, target: string): Promise<boolean> {
+  try {
+    await execFile("git", ["merge-base", "--is-ancestor", source, target], { cwd: repoPath });
+    return true;
+  } catch (error: unknown) {
+    if ((error as { code?: number | string }).code === 1) return false;
+    throw error;
   }
 }
 
@@ -105,16 +140,6 @@ async function branchIsCheckedOut(repoPath: string, branchRef: string): Promise<
   return stdout
     .split("\n")
     .some((line) => line.startsWith("branch ") && line.slice("branch ".length) === branchRef);
-}
-
-async function gitExitCode(repoPath: string, args: string[]): Promise<number> {
-  try {
-    await execFile("git", args, { cwd: repoPath });
-    return 0;
-  } catch (err) {
-    const code = (err as { code?: number | string }).code;
-    return typeof code === "number" ? code : 1;
-  }
 }
 
 async function mergeTreeConflictPaths(
@@ -147,36 +172,23 @@ async function mergeTreeConflictPaths(
 
 async function mergeWithoutCheckout(
   repoPath: string,
-  sourceBranch: string,
+  sourceSha: string,
   targetBranchInput: string,
   message: string,
 ): Promise<RefMergeResult> {
   const targetRef = localBranchRef(targetBranchInput);
   const targetBranch = shortBranch(targetRef);
+  await execFile("git", ["check-ref-format", targetRef], { cwd: repoPath });
 
   if (await branchIsCheckedOut(repoPath, targetRef)) {
     return { kind: "target-checked-out", targetBranch };
   }
 
-  const { stdout: targetOut } = await execFile(
-    "git",
-    ["rev-parse", `${targetRef}^{commit}`],
-    { cwd: repoPath },
-  );
-  const targetSha = targetOut.trim();
-
-  const { stdout: sourceOut } = await execFile(
-    "git",
-    ["rev-parse", `${sourceBranch}^{commit}`],
-    { cwd: repoPath },
-  );
-  const sourceSha = sourceOut.trim();
-
-  const sourceAlreadyMerged = await gitExitCode(
-    repoPath,
-    ["merge-base", "--is-ancestor", sourceSha, targetSha],
-  );
-  if (sourceAlreadyMerged === 0) {
+  const targetSha = await exactBranchOid(repoPath, targetRef);
+  if (await isAncestor(repoPath, sourceSha, targetSha)) {
+    if (!await publishInactiveRef(repoPath, targetRef, targetSha, undefined, message)) {
+      return { kind: "target-checked-out", targetBranch };
+    }
     return { kind: "merged", commit: targetSha, targetBranch };
   }
 
@@ -202,13 +214,58 @@ async function mergeWithoutCheckout(
   );
   const mergeCommit = commitOut.trim();
 
-  await execFile(
-    "git",
-    ["update-ref", "-m", message, targetRef, mergeCommit, targetSha],
-    { cwd: repoPath },
-  );
+  if (!await publishInactiveRef(repoPath, targetRef, targetSha, mergeCommit, message)) {
+    return { kind: "target-checked-out", targetBranch };
+  }
 
   return { kind: "merged", commit: mergeCommit, targetBranch };
+}
+
+async function publishInactiveRef(
+  repoPath: string,
+  targetRef: string,
+  old: string,
+  next: string | undefined,
+  message: string,
+): Promise<boolean> {
+  const child = spawn("git", ["update-ref", "--stdin", "-m", message], { cwd: repoPath, stdio: "pipe" });
+  let failure: Error | undefined;
+  let stderr = "";
+  child.on("error", error => { failure = error; });
+  child.stdin.on("error", error => { failure = error; });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  const closed = new Promise<number | null>(resolve => child.once("close", resolve));
+  const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const lines = reader[Symbol.asyncIterator]();
+  const step = async (command: string, reply: string) => {
+    await new Promise<void>((resolve, reject) => child.stdin.write(`${command}\n`, error => error ? reject(error) : resolve()));
+    if ((await lines.next()).value !== reply) throw new Error(`Git reference transaction did not acknowledge ${reply}`);
+  };
+  const run = async () => {
+    await step("start", "start: ok");
+    const edit = next ? `update ${targetRef} ${next} ${old}` : `verify ${targetRef} ${old}`;
+    await step(`option no-deref\n${edit}\nprepare`, "prepare: ok");
+    let available: boolean;
+    try {
+      // Git checks the old OID of a symbolic ref through its referent.
+      // Prepare owns the exact ref while we check whether it is direct.
+      await requireDirectBranch(repoPath, targetRef);
+      available = !await branchIsCheckedOut(repoPath, targetRef);
+    } catch (error: unknown) {
+      await step("abort", "abort: ok");
+      throw error;
+    }
+    const action = available ? "commit" : "abort";
+    await step(action, `${action}: ok`);
+    return available;
+  };
+  const result = await run().then(value => ({ value }), (error: unknown) => ({ error }));
+  child.stdin.end();
+  const code = await closed;
+  reader.close();
+  if (code !== 0 || failure) throw new Error(stderr.trim() || "Git reference transaction failed", { cause: failure ?? ("error" in result ? result.error : undefined) });
+  if ("error" in result) throw result.error;
+  return result.value;
 }
 
 // ─── Diff Computation ────────────────────────────────────────────────────────
@@ -220,6 +277,7 @@ async function mergeWithoutCheckout(
 function parseFileStatus(letter: string): DiffFile["status"] {
   switch (letter) {
     case "A":
+    case "C":
       return "added";
     case "D":
       return "deleted";
@@ -240,229 +298,159 @@ export function parseDiffOutput(
   rawDiff: string,
   nameStatusOutput: string,
 ): DiffFile[] {
-  if (!rawDiff.trim()) return [];
+  const entries = nameStatusOutput.split("\n").filter(line => line.length > 0).map(line => {
+    const [code, first, second] = line.split("\t");
+    const status = parseFileStatus(code.charAt(0));
+    const twoPaths = code.startsWith("R") || code.startsWith("C");
+    const filePath = twoPaths ? second : first;
+    const decoded = filePath === undefined ? null : decodeGitPath(filePath);
+    const oldPath = twoPaths ? decodeGitPath(first) : undefined;
+    if (decoded === null || oldPath === null) throw new Error("Remote Git returned an invalid file path");
+    return { path: decoded, status, ...(oldPath ? { oldPath } : {}) };
+  });
+  const patches = rawDiff.split(/(?=^diff --git )/m).filter(Boolean);
+  if (patches.length !== entries.length) throw new Error("Remote Git could not pair every changed file with its patch");
+  return entries.map((entry, index) => {
+    const patch = patches[index];
+    return { ...entry, patch, ...patchStats(patch) };
+  });
+}
 
-  // Parse name-status to get file statuses and rename info.
-  const statusMap = new Map<string, { status: DiffFile["status"]; oldPath?: string }>();
-  for (const line of nameStatusOutput.trim().split("\n")) {
-    if (!line.trim()) continue;
-    const parts = line.split("\t");
-    const statusLetter = parts[0].charAt(0); // R100 → R
-    const status = parseFileStatus(statusLetter);
-
-    if (status === "renamed" && parts.length >= 3) {
-      statusMap.set(parts[2], { status, oldPath: parts[1] });
-    } else if (parts.length >= 2) {
-      statusMap.set(parts[1], { status });
+/** Owns local/remote comparison routing and exposes read failures to the renderer. */
+export function registerDiffIpc(ipcMain: IpcMain, orchestrator: Pick<Orchestrator, "getTask" | "getRpcRouter" | "revertFile">, getMainWindow: () => BrowserWindow | null): void {
+  ipcMain.handle("orchestrator:revert-file", async (_evt, payload: { taskId: string; filePath: string }) => {
+    try {
+      await orchestrator.revertFile(payload.taskId, payload.filePath);
+      return { success: true };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
-  }
+  });
+  ipcMain.handle(
+    "orchestrator:get-diff",
+    async (_evt, payload: { taskId: string; checkpointSha?: string; checkpointFromSha?: string }) => {
+      try {
+        const task = orchestrator.getTask(payload.taskId);
+        if (!task) {
+          return { success: false, error: `Task not found: ${payload.taskId}` };
+        }
 
-  // Split the raw diff into per-file patches.
-  const fileDiffs = rawDiff.split(/^diff --git /m).filter((s) => s.trim());
-  const files: DiffFile[] = [];
+        let diff;
+        if (task.isRemote) {
+          if (payload.checkpointSha) throw new Error("Saved-file comparisons require a local workspace");
+          const router = orchestrator.getRpcRouter();
+          if (!router) throw new Error("SSH router not configured for remote diff");
+          diff = await computeRemoteDiff(task, router);
+        } else {
+          const fromRef = payload.checkpointSha ? payload.checkpointFromSha ?? task.baseRef : task.baseRef;
+          const toRef = payload.checkpointSha ?? "HEAD";
+          diff = await computeDiff(task, fromRef, toRef);
+        }
 
-  for (const fileDiff of fileDiffs) {
-    const patch = `diff --git ${fileDiff}`;
-
-    // Extract the file path from the diff header.
-    // Format: "a/path/to/file b/path/to/file"
-    const headerMatch = fileDiff.match(/^a\/(.+?) b\/(.+)/m);
-    if (!headerMatch) continue;
-
-    const filePath = headerMatch[2];
-
-    // Count additions and deletions from the hunk lines.
-    let additions = 0;
-    let deletions = 0;
-    for (const line of fileDiff.split("\n")) {
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        additions++;
-      } else if (line.startsWith("-") && !line.startsWith("---")) {
-        deletions++;
+        // Also relay as a diff-ready event for any listeners.
+        const win = getMainWindow();
+        if (win && !win.isDestroyed()) {
+          win.webContents.send("orchestrator:diff-ready", {
+            taskId: task.id,
+            diff: diff.rawDiff,
+            files: diff.files,
+          });
+        }
+        return { success: true, diff };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, error: message };
       }
-    }
-
-    const statusInfo = statusMap.get(filePath) ?? { status: "modified" as const };
-
-    files.push({
-      path: filePath,
-      status: statusInfo.status,
-      additions,
-      deletions,
-      patch,
-      ...(statusInfo.oldPath ? { oldPath: statusInfo.oldPath } : {}),
-    });
-  }
-
-  return files;
+    },
+  );
 }
 
-/**
- * Computes a structured diff between the task's base ref and the current
- * worktree state (including uncommitted changes).
- *
- * Strategy:
- * 1. First try: `git diff <baseRef>` — diffs baseRef against the working tree,
- *    capturing both committed AND uncommitted changes.
- * 2. If that's empty, try uncommitted changes only: `git diff HEAD`
- * 3. If still empty, try staged changes: `git diff --cached`
- */
-export async function computeDiff(task: Task): Promise<TaskDiff> {
-  const cwd = task.worktreePath || task.repoPath;
-
-  let rawDiff = "";
-  let nameStatus = "";
-
-  // Strategy 1: diff from base ref to working tree (committed + uncommitted).
+/** Compares saved trees or the complete live workspace without changing its index. */
+export async function computeDiff(task: Task, fromRef = task.baseRef, toRef = "HEAD"): Promise<TaskDiff> {
+  if (task.isRemote) throw new Error("Remote file comparisons require a connected remote agent");
+  const live = toRef === "HEAD";
+  const cwd = live ? task.worktreePath : task.repoPath;
+  const { stdout: from } = await gitForDiff(["rev-parse", "--verify", "--end-of-options", `${fromRef}^{tree}`], { cwd });
+  const args = ["diff", "--patch-with-raw", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+    "--src-prefix=a/", "--dst-prefix=b/", "--find-renames", "--submodule=short",
+    "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", from.trim()];
+  let directory: string | undefined;
+  let indexFile: string | undefined;
   try {
-    const result = await gitForDiff(
-      ["diff", task.baseRef],
-      { cwd, maxBuffer: 50 * 1024 * 1024 },
-    );
-    rawDiff = result.stdout;
-
-    const nsResult = await gitForDiff(
-      ["diff", "--name-status", task.baseRef],
-      { cwd },
-    );
-    nameStatus = nsResult.stdout;
-  } catch {
-    // baseRef might not be resolvable in the worktree — try alternatives.
-  }
-
-  // Strategy 2: unstaged working tree changes (git diff with no args).
-  // This catches edits Claude made without committing.
-  if (!rawDiff.trim()) {
-    try {
-      const result = await gitForDiff(
-        ["diff"],
-        { cwd, maxBuffer: 50 * 1024 * 1024 },
-      );
-      rawDiff = result.stdout;
-
-      const nsResult = await gitForDiff(
-        ["diff", "--name-status"],
-        { cwd },
-      );
-      nameStatus = nsResult.stdout;
-    } catch {
-      // Empty repo or no changes.
+    if (live) {
+      const [root, common, repository] = await Promise.all([
+        gitDirectory(cwd, "--show-toplevel"), gitDirectory(cwd, "--git-common-dir"), gitDirectory(task.repoPath, "--git-common-dir"),
+      ]);
+      if (root !== await fs.realpath(cwd) || common !== repository) throw new Error("Saved workspace no longer matches its Git repository");
+      directory = await fs.mkdtemp(path.join(os.tmpdir(), "crab-diff-"));
+      indexFile = path.join(directory, "index");
+      const { stdout: indexPath } = await gitForDiff(["rev-parse", "--git-path", "index"], { cwd });
+      try { await fs.copyFile(path.resolve(cwd, indexPath.replace(/\r?\n$/, "")), indexFile); } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      // Intent entries let Git compare untracked files (including saved baseline
+      // paths) without staging content. The user's real index remains untouched.
+      await gitForDiff(["add", "--intent-to-add", "--all", "--", "."], { cwd, indexFile });
+    } else {
+      const { stdout: to } = await gitForDiff(["rev-parse", "--verify", "--end-of-options", `${toRef}^{tree}`], { cwd });
+      args.push(to.trim());
     }
+    args.push("--");
+    // One invocation owns paths and patches; separate reads can disagree while
+    // files change. NUL-delimited raw paths preserve quoted/newline filenames.
+    const { stdout } = await gitForDiff(args, { cwd, indexFile, maxBuffer: 50 * 1024 * 1024 });
+    const { files, rawDiff } = parseRawDiff(stdout);
+    return {
+      taskId: task.id, baseRef: fromRef, headRef: toRef, files, rawDiff,
+      totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
+      totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0),
+    };
+  } finally {
+    if (directory) await fs.rm(directory, { recursive: true, force: true });
   }
-
-  // Strategy 3: staged changes (git diff --cached).
-  if (!rawDiff.trim()) {
-    try {
-      const result = await gitForDiff(
-        ["diff", "--cached"],
-        { cwd, maxBuffer: 50 * 1024 * 1024 },
-      );
-      rawDiff = result.stdout;
-
-      const nsResult = await gitForDiff(
-        ["diff", "--cached", "--name-status"],
-        { cwd },
-      );
-      nameStatus = nsResult.stdout;
-    } catch {
-      // No staged changes.
-    }
-  }
-
-  // Strategy 4: check for new untracked files without staging them.
-  // Staging from a read-only diff request can block large/filter-backed repos
-  // and should never mutate the user's index.
-  if (!rawDiff.trim()) {
-    try {
-      const untracked = await buildUntrackedDiff(cwd);
-      rawDiff = untracked.rawDiff;
-      nameStatus = untracked.nameStatus;
-    } catch {
-      // Best-effort.
-    }
-  }
-
-  // Get the HEAD ref.
-  let headRef = "";
-  try {
-    const result = await gitForDiff(["rev-parse", "HEAD"], { cwd });
-    headRef = result.stdout.trim();
-  } catch {
-    headRef = "unknown";
-  }
-
-  const files = parseDiffOutput(rawDiff, nameStatus);
-
-  const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0);
-  const totalDeletions = files.reduce((sum, f) => sum + f.deletions, 0);
-
-  return {
-    taskId: task.id,
-    baseRef: task.baseRef,
-    headRef,
-    files,
-    totalAdditions,
-    totalDeletions,
-    rawDiff,
-  };
 }
 
-async function buildUntrackedDiff(cwd: string): Promise<{ rawDiff: string; nameStatus: string }> {
-  const { stdout } = await gitForDiff(["ls-files", "--others", "--exclude-standard", "-z"], { cwd });
-  const files = stdout.split("\0").filter(Boolean);
-  const patches: string[] = [];
-  const nameStatus: string[] = [];
+async function gitDirectory(cwd: string, option: "--show-toplevel" | "--git-common-dir"): Promise<string> {
+  const { stdout } = await gitForDiff(["rev-parse", option], { cwd });
+  return fs.realpath(path.resolve(cwd, stdout.replace(/\r?\n$/, "")));
+}
 
-  for (const filePath of files) {
-    const absolutePath = path.resolve(cwd, filePath);
-    if (!absolutePath.startsWith(path.resolve(cwd) + path.sep)) continue;
-
-    let stat;
-    try {
-      stat = await fs.stat(absolutePath);
-    } catch {
-      continue;
-    }
-    if (!stat.isFile()) continue;
-
-    nameStatus.push(`A\t${filePath}`);
-
-    let content: Buffer;
-    try {
-      content = await fs.readFile(absolutePath);
-    } catch {
-      continue;
-    }
-
-    if (content.includes(0) || content.byteLength > MAX_UNTRACKED_DIFF_BYTES) {
-      patches.push([
-        `diff --git a/${filePath} b/${filePath}`,
-        "new file mode 100644",
-        "index 0000000..0000000",
-        `Binary files /dev/null and b/${filePath} differ`,
-      ].join("\n"));
-      continue;
-    }
-
-    const text = content.toString("utf-8").replace(/\r\n/g, "\n");
-    const lines = text.length === 0
-      ? []
-      : text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-    patches.push([
-      `diff --git a/${filePath} b/${filePath}`,
-      "new file mode 100644",
-      "index 0000000..0000000",
-      "--- /dev/null",
-      `+++ b/${filePath}`,
-      `@@ -0,0 +1,${lines.length} @@`,
-      ...lines.map((line) => `+${line}`),
-    ].join("\n"));
-  }
-
-  return {
-    rawDiff: patches.length > 0 ? `${patches.join("\n")}\n` : "",
-    nameStatus: nameStatus.length > 0 ? `${nameStatus.join("\n")}\n` : "",
+function parseRawDiff(output: string): { files: DiffFile[]; rawDiff: string } {
+  const entries: Array<Pick<DiffFile, "path" | "status" | "oldPath">> = [];
+  let cursor = 0;
+  const field = () => {
+    const end = output.indexOf("\0", cursor);
+    if (end < 0) throw new Error("Git returned an incomplete file comparison");
+    const value = output.slice(cursor, end);
+    cursor = end + 1;
+    return value;
   };
+  while (output[cursor] === ":") {
+    const status = field().split(" ").at(-1)?.charAt(0);
+    const first = field();
+    const renamed = status === "R" || status === "C";
+    entries.push({ path: renamed ? field() : first, status: parseFileStatus(status ?? ""), ...(renamed ? { oldPath: first } : {}) });
+  }
+  const rawDiff = output.slice(cursor).replace(/^\0/, "");
+  const patches = rawDiff.split(/(?=^diff --git )/m).filter(Boolean);
+  if (entries.length !== patches.length) throw new Error("Git could not pair every changed file with its patch");
+  const files = entries.map((entry, index) => {
+    const patch = patches[index];
+    return { ...entry, patch, ...patchStats(patch) };
+  });
+  return { files, rawDiff };
+}
+
+function patchStats(patch: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith("+")) additions++;
+    else if (inHunk && line.startsWith("-")) deletions++;
+  }
+  return { additions, deletions };
 }
 
 // ─── Remote Diff Computation ─────────────────────────────────────────────────
@@ -485,6 +473,8 @@ export async function computeRemoteDiff(
     );
   }
 
+  rpcRouter.assertRemoteEndpoint(task.remoteProfileId, task.remoteEndpoint);
+
   const result = await rpcRouter.sendToRemoteAgent(
     task.remoteProfileId,
     "task_compute_diff",
@@ -500,9 +490,10 @@ export async function computeRemoteDiff(
     head_ref: string;
   };
 
-  const rawDiff = result.diff ?? "";
-  const nameStatus = result.name_status ?? "";
-  const headRef = result.head_ref ?? "unknown";
+  const rawDiff = result.diff;
+  const nameStatus = result.name_status;
+  const headRef = result.head_ref;
+  if (typeof rawDiff !== "string" || typeof nameStatus !== "string" || typeof headRef !== "string") throw new Error("Remote agent returned an incomplete file comparison");
 
   const files = parseDiffOutput(rawDiff, nameStatus);
   const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0);
@@ -522,91 +513,44 @@ export async function computeRemoteDiff(
 // ─── Apply ───────────────────────────────────────────────────────────────────
 
 /**
- * Merges the agent branch into the base branch where the task was created.
- *
- * Before merging, ensures all changes in the worktree are committed to the
- * agent branch so nothing is lost. Then checks out the base branch in the
- * main repo and merges the agent branch into it.
- *
- * Returns an ApplyResult indicating success or conflict. If the merge fails
- * due to conflicts, the conflict file list is returned and the merge is aborted.
+ * Merges the task branch into its captured destination after committing pending source changes.
+ * Rejects changed workspace identities, missing targets and failed source commits;
+ * returns conflicts after aborting a conflicting merge.
  */
 export async function applyAll(task: Task): Promise<ApplyResult> {
-  if (isPrimaryWorkspaceTask(task)) {
-    return { success: true };
-  }
+  requireApplyWorkspace(task);
 
   const commitMessage = `Apply agent task: ${task.prompt.slice(0, 50)}`;
+  // Validate the captured destination before staging source work. A missing
+  // target cannot grant the branch checked out today ownership of this Apply.
+  const targetBranch = await applyTarget(task);
 
-  // First, ensure all worktree changes are committed to the agent branch.
-  // The agent may have left uncommitted changes.
-  try {
-    const { stdout: status } = await execFile(
-      "git",
-      ["status", "--porcelain"],
-      { cwd: task.worktreePath },
-    );
-    if (status.trim()) {
-      await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
-      await execFile(
-        "git",
-        ["commit", "-m", "Agent work (auto-committed before apply)"],
-        { cwd: task.worktreePath },
-      );
-    }
-  } catch {
-    // Best-effort — if commit fails, the merge will still pick up
-    // whatever was already committed on the branch.
+  // Display preferences cannot hide source changes from the Apply snapshot.
+  const { stdout: status } = await execFile("git", ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], { cwd: task.worktreePath });
+  if (status.trim()) {
+    await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
+    await execFile("git", ["commit", "-m", "Agent work (auto-committed before apply)"], { cwd: task.worktreePath });
   }
-
-  // Determine which branch to merge into.
-  // Use the stored baseBranch if available, otherwise detect the current branch.
-  let targetBranch: string | undefined = task.baseBranch;
-
-  if (!targetBranch) {
-    // Fallback: detect the current branch in the main repo.
-    try {
-      const { stdout } = await execFile(
-        "git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: task.repoPath },
-      );
-      const current = stdout.trim();
-      if (current && current !== "HEAD") {
-        targetBranch = current;
-      }
-    } catch {
-      // Will proceed without explicit checkout.
-    }
-  }
+  const source = await exactBranchOid(task.worktreePath, await taskBranchRef(task));
 
   const activeBranch = await currentBranch(task.repoPath);
-  if (targetBranch) {
-    const targetShort = shortBranch(targetBranch);
-    if (activeBranch !== targetShort) {
-      const refMerge = await mergeWithoutCheckout(
-        task.repoPath,
-        task.branch,
-        targetBranch,
-        commitMessage,
-      );
-      if (refMerge.kind === "merged") {
-        return { success: true };
-      }
-      if (refMerge.kind === "conflict") {
-        return { success: false, conflicts: refMerge.conflicts };
-      }
-      throw new Error(
-        `Target branch "${refMerge.targetBranch}" is checked out in another worktree; switch to that worktree to merge.`,
-      );
+  if (activeBranch !== targetBranch) {
+    const refMerge = await mergeWithoutCheckout(task.repoPath, source, targetBranch, commitMessage);
+    if (refMerge.kind === "merged") {
+      return { success: true };
     }
+    if (refMerge.kind === "conflict") {
+      return { success: false, conflicts: refMerge.conflicts };
+    }
+    throw new Error(`Target branch "${refMerge.targetBranch}" is checked out in another worktree; switch to that worktree to merge.`);
   }
 
   try {
     await execFile(
       "git",
-      ["merge", task.branch, "--no-ff", "-m", commitMessage],
+      ["merge", source, "--no-ff", "-m", commitMessage],
       { cwd: task.repoPath },
     );
-    return { success: true };
   } catch (err: unknown) {
     // execFile errors include stdout/stderr as properties on the error object.
     const errObj = err as { message?: string; stdout?: string; stderr?: string };
@@ -630,6 +574,13 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
 
     throw err;
   }
+
+  const targetRef = localBranchRef(targetBranch);
+  await requireDirectBranch(task.repoPath, targetRef);
+  if (!await isAncestor(task.repoPath, source, await exactBranchOid(task.repoPath, targetRef))) {
+    throw new Error(`Saved Apply target "${targetBranch}" does not contain the task commit. Inspect the repository checkout and task workspace before retrying.`);
+  }
+  return { success: true };
 }
 
 /**
@@ -651,69 +602,77 @@ async function getConflictFiles(repoPath: string): Promise<string[]> {
 // ─── Cherry-Pick ─────────────────────────────────────────────────────────────
 
 /**
- * Checks out selected files from the agent branch, stages, and commits them.
- *
- * Ensures the main repo is on the correct base branch before applying.
- * Uses `git checkout <branch> -- <file>` for each file, then stages
- * and commits all checked-out files into the base branch.
+ * Captures live selected files and commits them on the saved destination branch.
  */
 export async function cherryPickFiles(
   task: Task,
   files: string[],
+  snapshots: Pick<CheckpointManager, "snapshotHead">,
 ): Promise<void> {
-  if (isPrimaryWorkspaceTask(task)) return;
+  requireApplyWorkspace(task);
   if (files.length === 0) return;
 
-  // Ensure we're on the correct branch before applying files.
-  const targetBranch: string | undefined = task.baseBranch;
-  if (targetBranch) {
-    try {
-      const { stdout: currentBranch } = await execFile(
-        "git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: task.repoPath },
-      );
-      if (currentBranch.trim() !== targetBranch) {
-        await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
-      }
-    } catch {
-      // Proceed anyway — let the checkout/add fail with a clear error.
-    }
+  const targetBranch = await applyTarget(task);
+  const source = await snapshots.snapshotHead(task);
+  await taskBranchRef(task);
+  const { stdout: base } = await execFile("git", ["rev-parse", "--verify", "--end-of-options", `${task.baseRef}^{tree}`], { cwd: task.worktreePath });
+  const { stdout: renamed } = await execFile("git", ["diff", "--name-status", "-z", "--find-renames", "--diff-filter=R", base.trim(), source, "--"], { cwd: task.worktreePath, encoding: "buffer" });
+  const selection = new Set(files);
+  const renames = new TextDecoder("utf-8", { fatal: true }).decode(renamed).split("\0");
+  // The UI selects a rename by its new path. Its old path belongs to the same
+  // change; omitting it would turn a confirmed rename into a copied file.
+  for (let index = 0; index < renames.length - 1; index += 3) {
+    if (selection.has(renames[index + 2])) selection.add(renames[index + 1]);
   }
-
-  // Checkout each file from the agent branch.
-  for (const file of files) {
-    await execFile(
-      "git",
-      ["checkout", task.branch, "--", file],
-      { cwd: task.repoPath },
-    );
+  const selectedPaths = [...selection];
+  const paths = ["--", ...selectedPaths];
+  await requireCleanSelection(task.repoPath, selectedPaths);
+  if (await currentBranch(task.repoPath) !== targetBranch) {
+    await execFile("git", ["checkout", "--no-overwrite-ignore", targetBranch], { cwd: task.repoPath });
+    await requireCleanSelection(task.repoPath, selectedPaths);
   }
+  if (await currentBranch(task.repoPath) !== targetBranch) throw new Error("Saved Apply target is no longer checked out. Inspect the repository before retrying.");
 
-  // Stage all the checked-out files.
-  await execFile("git", ["add", ...files], { cwd: task.repoPath });
+  const { stdout: changed } = await execFile("git", ["--literal-pathspecs", "diff", "--name-only", "-z", "--no-renames", "HEAD", source, ...paths], { cwd: task.repoPath, encoding: "buffer" });
+  const changes = new TextDecoder("utf-8", { fatal: true }).decode(changed).split("\0").filter(Boolean);
+  if (!changes.length) return;
+  const changedPaths = ["--", ...changes];
+  // Restore uses no-overlay semantics: a selected deletion removes the target
+  // rather than leaving an old file behind. The clean check protects user bytes.
+  await execFile("git", ["--literal-pathspecs", "restore", `--source=${source}`, "--staged", "--worktree", ...changedPaths], { cwd: task.repoPath });
 
-  // Check if there are actually staged changes to commit.
-  // If the files are already identical (e.g., after a prior merge), git commit
-  // would fail with "nothing to commit". In that case, succeed silently.
-  const { stdout: diffStaged } = await execFile(
-    "git",
-    ["diff", "--cached", "--name-only"],
-    { cwd: task.repoPath },
-  );
-  if (!diffStaged.trim()) {
-    // Nothing to commit — files are already up to date.
-    return;
-  }
-
-  // Commit the cherry-picked files.
+  // Commit only the captured selection so unrelated staged work stays private.
   const fileList = files.length <= 3
     ? files.join(", ")
     : `${files.slice(0, 3).join(", ")} (+${files.length - 3} more)`;
   const commitMessage = `Apply selected files from agent task: ${fileList}`;
   await execFile(
     "git",
-    ["commit", "-m", commitMessage],
+    ["--literal-pathspecs", "commit", "--only", "-m", commitMessage, ...changedPaths],
     { cwd: task.repoPath },
   );
+}
+
+async function requireCleanSelection(repoPath: string, files: string[]): Promise<void> {
+  const paths = ["--", ...files];
+  const { stdout: status } = await execFile("git", ["--literal-pathspecs", "--no-optional-locks", "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none", ...paths], { cwd: repoPath });
+  if (status.length) throw new Error("Selected target paths contain local changes or untracked files. Save or move them before applying.");
+  const { stdout: entries } = await execFile("git", ["--literal-pathspecs", "ls-files", "-v", "-z", ...paths], { cwd: repoPath, encoding: "buffer" });
+  if (/(^|\0)[a-zS] /.test(new TextDecoder("utf-8", { fatal: true }).decode(entries))) throw new Error("Selected target paths use index exclusion flags. Clear them before applying.");
+  for (const file of files) {
+    const relative = path.relative(repoPath, path.resolve(repoPath, file));
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Apply requires paths inside the target repository");
+    let parent = path.dirname(relative);
+    while (parent !== ".") {
+      try {
+        const entry = await fs.lstat(path.join(repoPath, parent));
+        if (!entry.isDirectory()) throw new Error("Selected target path has a replaced parent directory. Move it before applying.");
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      parent = path.dirname(parent);
+    }
+  }
 }
 
 // ─── Discard ─────────────────────────────────────────────────────────────────
@@ -723,7 +682,7 @@ export async function cherryPickFiles(
  *
  * Delegates to `removeWorktree` from the worktree module.
  */
-export async function discard(task: Task): Promise<void> {
-  if (isPrimaryWorkspaceTask(task)) return;
-  await removeWorktree(task.repoPath, task.id);
+export async function discard(task: Task): Promise<string | undefined> {
+  if (task.worktreeMode === "primary") return;
+  return removeWorktree(task);
 }

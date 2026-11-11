@@ -1,12 +1,8 @@
 /**
- * Multi-Agent Collaboration View — Parallel agent lanes with Gantt-like display.
- *
- * Shows multiple agents working on the same task as horizontal lanes.
- * Each lane shows the agent's status, role, and live activity.
- * When all agents finish, offers to merge their work.
+ * Agent conversations sharing a workspace, with independent status and chat access.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Bot,
   GitMerge,
@@ -21,21 +17,11 @@ import type { AgentSessionInfo } from "../../lib/use-agent-sessions";
 
 // ── Types ───────────────────────────────────────────────────────────
 
-interface AgentLane {
-  id: string;
-  type: string;
-  role?: string;
-  status: "running" | "done" | "failed" | "idle";
-  /** Latest activity summary. */
-  lastActivity?: string;
-  /** Start time for duration display. */
-  startedAt?: number;
-}
-
 interface Props {
   task: OrchestratorTask;
-  /** Whether the primary agent is still streaming. */
-  isStreaming: boolean;
+  childTasks: OrchestratorTask[];
+  onOpenChat: (taskId: string) => void;
+  onReviewChanges: () => void;
   /** Callback to add a new agent to the task. */
   onAddAgent?: (agentType: string, role: string) => void;
   /** Live daemon session states for this task's agents. */
@@ -53,39 +39,17 @@ const PRESET_ROLES = [
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function MultiAgentView({ task, isStreaming, onAddAgent, daemonSessions = [] }: Props) {
-  const [lanes, setLanes] = useState<AgentLane[]>([]);
+export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, onAddAgent, daemonSessions = [] }: Props) {
   const [showAddMenu, setShowAddMenu] = useState(false);
-  const [merging, setMerging] = useState(false);
-
-  // Build lanes from task.agents + primary agent.
-  useEffect(() => {
-    const primary: AgentLane = {
-      id: "primary",
-      type: task.agentName,
-      role: "primary",
-      status: isStreaming ? "running" : (task.status === "failed" ? "failed" : "done"),
-      startedAt: task.createdAt,
-    };
-
-    const additional: AgentLane[] = (task.agents ?? []).map((a) => ({
-      id: a.id,
-      type: a.type,
-      role: a.role,
-      status: a.status === "done" || a.status === "failed" || a.status === "idle" ? a.status : "running",
-      startedAt: Date.now(),
-    }));
-
-    setLanes([primary, ...additional]);
-  }, [task, isStreaming]);
+  const conversations = [task, ...childTasks];
 
   const handleAddAgent = useCallback((role: string) => {
     onAddAgent?.(task.agentName, role);
     setShowAddMenu(false);
   }, [task.agentName, onAddAgent]);
 
-  const allDone = lanes.every((l) => l.status === "done" || l.status === "failed");
-  const hasMultiple = lanes.length > 1;
+  const allDone = conversations.every(conversation => ["reviewing", "applied", "archived", "discarded", "failed", "stopped"].includes(conversation.status));
+  const hasMultiple = conversations.length > 1;
 
   return (
     <div className="flex h-full flex-col">
@@ -93,7 +57,7 @@ export function MultiAgentView({ task, isStreaming, onAddAgent, daemonSessions =
       <div className="flex items-center gap-2 border-b border-gx-border px-4 py-2">
         <Bot size={13} className="text-gx-accent" />
         <span className="text-xs font-medium text-gx-text">Agents</span>
-        <span className="text-[10px] text-gx-muted">({lanes.length})</span>
+        <span className="text-[10px] text-gx-muted">({conversations.length})</span>
         <div className="flex-1" />
         <div className="relative">
           <button
@@ -125,8 +89,8 @@ export function MultiAgentView({ task, isStreaming, onAddAgent, daemonSessions =
       {/* Agent lanes (Gantt-like) */}
       <div className="flex-1 overflow-auto px-4 py-3">
         <div className="space-y-2">
-          {lanes.map((lane) => (
-            <AgentLaneRow key={lane.id} lane={lane} />
+          {conversations.map((conversation) => (
+            <AgentLaneRow key={conversation.id} task={conversation} primary={conversation.id === task.id} onOpenChat={onOpenChat} />
           ))}
         </div>
 
@@ -160,12 +124,11 @@ export function MultiAgentView({ task, isStreaming, onAddAgent, daemonSessions =
             </p>
             <button
               type="button"
-              disabled={merging}
-              onClick={() => setMerging(true)}
+              onClick={onReviewChanges}
               className="mt-2 flex items-center gap-1.5 rounded bg-gx-accent px-3 py-1.5 text-[11px] font-medium text-white hover:bg-gx-accent/80 disabled:opacity-50"
             >
-              {merging ? <Loader2 size={11} className="animate-spin" /> : <GitMerge size={11} />}
-              Review merged changes
+              <GitMerge size={11} />
+              Review changes
             </button>
           </div>
         )}
@@ -176,73 +139,45 @@ export function MultiAgentView({ task, isStreaming, onAddAgent, daemonSessions =
 
 // ── Lane Row ────────────────────────────────────────────────────────
 
-function AgentLaneRow({ lane }: { lane: AgentLane }) {
+function AgentLaneRow({ task, primary, onOpenChat }: { task: OrchestratorTask; primary: boolean; onOpenChat: (taskId: string) => void }) {
+  const running = task.status === "running" || task.status === "iterating";
   return (
     <div className="flex items-center gap-3 rounded-md border border-gx-border bg-gx-bg-sub px-3 py-2">
-      {/* Status indicator */}
       <div className={clsx(
-        "h-2.5 w-2.5 rounded-full",
-        lane.status === "running" && "bg-gx-success animate-pulse",
-        lane.status === "done" && "bg-gx-success",
-        lane.status === "failed" && "bg-gx-error",
-        lane.status === "idle" && "bg-gx-muted/40",
+        "h-2.5 w-2.5 shrink-0 rounded-full",
+        running ? "bg-gx-success animate-pulse" : task.status === "failed" ? "bg-gx-error" : "bg-gx-muted/40",
       )} />
 
       {/* Provider icon */}
       <div
         className={clsx(
           "flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
-          agentAccentBg(lane.type),
+          agentAccentBg(task.agentName),
         )}
-        title={lane.type}
+        title={task.agentName}
       >
-        <AgentIcon agentName={lane.type} size={12} className={agentAccentColor(lane.type)} />
+        <AgentIcon agentName={task.agentName} size={12} className={agentAccentColor(task.agentName)} />
       </div>
 
       {/* Agent info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-gx-text capitalize">
-            {lane.role ?? lane.type}
+            {primary ? "primary" : task.spawnedRole ?? task.title}
           </span>
-          <span className="text-[9px] text-gx-muted">{lane.type}</span>
-        </div>
-        {lane.lastActivity && (
-          <div className="mt-0.5 truncate text-[9px] text-gx-muted">
-            {lane.lastActivity}
-          </div>
-        )}
-      </div>
-
-      {/* Duration / status label */}
-      <div className="shrink-0 text-[9px]">
-        {lane.status === "running" && (
-          <span className="flex items-center gap-1 text-gx-success">
-            <Loader2 size={9} className="animate-spin" /> Working
-          </span>
-        )}
-        {lane.status === "done" && (
-          <span className="text-gx-muted">Done</span>
-        )}
-        {lane.status === "failed" && (
-          <span className="text-gx-error">Failed</span>
-        )}
-      </div>
-
-      {/* Progress bar (visual representation of work) */}
-      <div className="w-[80px] shrink-0">
-        <div className="h-1.5 overflow-hidden rounded-full bg-gx-border">
-          <div
-            className={clsx(
-              "h-full rounded-full transition-all duration-1000",
-              lane.status === "running" && "bg-gx-success animate-pulse w-3/4",
-              lane.status === "done" && "bg-gx-success w-full",
-              lane.status === "failed" && "bg-gx-error w-full",
-              lane.status === "idle" && "bg-gx-muted/30 w-0",
-            )}
-          />
+          <span className="text-[9px] text-gx-muted">{task.agentName}</span>
         </div>
       </div>
+
+      <div className="flex shrink-0 items-center gap-1 text-[11px] capitalize text-gx-muted" role="status">
+        {running && <Loader2 size={10} className="animate-spin" />}
+        {task.status}
+      </div>
+      <button type="button" onClick={() => onOpenChat(task.id)}
+        aria-label={`Open ${primary ? "primary" : task.spawnedRole ?? task.title} chat`}
+        className="shrink-0 rounded px-2 py-1 text-xs text-gx-accent hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent">
+        Open chat
+      </button>
     </div>
   );
 }

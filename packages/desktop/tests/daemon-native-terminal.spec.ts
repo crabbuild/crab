@@ -5,19 +5,37 @@ import * as path from "node:path";
 import { DaemonClient } from "../electron/daemon/daemon-client";
 import { DaemonServer } from "../electron/daemon/daemon-server";
 import { PROTOCOL_VERSION } from "../electron/daemon/protocol";
-import { createNodePtySpawner } from "../electron/daemon/subprocess-handle";
+import { createNodePtySpawner, NodePtySubprocessHandle } from "../electron/daemon/subprocess-handle";
 import { TerminalHost } from "../electron/daemon/terminal-host";
+import type { IPty } from "node-pty";
+import type { SessionInfo } from "../electron/daemon/types";
+import { socketAddress } from "../electron/daemon/socket-address";
 
-it("executes a real shell command through authenticated daemon connections", async () => {
+it.each(["win32", "darwin", "linux"])("terminates a %s PTY using its supported kill contract", platform => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const kill = vi.fn((signal?: string) => {
+    if (platform === "win32" && signal) throw new Error("Signals not supported on windows.");
+  });
+  const pty = { pid: 1, onData: vi.fn(), onExit: vi.fn(), kill } as unknown as IPty;
+  try {
+    Object.defineProperty(process, "platform", { value: platform });
+    new NodePtySubprocessHandle(pty).kill("SIGTERM");
+    expect(kill).toHaveBeenCalledWith(platform === "win32" ? undefined : "SIGTERM");
+  } finally { Object.defineProperty(process, "platform", descriptor); }
+});
+
+it.each(["short", "long"])("executes and terminates a real shell through a %s control path", async length => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-pty-"));
-  const base = path.join(root, `daemon-v${PROTOCOL_VERSION}`);
+  const directory = length === "long" ? path.join(root, "nested-home-".repeat(6)) : root;
+  fs.mkdirSync(directory, { recursive: true });
+  const base = path.join(directory, `daemon-v${PROTOCOL_VERSION}`);
   const server = new DaemonServer({
     socketPath: `${base}.sock`, tokenPath: `${base}.token`, pidPath: `${base}.pid`,
     spawnSubprocess: createNodePtySpawner(), idleTimeoutMs: 0,
   });
   let output = "";
   const client = new DaemonClient({
-    socketDir: root, daemonEntryPath: "",
+    socketDir: directory, daemonEntryPath: "",
     onSessionData: (_id, data) => { output += data; },
     onSessionExit: () => {}, onAgentStateChange: () => {},
   });
@@ -34,14 +52,46 @@ it("executes a real shell command through authenticated daemon connections", asy
     const expected = process.platform === "win32" ? `crab-pty-${process.env.COMPUTERNAME}` : "crab-pty-ready";
     await client.request("write", { sessionId: "native-test", data: command });
     await vi.waitFor(() => expect(output).toContain(expected), { timeout: 10_000 });
+    const sessions = await client.request<SessionInfo[]>("listSessions");
+    const session = sessions.find(session => session.sessionId === "native-test");
+    if (!session?.pid) throw new Error("Native terminal has no process identity");
+    const pid = session.pid;
+    await client.request("kill", { sessionId: "native-test" });
+    await vi.waitFor(() => {
+      expect(() => process.kill(pid, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" }));
+    }, { timeout: 10_000 });
   } finally {
     if (previousShell === undefined) delete process.env.SHELL;
     else process.env.SHELL = previousShell;
     client.disconnect();
     await server.shutdown({ killSessions: true });
+    const address = socketAddress(`${base}.sock`);
+    if (process.platform !== "win32" && address !== `${base}.sock`) {
+      fs.rmSync(path.dirname(address), { recursive: true, force: true });
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 }, 20_000);
+
+it.skipIf(process.platform === "win32").each(["public", "symlink"])("rejects a %s directory for a shortened socket", async kind => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-private-ipc-"));
+  const base = path.join(root, "nested-home-".repeat(6), `daemon-v${PROTOCOL_VERSION}`);
+  fs.mkdirSync(path.dirname(base), { recursive: true });
+  const directory = path.dirname(socketAddress(`${base}.sock`));
+  const server = new DaemonServer({
+    socketPath: `${base}.sock`, tokenPath: `${base}.token`, pidPath: `${base}.pid`,
+    spawnSubprocess: createNodePtySpawner(), idleTimeoutMs: 0,
+  });
+  try {
+    if (kind === "public") { fs.mkdirSync(directory); fs.chmodSync(directory, 0o755); }
+    else fs.symlinkSync(root, directory);
+    await expect(server.start()).rejects.toThrow("Daemon socket directory is not private and owned");
+  } finally {
+    await server.shutdown({ killSessions: true });
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it.skipIf(process.platform === "win32" || !fs.existsSync("/bin/bash"))("honors the selected shell and runs a command line after shell readiness", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crab-shell-profile-"));

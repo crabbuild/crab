@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceSnapshots } from "../../lib/use-workspace-snapshots";
 import clsx from "clsx";
 import { ChevronDown, Clock, RotateCcw } from "lucide-react";
 import { OrchestratorTask } from "./TaskCard";
@@ -18,58 +19,19 @@ import { CheckpointDiffRange } from "./CheckpointTimeline";
 
 // ── Types ───────────────────────────────────────────────────────────
 
-interface Checkpoint {
-  ref: string;
-  turnNumber: number;
-  sha: string;
-}
-
 interface Props {
   task: OrchestratorTask;
   selectedTurn: number | null;
-  onRevert?: (turnNumber: number) => void;
+  onRestore?: () => void;
   onSelectTurn?: (range: CheckpointDiffRange | null) => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn }: Props) {
+export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn }: Props) {
   const [open, setOpen] = useState(false);
-  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [reverting, setReverting] = useState(false);
+  const { checkpoints, backups, loading, restoring, error, restore, reload } = useWorkspaceSnapshots(task);
   const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Fetch checkpoints on mount and when task status changes.
-  useEffect(() => {
-    setLoading(true);
-    (window as any).crab.orchestrator
-      ?.listCheckpoints?.(task.id)
-      .then((result: { success: boolean; checkpoints?: Checkpoint[] }) => {
-        setCheckpoints(result?.success && result.checkpoints ? result.checkpoints : []);
-      })
-      .catch(() => setCheckpoints([]))
-      .finally(() => setLoading(false));
-  }, [task.id, task.status]);
-
-  // Listen for new checkpoints.
-  useEffect(() => {
-    const handler = (data: { taskId: string; turnNumber: number; ref: string; sha?: string }) => {
-      if (data.taskId !== task.id) return;
-      setCheckpoints((prev) => {
-        const existing = prev.find((c) => c.turnNumber === data.turnNumber);
-        if (existing) {
-          if (!existing.sha && data.sha) {
-            return prev.map((c) => c.turnNumber === data.turnNumber ? { ...c, sha: data.sha! } : c);
-          }
-          return prev;
-        }
-        return [...prev, { ref: data.ref, turnNumber: data.turnNumber, sha: data.sha ?? "" }];
-      });
-    };
-    const unsubscribe = (window as any).crab?.orchestrator?.onCheckpointCreated?.(handler);
-    return () => { if (typeof unsubscribe === "function") unsubscribe(); };
-  }, [task.id]);
 
   // Close dropdown on outside click.
   useEffect(() => {
@@ -88,6 +50,7 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
     return sorted.map((cp, idx) => {
       const next = sorted[idx + 1];
       return {
+        ref: cp.ref,
         turnNumber: cp.turnNumber,
         fromSha: cp.sha,
         toSha: next ? next.sha : null,
@@ -106,23 +69,13 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
     });
   }, [onSelectTurn]);
 
-  const handleRevert = useCallback(async (turnNumber: number) => {
-    setReverting(true);
-    try {
-      const result = await (window as any).crab.orchestrator?.revertCheckpoint(task.id, turnNumber);
-      if (result?.success) {
-        onRevert?.(turnNumber);
-      }
-    } catch {
-      // Handled by parent.
-    } finally {
-      setReverting(false);
-    }
-  }, [task.id, onRevert]);
+  const handleRestore = async (sourceRef: string) => {
+    if (await restore(sourceRef)) onRestore?.();
+  };
 
   // Don't render if no checkpoints.
   if (loading && checkpoints.length === 0) return null;
-  if (!loading && turns.length === 0) return null;
+  if (!loading && turns.length === 0 && backups.length === 0 && !error) return null;
 
   return (
     <div ref={dropdownRef} className="relative">
@@ -136,7 +89,8 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
             ? "text-gx-accent"
             : "text-gx-muted hover:text-gx-text",
         )}
-        title="Checkpoint timeline — time travel between agent turns"
+        aria-label="Saved file states"
+        title="Saved file states"
       >
         <Clock size={12} />
         {selectedTurn != null && (
@@ -176,11 +130,8 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
               const isActive = selectedTurn === turn.turnNumber;
 
               return (
-                <button
+                <div
                   key={turn.turnNumber}
-                  type="button"
-                  onClick={() => handleSelect(turn)}
-                  disabled={!turn.hasSha}
                   className={clsx(
                     "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition",
                     isActive
@@ -189,6 +140,7 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
                     !turn.hasSha && "opacity-40 cursor-not-allowed",
                   )}
                 >
+                  <button type="button" onClick={() => handleSelect(turn)} disabled={!turn.hasSha} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                   {/* Turn indicator dot */}
                   <span
                     className={clsx(
@@ -206,7 +158,7 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
                     <span className="text-xs font-medium">
                       Turn {turn.turnNumber}
                       {turn.isLatest && (
-                        <span className="ml-1.5 text-[9px] text-gx-success font-normal">latest</span>
+                        <span className="ml-1.5 text-[9px] text-gx-success font-normal">live</span>
                       )}
                     </span>
                     <span className="text-[10px] font-mono text-gx-muted truncate">
@@ -215,30 +167,41 @@ export function CheckpointDropdown({ task, selectedTurn, onRevert, onSelectTurn 
                     </span>
                   </div>
 
-                  {/* Revert button (not on latest) */}
-                  {!turn.isLatest && turn.hasSha && (
+                  </button>
+
+                  {/* Restore the saved pre-input file state. */}
+                  {turn.hasSha && (
                     <button
                       type="button"
-                      disabled={reverting}
+                      disabled={restoring}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleRevert(turn.turnNumber);
+                        void handleRestore(turn.ref);
                       }}
                       className="flex shrink-0 items-center gap-0.5 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[9px] text-gx-error opacity-0 group-hover:opacity-100 hover:bg-gx-error/10 disabled:opacity-50 transition"
-                      title={`Revert to turn ${turn.turnNumber}`}
+                      title={`Restore files before turn ${turn.turnNumber}`}
+                      aria-label={`Restore files before turn ${turn.turnNumber}`}
                     >
-                      <RotateCcw size={8} /> Revert
+                      <RotateCcw size={8} /> Restore files
                     </button>
                   )}
-                </button>
+                </div>
               );
             })}
           </div>
 
+          {error && <div className="px-3 py-2 text-xs text-gx-error"><p role="alert">{error}</p><button type="button" onClick={reload}>Reload saved file states</button></div>}
+          {backups.length > 0 && <div className="max-h-48 overflow-y-auto border-t border-gx-border p-2">
+            <p className="mb-1 text-xs text-gx-muted">Backups</p>
+            {backups.map((backup, index) => <button key={backup.ref} type="button" disabled={restoring} onClick={() => void handleRestore(backup.ref)}
+              className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-gx-hover disabled:opacity-50">
+              Restore files saved {new Date(backup.createdAt).toLocaleString()} · backup {backups.length - index}
+            </button>)}
+          </div>}
           {/* Footer */}
           <div className="border-t border-gx-border px-3 py-1.5">
             <span className="text-[10px] text-gx-muted">
-              {turns.length} checkpoint{turns.length !== 1 ? "s" : ""} · click to view turn diff
+              {turns.length} checkpoint{turns.length !== 1 ? "s" : ""} · restore files, keep conversation
             </span>
           </div>
         </div>

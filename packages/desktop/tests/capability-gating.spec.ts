@@ -215,17 +215,7 @@ describe("RemoteProvider capabilities", () => {
 
     const caps = await provider.capabilities(REPO_ID);
 
-    // canEdit and basic git ops should be true (optimistic)
-    expect(caps.canEdit).toBe(true);
-    expect(caps.canStageHunks).toBe(true);
-    expect(caps.canWorktree).toBe(true);
-    expect(caps.canForge).toBe(true);
-    // Features requiring agent support should be false (conservative)
-    expect(caps.canWatch).toBe(false);
-    expect(caps.canHydrate).toBe(false);
-    expect(caps.canSearch).toBe(false);
-    expect(caps.canExec).toBe(false);
-    expect(caps.canTrash).toBe(false);
+    expect(caps).toEqual(noCapabilities());
   });
 
   it("returns noCapabilities for non-remote repo_id", async () => {

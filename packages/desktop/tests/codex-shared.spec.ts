@@ -7,27 +7,11 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  mapDecisionToCodex,
   stripAnsi,
   CODEX_TRACE_LINE_RE,
   CODEX_MCP_NOISE_RE,
 } from "../electron/codex-shared";
 
-describe("mapDecisionToCodex", () => {
-  it.each([
-    { input: "allow" as const, expected: "acceptForSession" },
-    { input: "allow_once" as const, expected: "accept" },
-    { input: "deny" as const, expected: "decline" },
-    { input: "cancel" as const, expected: "cancel" },
-  ])('maps "$input" → "$expected"', ({ input, expected }) => {
-    expect(mapDecisionToCodex(input)).toBe(expected);
-  });
-
-  it("throws on an unknown decision value", () => {
-    // Force an invalid value past the type system to verify runtime guard.
-    expect(() => mapDecisionToCodex("bogus" as any)).toThrow("unreachable decision");
-  });
-});
 
 describe("stripAnsi", () => {
   it("returns plain text unchanged", () => {
