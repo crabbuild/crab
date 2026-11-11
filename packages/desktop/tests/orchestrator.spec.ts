@@ -23,6 +23,7 @@ import { OrchestratorTaskDatabase } from "../electron/orchestrator-task-db";
 import { AgentSubmissionUncertainError, type AgentTurnOptions } from "../electron/orchestrator-adapters";
 import { agentRegistry } from "../electron/orchestrator-registry";
 import { WorkspaceScripts } from "../electron/orchestrator-scripts";
+import { AgentProcessClosureError } from "../electron/agent-process";
 import { readTaskMetadata } from "../electron/orchestrator-worktree";
 import * as diff from "../electron/orchestrator-diff";
 import type { RpcRouter } from "../electron/ssh-router";
@@ -2158,6 +2159,18 @@ describe("Orchestrator", () => {
   });
 
   describe("applyTask", () => {
+    it("retains the workspace fence when selected Apply cannot confirm snapshot closure", async () => {
+      const task = await orchestrator.createTask("Selected source", "codex", "/tmp/repo", "main");
+      const error = new AgentProcessClosureError(new Error("Owned snapshot closure probe"));
+      const snapshot = vi.spyOn(CheckpointManager.prototype, "snapshotHead").mockRejectedValueOnce(error);
+      const { removeWorktree } = await import("../electron/orchestrator-worktree");
+      try {
+        await expect(orchestrator.applyTask(task.id, ["selected.txt"])).rejects.toBe(error);
+        await expect(orchestrator.discardTask(task.id)).rejects.toThrow("Workspace command closure is unconfirmed");
+        expect(vi.mocked(removeWorktree).mock.calls).toEqual([]);
+      } finally { snapshot.mockRestore(); await orchestrator.shutdown().catch(() => {}); }
+    });
+
     it.each(["archived", "applied", "discarded"] as const)("requires reopening a %s conversation before applying files", async status => {
       const task = await orchestrator.createTask("Closed", "codex", "/tmp/repo");
       task.status = status;

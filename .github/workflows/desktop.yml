@@ -126,6 +126,14 @@ jobs:
       - name: Test native desktop integration
         # Linux tests use the same baseline toolchain and CLI as the build.
         run: npm run build:agent -- --test
+      - name: Qualify selected Apply through the task view
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-selected-apply"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          fi
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs

@@ -1543,7 +1543,7 @@ export class Orchestrator extends EventEmitter {
         // Apply reads the whole workspace even when its directory is borrowed.
         // A peer's dev server cannot keep changing files during snapshot/merge.
         await this.workspaceScripts.close(task, true);
-        if (files) await cherryPickFiles(task, files);
+        if (files) await this.checkpointOperation(task, manager => cherryPickFiles(task, files, manager));
         else {
           const result = await applyAll(task);
           if (!result.success) return result;

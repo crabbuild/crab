@@ -2658,3 +2658,72 @@ types pass. Evidence: `sidebar-playwright-loader.json`,
 This establishes the dependency wiring, not macOS Intel qualification; that
 runner must pass on the next head. A targeted retry of its failed job was
 refused by GitHub because the containing workflow was still running.
+
+## Live selected-file Apply
+
+The task view displays a live workspace diff, but selected Apply read only its
+saved branch commit. Real Git regressions show modified and deleted source
+files returning success without applying the displayed change, while new,
+renamed and staged-ignored files fail as unknown paths. Replacing only the
+source read with a snapshot fixes three cases; deletion and rename still fail
+because path checkout uses overlay semantics and the request names only the
+rename's destination. Eight further regressions overwrite staged, unstaged,
+untracked, ignored, directory or index-excluded target data, or replace an
+untracked symlink above a selected target.
+
+Selected Apply now uses the existing private-index snapshot primitive through
+the Orchestrator's checkpoint owner. Its callee receives only the snapshot
+method it needs. Source index bytes and branch HEAD stay unchanged; uncertain
+snapshot closure retains the existing workspace writer fence and blocks
+Discard. Full Apply still commits the source branch, as required by its merge
+and branch-containment contract. SSH selected Apply remains explicitly
+unsupported; primary-workspace Apply retains its existing no-op behavior.
+
+The captured tree supplies selected file contents and rename metadata. A
+selected rename includes its old path, and Git restore's no-overlay behavior
+removes selected deletions. Literal pathspecs and NUL-delimited paths preserve
+file identity. Target checks include ignored and untracked files, index
+exclusion flags and replaced parent directories; they run again after a target
+checkout, which also refuses ignored-file replacement. Only changed selected
+paths enter the commit, preserving unrelated staged and unstaged target work.
+Repeated application is a no-op, including deleted and renamed paths.
+Contracts: [Git restore](https://git-scm.com/docs/git-restore),
+[Git checkout](https://git-scm.com/docs/git-checkout),
+[Git diff rename metadata](https://git-scm.com/docs/git-diff) and
+[Git index exclusion flags](https://git-scm.com/docs/git-ls-files).
+
+Evidence map: `DiffTab.handleCherryPick` sends selected paths through the
+preload's `orchestrator:cherry-pick` payload; its registered handler calls
+`Orchestrator.applyTask(taskId, files)`. That lifecycle owner closes writers
+and calls `cherryPickFiles` inside `checkpointOperation`; `snapshotHead` owns
+private-index capture, while Git restore and scoped commit own target writes.
+`applyAll`, primary-workspace no-ops and the remote rejection remain sibling
+contracts. The corrected 13-case baseline runs the unmodified module from
+`41e6436b076` through an owned test alias, then removes that temporary module.
+Its staged-ignored case verifies the actual ignore rule before the action.
+All 13 regressions fail there.
+
+All 311 scoped lifecycle/checkpoint/diff cases pass, with five additional
+idempotence checks passing after their assertions are added. Two actual
+Electron task-view actions select a pending file, a deletion and a rename:
+the success case verifies visible confirmation, target contents, source-index
+identity, unrelated target edits and reopened durable task state; the occupied
+case verifies a visible refusal and retained bytes. The fixture bridges the
+same selected-file payload to the real Orchestrator. Its initial 800-pixel
+window hid Diff in the responsive overflow menu; setting the intended desktop
+viewport fixes that fixture setup, with no product UI change. Three rebuilt
+unsigned package cases pass through bundled main-process modules, SQLite and
+CLI, with native manifest hashes verified. Production types and Electron
+build pass. Fixture semantic diagnostics equal the baseline's two unused
+declarations; no compiler settings or assertions are weakened.
+
+Evidence: `selected-corrected-baseline.json`,
+`selected-live-snapshot-only.json`, `selected-family-final.json`,
+`selected-idempotent-final.json`, `selected-snapshot-owner.json`,
+`selected-apply-ui-final.json`, `selected-apply-packaged.json` and
+`selected-fixture-type-baseline.json`. CI includes the two Electron actions on
+all four desktop platforms. Local and Windows publication remains a release
+gate: target preflight is not an atomic ref/index transaction, and checkout,
+hook failure and interruption recovery still need the protected publisher.
+The primary-workspace success receipt also still needs qualification against
+the UI's claim that selected files were committed.

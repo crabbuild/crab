@@ -113,6 +113,7 @@ Object.defineProperty(window, "crab", { value: {
       retryTask: (taskId: string) => invoke("retryTask", { taskId }),
       startReview: (taskId: string) => invoke("startReview", { taskId }),
       applyAll: (taskId: string) => invoke("applyAll", { taskId }),
+      cherryPick: (taskId: string, files: string[]) => invoke("cherryPick", { taskId, files }),
       runWorkspace: (payload: { taskId: string }) => invoke("runWorkspace", payload),
       getDiff: (taskId: string, checkpointSha?: string, checkpointFromSha?: string) => invoke("getDiff", { taskId, checkpointSha, checkpointFromSha }),
       getGoal: (taskId: string) => invoke("getGoal", { taskId }),

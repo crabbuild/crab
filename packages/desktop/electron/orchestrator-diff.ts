@@ -17,6 +17,7 @@ import type { Orchestrator, Task } from "./orchestrator";
 import { assertWorkspace, currentBranch, removeWorktree } from "./orchestrator-worktree";
 import type { RpcRouter } from "./ssh-router";
 import { decodeGitPath } from "./git-path";
+import type { CheckpointManager } from "./orchestrator-checkpoints";
 
 const execFile = promisify(execFileCb);
 const GIT_DIFF_TIMEOUT_MS = 10_000;
@@ -602,43 +603,77 @@ async function getConflictFiles(repoPath: string): Promise<string[]> {
 // ─── Cherry-Pick ─────────────────────────────────────────────────────────────
 
 /**
- * Checks out and commits selected paths on the saved destination branch.
+ * Captures live selected files and commits them on the saved destination branch.
  */
 export async function cherryPickFiles(
   task: Task,
   files: string[],
+  snapshots: Pick<CheckpointManager, "snapshotHead">,
 ): Promise<void> {
   if (isPrimaryWorkspaceTask(task)) return;
   if (files.length === 0) return;
 
   const targetBranch = await applyTarget(task);
-  const source = await exactBranchOid(task.worktreePath, localBranchRef(task.branch));
-  if (await currentBranch(task.repoPath) !== targetBranch) {
-    await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
+  const source = await snapshots.snapshotHead(task);
+  await taskBranchRef(task);
+  const { stdout: base } = await execFile("git", ["rev-parse", "--verify", "--end-of-options", `${task.baseRef}^{tree}`], { cwd: task.worktreePath });
+  const { stdout: renamed } = await execFile("git", ["diff", "--name-status", "-z", "--find-renames", "--diff-filter=R", base.trim(), source, "--"], { cwd: task.worktreePath, encoding: "buffer" });
+  const selection = new Set(files);
+  const renames = new TextDecoder("utf-8", { fatal: true }).decode(renamed).split("\0");
+  // The UI selects a rename by its new path. Its old path belongs to the same
+  // change; omitting it would turn a confirmed rename into a copied file.
+  for (let index = 0; index < renames.length - 1; index += 3) {
+    if (selection.has(renames[index + 2])) selection.add(renames[index + 1]);
   }
+  const selectedPaths = [...selection];
+  const paths = ["--", ...selectedPaths];
+  await requireCleanSelection(task.repoPath, selectedPaths);
+  if (await currentBranch(task.repoPath) !== targetBranch) {
+    await execFile("git", ["checkout", "--no-overwrite-ignore", targetBranch], { cwd: task.repoPath });
+    await requireCleanSelection(task.repoPath, selectedPaths);
+  }
+  if (await currentBranch(task.repoPath) !== targetBranch) throw new Error("Saved Apply target is no longer checked out. Inspect the repository before retrying.");
 
-  const paths = ["--", ...files];
-  await execFile("git", ["--literal-pathspecs", "checkout", source, ...paths], { cwd: task.repoPath });
+  const { stdout: changed } = await execFile("git", ["--literal-pathspecs", "diff", "--name-only", "-z", "--no-renames", "HEAD", source, ...paths], { cwd: task.repoPath, encoding: "buffer" });
+  const changes = new TextDecoder("utf-8", { fatal: true }).decode(changed).split("\0").filter(Boolean);
+  if (!changes.length) return;
+  const changedPaths = ["--", ...changes];
+  // Restore uses no-overlay semantics: a selected deletion removes the target
+  // rather than leaving an old file behind. The clean check protects user bytes.
+  await execFile("git", ["--literal-pathspecs", "restore", `--source=${source}`, "--staged", "--worktree", ...changedPaths], { cwd: task.repoPath });
 
-  // Checkout already stages the selection. Keep both the no-op check and the
-  // commit scoped to these paths so the user's other staged work stays private.
-  const { stdout: diffStaged } = await execFile(
-    "git",
-    ["--literal-pathspecs", "diff", "--cached", "--name-only", ...paths],
-    { cwd: task.repoPath },
-  );
-  if (!diffStaged.length) return;
-
-  // Commit the cherry-picked files.
+  // Commit only the captured selection so unrelated staged work stays private.
   const fileList = files.length <= 3
     ? files.join(", ")
     : `${files.slice(0, 3).join(", ")} (+${files.length - 3} more)`;
   const commitMessage = `Apply selected files from agent task: ${fileList}`;
   await execFile(
     "git",
-    ["--literal-pathspecs", "commit", "--only", "-m", commitMessage, ...paths],
+    ["--literal-pathspecs", "commit", "--only", "-m", commitMessage, ...changedPaths],
     { cwd: task.repoPath },
   );
+}
+
+async function requireCleanSelection(repoPath: string, files: string[]): Promise<void> {
+  const paths = ["--", ...files];
+  const { stdout: status } = await execFile("git", ["--literal-pathspecs", "--no-optional-locks", "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none", ...paths], { cwd: repoPath });
+  if (status.length) throw new Error("Selected target paths contain local changes or untracked files. Save or move them before applying.");
+  const { stdout: entries } = await execFile("git", ["--literal-pathspecs", "ls-files", "-v", "-z", ...paths], { cwd: repoPath, encoding: "buffer" });
+  if (/(^|\0)[a-zS] /.test(new TextDecoder("utf-8", { fatal: true }).decode(entries))) throw new Error("Selected target paths use index exclusion flags. Clear them before applying.");
+  for (const file of files) {
+    const relative = path.relative(repoPath, path.resolve(repoPath, file));
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Apply requires paths inside the target repository");
+    let parent = path.dirname(relative);
+    while (parent !== ".") {
+      try {
+        const entry = await fs.lstat(path.join(repoPath, parent));
+        if (!entry.isDirectory()) throw new Error("Selected target path has a replaced parent directory. Move it before applying.");
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      parent = path.dirname(parent);
+    }
+  }
 }
 
 // ─── Discard ─────────────────────────────────────────────────────────────────

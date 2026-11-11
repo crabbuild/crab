@@ -611,7 +611,7 @@ rename to new-name.ts
         const expected = fs.readFileSync(path.join(worktreePath, file), "utf8");
         await execFile("git", ["tag", task.branch, baseRef], { cwd: repoDir });
         if (mode === "inactive") await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
-        if (mode === "selected") await cherryPickFiles(task, [file]);
+        if (mode === "selected") await cherryPickFiles(task, [file], new CheckpointManager());
         else await expect(applyAll(task)).resolves.toEqual({ success: true });
         expect((await execFile("git", ["show", `refs/heads/main:${file}`], { cwd: repoDir })).stdout).toBe(expected);
         expect((await execFile("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repoDir })).stdout.trim()).toBe(baseRef);
@@ -634,7 +634,7 @@ rename to new-name.ts
             await execFile("git", ["symbolic-ref", "refs/heads/main", "refs/heads/referent"], { cwd: repoDir });
           }
           const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: target === "missing" ? undefined : "main" };
-          const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"]);
+          const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
           await expect(apply).rejects.toThrow();
           expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8"),
             applied: fs.existsSync(path.join(repoDir, "src/new-feature.ts")) }).toEqual({ target: baseRef, source: sourceHead, pending: "retained pending work\n", applied: false });
@@ -687,7 +687,7 @@ exec ${quote(git)} "$@"
         fs.writeFileSync(path.join(worktreePath, "pending.txt"), "user branch work\n");
         const sourceHead = await getHead(worktreePath);
         const task = { ...createMockTask(repoDir, taskId, baseRef, worktreePath), baseBranch: "main" };
-        const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"]);
+        const apply = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
         await expect(apply).rejects.toThrow(/branch/i);
         expect({ target: await getHead(repoDir), source: await getHead(worktreePath), pending: fs.readFileSync(path.join(worktreePath, "pending.txt"), "utf8") })
           .toEqual({ target: baseRef, source: sourceHead, pending: "user branch work\n" });
@@ -714,6 +714,94 @@ exec ${quote(git)} "$@"
   });
 
   describe("cherryPickFiles", () => {
+    it.each(["staged", "unstaged", "untracked", "ignored", "directory", "assume-unchanged", "skip-worktree"])("preserves %s target bytes instead of replacing them with the selection", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-target-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await makeAgentChanges(worktreePath);
+        const selection = ["staged", "unstaged", "assume-unchanged", "skip-worktree"].includes(mode) ? "src/index.ts" : "src/new-feature.ts";
+        const target = path.join(repoDir, selection);
+        if (mode === "directory") fs.mkdirSync(target);
+        const data = mode === "directory" ? path.join(target, "private.txt") : target;
+        fs.writeFileSync(data, "private target bytes\n");
+        if (mode === "staged") await execFile("git", ["add", "--", selection], { cwd: repoDir });
+        if (mode === "assume-unchanged" || mode === "skip-worktree") await execFile("git", ["update-index", `--${mode}`, "--", selection], { cwd: repoDir });
+        if (mode === "ignored") {
+          fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${selection}\n`);
+        }
+        await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });
+        const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+        const rejected = await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection], new CheckpointManager()).then(() => false, () => true);
+        expect({ rejected, head: await getHead(repoDir), bytes: fs.existsSync(data) ? fs.readFileSync(data, "utf8") : null, index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+          .toEqual({ rejected: true, head: baseRef, bytes: "private target bytes\n", index });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.skipIf(process.platform === "win32")("retains an untracked symlink above a selected target", async () => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-parent-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        fs.mkdirSync(path.join(worktreePath, "nested"));
+        fs.writeFileSync(path.join(worktreePath, "nested/file.txt"), "selected source bytes\n");
+        await execFile("git", ["add", "nested"], { cwd: worktreePath });
+        await execFile("git", ["commit", "-m", "Source file"], { cwd: worktreePath });
+        const privatePath = path.join(repoDir, "private");
+        fs.mkdirSync(privatePath);
+        fs.writeFileSync(path.join(privatePath, "file.txt"), "private target bytes\n");
+        const link = path.join(repoDir, "nested");
+        fs.symlinkSync(privatePath, link);
+        const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+        const rejected = await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), ["nested/file.txt"], new CheckpointManager()).then(() => false, () => true);
+        expect({ rejected, head: await getHead(repoDir), link: fs.lstatSync(link).isSymbolicLink(),
+          bytes: fs.readFileSync(path.join(privatePath, "file.txt"), "utf8"), index: fs.readFileSync(path.join(repoDir, ".git/index")) })
+          .toEqual({ rejected: true, head: baseRef, link: true, bytes: "private target bytes\n", index });
+      } finally { cleanup(worktreePath); }
+    });
+
+    it.each(["modified", "new", "deleted", "renamed", "staged ignored"])("applies the live %s selection while preserving the source index and unrelated files", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `selected-live-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        const original = mode === "renamed" || mode === "deleted" ? "src/utils.ts" : mode === "modified" ? "src/index.ts" : mode === "staged ignored" ? "src/private.txt" : "src/pending [1].txt";
+        const selection = mode === "renamed" ? "src/renamed.ts" : original;
+        const previous = fs.existsSync(path.join(worktreePath, original)) ? fs.readFileSync(path.join(worktreePath, original), "utf8") : "";
+        if (mode === "renamed") fs.renameSync(path.join(worktreePath, original), path.join(worktreePath, selection));
+        else if (mode === "deleted") fs.unlinkSync(path.join(worktreePath, original));
+        else fs.writeFileSync(path.join(worktreePath, selection), "selected live bytes\n");
+        if (mode === "staged ignored") {
+          await execFile("git", ["add", "--", selection], { cwd: worktreePath });
+          fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${selection}\n`);
+          expect((await execFile("git", ["check-ignore", "--no-index", "--", selection], { cwd: worktreePath })).stdout.trim()).toBe(selection);
+          fs.writeFileSync(path.join(worktreePath, selection), "selected live bytes\nupdated after staging\n");
+        }
+        fs.writeFileSync(path.join(worktreePath, "README.md"), "private staged work\n");
+        await execFile("git", ["add", "README.md"], { cwd: worktreePath });
+        fs.writeFileSync(path.join(worktreePath, "README.md"), "private unstaged work\n");
+        const indexPath = (await execFile("git", ["rev-parse", "--git-path", "index"], { cwd: worktreePath })).stdout.trim();
+        const sourceIndex = fs.readFileSync(path.resolve(worktreePath, indexPath));
+        const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
+        expect((await computeDiff(task)).files.map(file => file.path)).toContain(selection);
+        await cherryPickFiles(task, [selection], new CheckpointManager());
+        const appliedHead = await getHead(repoDir);
+        await cherryPickFiles(task, [selection], new CheckpointManager());
+        expect(await getHead(repoDir)).toBe(appliedHead);
+        const target = path.join(repoDir, selection);
+        expect({ target: fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null,
+          originalRemoved: !fs.existsSync(path.join(repoDir, original)), sourceHead: await getHead(worktreePath),
+          sourceIndex: fs.readFileSync(path.resolve(worktreePath, indexPath)), targetReadme: fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
+          sourceReadme: fs.readFileSync(path.join(worktreePath, "README.md"), "utf8") }).toEqual({
+          target: mode === "deleted" ? null : mode === "renamed" ? previous : mode === "staged ignored" ? "selected live bytes\nupdated after staging\n" : "selected live bytes\n",
+          originalRemoved: mode === "deleted" || mode === "renamed", sourceHead: baseRef, sourceIndex,
+          targetReadme: "# Test Repo\n", sourceReadme: "private unstaged work\n",
+        });
+      } finally { cleanup(worktreePath); }
+    });
+
     it.each(["new selection", "unchanged selection"])("preserves unrelated staged changes for %s", async mode => {
       const baseRef = await getHead(repoDir);
       const taskId = `cherry-staged-${path.basename(repoDir)}`;
@@ -727,7 +815,7 @@ exec ${quote(git)} "$@"
         await execFile("git", ["add", "--", "README.md"], { cwd: repoDir });
         fs.writeFileSync(readme, "unstaged user work\n");
 
-        await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection]);
+        await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection], new CheckpointManager());
 
         const { stdout: committed } = await execFile("git", ["diff", "--name-only", baseRef, "HEAD"], { cwd: repoDir });
         const { stdout: staged } = await execFile("git", ["show", ":README.md"], { cwd: repoDir });
@@ -750,7 +838,7 @@ exec ${quote(git)} "$@"
         const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
 
         // Only cherry-pick the new file, not the modification or deletion.
-        await cherryPickFiles(task, ["src/new-feature.ts"]);
+        await cherryPickFiles(task, ["src/new-feature.ts"], new CheckpointManager());
 
         // The new file should exist.
         expect(fs.existsSync(path.join(repoDir, "src/new-feature.ts"))).toBe(true);
@@ -789,7 +877,7 @@ exec ${quote(git)} "$@"
       try {
         const task = createMockTask(repoDir, taskId, baseRef, worktreePath);
         // Should not throw.
-        await expect(cherryPickFiles(task, [])).resolves.toBeUndefined();
+        await expect(cherryPickFiles(task, [], new CheckpointManager())).resolves.toBeUndefined();
       } finally {
         cleanup(worktreePath);
         try {
@@ -877,7 +965,7 @@ exec ${quote(git)} "$@"
         expect(diff.files.length).toBe(3);
 
         // Cherry-pick only the modified file.
-        await cherryPickFiles(task, ["src/index.ts"]);
+        await cherryPickFiles(task, ["src/index.ts"], new CheckpointManager());
 
         // Only the modified file should have agent changes.
         const content = fs.readFileSync(path.join(repoDir, "src/index.ts"), "utf-8");
