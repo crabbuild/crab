@@ -1,6 +1,6 @@
 // ─── Imports ─────────────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -22,7 +22,7 @@ import {
 import clsx from "clsx";
 import {
   AlertTriangle,
-  ChevronDown,
+  PanelBottom,
   Copy,
   Code2,
   FilePlus,
@@ -41,7 +41,10 @@ import {
 } from "lucide-react";
 import { OpenRepo } from "../state";
 import { useWorkflowEditor } from "../hooks/useWorkflowEditor";
-import { WorkflowStage, WorkflowRunState } from "../lib/workflow-types";
+import type { ImperativePanelHandle } from "react-resizable-panels";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
+import { WorkflowOutputPane } from "../components/workflow/WorkflowOutputPane";
+import { WorkflowStage } from "../lib/workflow-types";
 import { StageNode } from "../components/workflow/StageNode";
 import { StagePropertiesPanel } from "../components/workflow/StagePropertiesPanel";
 import { NewStageDialog } from "../components/workflow/NewStageDialog";
@@ -157,6 +160,17 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+
+  const [outputOpen, setOutputOpen] = useState(false);
+  const outputPanel = useRef<ImperativePanelHandle>(null);
+  const outputToggle = useRef<HTMLButtonElement>(null);
+  const outputId = useId();
+
+  // A new run reveals the shared log once. Dismissing it while the run streams
+  // must keep the canvas clear until the user opens it or starts another run.
+  useEffect(() => {
+    if (state.runState?.run_id) outputPanel.current?.expand();
+  }, [state.runState?.run_id]);
 
   // Refs and hooks
   const reactFlow = useReactFlow();
@@ -519,10 +533,15 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
 
   return (
     <div className="flex h-full w-full bg-gx-bg">
+      <ResizablePanelGroup direction="horizontal" autoSaveId="crab.workflowStudio.sidebar">
+      <ResizablePanel id="workflow-list" order={1} defaultSize={22} minSize={15} maxSize={40}>
       <WorkflowSidebar files={state.availableFiles} workflows={workflows} fileErrors={fileErrors} activeFile={state.activeFile}
         links={links} disabled={locked} dirty={state.dirty} canRename={!!repo.path}
         onSelect={actions.switchFile} onRefresh={() => actions.load()} onCreate={actions.createWorkflow} onRename={actions.renameWorkflow} onDelete={actions.deleteWorkflow} onMigrate={() => setShowMigrateWizard(true)} />
-      <div className="flex min-w-0 flex-1 flex-col">
+      </ResizablePanel>
+      <ResizableHandle aria-label="Resize workflow list" />
+      <ResizablePanel id="workflow-studio" order={2} minSize={60}>
+      <div className="flex h-full min-w-0 flex-col">
       {(operationError || editorError) && <div role="alert" className="border-b border-gx-error/40 bg-gx-error/10 px-4 py-2 text-xs text-gx-error">{operationError || editorError}</div>}
       {state.phase === "loading" ? (
         <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={18} className="animate-spin" />Loading workflows…</div>
@@ -544,6 +563,10 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gx-border bg-gx-surface pr-3">
         <WorkflowTabs active={activeTab} onChange={actions.setActiveTab} outdatedCount={outdatedCount} />
         <div className="flex shrink-0 items-center gap-2 py-1">
+        <button ref={outputToggle} type="button" className={clsx("btn flex items-center gap-1 text-xs", outputOpen && "text-gx-accent")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
+          onClick={() => outputOpen ? outputPanel.current?.collapse() : outputPanel.current?.expand()}>
+          <PanelBottom size={14} />Output
+        </button>
         {/* Run controls */}
         {state.phase === "running" ? (
           <button type="button" className="btn btn-danger flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
@@ -560,6 +583,9 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
         </div>
       </div>
 
+      <ResizablePanelGroup direction="vertical" autoSaveId="crab.workflowStudio.output" className="min-h-0 flex-1">
+      <ResizablePanel id="workflow-content" order={1} defaultSize={100} minSize={35}>
+      <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-2">
         <div className="flex basis-full items-center gap-3">
@@ -690,8 +716,6 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
             )}
           </div>
 
-          {/* Output pane */}
-          <WorkflowOutputPane runState={state.runState} onClear={actions.clearOutput} />
         </div>
       )}
 
@@ -709,8 +733,18 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
         </div>
       )}
 
+      </div>
+      </ResizablePanel>
+      <ResizableHandle aria-label="Resize workflow output" className={clsx(!outputOpen && "hidden")} />
+      <ResizablePanel ref={outputPanel} id="workflow-output" order={2} defaultSize={0} minSize={22} maxSize={65} collapsible collapsedSize={0}
+        onExpand={() => setOutputOpen(true)} onCollapse={() => setOutputOpen(false)}>
+        {outputOpen && <WorkflowOutputPane id={outputId} runState={state.runState} onClear={actions.clearOutput} onClose={() => { outputPanel.current?.collapse(); outputToggle.current?.focus(); }} />}
+      </ResizablePanel>
+      </ResizablePanelGroup>
       </>}
       </div>
+      </ResizablePanel>
+      </ResizablePanelGroup>
 
       {/* Context menu */}
       {contextMenu && (
@@ -854,65 +888,6 @@ function LegendPanel() {
         <div>Click edge to select, then Del to remove</div>
         <div>Drag bottom handle to top handle to connect</div>
       </div>
-    </div>
-  );
-}
-
-// ─── Workflow Output Pane ────────────────────────────────────────────────────
-
-function WorkflowOutputPane({ runState, onClear }: { runState: WorkflowRunState | null; onClear: () => void }) {
-  const lines = runState?.output ?? [];
-  const [collapsed, setCollapsed] = useState(!runState);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { setCollapsed(!runState); }, [runState?.run_id, runState?.error]);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [lines, runState?.error]);
-
-  return (
-    <div role="region" aria-label="Workflow output" className={clsx("shrink-0 border-t border-gx-border bg-gx-surface", collapsed ? "h-7" : "h-[160px]")}>
-      <div className="flex h-7 items-center justify-between border-b border-gx-border px-3">
-        <button
-          type="button"
-          className="flex items-center gap-1.5 text-[11px] font-medium text-gx-muted hover:text-gx-text"
-          onClick={() => setCollapsed(!collapsed)}
-          aria-expanded={!collapsed}
-        >
-          <ChevronDown size={12} className={clsx("transition", collapsed && "-rotate-90")} />
-          Output
-          {lines.length > 0 && (
-            <span className="rounded bg-gx-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-gx-accent">
-              {lines.length}
-            </span>
-          )}
-        </button>
-        {!collapsed && lines.length > 0 && (
-          <button type="button" className="text-[10px] text-gx-muted hover:text-gx-text" onClick={onClear}>
-            Clear
-          </button>
-        )}
-      </div>
-      {!collapsed && (
-        <div ref={scrollRef} className="h-[calc(100%-28px)] overflow-auto px-3 py-1 font-mono text-[11px]">
-          {lines.length === 0 && !runState?.error ? (
-            <div className="py-4 text-center text-gx-muted">{runState?.status === "running" ? "Waiting for workflow output…" : runState ? "No command output for this run." : "Run a workflow to see output here."}</div>
-          ) : (
-            lines.map((line) => (
-              <div
-                key={line.id}
-                className={clsx("whitespace-pre-wrap break-all leading-relaxed", line.error ? "text-gx-error" : "text-gx-text/80")}
-              >
-                {line.text}
-              </div>
-            ))
-          )}
-          {runState?.error && <div role="alert" className="whitespace-pre-wrap break-words py-1 text-gx-error">{runState.error}</div>}
-        </div>
-      )}
     </div>
   );
 }
