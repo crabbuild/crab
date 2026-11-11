@@ -105,7 +105,7 @@ function ChunkDetails({ repoId, nativeSessionId, file, onReopen }: { repoId: str
 }
 
 function MaterializeFile({ repoId, file, nativeSessionId, available }: { repoId: string; file: CapturedFile; nativeSessionId: string; available: boolean }) {
-  const { materializeFile } = useStore();
+  const { runFileTransfer } = useStore();
   const [pending, setPending] = useState(false);
   const [materialized, setMaterialized] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -116,7 +116,7 @@ function MaterializeFile({ repoId, file, nativeSessionId, available }: { repoId:
     setMessage(null);
     setError(null);
     try {
-      const result = await materializeFile(repoId, file.file_id, nativeSessionId);
+      const result = await runFileTransfer(repoId, { fileId: file.file_id }, nativeSessionId);
       setMaterialized(true);
       setMessage(`${formatBytes(result.written_bytes)} materialized on disk. Reopen details to inspect the working copy.`);
     } catch (error) {

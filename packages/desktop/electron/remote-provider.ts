@@ -302,6 +302,7 @@ export class RemoteProvider extends BaseProvider {
       canForge: true,
       canHydrate: false, // Remote repos don't support crab hydrate/dehydrate
       canHydrateSelection: this.capabilityNegotiator.isSupported(parsed.profileId, "files_materialize"),
+      canDehydrateSelection: this.capabilityNegotiator.isSupported(parsed.profileId, "files_dehydrate"),
       canMaterialize: this.capabilityNegotiator.isSupported(parsed.profileId, "file_open", "file_materialize", "file_close"),
       canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "git_grep"),
       canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "exec_command"),

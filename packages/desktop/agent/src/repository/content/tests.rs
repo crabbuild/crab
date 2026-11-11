@@ -340,6 +340,79 @@ async fn materialization_preserves_pointers_on_cancel_and_edits_observed_before_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
+async fn dehydration_preserves_a_working_file_on_cancel_or_same_size_replacement() {
+    let size = 2 * 1024 * 1024;
+    let name = "model[1],data.bin";
+    for replace in [false, true] {
+        let (directory, repo, _) = working_pointer("lfs", size).await;
+        let root = directory.path();
+        git(root, &["add", "--", ".gitattributes"]).await.unwrap();
+        git(
+            root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "Tracked file"],
+        )
+        .await
+        .unwrap();
+        let index = std::fs::read(root.join(".git/index")).unwrap();
+        let path = root.join(name);
+        let mut working = vec![0; size as usize];
+        working[..8].copy_from_slice(b"retained");
+        std::fs::write(&path, &working).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let alternate = root.join("replacement");
+        let edited = vec![7; size as usize];
+        let filenames = || {
+            let mut names = std::fs::read_dir(root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let before = filenames();
+        let scope = repo.read_scope();
+        let capture = Arc::new(
+            Dehydration::capture(&repo, name, scope.clone())
+                .await
+                .unwrap(),
+        );
+        let outcome = capture
+            .clone()
+            .run(&repo, {
+                let path = path.clone();
+                let edited = edited.clone();
+                move |checked| {
+                    if checked == size * 2 {
+                        if replace {
+                            let mut replacement = std::fs::File::create(&alternate)?;
+                            std::io::Write::write_all(&mut replacement, &edited)?;
+                            replacement
+                                .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+                            drop(replacement);
+                            std::fs::rename(&alternate, &path)?;
+                        } else {
+                            scope.cancel();
+                        }
+                    }
+                    Ok(())
+                }
+            })
+            .await;
+        capture.release_reader().await.unwrap();
+        let error = outcome.unwrap_err();
+        assert_eq!(error.is_cancelled(), !replace);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            if replace { edited } else { working }
+        );
+        assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index);
+        assert_eq!(filenames(), before);
+        repo.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CRAB_BIN pointing to the matching native runtime"]
 async fn materialization_outlives_its_view_and_repository_close_cancels_and_drains_it() {
     for close_repo in [false, true] {
         let (directory, repo, pointer) = working_pointer("lfs", 2 * 1024 * 1024).await;

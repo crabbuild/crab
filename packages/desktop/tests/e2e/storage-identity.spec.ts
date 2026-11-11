@@ -164,7 +164,13 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await page.screenshot({ path: test.info().outputPath("ssh-cold-parquet-sql.png") });
     await showFile(page, "archive.sqlite", "81");
     await page.getByRole("button", { name: "SQL", exact: true }).click();
-    await expect(page.getByRole("cell", { name: "81", exact: true })).toBeVisible();
+    try {
+      await expect(page.getByRole("cell", { name: "81", exact: true })).toBeVisible();
+    } catch (error) {
+      await page.screenshot({ path: test.info().outputPath("ssh-sqlite-failure.png") });
+      writeFileSync(test.info().outputPath("ssh-sqlite-failure.txt"), await page.getByRole("main").innerText());
+      throw error;
+    }
     for (const file of ["archive.sqlite", "archive.sqlite-wal"]) {
       expect(readFileSync(path.join(directories[0], file))).toEqual(git(directories[0], ["show", `:${file}`]));
     }
@@ -194,8 +200,13 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     expect(remote.requests.some(request => request.method === "files_materialize" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-bulk-hydration.png") });
-    // The later credential test must fetch content from storage again.
-    writeFileSync(path.join(directories[0], "weights.safetensors"), git(directories[0], ["show", ":weights.safetensors"]));
+    await page.getByRole("button", { name: /^Dehydrate 2 files/ }).click();
+    await page.getByRole("dialog", { name: "Dehydrate files?" }).getByRole("button", { name: "Dehydrate", exact: true }).click();
+    await expect(page.getByRole("main").getByText("Dehydrated weights.safetensors", { exact: true })).toBeVisible();
+    for (const file of bulkPaths) expect(readFileSync(path.join(directories[0], file))).toEqual(git(directories[0], ["show", `:${file}`]));
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
+    expect(remote.requests.some(request => request.method === "files_dehydrate" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("ssh-bulk-dehydration.png") });
     const beta: RepoHandle = await page.evaluate(({ id, directory }) => window.crab.ssh.openAsRepo(id, directory), { id: saved.id, directory: directories[1] });
     await page.evaluate(({ handle, path }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path } })), { handle: beta, path: betaId });
     section = await settings(page);

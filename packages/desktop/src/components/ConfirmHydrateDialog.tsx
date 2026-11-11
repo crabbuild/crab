@@ -41,7 +41,7 @@ export function ConfirmHydrateDialog({
   const title = isHydrate ? "Hydrate files?" : "Dehydrate files?";
   const body = isHydrate
     ? "Fetches and materializes content from object storage. Uses disk space equal to the logical size."
-    : "Replaces working-tree files with pointer blobs. Frees disk space; dehydrated files can be re-hydrated at any time.";
+    : "Checks the working files and their saved content before replacing them with pointers to free disk space.";
   const wouldUseMoreThanFree =
     isHydrate && freeBytes != null && freeBytes < totalBytes;
 
@@ -51,6 +51,9 @@ export function ConfirmHydrateDialog({
       onClick={onCancel}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className="w-[min(520px,92vw)] rounded-lg border border-gx-border bg-gx-surface p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >

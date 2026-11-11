@@ -1,4 +1,5 @@
 use super::*;
+use crate::repository::{Dehydration, FileSource, ReadScope};
 
 #[derive(Deserialize)]
 pub(super) struct FileMaterializeParams {
@@ -18,19 +19,18 @@ pub(super) async fn one(
         repo_id: &p.file.repo_id,
         op_id: &p.op_id,
         out,
+        direction: Direction::Hydrate,
     };
     let work = async {
-        let _publication = tokio::select! {
-            guard = repo.files.materializing.lock() => guard,
-            error = scope.cancelled() => return Err(error),
-        };
         let file = repo.files.get(&p.file.file_id).await?;
         let (_guard, source) = file.materialization(scope.clone()).await?;
         let total_bytes = source.size;
-        let written = job.write(source, 0, total_bytes, None).await?;
+        let written = source
+            .materialize(job.reporter(0, total_bytes, None))
+            .await?;
         Ok(json!({ "written_bytes": written }))
     };
-    job.run(state, &scope, work).await
+    job.run(state, &repo, &scope, work).await
 }
 
 #[derive(Deserialize)]
@@ -40,10 +40,88 @@ pub(super) struct FilesMaterializeParams {
     op_id: String,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Direction {
+    Hydrate,
+    Dehydrate,
+}
+
+impl Direction {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Hydrate => "hydrate",
+            Self::Dehydrate => "dehydrate",
+        }
+    }
+
+    fn file_error(self, path: &str, error: AgentError) -> AgentError {
+        if error.is_cancelled() {
+            return error;
+        }
+        let action = match self {
+            Self::Hydrate => "Hydrate",
+            Self::Dehydrate => "Dehydrate",
+        };
+        AgentError::Preview {
+            context: format!("{action} {path}"),
+            source: Box::new(error),
+        }
+    }
+}
+
+enum SelectedFile {
+    Hydrate(Arc<FileSource>),
+    Dehydrate(Arc<Dehydration>),
+}
+
+impl SelectedFile {
+    async fn capture(
+        repo: &BrowseSession,
+        path: &str,
+        direction: Direction,
+        scope: ReadScope,
+    ) -> Result<Self> {
+        Ok(match direction {
+            Direction::Hydrate => Self::Hydrate(Arc::new(
+                FileSource::capture_materialization(repo, path, scope).await?,
+            )),
+            Direction::Dehydrate => {
+                Self::Dehydrate(Arc::new(Dehydration::capture(repo, path, scope).await?))
+            }
+        })
+    }
+
+    fn work_bytes(&self) -> u64 {
+        match self {
+            Self::Hydrate(source) => source.size,
+            Self::Dehydrate(source) => source.size().saturating_mul(2),
+        }
+    }
+
+    async fn publish(
+        &self,
+        repo: &BrowseSession,
+        progress: impl FnMut(u64) -> Result<()> + Send + 'static,
+    ) -> Result<u64> {
+        match self {
+            Self::Hydrate(source) => source.clone().materialize(progress).await,
+            Self::Dehydrate(source) => source.clone().run(repo, progress).await,
+        }
+    }
+
+    async fn release_reader(&self) -> Result<()> {
+        match self {
+            Self::Hydrate(source) => source.release_reader().await,
+            Self::Dehydrate(source) => source.release_reader().await,
+        }
+    }
+}
+
 pub(super) async fn many(
     state: &State,
     p: FilesMaterializeParams,
     out: SharedStdout,
+    direction: Direction,
 ) -> Result<Value> {
     let repo = state.get(&p.repo_id).await?;
     let scope = repo.read_scope();
@@ -51,55 +129,64 @@ pub(super) async fn many(
         repo_id: &p.repo_id,
         op_id: &p.op_id,
         out,
+        direction,
     };
     let work = async {
-        let _publication = tokio::select! {
-            guard = repo.files.materializing.lock() => guard,
-            error = scope.cancelled() => return Err(error),
-        };
         if p.paths.is_empty() {
-            return Err(AgentError::Other(
-                "Select at least one file to hydrate".into(),
-            ));
+            return Err(AgentError::Other(format!(
+                "Select at least one file to {}",
+                direction.verb()
+            )));
         }
-        let mut paths = std::collections::HashSet::new();
+        let mut unique = std::collections::HashSet::new();
+        let paths: Vec<_> = p.paths.iter().filter(|path| unique.insert(*path)).collect();
+        crate::notify(
+            &job.out,
+            "progress/transfer",
+            job.progress(0, 0, Some((0, paths.len()))),
+        )
+        .await?;
         let mut captures = Vec::new();
         let mut total = 0u64;
-        for path in &p.paths {
-            if !paths.insert(path) {
-                continue;
-            }
-            let source =
-                crate::repository::FileSource::capture_materialization(&repo, path, scope.child())
-                    .await
-                    .map_err(|error| materialization_error(path, error))?;
-            total = total.saturating_add(source.size);
+        for path in paths {
+            scope.check()?;
+            let source = SelectedFile::capture(&repo, path, direction, scope.child())
+                .await
+                .map_err(|error| direction.file_error(path, error))?;
+            total = total.saturating_add(source.work_bytes());
             captures.push((path, source));
         }
         let count = captures.len();
+        let mut processed = 0u64;
         let mut written = 0u64;
         for (published, (path, source)) in captures.into_iter().enumerate() {
             scope.check()?;
-            let source = Arc::new(source);
-            let outcome = job
-                .write(source.clone(), written, total, Some((published, count)))
+            let outcome = source
+                .publish(
+                    &repo,
+                    job.reporter(processed, total, Some((published, count))),
+                )
                 .await;
             if let Ok(bytes) = &outcome {
                 written = written.saturating_add(*bytes);
+                processed = processed.saturating_add(source.work_bytes());
                 if let Err(error) = crate::notify(
                     &job.out,
                     "progress/transfer",
-                    job.progress(written, total, Some((published + 1, count))),
+                    job.progress(processed, total, Some((published + 1, count))),
                 )
                 .await
                 {
-                    tracing::error!(%error, "materialization progress delivery failed");
+                    tracing::error!(%error, "file transfer progress delivery failed");
                 }
-                let line = format!("Hydrated {path}");
-                job.line(shellout::Stream::Stdout, &line).await;
+                let action = match direction {
+                    Direction::Hydrate => "Hydrated",
+                    Direction::Dehydrate => "Dehydrated",
+                };
+                job.line(shellout::Stream::Stdout, &format!("{action} {path}"))
+                    .await;
             }
-            let cleanup = source.release_reader().await;
-            let result = match (outcome, cleanup) {
+            let result = match (outcome, source.release_reader().await) {
                 (Err(operation), Err(cleanup)) => Err(AgentError::Cleanup {
                     operation: Box::new(operation),
                     cleanup: Box::new(cleanup),
@@ -107,61 +194,55 @@ pub(super) async fn many(
                 (result, Ok(())) => result,
                 (Ok(_), Err(error)) => Err(error),
             };
-            result.map_err(|error| materialization_error(path, error))?;
+            result.map_err(|error| direction.file_error(path, error))?;
         }
         Ok(json!({ "written_bytes": written, "files": count }))
     };
-    job.run(state, &scope, work).await
-}
-
-fn materialization_error(path: &str, error: AgentError) -> AgentError {
-    if error.is_cancelled() {
-        return error;
-    }
-    AgentError::Preview {
-        context: format!("Hydrate {path}"),
-        source: Box::new(error),
-    }
+    job.run(state, &repo, &scope, work).await
 }
 
 struct Materialization<'a> {
     repo_id: &'a str,
     op_id: &'a str,
     out: SharedStdout,
+    direction: Direction,
 }
 
 impl Materialization<'_> {
-    async fn write(
+    fn reporter(
         &self,
-        source: Arc<crate::repository::FileSource>,
         before: u64,
         total: u64,
         files: Option<(usize, usize)>,
-    ) -> Result<u64> {
+    ) -> impl FnMut(u64) -> Result<()> + Send + 'static {
         let runtime = tokio::runtime::Handle::current();
         let job_id = self.op_id.to_owned();
         let repo_id = self.repo_id.to_owned();
         let out = self.out.clone();
-        source
-            .materialize(move |written| {
-                let job = Materialization {
-                    repo_id: &repo_id,
-                    op_id: &job_id,
-                    out: out.clone(),
-                };
-                runtime.block_on(crate::notify(
-                    &out,
-                    "progress/transfer",
-                    job.progress(before.saturating_add(written), total, files),
-                ))
-            })
-            .await
+        let direction = self.direction;
+        move |processed| {
+            let job = Materialization {
+                repo_id: &repo_id,
+                op_id: &job_id,
+                out: out.clone(),
+                direction,
+            };
+            runtime.block_on(crate::notify(
+                &out,
+                "progress/transfer",
+                job.progress(before.saturating_add(processed), total, files),
+            ))
+        }
     }
 
-    fn progress(&self, written: u64, total: u64, files: Option<(usize, usize)>) -> Value {
+    fn progress(&self, processed: u64, total: u64, files: Option<(usize, usize)>) -> Value {
+        let (written, checked) = match self.direction {
+            Direction::Hydrate => (processed, None),
+            Direction::Dehydrate => (0, Some(processed)),
+        };
         json!({
-            "op": "hydrate", "job_id": self.op_id, "repo_id": self.repo_id,
-            "written_bytes": written, "total_bytes": total,
+            "op": self.direction.verb(), "job_id": self.op_id, "repo_id": self.repo_id,
+            "written_bytes": written, "checked_bytes": checked, "total_bytes": total,
             "files_published": files.map(|(published, _)| published),
             "files_total": files.map(|(_, total)| total),
         })
@@ -169,7 +250,7 @@ impl Materialization<'_> {
 
     async fn line(&self, stream: shellout::Stream, line: &str) {
         let event = shellout::ProgressEvent {
-            op: "hydrate",
+            op: self.direction.verb(),
             job_id: self.op_id,
             stream,
             line: line.into(),
@@ -182,9 +263,18 @@ impl Materialization<'_> {
     async fn run(
         &self,
         state: &State,
-        scope: &crate::repository::ReadScope,
+        repo: &BrowseSession,
+        scope: &ReadScope,
         work: impl std::future::Future<Output = Result<Value>>,
     ) -> Result<Value> {
+        let work = async {
+            let _publication = tokio::select! {
+                guard = repo.files.materializing.lock() => guard,
+                error = scope.cancelled() => return Err(error),
+            };
+            scope.check()?;
+            work.await
+        };
         let signal = state.cancel_registry.register(self.op_id.to_owned()).await;
         tokio::pin!(signal);
         tokio::pin!(work);
@@ -210,23 +300,18 @@ impl Materialization<'_> {
             Err(error) if error.is_cancelled() => (-1, "cancelled"),
             Err(_) => (1, "failed"),
         };
-        if let Err(error) = &result {
-            if !error.is_cancelled() {
-                self.line(shellout::Stream::Stderr, &error.to_string())
-                    .await;
-            }
+        if let Err(error) = &result
+            && !error.is_cancelled()
+        {
+            self.line(shellout::Stream::Stderr, &error.to_string())
+                .await;
         }
-        if let Err(error) = crate::notify(
-        &self.out,
-        "progress/complete",
-        json!({
-            "op": "hydrate", "job_id": self.op_id, "repo_id": self.repo_id, "status": status, "outcome": outcome,
-        }),
-    )
-    .await
-    {
-        tracing::error!(%error, "materialization completion delivery failed");
-    }
+        let completion = json!({
+            "op": self.direction.verb(), "job_id": self.op_id, "repo_id": self.repo_id, "status": status, "outcome": outcome,
+        });
+        if let Err(error) = crate::notify(&self.out, "progress/complete", completion).await {
+            tracing::error!(%error, "file transfer completion delivery failed");
+        }
         result
     }
 }

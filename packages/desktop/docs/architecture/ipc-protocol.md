@@ -191,6 +191,16 @@ rechecks the index before a no-clobber publication. A batch can publish some
 files before a cancellation or error stops it. Activity retains the count
 already published.
 
+`files_dehydrate {repo_id, paths, op_id}` verifies the exact selection before
+replacing each working file with its committed Crab or Git LFS pointer bytes.
+The index entry must match the current commit. Both the working file and the
+normal reconstruction source must verify against that pointer. The reader's
+`Open` request includes `dehydrate_path` so the CLI applies the existing
+`crab.toml` always-profile protection. Ordinary reader opens omit that field.
+The reconstruction reader and its staging pin stay owned through publication.
+The writer checks the index, commit and working-file metadata again before
+atomic replacement, preserves permissions, and leaves the index untouched.
+
 The operation has a repository-owned scope. Closing its view cancels ordinary
 queries and waits for materialization before releasing the native source;
 repository close cancels and drains the write. `rpc/cancel {repo_id, op_id}`
@@ -201,6 +211,9 @@ writes explicitly remove their temporary output. Detected external edits survive
 `progress/transfer {op, job_id, repo_id, written_bytes, total_bytes}` reports
 logical bytes actually written to the temporary file, not network traffic.
 Batch progress includes `files_published` and `files_total`.
+Dehydration reports `checked_bytes` for the two full verification passes.
+Its `written_bytes` result counts the pointer bytes published. These checks use
+bounded ranges and apply the same cancellation and cleanup ownership as hydrate.
 `progress/complete` includes `outcome` for materialization: `completed`, `failed`
 or `cancelled`. Activity owns progress and cancellation across view changes.
 A transport error without a terminal result leaves the outcome unknown;

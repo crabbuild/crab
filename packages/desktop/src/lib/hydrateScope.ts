@@ -4,7 +4,7 @@
  * The Hydrate tab lets users pick *what* to hydrate or dehydrate via
  * a structured scope picker rather than a freeform glob textarea.
  * Each [`Scope`] mode is resolved against the repo's hydration state
- * to produce the exact file selection and the dehydrate CLI arguments.
+ * to produce the exact file selection.
  *
  * The verb (hydrate vs dehydrate) is applied as a final filter:
  * hydrate skips files already hydrated, dehydrate skips files that
@@ -34,13 +34,6 @@ export interface ResolvedScope {
   skipped: HydrationEntry[];
   /** Total logical bytes across `matched` (what the action will affect). */
   bytes: number;
-  /**
-   * Argument vector to pass to `rpc.hydrate` / `rpc.dehydrate`. For
-   * `all` we return an empty array (the agent maps that to `--all`);
-   * for everything else we send the matched literal paths so the CLI
-   * acts on exactly the previewed set.
-   */
-  patterns: string[];
 }
 
 /** True if a file is eligible for the verb (i.e. not already in target state). */
@@ -48,7 +41,7 @@ export function isEligible(entry: HydrationEntry, verb: HydrateVerb): boolean {
   if (verb === "hydrate") {
     return entry.state === "pointer" || entry.state === "missing";
   }
-  return entry.state === "hydrated" && entry.kind === "pointer";
+  return entry.state === "hydrated";
 }
 
 /**
@@ -73,20 +66,7 @@ export function resolveScope(
 
   const bytes = matched.reduce((sum, e) => sum + e.logical, 0);
 
-  // Step 3: build the patterns argv for the RPC.
-  let patterns: string[];
-  if (scope.kind === "all") {
-    // Empty list → agent maps to `--all`. Avoids bouncing every
-    // tracked path through the command line.
-    patterns = [];
-  } else {
-    // Send literal matched paths. The CLI treats these as exact-match
-    // globs which is exactly what we want — the user already saw the
-    // preview and confirmed it.
-    patterns = matched.map((e) => e.path);
-  }
-
-  return { matched, skipped, bytes, patterns };
+  return { matched, skipped, bytes };
 }
 
 function filterByScope(scope: Scope, entries: readonly HydrationEntry[]): HydrationEntry[] {

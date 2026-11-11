@@ -26,6 +26,7 @@ const ALLOWED_METHODS = new Set([
   "file_close",
   "file_materialize",
   "files_materialize",
+  "files_dehydrate",
   "read_text",
   "read_bytes",
   "read_range",
@@ -332,6 +333,7 @@ contextBridge.exposeInMainWorld("crab", {
       canForge: boolean;
       canHydrate: boolean;
       canHydrateSelection?: boolean;
+      canDehydrateSelection?: boolean;
       canSearch: boolean;
       canExec: boolean;
       canTrash: boolean;

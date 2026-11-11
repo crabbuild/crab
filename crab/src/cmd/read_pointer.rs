@@ -31,13 +31,31 @@ pub async fn run(cancel: &CancellationToken) -> Result<()> {
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
         first = input.next() => first?,
     };
-    let Some(Request::Open { pointer_b64 }) = first else {
+    let Some(Request::Open {
+        pointer_b64,
+        dehydrate_path,
+    }) = first
+    else {
         return Err(invalid("the first reader command must open a pointer"));
     };
     let bytes = STANDARD
         .decode(pointer_b64)
         .map_err(std::io::Error::other)?;
     let mut output = tokio::io::stdout();
+    if let Some(path) = dehydrate_path
+        && super::dehydrate::build_profile_protection(&std::env::current_dir()?, false)
+            .is_some_and(|protected| protected.is_match(&path))
+    {
+        emit(
+            &mut output,
+            Response::Failed {
+                code: "prefetch_protected".into(),
+                message: "The always prefetch profile keeps this file hydrated.".into(),
+            },
+        )
+        .await?;
+        return emit(&mut output, Response::Closed).await;
+    }
     let opening_cancel = cancel.child_token();
     let opening = Session::open(&bytes, &opening_cancel);
     tokio::pin!(opening);

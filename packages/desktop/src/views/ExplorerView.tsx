@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { ChevronsDownUp, FilePlus, Filter, FolderPlus, Loader2, RefreshCw, Search } from "lucide-react";
-import { OpenRepo } from "../state";
+import { OpenRepo, useStore } from "../state";
 import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
@@ -57,6 +57,14 @@ export const ExplorerView = memo(function ExplorerView({
 
   // Capability-based gating for file operations (create/rename/delete).
   const { canEdit } = useRepoCapabilities();
+  const { runFileTransfer } = useStore();
+  const nativeSessionId = repo.native_session_id;
+  const canHydrate = rev === null && repo.capabilities?.canHydrateSelection;
+  const canDehydrate = rev === null && repo.capabilities?.canDehydrateSelection;
+  const fileTransfers = useMemo(() => ({
+    hydrate: nativeSessionId && canHydrate ? (paths: string[]) => runFileTransfer(repo.repo_id, { paths, verb: "hydrate" }, nativeSessionId) : undefined,
+    dehydrate: nativeSessionId && canDehydrate ? (paths: string[]) => runFileTransfer(repo.repo_id, { paths, verb: "dehydrate" }, nativeSessionId) : undefined,
+  }), [repo.repo_id, nativeSessionId, canHydrate, canDehydrate, runFileTransfer]);
 
   // Resolve the repo root filesystem path for file operations.
   // Local repos use repo.path; remote repos extract the path from repo_id.
@@ -467,6 +475,7 @@ export const ExplorerView = memo(function ExplorerView({
               entries={filtered}
               gitStatus={gitStatus}
               hydrationByPath={hydrationByPath}
+              fileTransfers={fileTransfers}
               onOpenFile={onOpenFile}
               workspacePath={repoRootPath}
               repoId={repo.repo_id}

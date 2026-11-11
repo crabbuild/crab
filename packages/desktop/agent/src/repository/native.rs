@@ -31,6 +31,7 @@ pub(super) struct CapturedRead {
     runtime: NativeReads,
     root: PathBuf,
     pointer: Bytes,
+    dehydrate_path: Option<String>,
     selected: Option<Connection>,
     options: Option<DirectStoreOptions>,
     size: u64,
@@ -39,6 +40,11 @@ pub(super) struct CapturedRead {
 }
 
 impl CapturedRead {
+    pub(super) fn for_dehydration(mut self, path: String) -> Self {
+        self.dehydrate_path = Some(path);
+        self
+    }
+
     pub(super) async fn open(&self, stop: &CancellationToken) -> Result<&NativeFile> {
         self.opened
             .get_or_try_init(|| async {
@@ -104,6 +110,7 @@ impl NativeReads {
             runtime: self.clone(),
             root: root.to_owned(),
             pointer,
+            dehydrate_path: None,
             selected,
             options,
             size,
@@ -121,6 +128,7 @@ impl NativeReads {
         let selected = capture.selected.clone();
         let options = capture.options.clone();
         let pointer = capture.pointer.clone();
+        let dehydrate_path = capture.dehydrate_path.clone();
         let (send, receive) = mpsc::channel(8);
         let (ready, opened) = oneshot::channel();
         let (finished, completion) = watch::channel(Completion::Running);
@@ -139,7 +147,17 @@ impl NativeReads {
         }
         workers.jobs.spawn(async move {
             let result = actor(
-                root, pointer, selected, options, receive, ready, &stop, &actor_id,
+                root,
+                Request::Open {
+                    pointer_b64: STANDARD.encode(pointer),
+                    dehydrate_path,
+                },
+                selected,
+                options,
+                receive,
+                ready,
+                &stop,
+                &actor_id,
             )
             .await;
             let result = result.map_err(Arc::new);
@@ -345,7 +363,7 @@ async fn completed(mut completion: watch::Receiver<Completion>) -> Result<()> {
 
 async fn actor(
     root: PathBuf,
-    pointer: Bytes,
+    request: Request,
     selected: Option<Connection>,
     options: Option<DirectStoreOptions>,
     receive: mpsc::Receiver<Query>,
@@ -360,7 +378,7 @@ async fn actor(
             return Ok(());
         }
     };
-    let setup = process.open(pointer, selected.as_ref(), stop, id).await;
+    let setup = process.open(request, selected.as_ref(), stop, id).await;
     let size = match setup {
         Ok(size) => size,
         Err(error) => {
@@ -435,15 +453,12 @@ impl Process {
 
     async fn open(
         &mut self,
-        pointer: Bytes,
+        request: Request,
         selected: Option<&Connection>,
         stop: &CancellationToken,
         id: &str,
     ) -> Result<u64> {
-        self.send(Request::Open {
-            pointer_b64: STANDARD.encode(pointer),
-        })
-        .await?;
+        self.send(request).await?;
         let response = tokio::select! {
             () = stop.cancelled() => return Err(cancelled(id)),
             result = tokio::time::timeout(READ_TIMEOUT, response(&mut self.stdout)) => result.map_err(|_| AgentError::Other("native reader open timed out".into()))??,

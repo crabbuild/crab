@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Download, Upload } from "lucide-react";
 import { OpenRepo, useStore } from "../state";
-import { nextJobId, rpc } from "../ipc";
+import { nextJobId } from "../ipc";
 import { useJobLines } from "../lib/useJobLines";
 import { useHydrationStatus } from "../hooks/useHydrationStatus";
 import { useTrackedPatterns } from "../hooks/useTrackedPatterns";
@@ -15,18 +15,25 @@ import { HydrateVerb, Scope, resolveScope } from "../lib/hydrateScope";
 const CONFIRM_BYTES_THRESHOLD = 1 * 1024 * 1024 * 1024;
 const CONFIRM_FILES_THRESHOLD = 100;
 
+interface Selection {
+  verb: HydrateVerb;
+  paths: string[];
+  bytes: number;
+  nativeSessionId: string;
+}
+
 export function HydratePage({ repo }: { repo: OpenRepo }) {
   const [scope, setScope] = useState<Scope>({ kind: "all" });
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmVerb, setConfirmVerb] = useState<HydrateVerb | null>(null);
-  const { startJob, materializeFile } = useStore();
+  const [confirmation, setConfirmation] = useState<Selection | null>(null);
+  const { runFileTransfer } = useStore();
   const lines = useJobLines(jobId);
 
   const enabled = !!repo.path || repo.is_remote;
   const canHydrate = !!repo.native_session_id && !!repo.capabilities?.canHydrateSelection;
-  const canDehydrate = !!repo.path && !repo.is_remote && !!repo.capabilities?.canHydrate;
+  const canDehydrate = !!repo.native_session_id && !!repo.capabilities?.canDehydrateSelection;
   const { byPath, summary, loading: loadingStatus, error: statusError } = useHydrationStatus(repo.repo_id, enabled);
   const tracked = useTrackedPatterns(repo, enabled);
 
@@ -43,31 +50,18 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     [scope, entries],
   );
 
-  const activePreview = confirmVerb === "dehydrate" ? resolvedDehydrate : resolvedHydrate;
-
-  async function runNow(verb: HydrateVerb) {
-    if (verb === "hydrate" ? !canHydrate : !canDehydrate) return;
-    const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
-    if (resolved.matched.length === 0) {
-      setConfirmVerb(null);
-      return;
-    }
+  async function runNow({ verb, paths, nativeSessionId }: Selection) {
     const id = nextJobId(verb);
     setJobId(id);
     setBusy(true);
     setError(null);
     try {
-      if (verb === "hydrate" && repo.native_session_id) {
-        await materializeFile(repo.repo_id, resolved.matched.map(entry => entry.path), repo.native_session_id, id);
-      } else if (verb === "dehydrate" && repo.path) {
-        startJob(id, verb);
-        await rpc.dehydrate(repo.path, resolved.patterns, id);
-      }
+      await runFileTransfer(repo.repo_id, { paths, verb }, nativeSessionId, id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      setConfirmVerb(null);
+      setConfirmation(null);
     }
   }
 
@@ -78,16 +72,19 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
    * always confirms — destructive in spirit, even if reversible.
    */
   function requestRun(verb: HydrateVerb) {
+    const nativeSessionId = repo.native_session_id;
+    if (!nativeSessionId || (verb === "hydrate" ? !canHydrate : !canDehydrate)) return;
     const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
     if (resolved.matched.length === 0) return;
+    const selection = { verb, paths: resolved.matched.map(entry => entry.path), bytes: resolved.bytes, nativeSessionId };
     const heavy =
       verb === "dehydrate" ||
       resolved.bytes >= CONFIRM_BYTES_THRESHOLD ||
       resolved.matched.length >= CONFIRM_FILES_THRESHOLD;
     if (heavy) {
-      setConfirmVerb(verb);
+      setConfirmation(selection);
     } else {
-      void runNow(verb);
+      void runNow(selection);
     }
   }
 
@@ -164,7 +161,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
                 title={
                   resolvedDehydrate.matched.length === 0
                     ? "Nothing in scope is currently hydrated"
-                    : `Dehydrate ${resolvedDehydrate.matched.length} Crab file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
+                    : `Dehydrate ${resolvedDehydrate.matched.length} file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
                 }
               >
                 <Upload size={12} />
@@ -194,17 +191,17 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
       </div>
 
       <ConfirmHydrateDialog
-        open={confirmVerb !== null}
-        verb={confirmVerb ?? "hydrate"}
-        fileCount={activePreview.matched.length}
-        totalBytes={activePreview.bytes}
+        open={confirmation !== null}
+        verb={confirmation?.verb ?? "hydrate"}
+        fileCount={confirmation?.paths.length ?? 0}
+        totalBytes={confirmation?.bytes ?? 0}
         busy={busy}
         error={error}
         onCancel={() => {
-          if (!busy) setConfirmVerb(null);
+          if (!busy) setConfirmation(null);
         }}
         onConfirm={() => {
-          if (confirmVerb) void runNow(confirmVerb);
+          if (confirmation) void runNow(confirmation);
         }}
       />
     </div>

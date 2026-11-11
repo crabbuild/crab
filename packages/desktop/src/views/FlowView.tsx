@@ -32,8 +32,8 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { OpenRepo } from "../state";
-import { DirEntry, HydrationEntry, rpc, StagingStats } from "../ipc";
+import { OpenRepo, useStore } from "../state";
+import { DirEntry, HydrationEntry, mainProcess, rpc, StagingStats } from "../ipc";
 import { formatBytes } from "../lib/format";
 import { useHydrationStatus } from "../hooks/useHydrationStatus";
 import { useStagingStats } from "../hooks/useStagingStats";
@@ -47,6 +47,7 @@ import { executeCommand, CommandContext } from "../lib/command-registry";
 import { HydratePage } from "../pages/Hydrate";
 import { DatasetsView } from "./DatasetsView";
 import { LargeFileWizard } from "../components/LargeFileWizard";
+import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
 interface Props {
   repo: OpenRepo;
@@ -94,6 +95,7 @@ function getFileIcon(path: string) {
 
 export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   const crabStatus = useCrabStatus(repo.repo_id);
+  const { runFileTransfer } = useStore();
 
   const [tab, setTab] = useState<Tab>("files");
   const [phase, setPhase] = useState<FlowPhase>("browse");
@@ -139,8 +141,6 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   // Toolbar actions for the Large Files view.
   const toolbarActions = useMemo<ToolbarAction[]>(() => [
     { id: "crab.track", icon: Plus, label: "Add/Track" },
-    { id: "crab.hydrate", icon: Download, label: "Hydrate" },
-    { id: "crab.dehydrate", icon: Upload, label: "Dehydrate" },
     { id: "crab.push", icon: ArrowUp, label: "Push" },
   ], []);
 
@@ -155,18 +155,31 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   }, [commandContext]);
 
   // Context menu items for right-clicking files.
-  const contextMenuItems = useMemo<MenuItemDef[]>(() => [
-    { id: "crab.hydrate.file", label: "Hydrate", icon: Download },
-    { id: "crab.dehydrate.file", label: "Dehydrate", icon: Upload },
-    { id: "crab.track.file", label: "Track", icon: Plus, separator: true },
-    { id: "crab.untrack.file", label: "Untrack", icon: Minus },
-  ], []);
+  const contextMenuItems = useMemo<MenuItemDef[]>(() => {
+    const item = contextMenu && hydration.byPath.get(contextMenu.filePath);
+    const actions: MenuItemDef[] = [];
+    if (item && repo.native_session_id) {
+      if (repo.capabilities?.canHydrateSelection && isEligible(item, "hydrate")) actions.push({ id: "crab.hydrate.file", label: "Hydrate", icon: Download });
+      if (repo.capabilities?.canDehydrateSelection && isEligible(item, "dehydrate")) actions.push({ id: "crab.dehydrate.file", label: "Dehydrate", icon: Upload });
+    }
+    actions.push({ id: "crab.track.file", label: "Track", icon: Plus, separator: actions.length > 0 }, { id: "crab.untrack.file", label: "Untrack", icon: Minus });
+    return actions;
+  }, [contextMenu, hydration.byPath, repo.native_session_id, repo.capabilities]);
 
   const handleContextMenuSelect = useCallback(async (itemId: string) => {
     if (!contextMenu) return;
-    await executeCommand(itemId, commandContext, contextMenu.filePath);
+    const path = contextMenu.filePath;
     setContextMenu(null);
-  }, [contextMenu, commandContext]);
+    if (itemId === "crab.hydrate.file" || itemId === "crab.dehydrate.file") {
+      if (!repo.native_session_id) return;
+      const verb = itemId === "crab.dehydrate.file" ? "dehydrate" : "hydrate";
+      if (verb === "dehydrate" && !await mainProcess.dialogConfirm(`Dehydrate ${path}?`)) return;
+      try { await runFileTransfer(repo.repo_id, { verb, paths: [path] }, repo.native_session_id); }
+      catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+      return;
+    }
+    await executeCommand(itemId, commandContext, path);
+  }, [contextMenu, commandContext, repo.native_session_id, repo.repo_id, runFileTransfer]);
 
   const handleFileContextMenu = useCallback((e: React.MouseEvent, filePath: string) => {
     e.preventDefault();
@@ -522,6 +535,7 @@ function buildPointerTree(entries: PointerEntry[]): PointerTreeNode[] {
 }
 
 function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCommit?: (sha: string) => void }) {
+  const { runFileTransfer } = useStore();
   const [data, setData] = useState<PointerEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [limit, setLimit] = useState<50 | 100 | 250 | 500>(50);
@@ -552,21 +566,21 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
 
   const tree = useMemo(() => (data ? buildPointerTree(data) : []), [data]);
 
-  const handleHydrate = async (path: string) => {
+  const transfer = async (path: string, verb: HydrateVerb) => {
+    if (!repo.native_session_id || actionInProgress) return;
+    if (verb === "dehydrate" && !await mainProcess.dialogConfirm(`Dehydrate ${path}?`)) return;
     setActionInProgress(path);
+    setErr(null);
     try {
-      await rpc.hydrate(repo.path!, [path]);
-    } catch { /* ignore */ }
-    setActionInProgress(null);
+      await runFileTransfer(repo.repo_id, { verb, paths: [path] }, repo.native_session_id);
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActionInProgress(null);
+    }
   };
-
-  const handleDehydrate = async (path: string) => {
-    setActionInProgress(path);
-    try {
-      await rpc.dehydrate(repo.path!, [path]);
-    } catch { /* ignore */ }
-    setActionInProgress(null);
-  };
+  const handleHydrate = repo.native_session_id && repo.capabilities?.canHydrateSelection ? (path: string) => transfer(path, "hydrate") : undefined;
+  const handleDehydrate = repo.native_session_id && repo.capabilities?.canDehydrateSelection ? (path: string) => transfer(path, "dehydrate") : undefined;
 
   return (
     <div className="relative flex min-h-0 flex-1">
@@ -641,8 +655,8 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
                   onShowHistory={() => setHistoryFile(e)}
                   isActive={historyFile?.path === e.path}
                   hydrationState={hydration.byPath.get(e.path)?.state ?? null}
-                  onHydrate={() => handleHydrate(e.path)}
-                  onDehydrate={() => handleDehydrate(e.path)}
+                  onHydrate={handleHydrate && (() => handleHydrate(e.path))}
+                  onDehydrate={handleDehydrate && (() => handleDehydrate(e.path))}
                   actionInProgress={actionInProgress === e.path}
                 />
               ))}
@@ -688,15 +702,15 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
   entry: PointerEntry; index: number; totalBytes: number;
   onShowHistory: () => void; isActive: boolean;
   hydrationState: string | null;
-  onHydrate: () => void;
-  onDehydrate: () => void;
+  onHydrate?: () => void;
+  onDehydrate?: () => void;
   actionInProgress: boolean;
 }) {
   const share = totalBytes ? (entry.size / totalBytes) * 100 : 0;
   const fileName = entry.path.split("/").pop() ?? entry.path;
   const dirPath = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/") + 1) : "";
   const isHydrated = hydrationState === "hydrated";
-  const isPointer = hydrationState === "pointer" || hydrationState === null;
+  const isPointer = hydrationState === "pointer" || hydrationState === "missing";
   const { Icon: FileIcon, color: iconColor } = getFileIcon(entry.path);
 
   return (
@@ -712,7 +726,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
         "shrink-0 w-16 text-center rounded px-1.5 py-0.5 text-[10px] font-medium",
         isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
       )}>
-        {hydrationState ?? "pointer"}
+        {hydrationState ?? "Unknown"}
       </span>
       <span className="shrink-0 w-16 text-right tabular-nums text-gx-muted">{formatBytes(entry.size)}</span>
       <div className="flex shrink-0 items-center gap-1.5 w-24 justify-end">
@@ -725,7 +739,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
       <div className="flex shrink-0 w-14 items-center justify-center gap-1">
         {actionInProgress ? (
           <Loader2 size={12} className="animate-spin text-gx-muted" />
-        ) : isHydrated ? (
+        ) : isHydrated && onDehydrate ? (
           <button
             type="button"
             className="rounded p-1 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
@@ -735,7 +749,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
           >
             <CloudOff size={12} />
           </button>
-        ) : isPointer ? (
+        ) : isPointer && onHydrate ? (
           <button
             type="button"
             className="rounded p-1 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"
@@ -769,8 +783,8 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
   node: PointerTreeNode; depth: number; totalBytes: number;
   onShowHistory: (entry: PointerEntry) => void; activeHistoryPath: string | null;
   hydrationByPath: Map<string, HydrationEntry>;
-  onHydrate: (path: string) => void;
-  onDehydrate: (path: string) => void;
+  onHydrate?: (path: string) => void;
+  onDehydrate?: (path: string) => void;
   actionInProgress: string | null;
 }) {
   const [dirExpanded, setDirExpanded] = useState(depth < 2);
@@ -818,7 +832,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
   const isActive = activeHistoryPath === entry.path;
   const hydrationState = hydrationByPath.get(entry.path)?.state ?? null;
   const isHydrated = hydrationState === "hydrated";
-  const isPointer = hydrationState === "pointer" || hydrationState === null;
+  const isPointer = hydrationState === "pointer" || hydrationState === "missing";
   const isActionInProgress = actionInProgress === entry.path;
   const { Icon: FileIcon, color: iconColor } = getFileIcon(entry.path);
 
@@ -834,7 +848,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
         "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
         isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
       )}>
-        {hydrationState ?? "pointer"}
+        {hydrationState ?? "Unknown"}
       </span>
       <span className="ml-2 flex items-center gap-1.5 text-[10px] text-gx-muted">
         <span className="tabular-nums">{formatBytes(entry.size)}</span>
@@ -847,7 +861,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
       <div className="flex shrink-0 items-center gap-0.5">
         {isActionInProgress ? (
           <Loader2 size={11} className="animate-spin text-gx-muted" />
-        ) : isHydrated ? (
+        ) : isHydrated && onDehydrate ? (
           <button
             type="button"
             className="rounded p-0.5 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
@@ -857,7 +871,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
           >
             <CloudOff size={11} />
           </button>
-        ) : isPointer ? (
+        ) : isPointer && onHydrate ? (
           <button
             type="button"
             className="rounded p-0.5 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"

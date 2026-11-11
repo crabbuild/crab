@@ -18,7 +18,7 @@ mod files;
 mod native;
 pub(crate) use content::command::output as git_output;
 pub(crate) use content::diff;
-pub(crate) use content::{FileSource, MAX_COMPLETE_BYTES, ReadScope};
+pub(crate) use content::{Dehydration, FileSource, MAX_COMPLETE_BYTES, ReadScope};
 
 #[derive(Clone)]
 pub struct BrowseSession {

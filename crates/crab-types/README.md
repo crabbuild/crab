@@ -20,7 +20,9 @@ format. The crate has no network, filesystem, object-store, or runtime policy.
   unknown, not zero.
 - `pointer_read` — native reader session messages shared by the CLI helper and
   desktop sidecar. Range/chunk/cancel/close acknowledgements follow finished work;
-  process ownership and reconstruction policy stay with consumers.
+  `Open.dehydrate_path` requests the CLI's worktree prefetch protection for a
+  verified dehydration read. Process ownership and reconstruction policy stay
+  with consumers.
 - `storage` — provider kinds, normalized bucket identity, and auth-issued
   path scopes.
 - `replication` — read-replica and active-active configuration contracts.

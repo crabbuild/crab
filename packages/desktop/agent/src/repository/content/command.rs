@@ -154,6 +154,20 @@ pub(super) async fn blob(
     Ok(output.stdout.into())
 }
 
+pub(super) async fn blob_size(root: &Path, oid: &str, scope: &ReadScope) -> Result<u64> {
+    String::from_utf8(
+        run(
+            root,
+            &["--no-replace-objects", "cat-file", "-s", oid],
+            scope,
+        )
+        .await?,
+    )?
+    .trim()
+    .parse()
+    .map_err(|error| std::io::Error::other(error).into())
+}
+
 pub(super) async fn blob_to_file(
     root: &Path,
     oid: &str,

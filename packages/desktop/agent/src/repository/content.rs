@@ -10,6 +10,7 @@ pub(super) mod command;
 pub(crate) mod diff;
 mod materialize;
 mod sqlite;
+pub(crate) use materialize::Dehydration;
 use materialize::WorkingPointer;
 
 pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
@@ -277,17 +278,7 @@ impl FileSource {
         oid: String,
         scope: ReadScope,
     ) -> Result<Self> {
-        let size = String::from_utf8(
-            command::run(
-                root,
-                &["--no-replace-objects", "cat-file", "-s", &oid],
-                &scope,
-            )
-            .await?,
-        )?
-        .trim()
-        .parse::<u64>()
-        .map_err(std::io::Error::other)?;
+        let size = command::blob_size(root, &oid, &scope).await?;
         if size < crab_git::MAX_LFS_POINTER_SIZE as u64 {
             let bytes = command::run(
                 root,

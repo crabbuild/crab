@@ -6,7 +6,7 @@ import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer"
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import { parseRepoId } from "../electron/ssh-types";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError, isStorageRepositoryUrl } from "./ipc";
+import { RepoHandle, ProgressLine, type FileTransfer, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError, isStorageRepositoryUrl } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -669,7 +669,7 @@ interface Ctx {
   unpinRepo: (path: string) => void;
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
-  materializeFile: (repoId: string, selection: string | string[], nativeSessionId: string, jobId?: string) => Promise<{ written_bytes: number }>;
+  runFileTransfer: (repoId: string, selection: FileTransfer, nativeSessionId: string, jobId?: string) => Promise<{ written_bytes: number }>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -846,10 +846,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
-      materializeFile: async (repoId, selection, nativeSessionId, job_id = nextJobId("hydrate")) => {
-        dispatch({ type: "job-start", job_id, op: "hydrate" });
+      runFileTransfer: async (repoId, selection, nativeSessionId, jobId) => {
+        const op = "verb" in selection ? selection.verb : "hydrate";
+        const job_id = jobId ?? nextJobId(op);
+        dispatch({ type: "job-start", job_id, op });
         try {
-          const result = await rpc.materializeFile(repoId, selection, job_id, nativeSessionId);
+          const result = await rpc.fileTransfer(repoId, selection, job_id, nativeSessionId);
           dispatch({ type: "job-complete", job_id, status: 0 });
           return result;
         }

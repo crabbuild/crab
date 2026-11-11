@@ -66,6 +66,7 @@ impl Reader {
         let mut reader = Self::spawn(root);
         reader.send(Request::Open {
             pointer_b64: STANDARD.encode(pointer),
+            dehydrate_path: None,
         });
         assert!(matches!(reader.next(), Response::Ready { .. }));
         reader
@@ -158,6 +159,7 @@ fn close_before_ready_drains_reader_waiting_for_a_staging_writer() {
         let mut reader = Reader::spawn(root);
         reader.send(Request::Open {
             pointer_b64: STANDARD.encode(&pointer),
+            dehydrate_path: None,
         });
         if close_command {
             reader.send(Request::Close);

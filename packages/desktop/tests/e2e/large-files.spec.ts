@@ -226,7 +226,13 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect.poll(() => page.evaluate(() => window.crab.getCapabilities("large-files"))).toMatchObject({ canHydrateSelection: true });
     await expect(page.getByRole("button", { name: /^Hydrate 3 files/ })).toBeEnabled();
     await page.getByRole("button", { name: /^Hydrate 3 files/ }).click();
-    await expect(page.getByRole("main").getByText("Hydrated staged.safetensors", { exact: true })).toBeVisible();
+    try {
+      await expect(page.getByRole("main").getByText("Hydrated staged.safetensors", { exact: true })).toBeVisible();
+    } catch (error) {
+      await page.screenshot({ path: test.info().outputPath("hydrate-failure.png") });
+      writeFileSync(test.info().outputPath("hydrate-failure.txt"), await page.getByRole("main").innerText());
+      throw error;
+    }
     expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
@@ -257,6 +263,63 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect(page.getByRole("main").getByText("Hydrated lfs.safetensors", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
     expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+
+    git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Commit mixed pointer selection"]);
+    writeFileSync(path.join(source, "unrelated.txt"), "unrelated staged edit\n");
+    git(["add", "--", "unrelated.txt"]);
+    const dehydrateIndex = readFileSync(path.join(source, ".git", "index"));
+    const dehydrate = async (count: number) => {
+      await page.getByRole("button", { name: new RegExp(`^Dehydrate ${count} file`) }).click();
+      await page.getByRole("dialog", { name: "Dehydrate files?" }).getByRole("button", { name: "Dehydrate", exact: true }).click();
+    };
+    writeFileSync(path.join(source, tinyPath), Buffer.alloc(tinyContent.length, 99));
+    await dehydrate(3);
+    await expect(page.getByRole("alert").filter({ hasText: "Working file differs from committed content" })).toBeVisible();
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(Buffer.alloc(tinyContent.length, 99));
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
+    writeFileSync(path.join(source, tinyPath), tinyContent);
+    const project = path.join(source, "crab.toml");
+    writeFileSync(project, '[remote]\nurl = "crab://fixture/repo"\n[prefetch.profiles.always]\npaths = ["*.lfs"]\n');
+    await dehydrate(3);
+    await expect(page.getByRole("alert").filter({ hasText: "always prefetch profile" })).toBeVisible();
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
+    rmSync(project);
+    writeFileSync(payload, corrupt);
+    await dehydrate(3);
+    await expect(page.getByRole("alert").filter({ hasText: "lfs.safetensors" })).toBeVisible();
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyPointer);
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
+    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    const stopped = page.getByText("1 of 3 files dehydrated", { exact: true });
+    await expect(stopped.locator("..").getByText("Dehydration failed", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+    writeFileSync(payload, original);
+    await dehydrate(2);
+    await expect(page.getByRole("main").getByText("Dehydrated staged.safetensors", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(pointers.get("staged.safetensors"));
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
+    if (process.platform !== "win32") expect(statSync(path.join(source, "lfs.safetensors")).mode & 0o100).toBe(0o100);
+    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(dehydrateIndex);
+    expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(untouched);
+    await page.screenshot({ path: test.info().outputPath("bulk-crab-lfs-dehydration.png") });
+    const primary = page.getByRole("navigation", { name: "Primary", exact: true });
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    await page.locator(`[role="treeitem"][data-item-path="${tinyPath}"]`).click({ button: "right" });
+    await page.getByRole("button", { name: "Hydrate File", exact: true }).click();
+    await expect.poll(() => readFileSync(path.join(source, tinyPath)).equals(tinyContent)).toBe(true);
+    await primary.getByRole("button", { name: "Large Files", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate", exact: true }).click();
+    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    for (const file of ["staged.safetensors", "lfs.safetensors"]) {
+      await page.getByRole("checkbox", { name: new RegExp(file) }).check();
+    }
+    await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
+    await expect(page.getByRole("main").getByText("Hydrated staged.safetensors", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
+    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(dehydrateIndex);
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

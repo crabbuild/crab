@@ -69,6 +69,14 @@ the resolved index pointer. Activity shows written bytes and how many files
 have reached disk. If the operation stops partway, the completed files stay
 available and you can retry the remaining selection.
 
+**Dehydrate** checks each working file and its saved content against the
+committed pointer before freeing disk space. Commit staged pointer changes
+first. Modified files, unavailable content and files protected by the `always`
+prefetch profile stay hydrated, and Desktop shows the reason. Activity reports
+the bytes checked and files dehydrated. The same selection can then hydrate the
+files again. Both directions are available over SSH when its agent supports
+them. Explorer file/subtree actions and Storage Map use the same native owner.
+
 ### Live Refresh
 
 The Explorer watches the filesystem for changes. When files are
