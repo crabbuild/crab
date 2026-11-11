@@ -1,0 +1,150 @@
+import { test, expect, _electron as electron } from "@playwright/test";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import type { StorageConnectionInput } from "../../electron/storage-connection-types";
+import type { AgentEvent } from "../../src/ipc";
+import { call, packagedExecutable } from "./packaged-app";
+
+interface Fixture {
+  url: string;
+  profiles: Array<StorageConnectionInput & { endpoint: string }>;
+  payloads: Array<{ marker: string; sha256: string; size: number }>;
+}
+
+for (const kind of ["crab", "lfs"] as const) {
+  for (const outcome of ["cancel", "native-crash", "app-crash"] as const) {
+    test(`SDK ${kind} partial response ${outcome} retries exact content`, async () => {
+      const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
+      test.skip(!descriptor || (outcome === "native-crash" && process.platform === "win32"), "Requires the owned storage fixture; native process lookup requires POSIX");
+      test.setTimeout(120_000);
+      const fixture = JSON.parse(readFileSync(descriptor!, "utf8")) as Fixture;
+      const connection = fixture.profiles[0];
+      const payload = fixture.payloads[0];
+      const filename = kind === "crab" ? "weights.safetensors" : "lfs.safetensors";
+      const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-sdk-recovery-"));
+      const cache = path.join(root, "cache");
+      const profile = path.join(root, "profile");
+      const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")), CRAB_CACHE_DIR: cache, AWS_ACCESS_KEY_ID: "invalid-ambient-access", AWS_SECRET_ACCESS_KEY: "invalid-ambient-secret", AWS_SESSION_TOKEN: "invalid-ambient-session", AWS_ENDPOINT_URL: "http://127.0.0.1:1", AWS_ENDPOINT_URL_S3: "http://127.0.0.1:1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(root, "gitconfig") };
+      delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+      writeFileSync(env.GIT_CONFIG_GLOBAL, "");
+      let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+      let stderr = "";
+      const runtimes: Array<{ repo_id: string; native_session_id: string | null }> = [];
+      const epoch = (repoId: string) => runtimes.filter(runtime => runtime.repo_id === repoId).at(-1)?.native_session_id;
+      const transport = async (action: string) => {
+        const response = await fetch(`${connection.endpoint}/__fixture_${action}`);
+        expect(response.ok).toBe(true);
+        return await response.json() as { get: number; writes: number; stream_blocked: number; streamed_bytes: number; paused: boolean };
+      };
+      const inventory = () => {
+        const entries: Array<{ path: string; bytes: number }> = [];
+        const visit = (directory: string) => {
+          for (const entry of readdirSync(directory, { withFileTypes: true })) {
+            const file = path.join(directory, entry.name);
+            if (entry.isDirectory()) visit(file);
+            else entries.push({ path: path.relative(cache, file), bytes: statSync(file).size });
+          }
+        };
+        visit(cache);
+        return entries;
+      };
+      const launch = async (welcome = false) => {
+        application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
+        application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
+        const page = await application.firstWindow();
+        await page.exposeFunction("recordSdkRuntime", (runtime: typeof runtimes[number]) => runtimes.push(runtime));
+        await page.evaluate(() => {
+          const target = window as typeof window & { recordSdkRuntime: (runtime: unknown) => Promise<void> };
+          window.crab.onEvent((event: AgentEvent) => { if (event.method === "repo:capabilities-changed") void target.recordSdkRuntime(event.params); });
+        });
+        if (welcome) {
+          await page.getByRole("button", { name: "Skip", exact: true }).click();
+          await page.getByRole("button", { name: "No thanks", exact: true }).click();
+          return page;
+        }
+        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).waitFor();
+        for (const name of ["Skip", "No thanks"]) {
+          const button = page.getByRole("button", { name, exact: true });
+          if (await button.isVisible()) await button.click();
+        }
+        return page;
+      };
+      const openSnapshot = async (page: Awaited<ReturnType<typeof launch>>) => {
+        await page.getByRole("button", { name: "More actions", exact: true }).click();
+        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
+        await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
+        await dialog.getByRole("button", { name: `Edit ${connection.name}`, exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
+        await dialog.getByRole("button", { name: "Open snapshot", exact: true }).click();
+        await expect(dialog).toHaveCount(0);
+      };
+      try {
+        let page = await launch(true);
+        await call(page, "storage_connections_save", { connection });
+        await openSnapshot(page);
+        await expect(page.locator(`[role="treeitem"][data-item-path="${filename}"]`)).toBeVisible();
+        let repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+        expect(repoId).toBeTruthy();
+        await expect.poll(() => Boolean(epoch(repoId!))).toBe(true);
+        const initialEpoch = epoch(repoId!);
+        const before = await transport(`stream_${kind}`);
+        await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+        await expect.poll(async () => (await transport("stats")).stream_blocked).toBeGreaterThan(0);
+        expect((await transport("stats")).streamed_bytes).toBeGreaterThan(before.streamed_bytes);
+        const interruptedCache = inventory();
+        if (outcome === "cancel") {
+          await page.getByRole("button", { name: "Close tab", exact: true }).click();
+          await expect.poll(async () => (await transport("stats")).stream_blocked).toBe(0);
+        } else if (outcome === "native-crash") {
+          const parent = application!.process().pid;
+          const native = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
+            .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+            .find(row => row && Number(row[2]) === parent && /\/agent\/crab-desktop-agent(?:\s|$)/.test(row[3]));
+          if (!native) throw new Error("Owned native process was not found");
+          process.kill(Number(native[1]), "SIGKILL");
+        } else {
+          const closed = application!.waitForEvent("close");
+          process.kill(application!.process().pid!, "SIGKILL");
+          await closed;
+          application = undefined;
+          await expect.poll(async () => (await transport("stats")).stream_blocked).toBe(0);
+        }
+        expect((await transport("stats")).paused).toBe(true);
+        await transport("release");
+        if (!application) page = await launch();
+        if (!await page.getByRole("navigation", { name: "Primary", exact: true }).isVisible()) await openSnapshot(page);
+        if (outcome === "native-crash") {
+          const retry = page.getByRole("button", { name: "Retry reopening repository", exact: true });
+          await expect.poll(async () => Boolean(epoch(repoId!) && epoch(repoId!) !== initialEpoch) || await retry.isVisible()).toBe(true);
+          if (await retry.isVisible()) await retry.click();
+          await expect.poll(() => Boolean(epoch(repoId!) && epoch(repoId!) !== initialEpoch)).toBe(true);
+        }
+        const row = page.locator(`[role="treeitem"][data-item-path="${filename}"]`);
+        if (!await row.isVisible()) {
+          const nav = page.getByRole("navigation", { name: "Primary", exact: true });
+          await nav.getByRole("button", { name: "Settings", exact: true }).click();
+          await nav.getByRole("button", { name: "Files", exact: true }).click();
+        }
+        await row.click();
+        await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible({ timeout: 20_000 });
+        repoId = await page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"));
+        const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+        const bytes = Buffer.from(String(content.bytes_b64), "base64");
+        expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: payload.size, sha256: payload.sha256 });
+        const after = await transport("stats");
+        expect(after.get).toBeGreaterThan(before.get);
+        expect(after.writes).toBe(0);
+        await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-recovered.png") });
+        writeFileSync(test.info().outputPath("sdk-cache-proof.json"), JSON.stringify({ kind, outcome, before, after, interruptedCache, recoveredCache: inventory(), exactBytes: true }, null, 2));
+      } finally {
+        try { await transport("release"); }
+        finally { await application?.close(); }
+        writeFileSync(test.info().outputPath("application-stderr.log"), stderr);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
