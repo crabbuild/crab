@@ -151,6 +151,9 @@ impl TaskWorkspace {
         force: bool,
         delete_branch: bool,
     ) -> Result<Cleanup> {
+        if !force {
+            self.require_clean().await?;
+        }
         // Git remains the removal authority. A locked, replaced or unregistered
         // checkout must fail without recursive filesystem cleanup or pruning.
         let manager = crate::worktree::WorktreeManager::new(repo.to_path_buf());
@@ -177,6 +180,64 @@ impl TaskWorkspace {
                 })
             }
         }
+    }
+
+    async fn require_clean(&self) -> Result<()> {
+        // Normal Git removal honors display settings and omits ignored files.
+        // A landed merge cannot authorize deleting source data outside its commit.
+        let status = git(
+            self.root(),
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        )
+        .await?;
+        if !status.is_empty() {
+            return Err(AgentError::Other(
+                "Workspace retained modified, untracked or ignored source files".into(),
+            ));
+        }
+        let mut command = crate::shellout::git_command();
+        let output = crate::shellout::output(command.current_dir(self.root()).args([
+            "ls-files",
+            "-v",
+            "-z",
+            "--full-name",
+        ]))
+        .await?;
+        if !output.status.success() {
+            return Err(AgentError::Cli {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        let entries = String::from_utf8(output.stdout)?;
+        for entry in entries.split_terminator('\0') {
+            let (tag, name) = entry
+                .split_once(' ')
+                .ok_or_else(|| AgentError::Other("Git returned an invalid index entry".into()))?;
+            if tag != "S" && !tag.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+                continue;
+            }
+            // Sparse omissions contain no bytes to preserve. A materialized
+            // excluded file may hide edits from both status and ordinary removal.
+            let path = self.root().join(name);
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => {
+                    return Err(AgentError::Other(
+                        "Workspace retained files excluded by index flags".into(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -311,4 +372,78 @@ pub(crate) async fn writer_lease(root: &Path, task_id: Option<uuid::Uuid>) -> Re
     verify_branch(root, &record.branch).await?;
     require_no_pending_apply(&git_dir)?;
     Ok(Some(lease))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn non_force_cleanup_preserves_materialized_excluded_files() {
+        for (flag, materialized) in [
+            ("--assume-unchanged", true),
+            ("--skip-worktree", true),
+            ("--skip-worktree", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let repo = directory.path().join("repo");
+            let root = directory.path().join("source");
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "--template=", "--initial-branch=main"])
+                .await
+                .unwrap();
+            std::fs::write(repo.join("file.txt"), "before\n").unwrap();
+            git(&repo, &["add", "file.txt"]).await.unwrap();
+            git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ],
+            )
+            .await
+            .unwrap();
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "agent/source",
+                    root.to_str().unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+            let id = uuid::Uuid::new_v4();
+            TaskWorkspace::record(&repo, &root, id, "agent/source")
+                .await
+                .unwrap();
+            git(&root, &["update-index", flag, "file.txt"])
+                .await
+                .unwrap();
+            if materialized {
+                std::fs::write(root.join("file.txt"), "private editor bytes\n").unwrap();
+            } else {
+                std::fs::remove_file(root.join("file.txt")).unwrap();
+            }
+            let workspace =
+                TaskWorkspace::open(&repo, &root, Some(&id.to_string()), Some("agent/source"))
+                    .await
+                    .unwrap();
+            let result = workspace.remove(&repo, false, false).await;
+            assert_eq!(
+                (result.is_err(), root.exists()),
+                (materialized, materialized),
+                "{flag}, materialized={materialized}"
+            );
+        }
+    }
 }

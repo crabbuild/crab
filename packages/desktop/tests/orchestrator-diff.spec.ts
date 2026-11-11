@@ -444,6 +444,20 @@ rename to new-name.ts
   });
 
   describe("applyAll", () => {
+    it.each(["active", "inactive"])("includes untracked source files hidden by display settings for an %s target", async target => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `hidden-source-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });
+        fs.writeFileSync(path.join(worktreePath, "pending.txt"), "pending task bytes\n");
+        if (target === "inactive") await execFile("git", ["checkout", "-b", "other"], { cwd: repoDir });
+        const result = await applyAll(createMockTask(repoDir, taskId, baseRef, worktreePath));
+        const tree = (await execFile("git", ["ls-tree", "--name-only", "refs/heads/main", "pending.txt"], { cwd: repoDir })).stdout;
+        expect({ result, tree }).toEqual({ result: { success: true }, tree: "pending.txt\n" });
+      } finally { cleanup(worktreePath); }
+    });
+
     it("merges agent branch into current branch cleanly", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `apply-test-${Date.now()}`;

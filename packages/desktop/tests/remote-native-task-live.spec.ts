@@ -26,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "apply-sidecar-kill-active-edited", "apply-sidecar-kill-published", "apply-sidecar-kill-published-foreign-lock", "apply-sidecar-kill-published-source-edit", "apply-sidecar-kill-published-source-ignored", "apply-sidecar-kill-published-source-untracked", "apply-sidecar-kill-published-unconfirmed", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-source-hidden-untracked", "apply-source-ignored", "apply-source-assumed", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "apply-sidecar-kill-active-edited", "apply-sidecar-kill-published", "apply-sidecar-kill-published-foreign-lock", "apply-sidecar-kill-published-source-edit", "apply-sidecar-kill-published-source-ignored", "apply-sidecar-kill-published-source-untracked", "apply-sidecar-kill-published-unconfirmed", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -99,7 +99,29 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
       if (mode === "apply-target-detached") await run("git", ["checkout", "--detach"], { cwd: repo });
       task = await orchestrator.createTask("Use a built-in file writing or patch tool to create remote-proof.txt containing exactly remote-one followed by a newline. Do not use shell commands, external services or subagents. Reply Done.", mode === "claude-code" ? mode : "codex", mode === "checkpoint-stop-local" ? repo : repoId);
-      if (mode.startsWith("apply-target")) {
+      if (mode === "apply-source-hidden-untracked" || mode === "apply-source-ignored" || mode === "apply-source-assumed") {
+        const ignored = mode === "apply-source-ignored";
+        const assumed = mode === "apply-source-assumed";
+        const retained = ignored || assumed;
+        const name = ignored ? "ignored.txt" : assumed ? "seed.txt" : "pending.txt";
+        const warnings: string[] = [];
+        orchestrator.on("orchestrator:error", ({ message }: { message: string }) => warnings.push(message));
+        await run("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repo });
+        if (ignored) {
+          await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+          await writeFile(path.join(repo, ".git", "info", "exclude"), `${name}\n`);
+          await writeFile(path.join(task.worktreePath, "seed.txt"), "applied tracked bytes\n");
+        }
+        if (assumed) await run("git", ["update-index", "--assume-unchanged", "--", name], { cwd: task.worktreePath });
+        await writeFile(path.join(task.worktreePath, name), "retained task bytes\n");
+        await orchestrator.applyTask(task.id);
+        const source = path.join(task.worktreePath, name);
+        const target = path.join(repo, name);
+        expect({ status: task.status, source: existsSync(source) ? await readFile(source, "utf8") : null,
+          target: existsSync(target) ? await readFile(target, "utf8") : null, retained: existsSync(task.worktreePath), warning: warnings.length > 0,
+          tracked: await readFile(path.join(repo, "seed.txt"), "utf8") }).toEqual({ status: "applied", source: retained ? "retained task bytes\n" : null,
+          target: ignored ? null : assumed ? "before\n" : "retained task bytes\n", retained, warning: retained, tracked: ignored ? "applied tracked bytes\n" : "before\n" });
+      } else if (mode.startsWith("apply-target")) {
         await orchestrator.shutdown();
         orchestrator = new Orchestrator({ persistPath, rpcRouter: router });
         task = orchestrator.getTask(task.id)!;
@@ -533,7 +555,7 @@ wait "$child"
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-target-configured-strategy" || mode === "apply-target-signed-merge" || mode === "apply-target-hook-bypass" || mode === "apply-target-hook-index" || mode === "apply-eof" || hardKill) expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode.startsWith("apply-source-") || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-target-configured-strategy" || mode === "apply-target-signed-merge" || mode === "apply-target-hook-bypass" || mode === "apply-target-hook-index" || mode === "apply-eof" || hardKill) expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

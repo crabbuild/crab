@@ -525,7 +525,8 @@ export async function applyAll(task: Task): Promise<ApplyResult> {
   // target cannot grant the branch checked out today ownership of this Apply.
   const targetBranch = await applyTarget(task);
 
-  const { stdout: status } = await execFile("git", ["status", "--porcelain"], { cwd: task.worktreePath });
+  // Display preferences cannot hide source changes from the Apply snapshot.
+  const { stdout: status } = await execFile("git", ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], { cwd: task.worktreePath });
   if (status.trim()) {
     await execFile("git", ["add", "-A"], { cwd: task.worktreePath });
     await execFile("git", ["commit", "-m", "Agent work (auto-committed before apply)"], { cwd: task.worktreePath });

@@ -1923,7 +1923,17 @@ async fn apply_workspace(
     let wt = workspace.root();
     // Staging or commit failure cannot merge a stale task branch and then
     // delete the workspace containing the user's uncommitted changes.
-    let status = run_git_cmd(wt, &["status", "--porcelain"]).await?;
+    // Display preferences cannot hide source changes from the Apply snapshot.
+    let status = run_git_cmd(
+        wt,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )
+    .await?;
     if !status.trim().is_empty() {
         run_git_cmd(wt, &["add", "-A"]).await?;
         run_git_cmd(
@@ -2032,31 +2042,7 @@ async fn complete_apply(
     merge_commit: Option<String>,
     recovered: bool,
 ) -> Result<Value> {
-    let cleanup = async {
-        if recovered {
-            // Git's removal check honors status settings and ignores ignored
-            // files. Include all source files so recovery preserves new data.
-            let status = run_git_cmd(
-                workspace.root(),
-                &[
-                    "--no-optional-locks",
-                    "status",
-                    "--porcelain",
-                    "--ignored",
-                    "--untracked-files=all",
-                    "--ignore-submodules=none",
-                ],
-            )
-            .await?;
-            if !status.is_empty() {
-                return Err(AgentError::Other(
-                    "Recovered Apply retained modified, untracked or ignored source files".into(),
-                ));
-            }
-        }
-        workspace.remove(repo_dir, !recovered, true).await
-    }
-    .await;
+    let cleanup = workspace.remove(repo_dir, false, true).await;
     let (worktree_removed, branch_deleted, cleanup_error) = match cleanup {
         Ok(cleanup) => (true, cleanup.branch_deleted, cleanup.error),
         Err(error) => {
@@ -6007,6 +5993,77 @@ mod tests {
             .success(),
             "task branch should be deleted"
         );
+    }
+
+    async fn apply_source_file(ignored: bool) {
+        let (_td, root) = git_init_repo();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        assert!(sh(&root, &["add", "."]).status.success());
+        assert!(sh(&root, &["commit", "-m", "baseline"]).status.success());
+        let worktree = root.parent().unwrap().join("source-files");
+        assert!(
+            sh(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "agent/source",
+                    worktree.to_str().unwrap()
+                ]
+            )
+            .status
+            .success()
+        );
+        let task_id = uuid::Uuid::new_v4();
+        crate::task_workspace::TaskWorkspace::record(&root, &worktree, task_id, "agent/source")
+            .await
+            .unwrap();
+        assert!(
+            sh(&root, &["config", "status.showUntrackedFiles", "no"])
+                .status
+                .success()
+        );
+        if ignored {
+            std::fs::create_dir_all(root.join(".git/info")).unwrap();
+            std::fs::write(root.join(".git/info/exclude"), "source.txt\n").unwrap();
+            std::fs::write(worktree.join("tracked.txt"), "after\n").unwrap();
+        }
+        std::fs::write(worktree.join("source.txt"), "task bytes\n").unwrap();
+        assert!(sh(&root, &["checkout", "-b", "other"]).status.success());
+        let result = task_apply(
+            &root,
+            TaskApplyParams {
+                repo_id: "owned-repo".into(),
+                task_id: task_id.to_string(),
+                branch: "agent/source".into(),
+                base_branch: Some("main".into()),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let content = sh(&root, &["show", "main:source.txt"]);
+        let applied = content
+            .status
+            .success()
+            .then(|| String::from_utf8(content.stdout).unwrap());
+        assert_eq!(
+            json!({ "applied": result["applied"], "removed": result["worktree_removed"], "branch_deleted": result["branch_deleted"],
+            "source": std::fs::read_to_string(worktree.join("source.txt")).ok(), "target": applied }),
+            json!({ "applied": true, "removed": !ignored, "branch_deleted": !ignored,
+                "source": ignored.then_some("task bytes\n"), "target": (!ignored).then_some("task bytes\n") })
+        );
+    }
+
+    #[tokio::test]
+    async fn task_apply_captures_untracked_source_hidden_by_status_settings() {
+        apply_source_file(false).await;
+    }
+
+    #[tokio::test]
+    async fn task_apply_retains_ignored_source_after_merging() {
+        apply_source_file(true).await;
     }
 
     #[cfg(unix)]

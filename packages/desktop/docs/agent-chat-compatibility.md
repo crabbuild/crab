@@ -2548,6 +2548,52 @@ the same four unused-import diagnostics as its unchanged baseline; compiler
 settings are not weakened. Evidence: `tool-group-work-before.json`,
 `tool-group-complexity.json`, `tool-group-final-scoped.json`,
 `tool-group-browser-owned.json` and `tool-group-fixture-type-baseline.json`.
-The browser check uses an owned Vite server with an allocated loopback port;
-the default Playwright web-server setup timed out before running the test and
-still needs separate investigation. Full cross-platform CI remains pending.
+The browser check first passed against an owned Vite server with an allocated
+loopback port. A later run of the standard Playwright command also passes;
+web-server diagnostics show both loopback families refused connections until
+Vite started. The earlier startup timeouts do not establish a DNS or product
+bug. Full cross-platform CI remains pending.
+
+## Source files retained after Apply
+
+Normal SSH Apply still force-removed its source checkout after merging. Two
+real SSH regressions show the task marked applied while an untracked file
+hidden by `status.showUntrackedFiles=no`, or an ignored file, disappeared
+without reaching the target. Local Apply retained its checkout but omitted
+the hidden untracked file from its successful merge. A third SSH probe shows
+the same deletion for tracked edits hidden by `assume-unchanged`.
+
+Both full-Apply snapshot paths now explicitly include untracked files and
+submodule changes. Source staging retains Git's ignore and index-flag policy.
+Native Apply uses non-forced cleanup, with one check in `TaskWorkspace::remove`
+for all non-forced task removal. That check includes ignored files and refuses
+materialized files excluded by index flags. Missing sparse files contain no
+bytes to lose and remain removable. Explicit Discard retains its forceful
+contract. A landed merge with retained source reports success plus the existing
+cleanup warning, preserving its checkout and branch rather than retrying the
+merge or silently discarding excluded data.
+
+Ordinary non-forced Git removal alone is insufficient: its cleanliness check
+honors status display configuration and omits ignored files before recursively
+removing the checkout. `ls-files -v -z` identifies assume-unchanged and
+skip-worktree entries without interpreting quoted path names. The guard leaves
+those flags intact. Contracts: [Git status](https://git-scm.com/docs/git-status),
+[Git worktree removal implementation](https://github.com/git/git/blob/v2.50.1/builtin/worktree.c)
+and [Git index entry tags](https://git-scm.com/docs/git-ls-files).
+
+All 49 local diff/Apply tests and 33 real SSH lifecycle cases pass, including
+the existing publication, hook, interruption and recovery siblings; the three
+provider/catalog cases are filtered. Four scoped Apply Rust tests and a
+three-case cleanup test pass, including sparse omission as a negative control.
+The rebuilt unsigned macOS package passes all three source-file cases through
+its actual sidecar with the bundled manifest hash verified. Production and
+touched-fixture types, Electron/native builds, formatting and diff checks pass.
+Evidence: `apply-source-hidden-local-before.json`,
+`apply-source-files-ssh-before-corrected.json`,
+`apply-source-files-ssh-intermediate.json`, `apply-source-local-after.json`,
+`apply-source-ssh-siblings.json`, `apply-source-rust-final.log`,
+`apply-source-cleanup-rust.log` and `apply-source-packaged.json`.
+Desktop CI includes the three new live SSH cases. Current-head cross-platform
+proof remains pending. Local Archive uses a separate cleanup owner and still
+needs the same source-data audit; selected-file Apply and local/Windows active
+publication remain separate release gates.
