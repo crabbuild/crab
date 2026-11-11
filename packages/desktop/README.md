@@ -11,8 +11,8 @@ CLI on the user's PATH cannot override the bundled runtime.
 
 The primary rail contains **Chat**, **Files**, **Git**, **Large Files**,
 **Data Workflows**, **SSH Connections** (when enabled), and **Terminal**.
-Files switches between Explorer and Search; Git switches between Changes,
-History, Branches, Worktrees, and Pull Requests (when a forge is detected),
+Files switches between Explorer and Search in the sidebar header. Git switches
+between Changes, History, Branches, Worktrees, and Pull Requests (when a forge is detected),
 in that order. Branches and Worktrees each have their own sidebar and selection.
 Settings stays at the bottom. Click the repository name in the title bar for
 its Overview; the adjacent arrow switches workspace repositories.
