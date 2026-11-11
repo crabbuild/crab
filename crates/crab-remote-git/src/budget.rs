@@ -60,6 +60,7 @@ pub(crate) struct WorkBudget {
 #[derive(Clone)]
 pub(crate) struct OperationBudget {
     parent_read_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
+    read_progress: Option<crab_storage::ReadProgress>,
     work: Arc<Mutex<WorkBudget>>,
     runtime: Arc<RemoteGitRuntime>,
     id: u64,
@@ -86,6 +87,7 @@ impl OperationBudget {
     pub(crate) fn new(limits: OperationLimits, runtime: Arc<RemoteGitRuntime>) -> Self {
         Self {
             parent_read_admission: None,
+            read_progress: None,
             work: Arc::new(Mutex::new(WorkBudget::new(limits))),
             runtime,
             id: NEXT_BUDGET_ID.fetch_add(1, Ordering::Relaxed),
@@ -98,6 +100,20 @@ impl OperationBudget {
     ) -> Self {
         self.parent_read_admission = Some(admission);
         self
+    }
+
+    pub(crate) fn with_read_progress(mut self, progress: crab_storage::ReadProgress) -> Self {
+        self.read_progress = Some(progress);
+        self
+    }
+
+    pub(crate) async fn received(&self, bytes: u64) {
+        if let Some(progress) = &self.read_progress {
+            progress.record_received(bytes);
+        }
+        if let Some(parent) = &self.parent_read_admission {
+            parent.received(bytes).await;
+        }
     }
 
     pub(crate) fn read_admission(
@@ -273,6 +289,10 @@ impl ReadBudgetAdmission {
 impl crab_storage::ReadAdmission for ReadBudgetAdmission {
     fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    async fn received(&self, bytes: u64) {
+        self.budget.received(bytes).await;
     }
 
     async fn request(&self) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {

@@ -96,6 +96,13 @@ Interrupted counters are labeled **Last recorded progress**; check the actual
 working files before retrying. Recovery does not infer ownership from filenames
 or automatically resume an old download.
 
+Activity reports written bytes and bytes received from storage separately. A
+cached transfer can write content while receiving zero bytes from storage;
+verification and repeated reads can receive more than the file's logical size.
+Received bytes include storage response bodies and metadata, excluding connection setup and
+external commands. Older records without a measurement show **Storage received:
+not recorded**. A retry keeps its own counters alongside the original attempt.
+
 ## Discard whole-file changes
 
 In **Git → Changes**, discard a file from its row, its binary/pointer card,
@@ -126,8 +133,7 @@ If repository services fail, use the visible recovery error and **Retry reopenin
 repository**. A healthy sibling repository remains usable. Reader sessions are
 revoked on recovery or storage-identity replacement; reopen details to capture
 fresh content. Cache inspection/cleanup has its own Settings controls. Editable
-cache budgets, offline retention and measured network accounting remain
-work, rather than implied by those controls.
+cache budgets and offline retention remain open work.
 
 ## Qualification boundary
 
@@ -136,5 +142,5 @@ track/publish/lazy-clone/hydrate/edit/synchronize/rename/removal workflow, neste
 missing-file restoration, confirmed index restoration, pending-editor protection,
 selected identities and bounded local/SSH recovery.
 The [completion record](../large-file-support.md) separates that evidence from
-restartable transfers, storage budgets, larger workload
+interrupted SDK cache recovery, storage budgets, larger workload
 profiles and cross-platform/provider release gates.

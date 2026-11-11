@@ -393,6 +393,9 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
         await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
         await expect.poll(() => sha(readFileSync(path.join(directories[index], "cold.safetensors")))).toBe(source.cold_payloads[index].sha256);
         await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")?.transfer?.files_published).toBe(1);
+        const completed = (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")!;
+        expect(completed.transfer?.received_bytes).toBeGreaterThanOrEqual(source.cold_payloads[index].size);
+        await expect(page.getByText(/received from storage$/).first()).toBeInViewport();
         expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
         await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-retry.png") });
         await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();

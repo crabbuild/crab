@@ -10,6 +10,7 @@ export interface ProgressTransfer {
   job_id: string;
   repo_id: string;
   written_bytes: number;
+  received_bytes?: number;
   checked_bytes?: number | null;
   total_bytes: number | null;
   files_published?: number | null;
@@ -294,11 +295,18 @@ export class FileTransfers {
         this.failedPersistence(error);
       }
       if (this.failure || active.cancelRequested) this.cancelUnrecorded();
+    } else if (method === "progress/read" && current.status === "running") {
+      if (!number(params.received_bytes) || params.received_bytes < (current.transfer?.received_bytes ?? 0)) return;
+      active.admitted = true; active.sent = true;
+      const transfer: ProgressTransfer = current.transfer ?? { op: current.op, job_id: jobId, repo_id: active.repoId, written_bytes: 0, total_bytes: null };
+      this.update(jobId, { transfer: { ...transfer, received_bytes: params.received_bytes } });
+      if (this.failure || active.cancelRequested) this.cancelUnrecorded();
     } else if (method === "progress/transfer" && current.status === "running") {
       if (!number(params.written_bytes) || !(params.total_bytes === null || number(params.total_bytes))) return;
       const progress: ProgressTransfer = {
         op: current.op, job_id: jobId, repo_id: active.repoId,
         written_bytes: params.written_bytes, total_bytes: params.total_bytes,
+        received_bytes: current.transfer?.received_bytes,
       };
       for (const key of ["checked_bytes", "files_published", "files_total"] as const) if (params[key] === null || number(params[key])) progress[key] = params[key] as number | null;
       active.admitted = true; active.sent = true;

@@ -63,8 +63,14 @@ pub(crate) async fn open(
     let (ready, started) = oneshot::channel();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
         let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec()).map_err(remote_error)?;
-        let operation = repository
-            .operation_with_limits(OperationKind::Content, &cancel, options.content_limits())
+        let operation = options
+            .operation
+            .open_read(
+                &repository,
+                OperationKind::Content,
+                &cancel,
+                options.content_limits(),
+            )
             .await
             .map_err(remote_error)?;
         let result = async {

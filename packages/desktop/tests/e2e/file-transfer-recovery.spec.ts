@@ -140,6 +140,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
       } else if (outcome === "native-receipt-gap") {
         await expect.poll(async () => (await transport("stats")).stream_blocked).toBeGreaterThan(0);
         expect((await transport("stats")).streamed_bytes).toBeGreaterThan(before.streamed_bytes);
+        await expect.poll(async () => (await history()).jobs.find(job => job.status === "running")?.transfer?.received_bytes ?? 0).toBeGreaterThan(0);
         original = (await history()).jobs.find(job => job.status === "running")!;
         // Hold the real journal writer after payload allocation. Publication
         // can rename the file, but finish cannot send its receipt until cleanup
@@ -155,6 +156,8 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         await transport("release");
         await expect.poll(() => sha(readFileSync(path.join(source, files[0]))), { intervals: [20, 50, 100] }).toBe(hashes[0]);
         expect((await history()).jobs.find(job => job.job_id === original.job_id)?.transfer?.files_published).toBe(0);
+        await expect.poll(async () => (await history()).jobs.find(job => job.job_id === original.job_id)?.transfer?.received_bytes ?? 0).toBeGreaterThan(0);
+        original = (await history()).jobs.find(job => job.job_id === original.job_id)!;
         killNative();
         await releaseJournal();
         await expect.poll(async () => (await history()).jobs.find(job => job.job_id === original.job_id)?.status).toBe("interrupted");
@@ -168,6 +171,8 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         await expect.poll(async () => (await history()).jobs.find(job => job.status === "running")?.transfer?.files_published).toBe(1);
         original = (await history()).jobs.find(job => job.status === "running")!;
         expect(original.intent.paths).toEqual(files);
+        await expect.poll(async () => (await history()).jobs.find(job => job.job_id === original.job_id)?.transfer?.received_bytes ?? 0).toBeGreaterThan(0);
+        original = (await history()).jobs.find(job => job.job_id === original.job_id)!;
         expect(artifacts()).toHaveLength(1);
         const status = await call(page, "git_status_porcelain", { repo_id: "recovery" });
         expect((status.entries as Array<{ path: string }>).some(entry => artifacts().some(name => entry.path.startsWith(name + "/")))).toBe(false);
@@ -228,6 +233,13 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
       expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
       await page.screenshot({ animations: "disabled", path: test.info().outputPath("interrupted-transfer.png") });
       await showSources(original.job_id);
+      const interrupted = (await history()).jobs.find(job => job.job_id === original.job_id)!;
+      if (outcome === "receipt-gap" && interrupted.transfer?.received_bytes === undefined) {
+        await expect(page.getByText("Storage received: not recorded", { exact: true })).toBeVisible();
+      } else {
+        expect(interrupted.transfer?.received_bytes).toBeGreaterThanOrEqual(original.transfer?.received_bytes ?? 0);
+        await expect(page.getByText(/received from storage$/).first()).toBeVisible();
+      }
       await transport("release");
       if (outcome !== "app-crash" && outcome !== "receipt-gap") {
         await expect.poll(() => page.evaluate(() => window.crab.getCapabilities("recovery")).then(caps => caps.canHydrateSelection)).toBe(true);
@@ -239,6 +251,8 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
       await expect.poll(() => sha(readFileSync(path.join(source, files[1]))), { timeout: 40_000 }).toBe(hashes[1]);
       await expect.poll(async () => (await history()).jobs.some(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])).toBe(true);
       const retry = (await history()).jobs.find(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])!;
+      expect(retry.transfer?.received_bytes).toBeGreaterThanOrEqual(0);
+      expect((await history()).jobs.find(job => job.job_id === original.job_id)?.transfer?.received_bytes).toBe(interrupted.transfer?.received_bytes);
       expect(await sources(retry.job_id)).toEqual([{ ...versions[1], position: 0 }]);
       expect(await sources(original.job_id)).toEqual(versions);
       expect(artifacts()).toHaveLength(0);

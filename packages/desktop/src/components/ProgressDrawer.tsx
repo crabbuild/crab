@@ -435,6 +435,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
         {job.status === "interrupted" && <p>Last recorded progress</p>}
         <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
+        <p className="tabular-nums" title="Consumed storage response bodies, including metadata and repeated reads. Connection setup and external commands are excluded.">{transfer.received_bytes == null ? "Storage received: not recorded" : `${formatBytes(transfer.received_bytes)} received from storage`}</p>
         {transfer.files_published != null && transfer.files_total != null && (
           <p>{transfer.files_published} of {transfer.files_total} files {completed}</p>
         )}

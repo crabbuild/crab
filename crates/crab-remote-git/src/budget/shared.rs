@@ -183,6 +183,28 @@ impl crab_storage::ReadAdmission for SharedBudget {
         &self.cancellation
     }
 
+    async fn received(&self, bytes: u64) {
+        let owner = {
+            let state = self.state.lock().await;
+            // Budgets charge every participant, but a physical response is
+            // observed once. Keep the earliest live owner; never replay old
+            // traffic to late joiners or lose a frame after the last cancel.
+            state
+                .participants
+                .values()
+                .min_by_key(|participant| {
+                    let retired = participant.cancellation.is_cancelled()
+                        || participant.rejection.is_closed()
+                        || participant.rejection.borrow().is_some();
+                    (retired, participant.budget.id())
+                })
+                .map(|participant| participant.budget.clone())
+        };
+        if let Some(owner) = owner {
+            owner.received(bytes).await;
+        }
+    }
+
     async fn request(&self) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.charge(BudgetDimension::StorageRequests, 1).await?;
         Ok(())
@@ -201,6 +223,28 @@ impl crab_storage::ReadAdmission for SharedBudget {
 mod tests {
     use super::*;
     use crate::{OperationLimits, RemoteGitRuntime};
+
+    #[tokio::test]
+    async fn coalesced_origin_receipts_have_one_live_owner_without_replaying_to_late_joiners() {
+        let shared = SharedBudget::new(CancellationToken::new());
+        let (first, _) = crab_storage::ReadProgress::channel();
+        let (second, _) = crab_storage::ReadProgress::channel();
+        let first_budget = budget(100).with_read_progress(first.clone());
+        let second_budget = budget(100).with_read_progress(second.clone());
+        let first_cancel = CancellationToken::new();
+        let second_cancel = CancellationToken::new();
+        let first_lease = shared.register(&first_budget, &first_cancel).await.unwrap();
+        crab_storage::ReadAdmission::received(shared.as_ref(), 5).await;
+        let second_lease = shared
+            .register(&second_budget, &second_cancel)
+            .await
+            .unwrap();
+        assert_eq!((first.received_bytes(), second.received_bytes()), (5, 0));
+        first_cancel.cancel();
+        crab_storage::ReadAdmission::received(shared.as_ref(), 7).await;
+        assert_eq!((first.received_bytes(), second.received_bytes()), (5, 7));
+        drop((first_lease, second_lease));
+    }
 
     fn budget(maximum: u64) -> OperationBudget {
         OperationBudget::new(

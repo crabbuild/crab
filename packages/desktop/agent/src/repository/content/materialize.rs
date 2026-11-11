@@ -59,7 +59,13 @@ impl Dehydration {
         let (size, identity) = pointer_metadata(&bytes).ok_or_else(no_pointer)?;
         let reader = repo
             .readers
-            .capture(root, bytes.clone(), size, scope.id.clone())?
+            .capture(
+                root,
+                bytes.clone(),
+                size,
+                scope.id.clone(),
+                scope.read_progress.clone(),
+            )?
             .for_dehydration(path.into());
         let pointer = FileSource {
             source: Arc::new(Source::Pointer {

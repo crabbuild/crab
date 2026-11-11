@@ -255,6 +255,17 @@ struct Materialization<'a> {
 }
 
 impl Materialization<'_> {
+    async fn read_receipt(&self, received_bytes: u64) -> Result<()> {
+        crate::notify(
+            &self.out,
+            "progress/read",
+            json!({
+                "job_id": self.op_id, "repo_id": self.repo_id, "received_bytes": received_bytes,
+            }),
+        )
+        .await
+    }
+
     async fn source(&self, position: usize, version: FileVersion) -> Result<()> {
         let source = json!({
             "job_id": self.op_id, "repo_id": self.repo_id, "position": position,
@@ -347,14 +358,18 @@ impl Materialization<'_> {
         // must be cancellable without waiting for its first written byte.
         let admitted =
             crate::notify(&self.out, "progress/transfer", self.progress(0, 0, None)).await;
-        let result = match admitted {
-            Err(error) => Err(error),
-            Ok(()) => tokio::select! {
-                biased;
-                result = &mut work => result,
-                _ = &mut signal => { scope.cancel(); work.await },
-            },
-        };
+        let result = self
+            .observe_reads(scope, async {
+                match admitted {
+                    Err(error) => Err(error),
+                    Ok(()) => tokio::select! {
+                        biased;
+                        result = &mut work => result,
+                        _ = &mut signal => { scope.cancel(); work.await },
+                    },
+                }
+            })
+            .await;
         state.cancel_registry.unregister(self.op_id).await;
         // The writer checks cancellation before atomic publication. Its terminal
         // result wins a late cancel, so committed bytes cannot be called cancelled.
@@ -385,5 +400,79 @@ impl Materialization<'_> {
             tracing::error!(%error, "file transfer completion delivery failed");
         }
         result
+    }
+
+    async fn observe_reads(
+        &self,
+        scope: &ReadScope,
+        work: impl std::future::Future<Output = Result<Value>>,
+    ) -> Result<Value> {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let working = async {
+            let result = work.await;
+            stop.cancel();
+            result
+        };
+        let observing = async {
+            let mut last = None;
+            let mut clock = tokio::time::interval(std::time::Duration::from_millis(80));
+            clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => break,
+                    _ = clock.tick() => {},
+                }
+                let received = scope.read_progress().received_bytes();
+                if last != Some(received) {
+                    if let Err(error) = self.read_receipt(received).await {
+                        tracing::error!(%error, "read receipt delivery failed");
+                        scope.cancel();
+                        break;
+                    }
+                    last = Some(received);
+                }
+            }
+        };
+        // A pending work notification can hold stdout. Poll its writer alongside
+        // observations, then drain both before sending the final receipt; waiting
+        // for another write inside a selected tick would strand that lock owner.
+        let (result, ()) = tokio::join!(working, observing);
+        if let Err(error) = self
+            .read_receipt(scope.read_progress().received_bytes())
+            .await
+        {
+            tracing::error!(%error, "final read receipt delivery failed");
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_observation_drains_work_that_holds_the_output_lock() {
+        let out = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+        let scope = ReadScope::default();
+        let job = Materialization {
+            repo_id: "repository",
+            op_id: "transfer",
+            out: out.clone(),
+            direction: Direction::Hydrate,
+        };
+        let guard = out.lock().await;
+        let work = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            drop(guard);
+            Ok(Value::Null)
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            job.observe_reads(&scope, work),
+        )
+        .await;
+        assert!(matches!(result, Ok(Ok(Value::Null))));
     }
 }

@@ -39,10 +39,12 @@ describe("durable native file-transfer Activity", () => {
     const { db, jobs } = setup();
     await expect(jobs.run("files_materialize", params, repository, async () => {
       progress(jobs);
+      jobs.observe("progress/read", { job_id: "attempt", repo_id: "logical", received_bytes: 1024 * 1024 });
+      progress(jobs);
       throw Object.assign(new Error("Unavailable content FIXTURE_SECRET"), { code: 1011 });
     })).rejects.toThrow("Unavailable content");
     const restored = setup(db).jobs.snapshot().jobs[0];
-    expect(restored).toMatchObject({ status: "failed", transfer: { files_published: 1 }, interruption: "Unavailable content [redacted]", intent: { paths: params.paths } });
+    expect(restored).toMatchObject({ status: "failed", transfer: { files_published: 1, written_bytes: 4096, received_bytes: 1024 * 1024 }, interruption: "Unavailable content [redacted]", intent: { paths: params.paths } });
     expect(restored.nativeSessionId).toBeUndefined();
   });
 

@@ -188,6 +188,8 @@ pub const fn crab_sdk::managed::RepositoryInfo::protected_push(&self) -> bool
 pub const fn crab_sdk::managed::RepositoryInfo::revision(&self) -> u64
 pub const fn crab_sdk::managed::RepositoryInfo::state(&self) -> crab_sdk::managed::RepositoryState
 pub mod crab_sdk::operation
+pub use crab_sdk::operation::ReadProgress
+pub use crab_sdk::operation::ReadProgressReceiver
 #[non_exhaustive] pub enum crab_sdk::operation::ProgressUpdate
 pub crab_sdk::operation::ProgressUpdate::Cancelling
 pub crab_sdk::operation::ProgressUpdate::Delivered
@@ -208,6 +210,7 @@ pub fn crab_sdk::operation::Options::with_cancellation(self, crab_sdk::operation
 pub fn crab_sdk::operation::Options::with_deadline(self, std::time::Instant) -> Self
 pub fn crab_sdk::operation::Options::with_limits(self, crab_sdk::operation::ReadLimits) -> crab_sdk::Result<Self>
 pub fn crab_sdk::operation::Options::with_progress(self, crab_sdk::operation::Progress) -> Self
+pub fn crab_sdk::operation::Options::with_read_progress(self, crab_storage::read_progress::ReadProgress) -> Self
 pub fn crab_sdk::operation::Options::with_timeout(self, core::time::Duration) -> crab_sdk::Result<Self>
 pub struct crab_sdk::operation::Progress(_)
 impl crab_sdk::operation::Progress
