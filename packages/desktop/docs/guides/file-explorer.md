@@ -55,6 +55,22 @@ Right-click a file or folder for context menu actions:
 - **New file** — create a new file in the selected directory
 - **New folder** — create a new folder
 
+### Tracking and selected commits
+
+In **Large Files → Track & Stage**, select files and review their paths. Tracking
+configures repository-local Crab and Git LFS drivers with the bundled Crab
+executable. New paths get exact Crab tracking rules; existing Crab/LFS routing
+stays in effect. Spaces, literal glob characters and extensionless filenames
+stay within the selection. Each staged blob must be the expected pointer before
+the wizard reports success. Failed files show their errors and can be retried;
+you can also continue with the successful files.
+
+The wizard commits the current working contents of those successful files plus
+any pending `.gitattributes` file. This includes edits made after tracking and
+user edits within that attributes file. Other staged files remain staged. The
+Crab staging section uses the same selected-path commit operation; the ordinary
+Changes composer continues to commit the staged index. Push is a separate step.
+
 ### Hydration Decorations
 
 Crab and Git LFS files show their working-tree state:

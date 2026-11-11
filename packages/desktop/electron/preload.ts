@@ -73,6 +73,7 @@ const ALLOWED_METHODS = new Set([
   "git_reset_paths",
   // Commit
   "git_commit",
+  "git_commit_paths",
   "git_config_get",
   // Branches
   "git_checkout",
@@ -135,7 +136,6 @@ const ALLOWED_METHODS = new Set([
   "preview_notebook_meta",
   "notebook_strip_outputs",
   // Large-file pre-commit
-  "crab_add_auto",
   "crab_track_and_add",
   // Additional previews
   "preview_torch_checkpoint",

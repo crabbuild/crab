@@ -25,6 +25,7 @@ use crate::{
 mod file_write;
 mod lifecycle;
 mod materialize;
+mod track;
 
 /// Shared state across dispatch tasks. Holds the map of open
 /// repositories keyed by a desktop-assigned id.
@@ -244,6 +245,14 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_commit::git_commit(&work_dir, &p).await
         },
+        "git_commit_paths" => {
+            let p: crate::git_commit::GitCommitParams = decode(&method, params)?;
+            if p.paths.is_none() {
+                return Err(AgentError::Other("Select the files to commit".into()));
+            }
+            let work_dir = state.get_work_dir(&p.repo_id).await?;
+            crate::git_commit::git_commit(&work_dir, &p).await
+        },
         "git_diff_index_patch" => git_diff_index_patch(state, decode(&method, params)?).await,
         "git_diff_cached_patch" => git_diff_cached_patch(state, decode(&method, params)?).await,
         "git_apply_patch" => git_apply_patch(state, decode(&method, params)?).await,
@@ -277,15 +286,10 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "dehydrate" => dehydrate(decode(&method, params)?, out).await,
         "push" => push(decode(&method, params)?, out).await,
         "add" => add(decode(&method, params)?, out).await,
-        "crab_add_auto" => {
-            let p: CrabAddAutoParams = decode(&method, params)?;
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            crab_add_auto(&work_dir, p).await
-        },
         "crab_track_and_add" => {
-            let p: CrabTrackAndAddParams = decode(&method, params)?;
+            let p: track::Params = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
-            crab_track_and_add(&work_dir, p).await
+            track::run(&work_dir, p).await
         },
         "crab_add_structured" => {
             let p: CrabAddStructuredParams = decode(&method, params)?;
@@ -4565,333 +4569,6 @@ async fn crab_init(work_dir: &std::path::Path, p: CrabInitParams) -> Result<Valu
     Ok(
         json!({ "ok": true, "url": url, "config_path": work_dir.join("crab.toml").display().to_string() }),
     )
-}
-
-// ---------------- crab_add_auto ----------------
-
-#[derive(Debug, Deserialize)]
-struct CrabAddAutoParams {
-    repo_id: String,
-    paths: Vec<String>,
-}
-
-/// One-click "Track with crab" verb for the large-file pre-commit
-/// check. For each path:
-/// 1. Ensures the file extension is registered in `.gitattributes` via `crab track`
-/// 2. Runs `crab add <path>` to chunk + stage the file
-/// 3. Stages the resulting pointer blobs with `git add`
-///
-/// Partial success is acceptable — errors are collected and returned
-/// alongside the count of successfully tracked files.
-async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Result<Value> {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use tracing::{debug, warn};
-
-    let mut tracked: u64 = 0;
-    let mut errors: Vec<Value> = Vec::new();
-    let mut succeeded_paths: Vec<String> = Vec::new();
-    let mut patterns_added: Vec<String> = Vec::new();
-
-    // Step 1: Ensure all unique file extensions are tracked in .gitattributes.
-    // This is idempotent — `crab track` is a no-op if the pattern already exists.
-    let mut seen_extensions: HashSet<String> = HashSet::new();
-    for path in &p.paths {
-        if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            if seen_extensions.insert(ext_lower.clone()) {
-                let glob = format!("*.{}", ext_lower);
-                debug!(glob = %glob, "crab_add_auto: ensuring pattern is tracked");
-                let track_output = shellout::command()?
-                    .args(["track", &glob])
-                    .current_dir(work_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await
-                    .map_err(AgentError::Io)?;
-
-                if track_output.status.success() {
-                    patterns_added.push(glob);
-                } else {
-                    let stderr = String::from_utf8_lossy(&track_output.stderr).into_owned();
-                    warn!(glob = %format!("*.{}", ext_lower), stderr = %stderr, "crab track failed");
-                }
-            }
-        }
-    }
-
-    // Step 2: Run `crab add` for each file path.
-    for path in &p.paths {
-        debug!(path = %path, "crab_add_auto: running crab add");
-        let mut cmd = shellout::command()?;
-        cmd.args(["add", path])
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        crate::storage_auth::configure_command(&mut cmd)?;
-
-        let output = cmd.output().await.map_err(AgentError::Io)?;
-
-        if output.status.success() {
-            tracked += 1;
-            succeeded_paths.push(path.clone());
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            warn!(path = %path, status = output.status.code(), stderr = %stderr, "crab add failed");
-            errors.push(json!({
-                "path": path,
-                "status": output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    // Step 3: Stage the resulting pointer blobs so the index reflects the
-    // tracked state. Only stage paths that succeeded above.
-    if !succeeded_paths.is_empty() {
-        let mut git_args = vec!["add", "--"];
-        let refs: Vec<&str> = succeeded_paths.iter().map(String::as_str).collect();
-        git_args.extend(refs);
-
-        debug!(paths = ?succeeded_paths, "crab_add_auto: staging pointer blobs");
-        let git_output = crate::shellout::git_command()
-            .args(&git_args)
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if !git_output.status.success() {
-            let stderr = String::from_utf8_lossy(&git_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git add (staging) failed after crab add");
-            return Err(AgentError::Cli {
-                status: git_output.status.code().unwrap_or(-1),
-                stderr,
-            });
-        }
-    }
-
-    // Also stage .gitattributes if we added new patterns.
-    if !patterns_added.is_empty() {
-        debug!("crab_add_auto: staging .gitattributes");
-        let _ = crate::shellout::git_command()
-            .args(["add", ".gitattributes"])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await;
-    }
-
-    let mut result = json!({
-        "ok": true,
-        "tracked": tracked,
-        "patterns_added": patterns_added,
-    });
-    if !errors.is_empty() {
-        result["errors"] = json!(errors);
-    }
-    Ok(result)
-}
-
-// ---------------- crab_track_and_add ----------------
-
-#[derive(Debug, Deserialize)]
-struct CrabTrackAndAddParams {
-    repo_id: String,
-    paths: Vec<String>,
-    /// If true, also commit the staged pointer files with an auto-generated message.
-    auto_commit: Option<bool>,
-    /// Custom commit message. If absent and auto_commit is true, generates one.
-    commit_message: Option<String>,
-}
-
-/// Combined track + add + optional commit flow for the desktop wizard.
-///
-/// 1. Registers file extensions in `.gitattributes` via `crab track`
-/// 2. Runs `crab add` for each file (chunk + stage)
-/// 3. Stages pointer blobs + `.gitattributes` via `git add`
-/// 4. Optionally commits with a descriptive message
-///
-/// Returns detailed per-file results so the UI can show granular progress.
-async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams) -> Result<Value> {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use tracing::{debug, warn};
-
-    let mut patterns_added: Vec<String> = Vec::new();
-    let mut files_tracked: Vec<Value> = Vec::new();
-    let mut errors: Vec<Value> = Vec::new();
-
-    // Step 1: Register patterns.
-    let mut seen_extensions: HashSet<String> = HashSet::new();
-    for path in &p.paths {
-        if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            if seen_extensions.insert(ext_lower.clone()) {
-                let glob = format!("*.{}", ext_lower);
-                debug!(glob = %glob, "crab_track_and_add: registering pattern");
-                let output = shellout::command()?
-                    .args(["track", &glob])
-                    .current_dir(work_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await
-                    .map_err(AgentError::Io)?;
-
-                if output.status.success() {
-                    patterns_added.push(glob);
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    warn!(glob = %format!("*.{}", ext_lower), stderr = %stderr, "crab track failed");
-                }
-            }
-        }
-    }
-
-    // Step 2: Run `crab add` for each file.
-    for path in &p.paths {
-        debug!(path = %path, "crab_track_and_add: running crab add");
-        let mut cmd = shellout::command()?;
-        cmd.args(["add", path])
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        crate::storage_auth::configure_command(&mut cmd)?;
-
-        let output = cmd.output().await.map_err(AgentError::Io)?;
-
-        if output.status.success() {
-            files_tracked.push(json!({
-                "path": path,
-                "status": "ok",
-            }));
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            warn!(path = %path, status = output.status.code(), stderr = %stderr, "crab add failed");
-            errors.push(json!({
-                "path": path,
-                "status": output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    // Step 3: Stage pointer blobs + .gitattributes.
-    let succeeded_paths: Vec<&str> = files_tracked
-        .iter()
-        .filter_map(|f| f["path"].as_str())
-        .collect();
-
-    if !succeeded_paths.is_empty() {
-        let mut git_args: Vec<&str> = vec!["add", "--"];
-        git_args.extend(&succeeded_paths);
-        if !patterns_added.is_empty() {
-            git_args.push(".gitattributes");
-        }
-
-        debug!(paths = ?succeeded_paths, "crab_track_and_add: staging pointer blobs");
-        let git_output = crate::shellout::git_command()
-            .args(&git_args)
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if !git_output.status.success() {
-            let stderr = String::from_utf8_lossy(&git_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git add (staging) failed");
-            return Err(AgentError::Cli {
-                status: git_output.status.code().unwrap_or(-1),
-                stderr,
-            });
-        }
-    } else if !patterns_added.is_empty() {
-        // Stage .gitattributes even if no files succeeded (patterns were still added).
-        let _ = crate::shellout::git_command()
-            .args(["add", ".gitattributes"])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await;
-    }
-
-    // Step 4: Optional auto-commit.
-    let mut commit_sha: Option<String> = None;
-    if p.auto_commit.unwrap_or(false) && !succeeded_paths.is_empty() {
-        let file_names: Vec<&str> = succeeded_paths
-            .iter()
-            .filter_map(|p| Path::new(p).file_name().and_then(|n| n.to_str()))
-            .collect();
-
-        let message = p.commit_message.unwrap_or_else(|| {
-            if file_names.len() == 1 {
-                format!("Track large file: {}", file_names[0])
-            } else {
-                format!(
-                    "Track {} large files: {}",
-                    file_names.len(),
-                    file_names.join(", ")
-                )
-            }
-        });
-
-        debug!(message = %message, "crab_track_and_add: committing");
-        let commit_output = crate::shellout::git_command()
-            .args(["commit", "-m", &message])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if commit_output.status.success() {
-            // Extract the commit SHA from git log.
-            let sha_output = crate::shellout::git_command()
-                .args(["rev-parse", "HEAD"])
-                .current_dir(work_dir)
-                .stdout(std::process::Stdio::piped())
-                .output()
-                .await
-                .map_err(AgentError::Io)?;
-            commit_sha = Some(
-                String::from_utf8_lossy(&sha_output.stdout)
-                    .trim()
-                    .to_owned(),
-            );
-        } else {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git commit failed");
-            // Non-fatal: tracking succeeded, commit failed.
-            errors.push(json!({
-                "path": "_commit",
-                "status": commit_output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    Ok(json!({
-        "ok": true,
-        "patterns_added": patterns_added,
-        "files_tracked": files_tracked,
-        "errors": errors,
-        "commit_sha": commit_sha,
-    }))
 }
 
 // ---------------- serialization helpers ----------------

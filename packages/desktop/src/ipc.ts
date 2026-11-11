@@ -2159,6 +2159,7 @@ export const rpc = {
     repo_id: string,
     opts: {
       message: string;
+      paths?: string[];
       amend?: boolean;
       sign_off?: boolean;
       sign?: boolean;
@@ -2166,7 +2167,7 @@ export const rpc = {
       co_authored_by?: string[];
     },
   ) =>
-    call<{ sha: string; subject: string; amend: boolean }>("git_commit", {
+    call<{ sha: string; subject: string; amend: boolean }>(opts.paths === undefined ? "git_commit" : "git_commit_paths", {
       repo_id,
       ...opts,
     }),
@@ -2391,9 +2392,6 @@ export const rpc = {
 
   notebookStripOutputs: (repo_id: string, path: string) =>
     call<{ ok: boolean; stripped_cells: number }>("notebook_strip_outputs", { repo_id, path }),
-
-  crabAddAuto: (repo_id: string, paths: string[]) =>
-    call<{ ok: boolean; tracked: string[]; patterns_added?: string[] }>("crab_add_auto", { repo_id, paths }),
 
   crabTrackAndAdd: (
     repo_id: string,
@@ -2765,6 +2763,7 @@ export interface TrackAndAddResult {
   ok: boolean;
   patterns_added: string[];
   files_tracked: Array<{ path: string; status: string }>;
+  commit_paths: string[];
   errors: Array<{ path: string; status?: number; stderr?: string }>;
   commit_sha: string | null;
 }

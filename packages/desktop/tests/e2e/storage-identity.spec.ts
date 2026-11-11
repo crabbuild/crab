@@ -207,6 +207,38 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     expect(remote.requests.some(request => request.method === "files_dehydrate" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-bulk-dehydration.png") });
+    const trackedPaths = ["selected[1].bin", "selected-lfs.bin"];
+    const trackedContent = Buffer.alloc(2 * 1024 * 1024, 72);
+    for (const file of [...trackedPaths, "selected1.bin"]) writeFileSync(path.join(directories[0], file), trackedContent);
+    const attrs = path.join(directories[0], ".gitattributes");
+    writeFileSync(attrs, readFileSync(attrs, "utf8") + "\nselected-lfs.bin filter=lfs -text\n");
+    writeFileSync(path.join(directories[0], "unrelated.txt"), "keep staged\n");
+    git(directories[0], ["add", "--", "unrelated.txt"]);
+    const unrelatedIndex = git(directories[0], ["ls-files", "--stage", "-z", "--", "unrelated.txt"]);
+    await page.getByRole("button", { name: "Track & Stage", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh file list", exact: true }).click();
+    for (const file of trackedPaths) await page.getByText(file, { exact: true }).locator("../..").getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Track 2 files", exact: true }).click();
+    await page.getByRole("button", { name: "Track 2 files", exact: true }).click();
+    try {
+      await expect(page.getByText("Ready to commit", { exact: true })).toBeVisible();
+    } catch (error) {
+      await page.screenshot({ path: test.info().outputPath("ssh-tracking-failure.png") });
+      writeFileSync(test.info().outputPath("ssh-tracking-failure.txt"), await page.getByRole("main").innerText());
+      throw error;
+    }
+    await page.getByLabel("Commit message for tracked files", { exact: true }).fill("Track SSH selection");
+    const beforeCommit = git(directories[0], ["rev-parse", "HEAD"]).toString();
+    await page.getByRole("button", { name: "Commit", exact: true }).click();
+    await expect.poll(() => git(directories[0], ["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);
+    await expect(page.getByText("Committed", { exact: false })).toBeVisible();
+    expect(git(directories[0], ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]).toString().split("\0").filter(Boolean).sort()).toEqual([".gitattributes", ...trackedPaths].sort());
+    expect(git(directories[0], ["ls-files", "--stage", "-z", "--", "unrelated.txt"])).toEqual(unrelatedIndex);
+    expect(git(directories[0], ["check-attr", "filter", "--", "selected1.bin"]).toString()).toContain("unspecified");
+    expect(git(directories[0], ["show", "HEAD:selected-lfs.bin"]).toString()).toContain("version https://git-lfs.github.com/spec/v1");
+    expect(remote.requests.some(request => request.method === "crab_track_and_add" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
+    expect(remote.requests.some(request => request.method === "git_commit_paths" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("ssh-selected-tracking-commit.png") });
     const beta: RepoHandle = await page.evaluate(({ id, directory }) => window.crab.ssh.openAsRepo(id, directory), { id: saved.id, directory: directories[1] });
     await page.evaluate(({ handle, path }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path } })), { handle: beta, path: betaId });
     section = await settings(page);

@@ -15,7 +15,7 @@ record historical evidence rather than separate work queues.
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
-| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. Creation of missing directory trees, extensions/profiles and the complete lifecycle remain open. |
+| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. The complete lifecycle, missing directory trees and extensions/profiles remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Scope tracking and wizard commits to the selected files. The wizard currently registers whole extensions and commits the full index. Prove the track, stage, commit, push, fetch/pull and lazy-clone sequence for both formats, including exact identities, small-edit Crab deduplication and unrelated-index preservation. Repeat after editing, renaming or removing a file. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
+| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Tracking and selected commits are qualified below. Next prove one continuous UI track, stage, commit, push, fetch/pull and lazy-clone sequence for both formats against writable storage, including exact identities, small-edit Crab deduplication and unrelated-index preservation. Repeat after editing, renaming or removing a file. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
 | P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Cover removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -44,6 +44,59 @@ or hide unsupported actions. Each row closes with user action → real side effe
 multi-GiB bounds, small-edit dedup, cold interruption/restart, corrupt/missing
 objects and the cross-OS/provider matrix remain release gates for the whole
 feature; a successful preview smoke does not substitute for them.
+
+Consolidate each opportunity at its existing owner: keep selection and file
+details in Files, transfer outcomes and retry in Activity, and credentials,
+offline retention and budgets in Settings. The next lifecycle test should reuse
+the writable RustFS qualification fixture rather than the read-only two-store
+identity proxy. Only after that sequence passes should transfer interruption
+and restart be added to the same workflow. This keeps one ordered queue instead
+of separate feature, UI and platform backlogs. P1 work can reuse that fixture
+once its own P0 owner and failure behavior are qualified.
+
+## Selected tracking and commit checkpoint
+
+One native tracking handler serves the wizard and the large-file warning in the
+Changes composer. It registers anchored, quoted literal rules for new paths,
+retains existing Crab/LFS routing and validates indexed pointer bytes before
+reporting success. The existing SDK local configurator installs the paired Crab
+executable as both repository-local filter drivers. This closes the plain Git
+clone gap without a second filter installer. SDK clients close before staging.
+
+`git_commit_paths` delegates exact literal selection to Git's `commit --only`.
+It commits current working contents, including edits after tracking, and keeps
+other index entries staged. Both the wizard and Crab staging section use it.
+The ordinary Changes composer keeps its staged-index behavior. The pending
+whole `.gitattributes` file belongs to the wizard selection, including user edits
+within that file. The wizard shows pending tracking rules and states the
+current-contents commit behavior; the Explorer guide records whole-file scope.
+An older agent rejects the distinct scoped-commit method instead of silently
+committing the whole index. Hydrate's pattern picker decodes the generated quoted rules and
+matches their anchored/escaped paths with the existing minimatch dependency.
+
+The packaged macOS arm64 real-store cases verify partial failure and retry,
+literal bracket and extensionless names, preserved LFS routing, edits after
+tracking, byte-identical committed reads, an unselected decoy and unchanged
+unrelated staging. The SSH case starts with a plain Git clone and verifies the
+selected storage identity on tracking and scoped-commit wire calls. The SDK
+storage-replacement regression and mixed hydration/dehydration round trip pass.
+The real-store fixture uses Electron's test keychain for the unsigned package.
+The two-store proxy is read-only: these tests do not qualify pushing, offline
+tracking, unreachable storage, transfer cancellation or the complete lifecycle.
+
+There are 13 passing native Git/attribute cases and 90 focused TypeScript cases.
+Project and strict touched smoke-spec types pass. Native, renderer and Electron
+builds, serialized packaging, producer asset verification and Rust formatting
+pass. An earlier packaging run overlapped Electron output generation and had
+mismatched assets; rebuilding and packaging serially corrected it. The existing
+three base Clippy unwrap errors, missing ESLint configuration and unrelated broad
+test-tsconfig errors remain unqualified gates. No dependency or lockfile changes
+are required. Tracking/parser consolidation removes duplicate product paths;
+new tests exercise real Git and packaged UI outcomes.
+
+Evidence lives in the external build directory under
+`selected-tracking-final-*.log`, `selected-tracking-remote-proof/`,
+`selected-tracking-final-roundtrip/` and `selected-tracking-qualification.json`.
 
 ## Verified dehydration checkpoint
 

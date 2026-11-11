@@ -303,7 +303,7 @@ pub async fn validate_target(
                 | "crab_push_structured"
                 | "hydrate"
                 | "dehydrate"
-                | "crab_add_auto"
+                | "crab_track_and_add"
                 | "crab_reset_files"
                 | "storage_summary"
         )

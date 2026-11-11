@@ -262,7 +262,7 @@ replayed nor served as stale cache results during reconnection.
 
 ### Git Operations
 - `git_status_porcelain`, `git_grep`
-- `git_log`, `git_commit`, `git_commit_changes`
+- `git_log`, `git_commit`, `git_commit_paths`, `git_commit_changes`
 - `git_add_paths`, `git_reset_paths`
 - `git_stage_hunks`, `git_unstage_hunks`, `git_discard_hunks`
 - `git_checkout`, `git_branch_create`, `git_branch_delete`, `git_branch_rename`
@@ -272,9 +272,30 @@ replayed nor served as stale cache results during reconnection.
 
 ### Crab Operations
 - `clone`, `push`, `add`, `hydrate`, `dehydrate`, `status`
-- `crab_add_auto`, `crab_add_structured`, `crab_push_structured`
+- `crab_track_and_add`, `crab_add_structured`, `crab_push_structured`
 - `hydration_status`
 - `staging_stats`, `staging_clean`
+
+`crab_track_and_add` accepts exact regular repository paths. New paths receive
+anchored literal Crab attributes; existing Crab/LFS routing is retained. Git's
+repository-local drivers are configured by the existing SDK `configure_local`
+owner with the selected Git and bundled Crab executable paths. Both Crab and
+LFS filters use that Crab executable; symlink and wrapper invocation paths stay
+intact. The SDK client is closed before staging starts. Its configured clean
+filters stage each selection, and the handler verifies the
+resulting pointer format before reporting success. The response carries
+`files_tracked`, `errors`, `patterns_added` and the exact `commit_paths`, including
+pending `.gitattributes` rules after a retry. Partial failures stay visible.
+
+`git_commit_paths` requires a nonempty `paths` array and uses Git's literal
+[`commit --only`](https://git-scm.com/docs/git-commit#Documentation/git-commit.txt---only)
+operation. It commits the current working contents of those files
+and preserves other staged paths. Git owns filters, hooks, signing and index
+locking. Its distinct method name makes an older agent reject the operation
+instead of ignoring a new optional scope. Ordinary `git_commit` retains the full
+staged-index composer behavior. The wizard and Crab staging section supply their
+selected files plus the pending `.gitattributes` file. User edits within that
+attributes file are included in the selection.
 
 ### Merge/Rebase Operations
 - `op_start`, `op_continue`, `op_abort`, `op_status`, `op_edit_todo`

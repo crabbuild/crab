@@ -171,15 +171,19 @@ export function CommitComposer({ repo, hasStaged, stagedPaths, onCommitSuccess }
     if (largeFiles.length === 0) return;
     setTrackingInProgress(true);
     try {
-      await rpc.crabAddAuto(
+      const result = await rpc.crabTrackAndAdd(
         repo.repo_id,
         largeFiles.map((f) => f.path),
       );
-      // After tracking, clear the warning — the files are now pointer-tracked.
-      setLargeFiles([]);
+      const tracked = new Set(result.files_tracked.map(file => file.path));
+      setLargeFiles(previous => previous.filter(file => !tracked.has(file.path)));
+      if (result.errors.length > 0) {
+        setToast({ kind: "error", text: result.errors.map(error => `${error.path}: ${error.stderr}`).join("\n") });
+        return;
+      }
       setToast({
         kind: "info",
-        text: `${largeFiles.length} file${largeFiles.length > 1 ? "s" : ""} tracked with Crab`,
+        text: `${result.files_tracked.length} files tracked`,
       });
     } catch (e) {
       setToast({

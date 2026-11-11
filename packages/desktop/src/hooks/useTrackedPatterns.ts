@@ -110,13 +110,34 @@ export function parseGitattributes(content: string): TrackedPattern[] {
  * spaces survive).
  */
 function extractFirstToken(line: string): string | null {
-  if (line.startsWith('"')) {
-    const end = line.indexOf('"', 1);
-    if (end === -1) return null;
-    return line.slice(1, end);
+  if (!line.startsWith('"')) return line.match(/^\S+/)?.[0] ?? null;
+  const quoted = line.match(/^"(?:[^"\\]|\\.)*"/);
+  if (!quoted) throw new Error("Unterminated quoted tracking pattern.");
+  const source = new TextEncoder().encode(quoted[0].slice(1, -1));
+  const decoded = new Uint8Array(source.length);
+  const escapes: Record<number, number> = { 97: 7, 98: 8, 102: 12, 110: 10, 114: 13, 116: 9, 118: 11, 34: 34, 92: 92 };
+  let written = 0;
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] !== 92) {
+      decoded[written++] = source[index];
+      continue;
+    }
+    const next = source[++index];
+    if (next >= 48 && next <= 55) {
+      let value = next - 48;
+      let digits = 1;
+      while (digits < 3 && source[index + 1] >= 48 && source[index + 1] <= 55) {
+        value = value * 8 + source[++index] - 48;
+        digits++;
+      }
+      if (value > 255) throw new Error("Invalid octal byte in tracking pattern.");
+      decoded[written++] = value;
+      continue;
+    }
+    if (escapes[next] === undefined) throw new Error("Invalid escape in tracking pattern.");
+    decoded[written++] = escapes[next];
   }
-  const m = line.match(/^\S+/);
-  return m ? m[0] : null;
+  return new TextDecoder("utf-8", { fatal: true }).decode(decoded.subarray(0, written));
 }
 
 /**

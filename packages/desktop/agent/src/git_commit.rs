@@ -22,6 +22,9 @@ pub struct GitCommitParams {
     pub repo_id: String,
     /// Commit message subject (+ optional body). Must not be empty.
     pub message: String,
+    /// Commit current working contents of only these literal paths.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
     /// When true, amend the current HEAD commit.
     #[serde(default)]
     pub amend: Option<bool>,
@@ -93,14 +96,30 @@ pub async fn git_commit(work_dir: &Path, params: &GitCommitParams) -> Result<Val
     args.push("-m".into());
     args.push(final_message);
 
+    if let Some(paths) = &params.paths {
+        if paths.is_empty() {
+            return Err(AgentError::Other(
+                "Select at least one file to commit".into(),
+            ));
+        }
+        for path in paths {
+            crab_sdk::GitPath::new(path.as_bytes().to_vec())?;
+        }
+        // Git owns partial-commit locking, hooks and index reconciliation.
+        // Other staged paths stay staged for the user's next commit.
+        args.extend(["--only".into(), "--".into()]);
+        args.extend(paths.iter().cloned());
+    }
+
     debug!(args = ?args, "git commit");
 
-    let out = crate::shellout::git_command()
+    let mut command = crate::shellout::git_command();
+    command
+        .arg("--literal-pathspecs")
         .args(&args)
-        .current_dir(work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
+        .current_dir(work_dir);
+    crate::storage_auth::configure_command(&mut command)?;
+    let out = command.output().await?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -263,6 +282,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_commit_uses_literal_working_paths_and_keeps_other_staged_changes() {
+        let (_td, root) = git_init_repo();
+        for path in ["a[1].txt", "a1.txt", "other.txt"] {
+            write_file(&root, path, "original\n");
+            stage_file(&root, path);
+        }
+        assert!(sh(&root, &["commit", "-m", "initial"]).status.success());
+        for path in ["a[1].txt", "a1.txt", "other.txt"] {
+            write_file(&root, path, "staged\n");
+            stage_file(&root, path);
+        }
+        let siblings = sh(&root, &["ls-files", "--stage", "--", "a1.txt", "other.txt"]).stdout;
+        write_file(&root, "a[1].txt", "current working bytes\n");
+        let params = GitCommitParams {
+            repo_id: "test".into(),
+            message: "selected change".into(),
+            paths: Some(vec!["a[1].txt".into()]),
+            amend: None,
+            sign_off: None,
+            sign: None,
+            author_date: None,
+            co_authored_by: None,
+        };
+        git_commit(&root, &params).await.expect("selected commit");
+        assert_eq!(
+            (
+                sh(
+                    &root,
+                    &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+                )
+                .stdout,
+                sh(&root, &["show", "HEAD:a[1].txt"]).stdout,
+                sh(&root, &["ls-files", "--stage", "--", "a1.txt", "other.txt"]).stdout,
+            ),
+            (
+                b"a[1].txt\n".to_vec(),
+                b"current working bytes\n".to_vec(),
+                siblings
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_selection_cannot_commit_the_index() {
+        let (_td, root) = git_init_repo();
+        write_file(&root, "other.txt", "staged\n");
+        stage_file(&root, "other.txt");
+        let index = std::fs::read(root.join(".git/index")).expect("index");
+        let params = GitCommitParams {
+            repo_id: "test".into(),
+            message: "empty selection".into(),
+            paths: Some(Vec::new()),
+            amend: None,
+            sign_off: None,
+            sign: None,
+            author_date: None,
+            co_authored_by: None,
+        };
+        let error = git_commit(&root, &params)
+            .await
+            .expect_err("empty selection");
+        assert!(matches!(error, AgentError::Other(_)));
+        assert_eq!(
+            std::fs::read(root.join(".git/index")).expect("index"),
+            index
+        );
+    }
+
+    #[tokio::test]
     async fn commit_with_staged_file_succeeds() {
         let (_td, root) = git_init_repo();
         write_file(&root, "hello.txt", "hello world\n");
@@ -270,6 +358,7 @@ mod tests {
 
         let params = GitCommitParams {
             repo_id: "test".into(),
+            paths: None,
             message: "feat: add hello".into(),
             amend: None,
             sign_off: None,
@@ -301,6 +390,7 @@ mod tests {
         // Amend with a new message.
         let params = GitCommitParams {
             repo_id: "test".into(),
+            paths: None,
             message: "amended message".into(),
             amend: Some(true),
             sign_off: None,
@@ -324,6 +414,7 @@ mod tests {
 
         let params = GitCommitParams {
             repo_id: "test".into(),
+            paths: None,
             message: "feat: collaborative work".into(),
             amend: None,
             sign_off: None,
@@ -355,6 +446,7 @@ mod tests {
 
         let params = GitCommitParams {
             repo_id: "test".into(),
+            paths: None,
             message: "   ".into(), // whitespace-only
             amend: None,
             sign_off: None,
@@ -378,6 +470,7 @@ mod tests {
 
         let params = GitCommitParams {
             repo_id: "test".into(),
+            paths: None,
             message: "should fail".into(),
             amend: None,
             sign_off: None,

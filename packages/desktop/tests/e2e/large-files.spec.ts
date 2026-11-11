@@ -1,11 +1,128 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync, statSync, chmodSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { call, packagedExecutable } from "./packaged-app";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
+
+test("tracking wizard commits literal selected files and preserves unrelated staging", async () => {
+  const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
+  test.skip(!descriptor, "Requires the owned real-store tracking fixture");
+  test.setTimeout(120_000);
+  const storage = (JSON.parse(readFileSync(descriptor!, "utf8")) as { profiles: Array<{ bucket: string; endpoint: string; region: string; credentials: { access_key_id: string; secret_access_key: string } }> }).profiles[0];
+  const remoteUrl = `crab://${storage.bucket}/proof`;
+  const executablePath = packagedExecutable();
+  const resources = process.platform === "darwin" ? path.resolve(path.dirname(executablePath), "../Resources") : path.join(path.dirname(executablePath), "resources");
+  const crab = path.join(resources, "agent", process.platform === "win32" ? "crab.exe" : "crab");
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-tracking-"));
+  const source = path.join(root, "source");
+  mkdirSync(source);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    CRAB_CACHE_DIR: path.join(root, "cache"),
+    AWS_ACCESS_KEY_ID: storage.credentials.access_key_id,
+    AWS_SECRET_ACCESS_KEY: storage.credentials.secret_access_key,
+    AWS_ENDPOINT_URL: storage.endpoint,
+    AWS_ENDPOINT_URL_S3: storage.endpoint,
+    AWS_REGION: storage.region,
+    AWS_DEFAULT_REGION: storage.region,
+    AWS_EC2_METADATA_DISABLED: "true",
+    AWS_ALLOW_HTTP: "true",
+    AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false",
+  };
+  delete env.AWS_SESSION_TOKEN;
+  delete env.AWS_PROFILE;
+  writeFileSync(path.join(root, "gitconfig"), "");
+  const git = (args: string[]) => execFileSync("git", ["--literal-pathspecs", ...args], { cwd: source, env });
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    git(["init", "--initial-branch=main"]);
+    git(["remote", "add", "origin", remoteUrl]);
+    git(["config", "user.name", "Desktop fixture"]);
+    git(["config", "user.email", "desktop@example.invalid"]);
+    const driver = `'${crab.replaceAll("\\", "/").replaceAll("'", "'\\''")}' filter-process`;
+    for (const kind of ["crab", "lfs"]) {
+      git(["config", `filter.${kind}.process`, driver]);
+      git(["config", `filter.${kind}.required`, "true"]);
+    }
+    writeFileSync(path.join(source, ".gitignore"), ".crab/\n");
+    writeFileSync(path.join(source, "crab.toml"), `[remote]\nurl = ${JSON.stringify(remoteUrl)}\n`);
+    writeFileSync(path.join(source, ".gitattributes"), "lfs.bin filter=lfs -text\n");
+    writeFileSync(path.join(source, "other.txt"), "original\n");
+    git(["add", "--", ".gitignore", ".gitattributes", "other.txt"]);
+    git(["commit", "-m", "initial"]);
+    writeFileSync(path.join(source, "other.txt"), "keep this staged\n");
+    git(["add", "--", "other.txt"]);
+    const unrelated = git(["ls-files", "--stage", "-z", "--", "other.txt"]);
+    const content = Buffer.alloc(2 * 1024 * 1024, 53);
+    const selected = ["data[1].bin", "lfs.bin", "weights"];
+    for (const file of [...selected, "data1.bin"]) writeFileSync(path.join(source, file), content);
+    application = await electron.launch({ executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const handle = await call(page, "open_local", { repo_id: "tracking", path: source });
+    await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
+    await page.getByRole("button", { name: "Track & Stage", exact: true }).click();
+    for (const file of selected) await page.getByText(file, { exact: true }).locator("../..").getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Track 3 files", exact: true }).click();
+    if (process.platform === "win32") rmSync(path.join(source, "data[1].bin"));
+    else chmodSync(path.join(source, "data[1].bin"), 0);
+    await page.getByRole("button", { name: "Track 3 files", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Retry tracking", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("2 tracked, 1 failed", { exact: true })).toBeVisible();
+    expect(git(["show", ":lfs.bin"]).toString()).toContain("version https://git-lfs.github.com/spec/v1");
+    if (process.platform === "win32") writeFileSync(path.join(source, "data[1].bin"), content);
+    else chmodSync(path.join(source, "data[1].bin"), 0o644);
+    await page.getByRole("button", { name: "Retry tracking", exact: true }).click();
+    await expect(page.getByText("Ready to commit", { exact: true })).toBeVisible();
+    expect(git(["check-attr", "filter", "--", "data1.bin"]).toString()).toContain("unspecified");
+    expect(git(["check-attr", "filter", "--", "lfs.bin"]).toString()).toContain("lfs");
+    expect(git(["show", ":lfs.bin"]).toString()).toContain("version https://git-lfs.github.com/spec/v1");
+    const edited = Buffer.from(content);
+    edited.write("edited after tracking", 100);
+    writeFileSync(path.join(source, "data[1].bin"), edited);
+    await page.getByLabel("Commit message for tracked files", { exact: true }).fill("Track selected large files");
+    const beforeCommit = git(["rev-parse", "HEAD"]).toString();
+    await page.getByRole("button", { name: "Commit", exact: true }).click();
+    await expect.poll(() => git(["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);
+    await expect(page.getByText("Committed", { exact: false })).toBeVisible();
+    expect(git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]).toString().split("\0").filter(Boolean).sort()).toEqual([".gitattributes", ...selected].sort());
+    expect(git(["ls-files", "--stage", "-z", "--", "other.txt"])).toEqual(unrelated);
+    expect(git(["show", "HEAD:other.txt"]).toString()).toBe("original\n");
+    expect(git(["ls-files", "--", "data1.bin"]).length).toBe(0);
+    for (const file of selected) {
+      const saved = await page.evaluate(async params => {
+        try { return await window.crab.rpc("read_bytes", params) as { bytes_b64: string }; }
+        catch (error) { throw new Error(JSON.stringify(error)); }
+      }, { repo_id: "tracking", path: file, rev: "HEAD", max_bytes: content.length + 1 });
+      expect(Buffer.from(String(saved.bytes_b64), "base64")).toEqual(file === "data[1].bin" ? edited : content);
+      expect(readFileSync(path.join(source, file))).toEqual(file === "data[1].bin" ? edited : content);
+    }
+    await page.screenshot({ path: test.info().outputPath("selected-tracking-commit.png") });
+    await page.getByRole("button", { name: "Skip push — I'll push later", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
+    await page.getByRole("tab", { name: "Pattern", exact: true }).click();
+    const rule = page.getByText("/data\\[1\\].bin", { exact: true }).locator("../..");
+    await expect(rule).toContainText("1 file");
+    await page.screenshot({ path: test.info().outputPath("selected-tracking-pattern.png") });
+  } catch (error) {
+    if (application) {
+      const page = await application.firstWindow();
+      await page.screenshot({ path: test.info().outputPath("selected-tracking-failure.png") });
+      writeFileSync(test.info().outputPath("selected-tracking-failure.txt"), await page.getByRole("main").innerText());
+    }
+    throw error;
+  } finally {
+    await application?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("packaged desktop previews large pointers and materializes Crab and LFS content", async () => {
   test.setTimeout(240_000);

@@ -1103,20 +1103,9 @@ function FilesPanel({
 
   const handleCommit = useCallback(
     async (message: string) => {
-      // Two-step: stage everything in the working tree that crab
-      // touched (`.gitattributes` + the tracked files), then commit.
-      // We can't always rely on `crab add` having staged the file
-      // already (older crab versions, or the user ran `git restore
-      // --staged` between add and commit).
-      const paths = new Set<string>();
-      for (const f of stagingStats?.files ?? []) {
-        if (f.file_path) paths.add(f.file_path);
-      }
-      if (gitStatusByPath.has(".gitattributes")) paths.add(".gitattributes");
-      if (paths.size > 0) {
-        await rpc.gitAddPaths(repo.repo_id, Array.from(paths));
-      }
-      await rpc.gitCommit(repo.repo_id, { message });
+      const paths = (stagingStats?.files ?? []).map(file => file.file_path).filter((path): path is string => !!path);
+      if (gitStatusByPath.has(".gitattributes")) paths.push(".gitattributes");
+      await rpc.gitCommit(repo.repo_id, { message, paths });
       onRefresh();
       onRefreshStaging();
     },
