@@ -156,7 +156,7 @@ crab-cache = { workspace = true, features = ["local-cache", "remote-client", "xe
 crab-cache-store = { workspace = true, features = ["remote-client"] }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-diff = { workspace = true }
-crab-git = { workspace = true, features = ["process"] }
+crab-git = { workspace = true, features = ["process", "facade"] }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
 crab-read = { workspace = true, features = ["local-staging"] }

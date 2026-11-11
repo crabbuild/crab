@@ -217,12 +217,11 @@ fn attribute_pattern(path: &str) -> Result<String> {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut command = shellout::git_command();
+    let mut command = shellout::git_command()?;
     command
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root);
-    crate::storage_auth::configure_command(&mut command)?;
     checked(command.output().await?)
 }
 

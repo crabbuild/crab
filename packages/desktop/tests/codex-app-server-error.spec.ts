@@ -34,7 +34,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 12345,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),
@@ -110,7 +109,7 @@ async function completeHandshake(
   }
   serverWrite(stdout, {
     id: turnStartReq!.id,
-    result: { turnId: "turn_1" },
+    result: { turn: { id: "turn_1" } },
   });
 
   // 4. Send thread/started and turn/started notifications

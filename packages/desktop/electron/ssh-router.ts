@@ -1,4 +1,4 @@
-import { parseRepoId } from "./ssh-types";
+import { parseRepoId, sameRemoteEndpoint, type RemoteEndpoint } from "./ssh-types";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { TextDecoder } from "node:util";
@@ -66,6 +66,9 @@ const OWNED_METHODS = new Set([
 const CACHEABLE_READ_METHODS = new Set([
   "git_status_porcelain", "git_log", "list_refs", "repo_summary", "hydration_status",
 ]);
+// Worktree discovery may wait for repository recovery, but its paths must
+// never be returned from a stale cache as if they were the live checkout.
+const REPLAYABLE_READ_METHODS = new Set([...CACHEABLE_READ_METHODS, "git_worktree_list"]);
 const PROGRESS_METHODS = new Set([
   "progress/line", "progress/transfer", "progress/complete", "progress/partial",
   "crab/add_progress", "crab/push_step", "crab/push_progress",
@@ -112,7 +115,7 @@ export class RpcRouter extends EventEmitter {
       // Process readiness precedes repository replay. Join that repository's
       // admission before metadata dispatch. Captures and cancellation retain
       // their live-session contract rather than acquiring a hidden retry queue.
-      if (this.sessionManager.getStatus(profileId) === "connected" && isCacheableReadMethod(method)) {
+      if (this.sessionManager.getStatus(profileId) === "connected" && REPLAYABLE_READ_METHODS.has(method)) {
         const pending = this.sessionManager.repositoryWork(repoId);
         if (pending) await pending;
       }
@@ -185,9 +188,44 @@ export class RpcRouter extends EventEmitter {
       this.pending.delete(id);
       request.reject(error);
     }
+    this.emit("remote-channel-retired", { profileId: owner.profileId, owner, reason: error });
     owner.finish();
     // EOF lets the native agent cancel and join reads, then close its SDK/DBs.
     owner.channel.end();
+  }
+
+  /** Retires sent calls without moving the unsent read queue to another channel. */
+  detachChannel(profileId: string): void {
+    const owner = this.channels.get(profileId);
+    if (owner) this.failChannel(owner, new Error("Remote agent disconnected before its RPC completed; outcome is unknown"));
+  }
+
+  /** Captures the channel identity for a native process's entire lifetime. */
+  remoteChannelOwner(profileId: string): object | undefined { return this.channels.get(profileId); }
+
+  /** Captures the verified destination of the currently attached agent. */
+  remoteEndpoint(profileId: string): RemoteEndpoint {
+    const connection = this.sessionManager.getConnection(profileId);
+    const channel = this.channels.get(profileId)?.channel;
+    if (!channel || connection?.channels.agent !== channel || !connection.endpoint) {
+      throw new Error("Remote endpoint requires an attached, authenticated SSH agent");
+    }
+    return { ...connection.endpoint };
+  }
+
+  /** Refuses to infer a durable task's destination from an editable profile. */
+  assertRemoteEndpoint(profileId: string, expected: RemoteEndpoint | undefined): void {
+    if (!expected) throw new Error("Remote task endpoint was not recorded. Recover its host binding explicitly before continuing.");
+    const current = this.remoteEndpoint(profileId);
+    if (!sameRemoteEndpoint(current, expected)) {
+      throw new Error("SSH profile endpoint changed. Restore the task's original host, account and host key before continuing.");
+    }
+  }
+
+  /** Sends only on the captured channel; a replacement cannot inherit process writes. */
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (this.channels.get(profileId) !== owner) return Promise.reject(new Error("Native process transport was replaced; remote closure is unconfirmed"));
+    return this.sendPreparedToRemoteAgent(this.channels.get(profileId)!, method, params);
   }
 
   replayQueue(profileId: string): Promise<void> {
@@ -270,8 +308,8 @@ export class RpcRouter extends EventEmitter {
     if (status === "reconnecting") {
       // Only explicitly cacheable metadata can be replayed. Captured sources,
       // cancellation signals and unknown mutations belong to one agent session.
-      if (!isCacheableReadMethod(method)) throw Object.assign(new Error("Connection lost: live operations are unavailable during reconnection"), { code: "SSH_RECONNECTING" });
-      const cached = repoId ? this.remoteCache?.getCached(`${repoId}:${method}`) : null;
+      if (!REPLAYABLE_READ_METHODS.has(method)) throw Object.assign(new Error("Connection lost: live operations are unavailable during reconnection"), { code: "SSH_RECONNECTING" });
+      const cached = isCacheableReadMethod(method) && repoId ? this.remoteCache?.getCached(`${repoId}:${method}`) : null;
       if (cached) {
         const data = cached.data;
         return { ...(data !== null && typeof data === "object" && !Array.isArray(data) ? data : { data }), __stale: true };
@@ -296,6 +334,9 @@ export class RpcRouter extends EventEmitter {
   }
 
   async sendToRemoteAgent(profileId: string, method: string, params: unknown): Promise<unknown> {
+    const status = this.sessionManager.getStatus(profileId);
+    if (status === "reconnecting") return this.routeToRemote(profileId, extractRepoId(params) ?? "", method, params);
+    if (status !== "connected" && !(status === "deploying" && method === "capabilities")) throw new Error(`SSH connection not available (status: ${status})`);
     const owner = this.channelOwner(profileId);
     return this.storageConnections.request(method, params, (name, payload) => this.sendPreparedToRemoteAgent(owner, name, payload), profileId);
   }
@@ -366,10 +407,11 @@ export class RpcRouter extends EventEmitter {
       }, timeoutMs);
       const counter = this.bandwidthCounters.get(owner.profileId);
       if (counter) counter.bytesOut += Buffer.byteLength(frame);
-      owner.channel.write(frame, error => {
-        if (!error) return;
-        this.failChannel(owner, error);
-      });
+      try {
+        owner.channel.write(frame, error => { if (error) this.failChannel(owner, error); });
+      } catch (reason: unknown) {
+        this.failChannel(owner, reason instanceof Error ? reason : new Error("SSH frame write failed", { cause: reason }));
+      }
     });
   }
 

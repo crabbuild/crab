@@ -12,6 +12,7 @@ import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
 import type { CapabilitiesChangedEvent } from "./repo-provider";
 import { rpcReply } from "./rpc-transport";
 import { MediaResources } from "./media";
+import { registerAppShutdown } from "./app-shutdown";
 import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
@@ -28,11 +29,12 @@ import { registerForgeAuth } from "./forge-auth";
 import { registerOrchestratorIpc } from "./orchestrator-ipc";
 import { SkillManager } from "./skill-manager";
 import { registerSkillManagerIpc } from "./skill-manager-ipc";
-import { orchestratorReattach } from "./daemon/orchestrator-reattach";
 import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
-import { KnownHostsManager, type HostKeyRequest } from "./ssh-known-hosts";
 import { SshSessionManager } from "./ssh-manager";
+import { RemoteRuntimeStore } from "./ssh-runtime";
+import { KnownHostsManager, createHostKeyVerifier } from "./ssh-known-hosts";
+import { confirmSshHostKey } from "./ssh-host-key-dialog";
 import { registerSshIpcHandlers } from "./ssh-ipc";
 import { RemoteTerminalManager } from "./ssh-terminal";
 import { PortForwardManager } from "./ssh-port-forward";
@@ -132,6 +134,7 @@ app.on("before-quit", event => {
   quitRequested = true;
   mainWindow.close();
 });
+let shutdownAgentServices: (() => Promise<void>) | undefined;
 
 // Workspace state (managed by IPC handlers)
 let workspaceRootPath: string | null = null;
@@ -144,14 +147,12 @@ let workspacePoller: StatusPoller | null = null;
 let _rpcRouter: RpcRouter | null = null;
 let _sshSessionManager: SshSessionManager | null = null;
 
-// Orchestrator instance — exposed at module level so the SSH subsystem
-// can wire the RPC router's notification stream to it.
+// The shared orchestrator receives its SSH router after subsystem startup.
 import type { Orchestrator } from "./orchestrator";
 let orchestrator: Orchestrator | null = null;
 
 /**
- * Returns the orchestrator instance. Used by the SSH subsystem to wire
- * the RPC router's notification stream via bridgeRemoteActivityFeed().
+ * Returns the shared local/remote task owner.
  * Returns null if called before registerIpc() completes.
  */
 export function getOrchestrator(): Orchestrator | null {
@@ -364,7 +365,9 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
   registerKeychainHandlers(ipcMain);
 
   // Orchestrator IPC handlers (agent task lifecycle, diff, apply).
-  orchestrator = registerOrchestratorIpc(ipcMain, () => mainWindow, skillManager);
+  const agentServices = registerOrchestratorIpc(ipcMain, () => mainWindow, skillManager);
+  orchestrator = agentServices.orchestrator;
+  shutdownAgentServices = agentServices.shutdown;
 
   // Agent Workflow IPC handlers (DAG definitions, run orchestration, review gates).
   registerAgentWorkflowIpc(ipcMain, () => mainWindow, () => orchestrator);
@@ -1732,7 +1735,10 @@ app.whenReady().then(async () => {
 
   // Core SSH modules
   const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
-  const verifyHostKey = knownHosts.authorize.bind(knownHosts);
+  const verifyHostKey = createHostKeyVerifier(knownHosts, (request, signal) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false);
+    return confirmSshHostKey(mainWindow, request, signal);
+  });
   const sshSessionManager = new SshSessionManager(verifyHostKey);
 
   const storageConnections = new StorageConnections(
@@ -1766,21 +1772,6 @@ app.whenReady().then(async () => {
   registerLspIpc(lspManager, () => mainWindow);
   registerFileWatcher(() => mainWindow);
 
-  knownHosts.on("ssh:host-key-request", (prompt: HostKeyRequest) => {
-    if (!mainWindow || mainWindow.isDestroyed()) { void knownHosts.answer(prompt.requestId, false); return; }
-    mainWindow.webContents.send("ssh:host-key-request", prompt);
-  });
-  knownHosts.on("ssh:host-key-closed", (payload: { requestId: string }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("ssh:host-key-closed", payload);
-  });
-  ipcMain.handle("ssh:host-key-answer", (event, requestId: string, accepted: boolean) => {
-    if (event.sender !== mainWindow?.webContents || typeof requestId !== "string" || typeof accepted !== "boolean") throw new Error("Invalid SSH host-key decision");
-    return knownHosts.answer(requestId, accepted);
-  });
-  app.on("browser-window-created", (_event, window) => {
-    window.once("closed", () => { if (!mainWindow || mainWindow === window) knownHosts.cancelPending(); });
-  });
-  app.on("before-quit", () => { if (!mainWindow) knownHosts.cancelPending(); });
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
@@ -1791,10 +1782,11 @@ app.whenReady().then(async () => {
     },
   }, storageConnections);
   _rpcRouter = rpcRouter;
-  const runtimeRoot = app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "resources", "native");
-  const agentDeployer = new AgentDeployer(path.join(runtimeRoot, "ssh-runtimes"), app.getVersion());
+  orchestrator?.setRpcRouter(rpcRouter);
+  const runtimeOptions = { packaged: app.isPackaged, appPath: app.getAppPath(), version: app.getVersion(), cacheDirectory: path.join(app.getPath("userData"), "remote-runtimes") };
+  const remoteRuntimes = new RemoteRuntimeStore(runtimeOptions);
   const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
-  sshSessionManager.configureAgentDeployment({ agentDeployer, capabilityNegotiator, rpcRouter });
+  sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(remoteRuntimes.resolve.bind(remoteRuntimes)), capabilityNegotiator, rpcRouter });
   const fileEditor = new RemoteFileEditor(rpcRouter, sshSessionManager);
   const gitManager = new RemoteGitManager(rpcRouter, sshSessionManager);
   const remoteProvider = new RemoteProvider({
@@ -1807,7 +1799,7 @@ app.whenReady().then(async () => {
   const registry = getProviderRegistry();
 
   const fileBrowser = new RemoteFileBrowser(sshSessionManager, registry, remoteProvider);
-  registerSshIpcHandlers(sshProfileManager, sshSessionManager, fileBrowser, sshTerminalManager, sshPortForwardManager);
+  registerSshIpcHandlers(sshProfileManager, sshSessionManager, fileBrowser, knownHosts, sshTerminalManager, sshPortForwardManager);
 
   bridgeAgentDeployToRenderer(sshSessionManager);
   // Remote progress is scoped by the router's live request owner. Forward only
@@ -2076,95 +2068,6 @@ app.whenReady().then(async () => {
       getSessionTypeBreakdown: () => termRouter.getSessionTypeBreakdown(),
     });
 
-    // Warm reattach disabled — causes CPU spikes when sessions have no
-    // mounted TerminalView to receive data. The on-mount reattach in
-    // TerminalView (termReattachSessions IPC) handles reconnection
-    // when the user actually opens the terminal view.
-    setTimeout(async () => {
-      // Skip warm reattach — let on-demand reattach handle it
-      console.log("[crab-desktop] Skipping warm reattach (on-demand reattach active)");
-
-      // Orchestrator reattach: reconnect agent tasks that were running when
-      // the app last quit. Runs after warm reattach so daemon sessions are
-      // already live before we try to attach to them.
-      const currentOrchestrator = getOrchestrator();
-      if (currentOrchestrator) {
-        const runningTasks = currentOrchestrator
-          .getAllTasks()
-          .filter((t) => t.status === "running" || t.status === "reviewing")
-          .map((t) => ({
-            id: t.id,
-            status: t.status as "running" | "reviewing",
-            worktreePath: t.worktreePath,
-            sessionId: undefined,
-          }));
-
-        if (runningTasks.length > 0) {
-          try {
-            await orchestratorReattach(
-              runningTasks,
-              {
-                getAgentSessions: () => daemonSubsystem!.daemonClient.getAgentSessions(),
-                createOrAttach: (sessionId, cols, rows) =>
-                  daemonSubsystem!.daemonClient.request("createOrAttach", {
-                    sessionId,
-                    cols,
-                    rows,
-                  }),
-                onReattached: (taskId, _sessionId) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    // Task is still running — no status change needed, but
-                    // emit an event so the renderer knows the session is live.
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                onSessionExited: (taskId, exitCode) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    task.status = exitCode === 0 ? "reviewing" : "failed";
-                    task.exitCode = exitCode;
-                    task.completedAt = Date.now();
-                    currentOrchestrator.persistTasks().catch((err: unknown) => {
-                      console.warn("[crab-desktop] Failed to persist tasks after session exit:", err);
-                    });
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                onSessionMissing: (taskId) => {
-                  const task = currentOrchestrator.getTask(taskId);
-                  if (task) {
-                    task.status = "failed";
-                    task.completedAt = Date.now();
-                    currentOrchestrator.persistTasks().catch((err: unknown) => {
-                      console.warn("[crab-desktop] Failed to persist tasks after session missing:", err);
-                    });
-                    currentOrchestrator.emit("orchestrator:task-status", {
-                      taskId,
-                      status: task.status,
-                    });
-                  }
-                },
-                log: (level, message) => {
-                  if (level === "error") console.error(`[orchestrator-reattach] ${message}`);
-                  else if (level === "warn") console.warn(`[orchestrator-reattach] ${message}`);
-                  else console.log(`[orchestrator-reattach] ${message}`);
-                },
-              },
-            );
-          } catch (err) {
-            console.warn("[crab-desktop] Orchestrator reattach failed:", err);
-          }
-        }
-      }
-    }, 1000);
-
     console.log("[crab-desktop] PTY daemon mode active — both bridges registered");
 
     registerTerminalSessionIpc(ipcMain, daemonSubsystem.daemonClient, daemonSubsystem.daemonBridge, termRouter);
@@ -2217,10 +2120,8 @@ app.whenReady().then(async () => {
     // Main-process worktrees, Git helpers and the sidecar must use the same release.
     process.env.CRAB_BIN = runtime.crab;
     process.env.PATH = `${path.dirname(runtime.crab)}${path.delimiter}${process.env.PATH ?? ""}`;
-    // Each application profile owns its SlateDB writer; parallel profiles must
-    // not contend for the standalone sidecar's home-directory index.
-    const indexerDirectory = path.join(app.getPath("userData"), "native", "indexer");
-    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), ["--index-dir", indexerDirectory], storageConnections);
+    // The native process owns and retires its private metadata index.
+    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections);
     if (logsDir) next.on("stderr", (line: string) => {
       const day = new Date().toISOString().slice(0, 10);
       fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {
@@ -2272,18 +2173,7 @@ app.whenReady().then(async () => {
     });
   });
 
-  // ── SSH Remote Activity Bridge ──────────────────────────────────
-  // When the SSH subsystem creates an RPC router, call
-  // bridgeRemoteActivityFeed(router, orchestrator) to connect the
-  // remote agent's notification stream to the orchestrator. This
-  // ensures remote task events (task_event, task_completed,
-  // task_failed) flow through the same pipeline as local tasks and
-  // display identically in the Task Panel.
-  //
-  // The bridge is wired lazily: the SSH subsystem calls
-  // bridgeRemoteActivityFeed() when a connection is established and
-  // the router is ready. The orchestrator instance is available via
-  // the module-level `orchestrator` variable set by registerIpc().
+
 });
 
 app.on("window-all-closed", () => {
@@ -2294,21 +2184,16 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 });
 
-app.on("will-quit", (e) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  e.preventDefault();
-  stopAutoUpdater();
-  Promise.allSettled([
-    stopFileWrites(),
-    stopNotebookKernels(),
-    stopJupyterRuntimeCommands(),
-    stopAllWatchers(),
-    (async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } })(),
-    sidecarManager.stopAll(),
-    lspManager.stopAll(),
-  ]).then(results => {
-    for (const result of results) if (result.status === "rejected") console.error("Desktop shutdown failed", result.reason);
-    app.exit(results.some(result => result.status === "rejected") ? 1 : 0);
-  });
-});
+registerAppShutdown(app, [
+  () => { isShuttingDown = true; },
+  stopAutoUpdater,
+  stopFileWrites,
+  stopNotebookKernels,
+  stopJupyterRuntimeCommands,
+  stopAllWatchers,
+  () => shutdownAgentServices?.(),
+  async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } },
+  () => _sshSessionManager && Promise.all(_sshSessionManager.getAllConnections().map(connection => _sshSessionManager!.disconnect(connection.profile.id))),
+  () => sidecarManager.stopAll(),
+  () => lspManager.stopAll(),
+]);

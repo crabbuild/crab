@@ -16,6 +16,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { socketAddress } from "./socket-address";
 
 import { DaemonServer } from "./daemon-server";
 import { createNodePtySpawner } from "./subprocess-handle";
@@ -145,7 +146,7 @@ function cleanupStaleSocket(socketPath: string, pidPath: string): void {
 
   // Remove stale socket file
   try {
-    fs.unlinkSync(socketPath);
+    fs.unlinkSync(socketAddress(socketPath));
   } catch {
     // May not exist
   }
@@ -211,7 +212,7 @@ let memoryManager: MemoryManager | null = null;
 let auditLogger: AuditLogger | null = null;
 let isShuttingDown = false;
 
-async function gracefulShutdown(reason: string): Promise<void> {
+async function gracefulShutdown(reason: string, killSessions = true): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
@@ -225,12 +226,11 @@ async function gracefulShutdown(reason: string): Promise<void> {
   try {
     // Persist latest state before closing sessions
     if (checkpointTimer) {
+      checkpointTimer.stop();
       checkpointTimer.finalCheckpoint();
     }
 
-    // Shutdown the server — this sends SIGHUP to all PTY processes,
-    // waits up to 5s for graceful exit, then terminates them
-    await server.shutdown({ killSessions: true });
+    await server.shutdown({ killSessions });
     logger.info("Shutdown complete");
   } catch (err) {
     logger.error("Error during shutdown", { error: (err as Error).message });
@@ -347,7 +347,7 @@ async function main(): Promise<void> {
   // Check for stale socket and clean up if needed
   // Windows pipes have no socket file. The PID guard must still protect a live
   // daemon's token from being overwritten by a duplicate startup.
-  if (fs.existsSync(socketPath) || fs.existsSync(pidPath)) {
+  if (fs.existsSync(socketAddress(socketPath)) || fs.existsSync(pidPath)) {
     cleanupStaleSocket(socketPath, pidPath);
   }
 
@@ -379,9 +379,8 @@ async function main(): Promise<void> {
     tokenPath,
     pidPath,
     spawnSubprocess: createNodePtySpawner(),
-    onIdleShutdown: () => {
-      logger.info("Idle timeout reached — shutting down");
-      void gracefulShutdown("idle-timeout");
+    onShutdownRequested: (reason, killSessions) => {
+      void gracefulShutdown(reason, killSessions);
     },
     hooks: {
       beforeSpawn: () => quotaManager!.checkCanCreateSession(server!.sessionCount),

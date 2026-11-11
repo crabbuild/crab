@@ -470,7 +470,7 @@ fn entry(path: String, size: u64, blob: &[u8]) -> BrowserEntry {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
@@ -488,7 +488,7 @@ async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
     use std::process::Stdio;
-    let mut child = crate::shellout::git_command()
+    let mut child = crate::shellout::git_command()?
         .args(["cat-file", mode])
         .current_dir(root)
         .stdin(Stdio::piped())

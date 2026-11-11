@@ -8,7 +8,7 @@
  */
 
 import type { ReactNode } from "react";
-import type { ToolEvent } from "../chat-types";
+import type { ToolEvent } from "../../../../electron/agent-chat-messages";
 import type { CardId } from "../../../lib/turn-derivation";
 
 /**

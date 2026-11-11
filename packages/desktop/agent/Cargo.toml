@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # Read-side verbs go through the SDK.
 crab-sdk = { workspace = true, features = ["files", "service", "local"] }
-crab-git = { workspace = true, features = ["process"] }
+crab-git = { workspace = true, features = ["process", "facade"] }
 crab-types = { workspace = true }
 crab-storage = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
@@ -87,6 +87,7 @@ base64 = "0.22"
 bytes = { workspace = true }
 blake3 = { workspace = true }
 sha2 = "0.10"
+# Scoped native artifacts are removed on cancellation and shutdown.
 tempfile = { workspace = true }
 
 # Stream adapters for `walk()` consumers (used by `list_stream`).

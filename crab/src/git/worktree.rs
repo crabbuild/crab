@@ -203,72 +203,41 @@ struct IndexStatUpdate {
 
 fn write_index_stats(root: &Path, updates: &HashMap<Vec<u8>, IndexStatUpdate>) -> Result<usize> {
     use bstr::ByteSlice;
-
     if updates.is_empty() {
         return Ok(0);
     }
-
-    let index_path = WorktreeContext::resolve_from_path(root)?.index_path();
-    let lock = gix_lock::File::acquire_to_update_resource(
-        &index_path,
-        gix_lock::acquire::Fail::Immediately,
-        None,
-    )
-    .map_err(|error| CrabError::Internal(format!("lock Git index: {error}")))?;
-    let mut index = gix_index::File::at(
-        &index_path,
-        gix_hash::Kind::Sha1,
-        true,
-        gix_index::decode::Options::default(),
-    )
-    .map_err(|error| CrabError::Internal(format!("read Git index: {error}")))?;
-    let repo = updates
-        .values()
-        .any(|update| update.expected_pointer.is_some())
-        .then(|| {
-            gix::open(root)
-                .map_err(|error| CrabError::Internal(format!("open Git repository: {error}")))
-        })
-        .transpose()?;
-    let mut updated = 0usize;
-    for (entry, entry_path) in index.entries_mut_with_paths() {
-        if entry.stage() != gix_index::entry::Stage::Unconflicted {
-            continue;
-        }
-        let Some(update) = updates.get(entry_path.as_bytes()) else {
+    let repo = gix::open(root).map_err(|error| CrabError::Io(std::io::Error::other(error)))?;
+    let index = repo
+        .open_index()
+        .map_err(|error| CrabError::Io(std::io::Error::other(error)))?;
+    let mut selected = Vec::with_capacity(updates.len());
+    for entry in index.entries() {
+        let path = entry.path(&index);
+        let Some(update) = updates.get(path.as_bytes()) else {
             continue;
         };
-        if let Some((expected_hash, expected_size)) = update.expected_pointer {
-            let Some(repo) = repo.as_ref() else {
-                continue;
-            };
-            let Ok(blob) = repo.find_blob(entry.id) else {
-                continue;
-            };
+        let blob = if let Some((hash, size)) = update.expected_pointer {
+            let blob = repo
+                .find_blob(entry.id)
+                .map_err(|error| CrabError::Io(std::io::Error::other(error)))?;
             let Ok(pointer) = Pointer::parse(&blob.data) else {
                 continue;
             };
-            if pointer.file_hash != expected_hash || pointer.size != expected_size {
+            if pointer.file_hash != hash || pointer.size != size {
                 continue;
             }
-        }
-        entry.stat = update.stat;
-        updated += 1;
+            Some(blob.data.clone())
+        } else {
+            None
+        };
+        selected.push(crab_git::index_stat::IndexStatUpdate {
+            path: gix::path::from_bstr(path).into_owned(),
+            stat: update.stat,
+            expected_blob: blob,
+        });
     }
-    if updated == 0 {
-        return Ok(0);
-    }
-
-    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, lock);
-    index
-        .write_to(&mut writer, gix_index::write::Options::default())
-        .map_err(|error| CrabError::Internal(format!("write Git index: {error}")))?;
-    let lock = writer
-        .into_inner()
-        .map_err(|error| CrabError::Io(error.into_error()))?;
-    lock.commit()
-        .map_err(|error| CrabError::Internal(format!("commit Git index: {error}")))?;
-    Ok(updated)
+    crab_git::index_stat::refresh(root, &selected)
+        .map_err(|error| CrabError::Io(std::io::Error::other(error)))
 }
 
 /// Keep freshly published filter output outside Git's racy-stat window.

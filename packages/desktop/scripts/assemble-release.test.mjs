@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 const { findFile, resolveFiles } = require('electron-updater/out/providers/Provider');
 const { MacUpdater } = require('electron-updater/out/MacUpdater');
 const FpmTarget = require('app-builder-lib/out/targets/FpmTarget').default;
-const { executeAppBuilderAsJson } = require('app-builder-lib/out/util/appBuilder');
+const { convertIcon } = require('app-builder-lib/out/util/iconConverter');
 const childProcess = require('node:child_process');
 const script = fileURLToPath(new URL('./assemble-release.mjs', import.meta.url));
 const version = '2.3.4';
@@ -43,7 +43,7 @@ test('Windows installer icon can be generated from the configured image', async 
   for (const icon of [config.nsis.installerIcon, config.nsis.uninstallerIcon]) {
     if (icon) assert.ok(readFileSync(path.resolve(desktop, icon)).length > 0);
   }
-  const result = await executeAppBuilderAsJson(['icon', '--format', 'ico', '--root', path.join(desktop, 'build'), '--root', desktop, '--out', output, '--input', config.win.icon]);
+  const result = await convertIcon({ sources: [config.win.icon], fallbackSources: [], roots: [path.join(desktop, 'build'), desktop], format: 'ico', outDir: output });
   assert.ok(result.icons?.some((icon) => icon.file.endsWith('.ico')));
 });
 
@@ -64,6 +64,14 @@ function fixture(t, releaseVersion = version) {
     });
     const prefix = version.includes('-') ? version.split('-')[1].split('.')[0] : 'latest';
     writeFileSync(path.join(folder, channel.replace('latest', prefix)), JSON.stringify({ version, files, path: files[0].url, sha512: files[0].sha512, releaseDate: '2026-01-01T00:00:00.000Z' }));
+  }
+  const runtimes = path.join(input, 'remote-runtimes'); mkdirSync(runtimes);
+  for (const platform of ['darwin', 'linux']) for (const arch of ['arm64', 'x64']) {
+    const prefix = `Crab-${version}-runtime-${platform}-${arch}`; const hashes = {};
+    for (const name of ['crab', 'crab-desktop-agent']) {
+      const data = Buffer.from(`${prefix}/${name}`); writeFileSync(path.join(runtimes, `${prefix}-${name}`), data); hashes[name] = createHash('sha256').update(data).digest('hex');
+    }
+    writeFileSync(path.join(runtimes, `${prefix}.json`), JSON.stringify({ version, platform, arch, hashes }));
   }
   const blockmap = `Crab-${version}-mac-arm64.zip.blockmap`;
   writeFileSync(path.join(input, 'mac-arm64', blockmap), 'blockmap');
@@ -122,6 +130,8 @@ test('assembles update channels, installers and verifiable checksums for all pla
 });
 
 for (const [name, mutate, message] of [
+  ['missing remote runtime', ({ input }) => rmSync(path.join(input, 'remote-runtimes', `Crab-${version}-runtime-linux-arm64-crab`)), /ENOENT/],
+  ['corrupted remote runtime', ({ input }) => writeFileSync(path.join(input, 'remote-runtimes', `Crab-${version}-runtime-darwin-x64-crab`), 'corrupted'), /Remote runtime checksum mismatch/],
   ['corrupted installer', ({ input }) => writeFileSync(path.join(input, 'windows-x64', `Crab-${version}-win-x64.exe`), 'corrupt'), /does not match/],
   ['missing installer', ({ input }) => rmSync(path.join(input, 'linux-x64', `Crab-${version}-linux-amd64.deb`)), /ENOENT/],
   ['missing DEB update metadata', ({ input }) => {

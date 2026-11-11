@@ -71,6 +71,13 @@ user edits within that attributes file. Other staged files remain staged. The
 Crab staging section uses the same selected-path commit operation; the ordinary
 Changes composer continues to commit the staged index. Push is a separate step.
 
+In **Git → Changes**, whole-file Stage and Unstage operate on exact paths,
+including Crab and Git LFS binary files. Inline text hunk actions remain
+separate. Track & Stage includes file recipes with no new local segment chunks;
+reused content can still have a changed pointer to commit. Refreshing the file
+list retains the commit message. The Large Files toolbar's **Push** opens the
+same destination and result panel as the staging section.
+
 ### Hydration Decorations
 
 Crab and Git LFS files show their working-tree state:

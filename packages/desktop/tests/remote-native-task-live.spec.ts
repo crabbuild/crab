@@ -1,0 +1,573 @@
+import { mockStorageConnections } from "./mock-storage-connections";
+import { describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { homedir } from "node:os";
+import path from "node:path";
+import { EventEmitter } from "node:events";
+import type { IpcMain } from "electron";
+import type { ClientChannel } from "ssh2";
+import type { SshSessionManager } from "../electron/ssh-manager";
+import { RpcRouter } from "../electron/ssh-router";
+import { Orchestrator, type Task } from "../electron/orchestrator";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
+import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
+import { ChatDatabase } from "../electron/orchestrator-chat-db";
+import { registerChatIpc } from "../electron/orchestrator-chat";
+import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
+import { AgentDetector, registerAgentDetectionIpc } from "../electron/ssh-agent-detection";
+import type { AgentEvent, AgentModel } from "../electron/orchestrator-adapters";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
+import { terminalSshServer } from "./fixtures/ssh-terminal-server";
+
+const liveRoot = process.env.CRAB_AGENT_LIVE_ROOT;
+const run = promisify(execFile);
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
+describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-source-hidden-untracked", "apply-source-ignored", "apply-source-assumed", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "apply-sidecar-kill-active-edited", "apply-sidecar-kill-published", "apply-sidecar-kill-published-foreign-lock", "apply-sidecar-kill-published-source-edit", "apply-sidecar-kill-published-source-ignored", "apply-sidecar-kill-published-source-untracked", "apply-sidecar-kill-published-unconfirmed", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+    const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
+    const repo = path.join(root, "repo"); await mkdir(repo);
+    await run("git", ["init", "--template=", "--initial-branch=main", repo]);
+    // Apply commits later in the sidecar with the server's global config disabled.
+    for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["user.useConfigOnly", "true"], ["commit.gpgSign", "false"]]) {
+      await run("git", ["config", "--local", key, value], { cwd: repo });
+    }
+    await writeFile(path.join(repo, "seed.txt"), "before\n");
+    await run("git", ["add", "."], { cwd: repo });
+    await run("git", ["commit", "-m", "baseline"], { cwd: repo });
+    const platform = process.platform === "darwin" ? "mac" : "linux";
+    const runtime = path.resolve(`resources/native/${platform}-${process.arch}`);
+    const server = await terminalSshServer(root, (await getExpandedEnv()).PATH);
+    const bin = path.join(root, "bin");
+    if (mode === "availability") {
+      await mkdir(bin);
+      for (const binary of ["claude", "codex"]) await writeFile(path.join(bin, binary), `#!/bin/sh\nprintf '${binary} server-fixture\\n'\n`, { mode: 0o755 });
+      server.env.PATH = `${bin}:/usr/bin:/bin`;
+    }
+    // Keep temporary worktrees in this fixture; use the server account's
+    // existing CLI configuration/login directories without copying credentials.
+    Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+      CODEX_HOME: process.env.CODEX_HOME ?? path.join(homedir(), ".codex"), CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude") });
+    const client = await server.connect();
+    const sidecarPidFile = path.join(root, "first-sidecar-pid");
+    const openAgent = (recordPid = false) => new Promise<ClientChannel>((resolve, reject) => client.exec(`${recordPid ? `printf '%s\\n' "$$" > ${quote(sidecarPidFile)}; ` : ""}exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
+    const hardKill = mode.startsWith("apply-sidecar-kill");
+    const channel = await openAgent(hardKill);
+    let diagnostics = ""; channel.stderr.on("data", (bytes: Buffer) => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
+    const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
+    const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
+      hostKey: `SHA256:${Buffer.from(server.connection.fingerprint, "hex").toString("base64").replace(/=+$/, "")}` };
+    let connectedAgent = channel;
+    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, endpoint, channels: { agent: connectedAgent } }) } as unknown as SshSessionManager;
+    const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } }, mockStorageConnections);
+    router.attachChannel("fixture", channel);
+    const repoId = `ssh://fixture${repo}`;
+    const persistPath = path.join(root, "tasks.sqlite");
+    vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(root, "settings.json"));
+    const local = { binaryPath: "/client-only/provider", extraArgs: ["--client-only"], env: { CLIENT_ONLY_CREDENTIAL: "client-scope-only-value" } };
+    await writeFile(path.join(root, "settings.json"), JSON.stringify({ orchestratorAgentConfigs: { codex: local, "claude-code": local } }));
+    const requests = vi.spyOn(router, "requestOnRemoteChannel");
+    let orchestrator = new Orchestrator({ persistPath, rpcRouter: router, timeoutMs: 120_000 });
+    const db = new ChatDatabase(path.join(root, "chat.sqlite"));
+    const events: AgentEvent[] = [];
+    const catalogs: Record<string, { repository: number; workspace: number }> = {};
+    let availability: unknown;
+    let cancellation: unknown;
+    let task: Task | undefined;
+    const wire = () => orchestrator.on("orchestrator:event", ({ taskId, event }: { taskId: string; event: AgentEvent }) => {
+      events.push(event);
+      const approval = event.approval;
+      if (!approval || !task) return;
+      let allowed = false;
+      if (approval.kind === "file") {
+        if (mode === "claude-code") {
+          const input = JSON.parse(approval.detail ?? "{}") as { file_path?: string };
+          allowed = input.file_path === path.join(task.worktreePath, "remote-proof.txt");
+        } else allowed = [task.worktreePath, path.join(task.worktreePath, "remote-proof.txt")].includes(approval.detail?.split("\n")[0] ?? "");
+      }
+      orchestrator.recordApproval(taskId, { requestId: approval.requestId, decision: allowed ? "allow_once" : "deny", summary: "Owned remote fixture" });
+    });
+    const wait = async () => vi.waitFor(() => {
+      if (task?.status === "failed") throw new Error(events.find(event => event.error)?.error ?? "Remote native turn failed");
+      expect(task?.status).toBe("reviewing");
+    }, { timeout: 120_000, interval: 100 });
+    let succeeded = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
+      if (mode === "apply-target-detached") await run("git", ["checkout", "--detach"], { cwd: repo });
+      task = await orchestrator.createTask("Use a built-in file writing or patch tool to create remote-proof.txt containing exactly remote-one followed by a newline. Do not use shell commands, external services or subagents. Reply Done.", mode === "claude-code" ? mode : "codex", mode === "checkpoint-stop-local" ? repo : repoId);
+      if (mode === "apply-source-hidden-untracked" || mode === "apply-source-ignored" || mode === "apply-source-assumed") {
+        const ignored = mode === "apply-source-ignored";
+        const assumed = mode === "apply-source-assumed";
+        const retained = ignored || assumed;
+        const name = ignored ? "ignored.txt" : assumed ? "seed.txt" : "pending.txt";
+        const warnings: string[] = [];
+        orchestrator.on("orchestrator:error", ({ message }: { message: string }) => warnings.push(message));
+        await run("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repo });
+        if (ignored) {
+          await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+          await writeFile(path.join(repo, ".git", "info", "exclude"), `${name}\n`);
+          await writeFile(path.join(task.worktreePath, "seed.txt"), "applied tracked bytes\n");
+        }
+        if (assumed) await run("git", ["update-index", "--assume-unchanged", "--", name], { cwd: task.worktreePath });
+        await writeFile(path.join(task.worktreePath, name), "retained task bytes\n");
+        await orchestrator.applyTask(task.id);
+        const source = path.join(task.worktreePath, name);
+        const target = path.join(repo, name);
+        expect({ status: task.status, source: existsSync(source) ? await readFile(source, "utf8") : null,
+          target: existsSync(target) ? await readFile(target, "utf8") : null, retained: existsSync(task.worktreePath), warning: warnings.length > 0,
+          tracked: await readFile(path.join(repo, "seed.txt"), "utf8") }).toEqual({ status: "applied", source: retained ? "retained task bytes\n" : null,
+          target: ignored ? null : assumed ? "before\n" : "retained task bytes\n", retained, warning: retained, tracked: ignored ? "applied tracked bytes\n" : "before\n" });
+      } else if (mode.startsWith("apply-target")) {
+        await orchestrator.shutdown();
+        orchestrator = new Orchestrator({ persistPath, rpcRouter: router });
+        task = orchestrator.getTask(task.id)!;
+        const strategy = mode === "apply-target-configured-strategy";
+        const signatures = mode === "apply-target-signature-required";
+        const signedMerge = mode === "apply-target-signed-merge";
+        const hookBypass = mode === "apply-target-hook-bypass";
+        const hookIndex = mode === "apply-target-hook-index";
+        if (strategy) {
+          await writeFile(path.join(task.worktreePath, "seed.txt"), "task conflict\n");
+          await writeFile(path.join(repo, "seed.txt"), "keep target bytes\n");
+          await run("git", ["add", "--", "seed.txt"], { cwd: repo });
+          await run("git", ["commit", "-m", "target changes"], { cwd: repo });
+          await run("git", ["config", "branch.main.mergeOptions", "-X ours"], { cwd: repo });
+        }
+        if (signatures) await run("git", ["config", "branch.main.mergeOptions", "--verify-signatures"], { cwd: repo });
+        if (hookBypass) await run("git", ["config", "branch.main.mergeOptions", "--no-verify"], { cwd: repo });
+        if (signedMerge) {
+          const key = path.join(repo, ".git", "merge-signing");
+          const allowed = path.join(repo, ".git", "allowed-signers");
+          const config = path.join(root, "main.gitconfig");
+          await run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
+          await writeFile(allowed, `fixture@example.invalid ${await readFile(`${key}.pub`, "utf8")}`);
+          for (const [name, value] of [["gpg.format", "ssh"], ["user.signingkey", path.relative(repo, key)], ["gpg.ssh.allowedSignersFile", path.relative(repo, allowed)], ["commit.gpgSign", "true"], ["branch.main.mergeOptions", "--signoff"]]) {
+            await run("git", ["config", "--file", config, name, value], { cwd: repo });
+          }
+          await run("git", ["config", "includeIf.onbranch:main.path", config], { cwd: repo });
+        }
+        const head = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout;
+        const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
+        const originalIndex = await readFile(path.resolve(task.worktreePath, index));
+        await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
+        const overlap = mode.endsWith("-overlap");
+        const active = mode === "apply-target-active" || mode === "apply-target-active-source-tag" || mode === "apply-target-hook-rejected" || overlap || strategy || signatures || signedMerge || hookBypass || hookIndex;
+        const sourceTag = mode.endsWith("-source-tag");
+        if (sourceTag) await run("git", ["tag", task.branch, head.trim()], { cwd: repo });
+        if (mode === "apply-target-checkout-race") await run("git", ["branch", "other"], { cwd: repo });
+        else if (!active) await run("git", ["checkout", "-b", "other"], { cwd: repo });
+        if (mode === "apply-target-deleted") await run("git", ["branch", "-D", "main"], { cwd: repo });
+        if (mode === "apply-target-symbolic") {
+          await run("git", ["branch", "alias-target"], { cwd: repo });
+          await run("git", ["symbolic-ref", "refs/heads/main", "refs/heads/alias-target"], { cwd: repo });
+        }
+        if (hookIndex) await run("git", ["config", "core.hooksPath", "test-hooks"], { cwd: repo });
+        const hooks = hookIndex ? path.join(repo, "test-hooks") : path.join(repo, ".git", "hooks");
+        const observed = path.join(root, "post-merge-state");
+        const preMerge = path.join(root, "pre-merge-state");
+        if (active || mode === "apply-target-checkout-race") {
+          await mkdir(hooks, { recursive: true });
+          await writeFile(path.join(hooks, "post-merge"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$(git rev-parse HEAD)" "$(git diff --cached --name-only)" > ${quote(observed)}
+`, { mode: 0o755 });
+        }
+        if (mode === "apply-target-checkout-race") {
+          // Update real HEAD while Git is completing the merge. Both branches
+          // share one OID, so comparing only old commit IDs cannot detect it.
+          await writeFile(path.join(hooks, "pre-merge-commit"), `#!/bin/sh
+git --git-dir=${quote(path.join(repo, ".git"))} --work-tree=${quote(repo)} symbolic-ref HEAD refs/heads/other
+`, { mode: 0o755 });
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target.*changed before publication/i);
+          expect({ active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
+            target: (await run("git", ["rev-parse", "refs/heads/main"], { cwd: repo })).stdout,
+            other: (await run("git", ["rev-parse", "refs/heads/other"], { cwd: repo })).stdout,
+            checkout: (await run("git", ["status", "--porcelain"], { cwd: repo })).stdout,
+            postHook: existsSync(observed), bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), status: task.status
+          }).toEqual({ active: "other", target: head, other: head, checkout: "", postHook: false, bytes: "captured target bytes\n", status: "stopped" });
+        } else if (overlap) {
+          const file = path.join(repo, "apply-target.txt");
+          await writeFile(file, "user checkout bytes\n");
+          if (mode === "apply-target-ignored-overlap") {
+            // The exclude file is shared by both worktrees. Stage the source
+            // first so Apply sees a real incoming file to protect against.
+            await run("git", ["add", "--", "apply-target.txt"], { cwd: task.worktreePath });
+            await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+            await writeFile(path.join(repo, ".git", "info", "exclude"), "apply-target.txt\n");
+          }
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/overwrite|overwritten/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            file: await readFile(file, "utf8"), indexLock: existsSync(path.join(repo, ".git", "index.lock")),
+            journal: existsSync(path.join(repo, ".git", "crab-desktop-active-apply")), postHook: existsSync(observed)
+          }).toEqual({ head, file: "user checkout bytes\n", indexLock: false, journal: false, postHook: false });
+          await orchestrator.discardTask(task.id);
+        } else if (signatures) {
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/signature/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            file: existsSync(path.join(repo, "apply-target.txt")), postHook: existsSync(observed), source: existsSync(task.worktreePath)
+          }).toEqual({ head, file: false, postHook: false, source: true });
+          await orchestrator.discardTask(task.id);
+        } else if (mode === "apply-target-hook-rejected") {
+          await writeFile(path.join(hooks, "pre-merge-commit"), "#!/bin/sh\nprintf 'fixture rejected merge\\n' >&2\nexit 1\n", { mode: 0o755 });
+          const targetIndex = path.join(repo, ".git", "index");
+          const original = await readFile(targetIndex);
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/fixture rejected merge/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            index: await readFile(targetIndex), checkout: (await run("git", ["status", "--porcelain"], { cwd: repo })).stdout,
+            postHook: existsSync(observed), bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8")
+          }).toEqual({ head, index: original, checkout: "", postHook: false, bytes: "captured target bytes\n" });
+          await orchestrator.discardTask(task.id);
+        } else if (mode === "apply-target" || active || sourceTag) {
+          const prepareMerge = path.join(root, "prepare-merge-state");
+          if (hookBypass) {
+            await writeFile(path.join(hooks, "commit-msg"), `#!/bin/sh
+if [ "$(pwd -P)" = ${quote(repo)} ]; then exit 1; fi
+`, { mode: 0o755 });
+            await writeFile(path.join(hooks, "prepare-commit-msg"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$2" > ${quote(prepareMerge)}
+`, { mode: 0o755 });
+          }
+          if (active) await writeFile(path.join(hooks, "pre-merge-commit"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$GIT_EDITOR" "$(git diff --cached --name-only)" > ${quote(preMerge)}
+${hookBypass ? "exit 1" : hookIndex ? "printf 'hook bytes\\n' > hook-file\ngit add -- hook-file" : ""}
+`, { mode: 0o755 });
+          await orchestrator.applyTask(task.id);
+          expect({ captured: task.baseBranch, active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
+            target: (await run("git", ["show", "main:apply-target.txt"], { cwd: repo })).stdout,
+            activeFiles: (await run("git", ["ls-tree", "--name-only", "HEAD", "apply-target.txt"], { cwd: repo })).stdout.trim(),
+            checkout: active ? await readFile(path.join(repo, "apply-target.txt"), "utf8") : existsSync(path.join(repo, "apply-target.txt")),
+            status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: active ? "main" : "other", target: "captured target bytes\n", activeFiles: active ? "apply-target.txt" : "", checkout: active ? "captured target bytes\n" : false, status: "applied", worktree: false });
+          if (sourceTag) expect((await run("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repo })).stdout).toBe(head);
+          if (strategy) expect(await readFile(path.join(repo, "seed.txt"), "utf8")).toBe("keep target bytes\n");
+          if (signedMerge) {
+            await run("git", ["verify-commit", "HEAD"], { cwd: repo });
+            const { stdout: message } = await run("git", ["log", "-1", "--format=%B"], { cwd: repo });
+            expect(message).toMatch(/^Signed-off-by: .+ <[^>]+>$/m);
+          }
+          if (hookIndex) {
+            expect((await run("git", ["ls-tree", "--name-only", "HEAD", "hook-file"], { cwd: repo })).stdout).toBe("");
+            expect((await run("git", ["show", ":hook-file"], { cwd: repo })).stdout).toBe("hook bytes\n");
+          }
+          if (active) {
+            const headAfter = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+            if (hookBypass) {
+              expect(existsSync(preMerge)).toBe(false);
+              expect(await readFile(prepareMerge, "utf8")).toBe(`${repo}\nmerge\n`);
+            } else expect(await readFile(preMerge, "utf8")).toBe(`${repo}\n:\napply-target.txt\n`);
+            expect(await readFile(observed, "utf8")).toBe(`${repo}\n${headAfter}\n${hookIndex ? "hook-file" : ""}\n`);
+          }
+        } else {
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target/i);
+          // Apply drains a created conversation before backend validation;
+          // failure retains its stopped owner and untouched workspace for recovery.
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            source: (await run("git", ["rev-parse", "HEAD"], { cwd: task.worktreePath })).stdout,
+            bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), index: await readFile(path.resolve(task.worktreePath, index)),
+            captured: task.baseBranch, status: task.status }).toEqual({ head, source: head, bytes: "captured target bytes\n", index: originalIndex,
+            captured: mode === "apply-target-detached" ? undefined : "main", status: "stopped" });
+          if (mode === "apply-target-symbolic") {
+            expect((await run("git", ["rev-parse", "refs/heads/alias-target"], { cwd: repo })).stdout).toBe(head);
+          }
+          await orchestrator.discardTask(task.id);
+        }
+      } else if (mode === "apply-eof" || hardKill) {
+        const published = mode.startsWith("apply-sidecar-kill-published");
+        const active = mode.startsWith("apply-sidecar-kill-active") || published;
+        const edited = mode === "apply-sidecar-kill-active-edited";
+        const foreign = mode === "apply-sidecar-kill-published-foreign-lock";
+        const sourceEdited = mode === "apply-sidecar-kill-published-source-edit";
+        const sourceIgnored = mode === "apply-sidecar-kill-published-source-ignored";
+        const sourceUntracked = mode === "apply-sidecar-kill-published-source-untracked";
+        const retainSource = sourceEdited || sourceIgnored || sourceUntracked;
+        const unconfirmed = mode === "apply-sidecar-kill-published-unconfirmed";
+        const worktree = task.worktreePath;
+        const head = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+        const journal = path.join(repo, ".git", "crab-desktop-active-apply");
+        const targetLock = path.join(repo, ".git", "index.lock");
+        const started = path.join(root, "hook-pid");
+        const release = path.join(root, "release-hook");
+        const late = path.join(worktree, "late.txt");
+        const postMerge = path.join(root, "post-merge-replay");
+        await writeFile(path.join(worktree, "pending.txt"), "pending source bytes\n");
+        await mkdir(path.join(repo, ".git", "hooks"), { recursive: true });
+        const hook = path.join(repo, ".git", "hooks", published ? "reference-transaction" : active ? "pre-merge-commit" : "pre-commit");
+        if (published) await writeFile(path.join(repo, ".git", "hooks", "post-merge"), `#!/bin/sh
+printf 'ran\\n' > ${quote(postMerge)}
+`, { mode: 0o755 });
+        await writeFile(hook, `#!/bin/sh
+${published ? 'if [ "$1" != committed ] || ! grep " refs/heads/main$" >/dev/null; then exit 0; fi' : ""}
+printf '%s\\n' "$$" > ${quote(started)}
+for i in $(seq 1 300); do
+  if [ -f ${quote(release)} ]; then
+    printf 'late write\\n' > ${quote(late)}
+    exit 0
+  fi
+  sleep 0.1
+done
+exit 1
+`, { mode: 0o755 });
+        const apply = orchestrator.applyTask(task.id).then(() => true, () => false);
+        let hookPid: number | undefined;
+        const hookAlive = () => {
+          if (!hookPid) return false;
+          try { process.kill(hookPid, 0); return true; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
+        };
+        try {
+          await vi.waitFor(async () => {
+            hookPid = Number((await readFile(started, "utf8")).trim());
+            expect(hookPid).toBeGreaterThan(1);
+          }, { timeout: 15_000 });
+          const sourceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+          const targetHead = published ? `${await readFile(path.join(journal, "candidate"), "utf8")}\n` : head;
+          if (active) {
+            const intent = JSON.parse(await readFile(path.join(journal, "intent.json"), "utf8"));
+            const owner = await stat(targetLock);
+            expect(intent).toMatchObject({ target: "refs/heads/main", old: head.trim(), source: sourceHead.trim(), lock_device: owner.dev, lock_inode: owner.ino });
+            expect((await run("git", ["show", "HEAD:pending.txt"], { cwd: worktree })).stdout).toBe("pending source bytes\n");
+          } else expect(sourceHead).toBe(head);
+          const discard = { repo_id: repoId, task_id: task.id, branch: task.branch, worktree_path: worktree };
+          await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_workspace_busy" } });
+          if (hardKill) {
+            const sidecarPid = Number((await readFile(sidecarPidFile, "utf8")).trim());
+            expect(sidecarPid).toBeGreaterThan(1);
+            expect((await run("ps", ["-p", String(sidecarPid), "-o", "args="])).stdout.trim()).toBe(path.join(runtime, "crab-desktop-agent"));
+            process.kill(sidecarPid, "SIGKILL");
+          } else {
+            channel.end();
+          }
+          await closed;
+          // A separate worker can finish retiring Git after its RPC parent is
+          // killed. Graceful EOF must confirm closure before the channel ends.
+          if (hardKill) await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
+          expect({ reportedApplied: await apply, writerAlive: hookAlive(),
+            source: (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout,
+            target: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            bytes: await readFile(path.join(worktree, "pending.txt"), "utf8")
+          }).toEqual({ reportedApplied: false, writerAlive: false, source: sourceHead, target: targetHead, bytes: "pending source bytes\n" });
+          if (active) {
+            expect(existsSync(targetLock) && existsSync(path.join(journal, "proposal"))).toBe(true);
+          }
+          const replacement = await openAgent();
+          replacement.stderr.resume();
+          const replacementClosed = new Promise<void>(resolve => replacement.once("close", resolve));
+          try {
+            connectedAgent = replacement;
+            router.attachChannel("fixture", replacement);
+            await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
+            await vi.waitFor(() => expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } }), { timeout: 10_000 });
+            await expect(router.sendToRemoteAgent("fixture", "native_process_open", {
+              process_id: randomUUID(), task_id: task.id, executable: "/bin/true", args: [], cwd: worktree,
+            })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+            const targetFile = path.join(repo, "pending.txt");
+            if (published || edited) await writeFile(targetFile, "new editor bytes\n");
+            if (foreign) {
+              await rename(targetLock, path.join(root, "retired-fixture-lock"));
+              await writeFile(targetLock, "foreign index writer\n");
+            }
+            if (sourceEdited) await writeFile(path.join(worktree, "pending.txt"), "new source bytes\n");
+            if (sourceIgnored || sourceUntracked) {
+              await run("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repo });
+              if (sourceIgnored) {
+                await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+                await writeFile(path.join(repo, ".git", "info", "exclude"), "recovery-local.txt\n");
+              }
+              await writeFile(path.join(worktree, "recovery-local.txt"), "new source-only bytes\n");
+            }
+            if (unconfirmed) await rm(path.join(journal, "writers-closed"));
+            if (!active || edited || foreign || unconfirmed) {
+              await expect(router.sendToRemoteAgent("fixture", "task_apply", { ...discard, base_branch: task.baseBranch })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+              if (edited || foreign) expect(await readFile(targetFile, "utf8")).toBe("new editor bytes\n");
+              if (foreign) expect(await readFile(targetLock, "utf8")).toBe("foreign index writer\n");
+              expect(existsSync(worktree)).toBe(true);
+            } else {
+              // A new explicit Apply retries an unpublished merge. Published
+              // recovery leaves the original hook installed to catch replay.
+              if (!published) await rm(hook);
+              const warnings: string[] = [];
+              orchestrator.on("orchestrator:error", ({ message }) => warnings.push(message));
+              await expect(orchestrator.applyTask(task.id)).resolves.toEqual({ success: true });
+              expect({ status: task.status, journal: existsSync(journal), lock: existsSync(targetLock), worktree: existsSync(worktree),
+                indexed: (await run("git", ["show", ":pending.txt"], { cwd: repo })).stdout, bytes: await readFile(targetFile, "utf8")
+              }).toEqual({ status: "applied", journal: false, lock: false, worktree: retainSource,
+                indexed: "pending source bytes\n", bytes: published ? "new editor bytes\n" : "pending source bytes\n" });
+              if (published) {
+                expect((await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout).toBe(targetHead);
+                expect(existsSync(postMerge)).toBe(false);
+                expect(warnings.join("\n")).toMatch(/post-merge hook completed/);
+              }
+              if (sourceEdited) expect(await readFile(path.join(worktree, "pending.txt"), "utf8")).toBe("new source bytes\n");
+              if (sourceIgnored || sourceUntracked) expect(await readFile(path.join(worktree, "recovery-local.txt"), "utf8")).toBe("new source-only bytes\n");
+            }
+          } finally {
+            replacement.end();
+            await replacementClosed;
+          }
+        } finally {
+          await writeFile(release, "release owned hook if still running\n");
+          await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
+        }
+        expect(existsSync(late)).toBe(false);
+      } else if (mode === "checkpoints") {
+        const saved = task;
+        const factory = remoteAgentProcessFactory(router, "fixture");
+        const checkpoints = new CheckpointManager(() => factory);
+        await writeFile(path.join(saved.worktreePath, ".gitignore"), "ignored-new.txt\n");
+        await writeFile(path.join(saved.worktreePath, "ignored-new.txt"), "staged ignored addition\n");
+        await run("git", ["add", "-f", "ignored-new.txt"], { cwd: saved.worktreePath });
+        await writeFile(path.join(saved.worktreePath, "seed.txt"), "staged\n");
+        await run("git", ["add", "seed.txt"], { cwd: saved.worktreePath });
+        const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: saved.worktreePath })).stdout.trim();
+        const original = await readFile(path.resolve(saved.worktreePath, index));
+        await writeFile(path.join(saved.worktreePath, "seed.txt"), "unstaged\n");
+        await writeFile(path.join(saved.worktreePath, "ignored-new.txt"), "updated ignored addition\n");
+        await writeFile(path.join(saved.worktreePath, "雪🙂.txt"), "untracked\n");
+        const captured = await checkpoints.createCheckpoint(saved, 0);
+        const files = await run("git", ["ls-tree", "-r", "--name-only", captured.sha], { cwd: repo });
+        expect({ index: await readFile(path.resolve(saved.worktreePath, index)), listed: await checkpoints.listCheckpoints(saved), tracked: (await run("git", ["show", `${captured.sha}:seed.txt`], { cwd: repo })).stdout,
+          untracked: (await run("git", ["show", `${captured.sha}:雪🙂.txt`], { cwd: repo })).stdout,
+          ignored: (await run("git", ["show", `${captured.sha}:ignored-new.txt`], { cwd: repo })).stdout, hasFiles: files.stdout.length > 0 }).toEqual({ index: original, listed: [{ ...captured, turnNumber: 0 }], tracked: "unstaged\n", untracked: "untracked\n", ignored: "updated ignored addition\n", hasFiles: true });
+        await checkpoints.holdCheckpoint(saved, 1, captured.sha);
+        await checkpoints.recordCheckpoint(saved, 1, captured.sha); await checkpoints.releaseCheckpoint(saved, 1);
+        expect((await checkpoints.listCheckpoints(saved)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
+        const lock = path.join(repo, ".git", "refs", "crab", "checkpoints", saved.id, "2.lock");
+        await writeFile(lock, "owned fixture lock");
+        try {
+          await expect(checkpoints.createCheckpoint(saved, 2)).rejects.toThrow();
+          expect((await checkpoints.listCheckpoints(saved)).map(checkpoint => checkpoint.turnNumber)).toEqual([0, 1]);
+        } finally { await rm(lock); }
+      } else if (mode.startsWith("checkpoint-stop-")) {
+        const marker = path.join(root, "filter-owner"); const proof = path.join(root, "filter-writes"); const release = path.join(root, "filter-release");
+        const script = path.join(root, "filter.sh");
+        await writeFile(script, `#!/bin/sh
+if [ -z "\${GIT_INDEX_FILE:-}" ]; then exec cat; fi
+trap '' TERM
+(trap '' TERM; while [ ! -f ${quote(release)} ]; do printf x >> ${quote(proof)}; sleep 0.05; done) &
+child=$!
+printf '%s\\n' "$$" "$child" "$GIT_INDEX_FILE" > ${quote(marker)}
+wait "$child"
+`, { mode: 0o755 });
+        await run("git", ["config", "filter.crab-checkpoint.clean", `sh ${quote(script)}`], { cwd: repo });
+        await run("git", ["config", "filter.crab-checkpoint.required", "true"], { cwd: repo });
+        await writeFile(path.join(task.worktreePath, ".gitattributes"), "seed.txt filter=crab-checkpoint\n");
+        // A stale stat cache makes status want to refresh the real index even
+        // though these file bytes are unchanged. Preparation must leave it alone.
+        const modified = new Date(Date.now() + 5000);
+        await utimes(path.join(task.worktreePath, "seed.txt"), modified, modified);
+        const indexPath = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
+        const index = path.resolve(task.worktreePath, indexPath); const original = await readFile(index);
+        wire();
+        const startup = orchestrator.startTask(task.id);
+        const cancelled = expect(startup).rejects.toThrow(/cancelled/);
+        let stopping: Promise<void> | undefined;
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await vi.waitFor(async () => expect((await readFile(marker, "utf8")).trim().split("\n")).toHaveLength(3), { timeout: 15_000 });
+          const [parent, child, privateIndex] = (await readFile(marker, "utf8")).trim().split("\n");
+          stopping = orchestrator.cancelTask(task.id);
+          await Promise.race([stopping, new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("Checkpoint Stop did not close its writer")), 20_000); })]);
+          const alive = (pid: string) => { try { process.kill(Number(pid), 0); return true; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; } };
+          const bytes = await readFile(proof);
+          await new Promise(resolve => setTimeout(resolve, 200));
+          expect({ status: task.status, writers: [alive(parent), alive(child)], proof: await readFile(proof), index: await readFile(index), events }).toEqual({ status: "stopped", writers: [false, false], proof: bytes, index: original, events: [] });
+          await expect(readFile(privateIndex)).rejects.toMatchObject({ code: "ENOENT" });
+          await expect(readFile(`${privateIndex}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+          cancellation = { host: task.isRemote ? "ssh" : "local", pids: [Number(parent), Number(child)], writersStopped: true, userIndexUnchanged: true, privateIndexRemoved: true, privateLockRemoved: true, outputStable: true, providerEvents: events.length };
+          await cancelled;
+        } finally {
+          clearTimeout(deadline); await writeFile(release, "release fixture writer\n");
+          await startup.catch(() => {}); await stopping?.catch(() => {});
+          await run("git", ["config", "--remove-section", "filter.crab-checkpoint"], { cwd: repo });
+        }
+      } else if (mode === "availability") {
+        type Handler = Parameters<IpcMain["handle"]>[1];
+        const handlers = new Map<string, Handler>();
+        const stop = registerAgentDetectionIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, () => router);
+        const detect = () => handlers.get("orchestrator:detect-agents")!({} as Parameters<Handler>[0], { repoId });
+        try {
+          availability = await detect();
+          expect(availability).toEqual({ success: true, agents: [
+            { type: "claude-code", name: "Claude Code", binary: "claude", path: path.join(bin, "claude"), version: "claude server-fixture", available: true },
+            { type: "codex", name: "Codex", binary: "codex", path: path.join(bin, "codex"), version: "codex server-fixture", available: true },
+          ] });
+          await rm(path.join(bin, "codex"));
+          expect(await detect()).toMatchObject({ success: true, agents: [{ available: true }, { available: false, path: "" }] });
+          await writeFile(path.join(bin, "claude"), "#!/bin/sh\nprintf 'Broken server executable' >&2\nexit 7\n", { mode: 0o755 });
+          expect(await detect()).toMatchObject({ success: false, error: expect.stringContaining("Broken server executable") });
+          expect(requests.mock.calls.some(call => ["detect_agents", "exec_command"].includes(call[2]))).toBe(false);
+        } finally { await stop(); }
+      } else if (mode === "catalogs") {
+        const detector = new AgentDetector(() => router);
+        try {
+          availability = await detector.detect(repoId);
+          expect(availability).toEqual(expect.arrayContaining([
+            expect.objectContaining({ type: "codex", available: true }), expect.objectContaining({ type: "claude-code", available: true }),
+          ]));
+        } finally { await detector.shutdown(); }
+        type Handler = Parameters<IpcMain["handle"]>[1];
+        const handlers = new Map<string, Handler>();
+        const stop = registerModelDiscoveryIpc({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain, orchestrator);
+        const sender = Object.assign(new EventEmitter(), { id: 1 });
+        const discover = (agentType: string, cwd: string, taskId?: string) => handlers.get("orchestrator:list-models")!(
+          { sender } as Parameters<Handler>[0], { agentType, cwd, taskId, requestId: crypto.randomUUID() },
+        ) as Promise<{ success: boolean; models?: AgentModel[]; error?: string }>;
+        try {
+          for (const provider of ["codex", "claude-code"]) {
+            const repository = await discover(provider, repoId);
+            // A caller's stale raw path must not override saved SSH ownership.
+            const workspace = await discover(provider, "/client-only/stale-path", task.id);
+            expect([repository, workspace]).toEqual([{ success: true, models: expect.any(Array) }, { success: true, models: expect.any(Array) }]);
+            catalogs[provider] = { repository: repository.models!.length, workspace: workspace.models!.length };
+            expect(Object.values(catalogs[provider]).every(count => count > 0)).toBe(true);
+          }
+          const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
+          const contexts = opens.map(params => ({ cwd: (params as { cwd: string }).cwd, taskId: (params as { task_id?: string }).task_id }));
+          expect(contexts.slice(-4)).toEqual([repo, task.worktreePath, repo, task.worktreePath].map(cwd => ({ cwd, taskId: cwd === repo ? undefined : task!.id })));
+          expect(events).toEqual([]);
+        } finally { await stop(); }
+      } else {
+        wire();
+        type Handler = Parameters<Parameters<typeof registerChatIpc>[0]["handle"]>[1];
+        const handlers = new Map<string, Handler>();
+        let chat = registerChatIpc({ handle: (name, handler) => handlers.set(name, handler) }, orchestrator, db, () => null);
+        await orchestrator.startTask(task.id); await wait();
+        const session = mode === "codex" ? task.codexThreadId : task.claudeSessionId;
+        expect(Boolean(session)).toBe(true);
+        await handlers.get("orchestrator:iterate")!({} as Parameters<Handler>[0], { taskId: task.id, feedback: "Use your built-in edit/patch tool to replace remote-one with remote-two in remote-proof.txt. Do not use other tools, shell commands or subagents. Reply Done.", messageId: "remote-warm-input" });
+        await wait();
+        await orchestrator.shutdown();
+        orchestrator = new Orchestrator({ persistPath, rpcRouter: router, timeoutMs: 120_000 });
+        task = orchestrator.getTask(task.id)!; wire();
+        chat = registerChatIpc({ handle: (name, handler) => handlers.set(name, handler) }, orchestrator, db, () => null);
+        await orchestrator.iterate(task.id, "Use your built-in edit/patch tool to replace remote-two with remote-three in remote-proof.txt. Do not use other tools, shell commands or subagents. Reply Done."); await wait();
+        expect({ file: await readFile(path.join(task.worktreePath, "remote-proof.txt"), "utf8"), session: mode === "codex" ? task.codexThreadId : task.claudeSessionId,
+          turns: (await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!))).map(checkpoint => checkpoint.turnNumber), feedback: task.feedback.length,
+          visible: chat.snapshot(task.id).messages.some(message => message.id === "remote-warm-input") }).toEqual({ file: "remote-three\n", session, turns: [0, 1, 2], feedback: 2, visible: true });
+      }
+      if (mode === "codex") {
+        await orchestrator.applyTask(task.id);
+        expect({ status: task.status, file: await readFile(path.join(repo, "remote-proof.txt"), "utf8") }).toEqual({ status: "applied", file: "remote-three\n" });
+      } else if (!mode.startsWith("apply-")) {
+        await orchestrator.discardTask(task.id);
+        expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
+      }
+      const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
+      if (mode === "checkpoint-stop-local" || mode.startsWith("apply-source-") || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-target-configured-strategy" || mode === "apply-target-signed-merge" || mode === "apply-target-hook-bypass" || mode === "apply-target-hook-index" || mode === "apply-eof" || hardKill) expect(opens).toEqual([]);
+      else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
+      succeeded = true;
+    } finally {
+      await orchestrator.shutdown().catch(error => { diagnostics += `\nShutdown: ${String(error)}`; });
+      channel.end(); timer = setTimeout(() => channel.destroy(), 15_000);
+      try { await closed; } finally {
+        clearTimeout(timer); db.close(); router.detachChannel("fixture"); client.end(); await server.close(); requests.mockRestore(); vi.unstubAllEnvs();
+        await writeFile(path.join(liveRoot!, `${mode}-remote-native-task.json`), JSON.stringify({ root, task, catalogs, availability, cancellation, events, diagnostics }, null, 2));
+        if (succeeded) await rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 420_000);
+});

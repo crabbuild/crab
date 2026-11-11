@@ -37,6 +37,7 @@ import { ContextPicker, ContextKind, ContextPickerResult } from "./ContextPicker
 import { AtContextDropdown, AtContextItem } from "./AtContextDropdown";
 import { FileMentionDropdown, FileMatch } from "./FileMentionDropdown";
 import { QuickAttachBar } from "./QuickAttachBar";
+import { intelligenceLabel } from "./model-catalog";
 import { AgentIcon, agentAccentColor } from "./AgentIcon";
 import { AgentWorkflowDefinition, rpc, DirEntry } from "../../ipc";
 
@@ -99,9 +100,9 @@ interface Props {
   /** Available intelligence/reasoning effort levels for the current model. */
   intelligenceLevels?: string[];
   /** Currently selected intelligence level. */
-  intelligence?: string;
+  intelligence?: string | null;
   /** Called when the user selects an intelligence level. */
-  onIntelligenceChange?: (level: string) => void;
+  onIntelligenceChange?: (level: string | null) => void;
   /** Current chat mode — plan or instant. */
   mode: ChatMode;
   /** Called when the user toggles mode. */
@@ -731,7 +732,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             <Sparkles size={12} className="text-gx-accent" />
             <span className="text-[10px] font-medium">
               {selectedModel ? selectedModel.label : "Default"}
-              {intelligence && <span className="ml-1 text-gx-muted">{intelligence.charAt(0).toUpperCase() + intelligence.slice(1).replace("-", " ")}</span>}
+              {intelligence && <span className="ml-1 text-gx-muted">{intelligenceLabel(intelligence)}</span>}
             </span>
           </IconButton>
         )}
@@ -1186,8 +1187,8 @@ function ModelIntelligencePopover({
   selectedModel: string;
   onModelChange: (value: string) => void;
   intelligenceLevels: string[];
-  intelligence: string;
-  onIntelligenceChange?: (level: string) => void;
+  intelligence: string | null;
+  onIntelligenceChange?: (level: string | null) => void;
   onClose: () => void;
 }) {
   const [showMore, setShowMore] = useState(false);
@@ -1206,6 +1207,9 @@ function ModelIntelligencePopover({
           <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted">
             Intelligence
           </div>
+          <button type="button" onClick={() => onIntelligenceChange?.(null)} className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">
+            <span className="flex-1">Default effort</span>{!intelligence && <Check size={11} className="shrink-0" />}
+          </button>
           {intelligenceLevels.map((level) => (
             <button
               key={level}
@@ -1218,7 +1222,7 @@ function ModelIntelligencePopover({
                   : "text-gx-text hover:bg-gx-surface-hover",
               )}
             >
-              <span className="flex-1">{level.charAt(0).toUpperCase() + level.slice(1).replace("-", " ")}</span>
+              <span className="flex-1">{intelligenceLabel(level)}</span>
               {intelligence === level && <Check size={11} className="shrink-0" />}
             </button>
           ))}

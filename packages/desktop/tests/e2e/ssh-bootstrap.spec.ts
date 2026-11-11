@@ -1,4 +1,7 @@
 import { test, expect } from "@playwright/test";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
+import type { RemoteRuntimeStore } from "../../electron/ssh-runtime";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
@@ -31,9 +34,15 @@ test("SSH bootstrap deploys the real native pair, reads repositories and drains 
   const router = new Router(manager, { request: async () => { throw new Error("Remote operation reached the local agent"); } }, storage);
   const capabilities = new Negotiator(router);
   const version = JSON.parse(readFileSync(path.join(resources, "agent/runtime.json"), "utf8")).version as string;
-  manager.configureAgentDeployment({ agentDeployer: new Deployer(path.join(resources, "ssh-runtimes"), version), capabilityNegotiator: capabilities, rpcRouter: router });
+  const { RemoteRuntimeStore: RuntimeStore } = packagedModule<{ RemoteRuntimeStore: typeof RemoteRuntimeStore }>(resources, "ssh-runtime");
+  const runtime = new RuntimeStore({ packaged: true, appPath: resources, version, cacheDirectory: path.join(root, "runtimes") }, async input => {
+    const name = path.basename(new URL(String(input)).pathname);
+    return new Response(Readable.toWeb(createReadStream(path.resolve("release/remote-runtime", name))) as unknown as ReadableStream<Uint8Array>);
+  });
+  manager.setAgentDependencies({ createDeployer: () => new Deployer(runtime.resolve.bind(runtime)), capabilityNegotiator: capabilities, rpcRouter: router });
   const profile = (id: string): SshProfile => ({ id, label: "Bootstrap fixture", host: "127.0.0.1", port: fixture.port, username: "fixture", authMethod: { type: "key", keyPath: fixture.keyPath }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: true, tags: [], portForwards: [], createdAt: Date.now() });
   const first = profile(randomUUID()), second = profile(randomUUID());
+  first.autoReconnect = true;
   let stage = "setup";
   let failure: unknown;
   try {
@@ -80,7 +89,6 @@ test("SSH bootstrap deploys the real native pair, reads repositories and drains 
     expect(fixture.uploadedBytes).toBe(firstUpload);
     expect(await router.route(left.repo_id as string, "git_status_porcelain", { repo_id: left.repo_id })).toBeDefined();
     stage = "automatic reconnect";
-    first.autoReconnect = true;
     const previous = manager.getConnection(first.id)!.channels.agent;
     manager.getConnection(first.id)!.client.end();
     await expect.poll(() => manager.getStatus(first.id)).toBe("reconnecting");

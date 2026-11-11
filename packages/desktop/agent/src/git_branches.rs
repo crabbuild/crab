@@ -135,7 +135,7 @@ pub async fn git_set_upstream(work_dir: &Path, params: &SetUpstreamParams) -> Re
 
 /// Run a git command and return stdout on success, or an error on failure.
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(args)
         .current_dir(work_dir)
         .output()

@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SSH connection test qualification</title></head>
+<body><div id="root"></div><script type="module">
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { ConnectionForm } from "/src/components/ssh/ConnectionForm.tsx";
+import "/src/index.css";
+const api = new URLSearchParams(location.search).get("api");
+const profile = await fetch(`${api}/profile`).then(response => response.json());
+window.crab = { ssh: { testConnection: input => fetch(`${api}/test`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }).then(response => response.json()) } };
+createRoot(document.getElementById("root")).render(React.createElement(ConnectionForm, { profile, onSave() {}, onCancel() {} }));
+</script></body></html>

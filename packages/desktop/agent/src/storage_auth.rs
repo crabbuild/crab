@@ -320,7 +320,7 @@ pub async fn validate_target(
     if git {
         // Git may choose a branch upstream or a push URL independently of
         // origin. One selected identity must match every cloud transport.
-        let output = crate::shellout::git_command()
+        let output = crate::shellout::git_command()?
             .args(["config", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"])
             .current_dir(&work_dir)
             .kill_on_drop(true)
@@ -367,7 +367,7 @@ async fn remote_url(
             Err(error) => return Err(error.into()),
         }
     }
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .args(["remote", "get-url", remote.unwrap_or("origin")])
         .current_dir(work_dir)
         .kill_on_drop(true)

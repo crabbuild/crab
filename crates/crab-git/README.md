@@ -59,6 +59,8 @@ The main surfaces are:
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
   pointer-aware repository behavior;
 - `tag` and `push_state` for annotated refs and push bookkeeping;
+- `index_stat` (with `facade`) for locked stat-cache refresh after verified
+  publication; object IDs, modes and unrelated staging remain unchanged;
 - `pre_push` for bounded, whole-batch hook input decoding, including exact
   object IDs, destination mappings, deletions, and duplicate-ref rejection.
   The caller chooses the byte limit and publication policy. Parsing SHA-256

@@ -8,10 +8,11 @@
  *   3. The env includes PATH expansion via getExpandedEnv and custom vars.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock child_process before any module reads it so every spawn call is
 // captured and no real codex process is forked during the test.
+const adapters: CodexAppServerAdapter[] = [];
 const spawnCalls: Array<{ binary: string; args: string[]; options: unknown }> = [];
 
 vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
@@ -45,21 +46,17 @@ vi.mock("node:child_process", async () => {
 });
 
 function makeFakeProc() {
-  const { Readable, Writable } = require("node:stream");
-  const stdout = new Readable({ read() { this.push(null); } });
-  const stderr = new Readable({ read() { this.push(null); } });
-  const stdin: any = new Writable({ write(_c: any, _e: any, cb: any) { cb(); } });
-  stdin.endCalled = false;
-  const origEnd = stdin.end.bind(stdin);
-  stdin.end = (...args: any[]) => { stdin.endCalled = true; return origEnd(...args); };
-  const fake: any = {
-    stdin,
-    stdout,
-    stderr,
-    on: vi.fn(),
-    kill: vi.fn(),
+  const { EventEmitter } = require("node:events") as typeof import("node:events");
+  const { Readable, Writable } = require("node:stream") as typeof import("node:stream");
+  const fake = new EventEmitter(); let closed = false;
+  const stdout = new Readable({ read() {} }); const stderr = new Readable({ read() {} });
+  const close = () => {
+    if (closed) return; closed = true;
+    stdout.push(null); stderr.push(null);
+    setImmediate(() => { fake.emit("exit", 0, null); fake.emit("close", 0, null); });
   };
-  return fake;
+  const stdin = new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) { done(); close(); } });
+  return Object.assign(fake, { stdin, stdout, stderr, kill: vi.fn(() => { close(); return true; }) });
 }
 
 import { CodexAppServerAdapter } from "../electron/codex-app-server-adapter";
@@ -69,12 +66,14 @@ beforeEach(() => {
   spawnCalls.length = 0;
 });
 
+afterEach(async () => { await Promise.all(adapters.splice(0).map(adapter => adapter.cancel())); });
+
 describe("codex app-server wiring", () => {
   it("spawns `codex app-server --listen stdio://` with correct cwd and stdio", async () => {
     const adapter = new CodexAppServerAdapter();
-    await adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
+    adapters.push(adapter); void adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
 
-    expect(spawnCalls).toHaveLength(1);
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
     const call = spawnCalls[0];
     expect(call.binary).toBe("codex");
     expect(call.args).toEqual(["app-server", "--listen", "stdio://"]);
@@ -86,8 +85,9 @@ describe("codex app-server wiring", () => {
 
   it("env includes custom vars and PATH expansion via getExpandedEnv", async () => {
     const adapter = new CodexAppServerAdapter();
-    await adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
+    adapters.push(adapter); void adapter.spawn("test prompt", "/tmp/workdir", { CUSTOM_VAR: "value" });
 
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
     const call = spawnCalls[0];
     const opts = call.options as { env: Record<string, string> };
 
@@ -105,9 +105,9 @@ describe("codex app-server wiring", () => {
 
   it("extraArgs are appended after the base args", async () => {
     const adapter = new CodexAppServerAdapter(["--model", "o3"]);
-    await adapter.spawn("test prompt", "/tmp/workdir");
+    adapters.push(adapter); void adapter.spawn("test prompt", "/tmp/workdir");
 
-    expect(spawnCalls).toHaveLength(1);
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
     const call = spawnCalls[0];
     expect(call.binary).toBe("codex");
     expect(call.args).toEqual(["app-server", "--listen", "stdio://", "--model", "o3"]);

@@ -162,7 +162,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     if (process.platform !== "win32") {
       await run.click();
       await expect.poll(() => existsSync(snapshot)).toBe(true);
-      execFileSync(path.join(resources, "agent", "crab-desktop-agent"), ["--index-dir", path.join(root, "other-index")], { env, input: "", timeout: 10_000 });
+      execFileSync(path.join(resources, "agent", "crab-desktop-agent"), [], { env, input: "", timeout: 10_000 });
       expect(existsSync(snapshot)).toBe(true);
       const native = nativePid();
       if (!native) throw new Error("Test application's native child was not found");

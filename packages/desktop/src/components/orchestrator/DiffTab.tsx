@@ -99,6 +99,7 @@ function loadDiffRenderMode(): DiffRenderMode {
 
 interface Props {
   task: OrchestratorTask;
+  workspaceRevision?: number;
   /** The repo handle (kept for potential future use). */
   repo: any;
   /** File path to initially select (e.g., from the live file tree). */
@@ -120,11 +121,17 @@ interface Props {
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
+export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
+  const inPrimaryWorkspace = task.worktreeMode === "primary";
   const [files, setFiles] = useState<DiffFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [diffError, setDiffError] = useState<string>();
+  const [diffRequest, setDiffRequest] = useState(0);
+  const [revertError, setRevertError] = useState<string>();
+  const [revertingFile, setRevertingFile] = useState<string>();
+  const revertOwner = useRef<{ taskId: string; pending: boolean }>();
   const effective = useEffectiveTheme();
 
   // View mode: list / tree / unified (matches commit timeline page)
@@ -160,6 +167,14 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
   // Unified-mode all-diffs pane ref
   const allDiffsRef = useRef<{ scrollToFile: (path: string) => void } | null>(null);
 
+  useEffect(() => {
+    const owner = { taskId: task.id, pending: false };
+    revertOwner.current = owner;
+    setRevertError(undefined);
+    setRevertingFile(undefined);
+    return () => { if (revertOwner.current === owner) revertOwner.current = undefined; };
+  }, [task.id]);
+
   // Persist view mode preferences
   useEffect(() => {
     localStorage.setItem(LS_AGENT_FILE_VIEW, fileViewMode);
@@ -173,16 +188,25 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
   useEffect(() => {
     if (shouldDeferDiffFetch(task.status)) {
       setFiles([]);
+      setSelectedFiles(new Set());
       setActiveFile(null);
+      setDiffError(undefined);
       setLoading(false);
       return;
     }
 
+    let current = true;
     setLoading(true);
-    (window as any).crab.orchestrator
+    setDiffError(undefined);
+    setFiles([]);
+    setSelectedFiles(new Set());
+    setActiveFile(null);
+    window.crab.orchestrator
       .getDiff(task.id, checkpointSha || undefined, checkpointFromSha || undefined)
-      .then((result: { success?: boolean; diff?: { files: DiffFile[] }; files?: DiffFile[] }) => {
-        const diffFiles = result?.diff?.files ?? result?.files ?? [];
+      .then(result => {
+        if (!current) return;
+        if (!result.success || !result.diff) throw new Error(result.error ?? "File comparison unavailable");
+        const diffFiles = result.diff.files;
         setFiles(diffFiles);
         if (diffFiles.length > 0) {
           setActiveFile(diffFiles[0].path);
@@ -190,9 +214,10 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
           setActiveFile(null);
         }
       })
-      .catch(() => setFiles([]))
-      .finally(() => setLoading(false));
-  }, [task.id, task.status, checkpointSha, checkpointFromSha]);
+      .catch((error: unknown) => { if (current) setDiffError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [task.id, task.status, checkpointSha, checkpointFromSha, workspaceRevision, diffRequest]);
 
   // When initialActiveFile changes (e.g., user clicked in live file tree),
   // select that file in the diff view if it exists.
@@ -285,16 +310,23 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
 
   // File revert
   const handleRevertFile = useCallback(async (filePath: string) => {
+    const owner = revertOwner.current;
+    if (!owner || owner.taskId !== task.id || owner.pending) return;
+    owner.pending = true;
+    setRevertingFile(filePath);
+    setRevertError(undefined);
     try {
-      await (window as any).crab.orchestrator.revertFile(task.id, filePath);
-      setFiles((prev) => prev.filter((f) => f.path !== filePath));
-      if (activeFile === filePath) {
-        setActiveFile(files.find((f) => f.path !== filePath)?.path ?? null);
-      }
-    } catch {
-      // Revert failed silently.
+      const result = await window.crab.orchestrator.revertFile(task.id, filePath);
+      if (revertOwner.current !== owner) return;
+      if (!result.success) throw new Error(result.error ?? "File restoration failed");
+      setDiffRequest(request => request + 1);
+    } catch (error: unknown) {
+      if (revertOwner.current === owner) setRevertError(`Could not revert ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      owner.pending = false;
+      if (revertOwner.current === owner) setRevertingFile(undefined);
     }
-  }, [task.id, activeFile, files]);
+  }, [task.id]);
 
   // Add comment handler
   const handleAddComment = useCallback(
@@ -385,6 +417,16 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
     );
   }
 
+  if (diffError) {
+    return (
+      <div role="alert" className="flex h-full flex-col items-center justify-center gap-2 p-4 text-xs">
+        <span className="font-medium text-gx-error">Could not load changes</span>
+        <span className="max-w-lg break-words text-gx-muted">{diffError}</span>
+        <button type="button" onClick={() => setDiffRequest(request => request + 1)} className="rounded border border-gx-border px-3 py-1.5 hover:bg-gx-hover">Reload changes</button>
+      </div>
+    );
+  }
+
   if (files.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-gx-muted">
@@ -430,13 +472,15 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
         }}
       />
 
+      {revertError && <div role="alert" className="break-words border-b border-gx-border px-3 py-2 text-xs text-gx-error">{revertError}</div>}
+
       {/* Conflict banner */}
       {conflicts && (
         <ConflictBanner conflicts={conflicts} onDismiss={() => setConflicts(null)} />
       )}
 
       {/* Partial apply status */}
-      {appliedFiles.size > 0 && remainingFiles.length > 0 && (
+      {!inPrimaryWorkspace && appliedFiles.size > 0 && remainingFiles.length > 0 && (
         <PartialApplyBanner
           appliedCount={appliedFiles.size}
           remainingCount={remainingFiles.length}
@@ -456,7 +500,8 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
               appliedFiles={appliedFiles}
               onSelectFile={handleSelectFile}
               onToggleFile={toggleFile}
-              onRevertFile={handleRevertFile}
+              onRevertFile={checkpointSha ? undefined : handleRevertFile}
+              revertingFile={revertingFile}
               fileComments={fileComments}
             />
           ) : fileViewMode === "tree" ? (
@@ -525,19 +570,26 @@ export function DiffTab({ task, repo: _repo, active, initialActiveFile, checkpoi
         </Panel>
       </PanelGroup>
 
+      {inPrimaryWorkspace && (
+        <p role="status" className="border-t border-gx-border px-4 py-2 text-xs text-gx-muted">
+          These edits are already in this workspace. Commit them in Git Changes.
+        </p>
+      )}
+
       {/* Action buttons (bottom bar) */}
       <div className="flex shrink-0 items-center gap-2 border-t border-gx-border px-4 py-2">
         <button
           type="button"
           onClick={handleApplyAll}
-          className="flex items-center gap-1.5 rounded-md bg-gx-success px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-success/85 transition"
+          disabled={inPrimaryWorkspace}
+          className="flex items-center gap-1.5 rounded-md bg-gx-success px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-success/85 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Check size={12} /> Apply all
         </button>
         <button
           type="button"
           onClick={handleCherryPick}
-          disabled={selectedFiles.size === 0}
+          disabled={inPrimaryWorkspace || selectedFiles.size === 0}
           className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Cherry size={12} /> Apply selected ({selectedFiles.size})
@@ -773,6 +825,7 @@ function DiffFileList({
   onSelectFile,
   onToggleFile,
   onRevertFile,
+  revertingFile,
   fileComments,
 }: {
   files: DiffFile[];
@@ -781,7 +834,8 @@ function DiffFileList({
   appliedFiles: Set<string>;
   onSelectFile: (path: string) => void;
   onToggleFile: (path: string) => void;
-  onRevertFile: (path: string) => void;
+  onRevertFile?: (path: string) => void;
+  revertingFile?: string;
   fileComments: FileComments;
 }) {
   return (
@@ -871,9 +925,11 @@ function DiffFileList({
                   </span>
 
                   {/* Revert button (visible on hover) */}
-                  {!isApplied && (
+                  {!isApplied && onRevertFile && (
                     <button
                       type="button"
+                      disabled={revertingFile !== undefined}
+                      aria-busy={revertingFile === f.path}
                       onClick={(e) => {
                         e.stopPropagation();
                         onRevertFile(f.path);

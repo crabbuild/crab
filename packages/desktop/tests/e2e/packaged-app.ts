@@ -1,9 +1,11 @@
-import type { Page } from "@playwright/test";
-import { existsSync, readFileSync } from "node:fs";
+import type { ElectronApplication, Page } from "@playwright/test";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { Readable } from "node:stream";
 import { extractFile } from "@electron/asar";
 import type { StorageConnections } from "../../electron/storage-connections";
+import type { RemoteRuntimeStore } from "../../electron/ssh-runtime";
 
 export function packagedModule<T>(resources: string, name: string): T {
   const file = path.resolve(__dirname, `../../dist-electron/${name}.cjs`);
@@ -11,14 +13,39 @@ export function packagedModule<T>(resources: string, name: string): T {
   return createRequire(__filename)(file) as T;
 }
 
+export async function prepareFixtureSsh(application: ElectronApplication, fixture: { port: number; publicHostKey: Buffer }): Promise<void> {
+  const options = await application.evaluate(({ app }) => ({
+    packaged: true, appPath: app.getAppPath(), version: app.getVersion(), cacheDirectory: `${app.getPath("userData")}/remote-runtimes`,
+  }));
+  const resources = path.dirname(options.appPath);
+  const { RemoteRuntimeStore: RuntimeStore } = packagedModule<{ RemoteRuntimeStore: typeof RemoteRuntimeStore }>(resources, "ssh-runtime");
+  // Unreleased builds have no public release assets yet. Populate the isolated
+  // cache through the actual resolver and this build's hashed producer outputs.
+  const runtimes = new RuntimeStore(options, async input => {
+    const name = path.basename(new URL(String(input)).pathname);
+    return new Response(Readable.toWeb(createReadStream(path.resolve(__dirname, "../../release/remote-runtime", name))) as unknown as ReadableStream<Uint8Array>);
+  });
+  if (process.platform !== "darwin" && process.platform !== "linux") throw new Error("SSH fixture requires a POSIX runtime");
+  if (process.arch !== "arm64" && process.arch !== "x64") throw new Error("Unsupported SSH fixture architecture");
+  await runtimes.resolve({ platform: process.platform, arch: process.arch }, new AbortController().signal);
+  // Pin only the owned loopback server in this isolated profile. Native prompt
+  // decisions and rotation are exercised separately by ssh-host-key.spec.ts.
+  await application.evaluate(({ app }, { port, key }) => {
+    const modules = process.getBuiltinModule("node:module") as typeof import("node:module");
+    const require = modules.createRequire(`${app.getAppPath()}/package.json`);
+    const { KnownHostsManager } = require(`${app.getAppPath()}/dist-electron/ssh-known-hosts.cjs`) as typeof import("../../electron/ssh-known-hosts");
+    new KnownHostsManager(`${app.getPath("userData")}/ssh-known-hosts.json`).accept("127.0.0.1", port, Buffer.from(key, "base64"));
+  }, { port: fixture.port, key: fixture.publicHostKey.toString("base64") });
+}
+
 export function unboundStorage(resources: string, file: string, changed: (keys: string[], state: "changed" | "removed") => Promise<void>): StorageConnections {
   const { StorageConnections: Connections } = packagedModule<{ StorageConnections: typeof StorageConnections }>(resources, "storage-connections");
   // Staged transport fixtures have no saved credentials. Use the real vault's
   // locked-keyring contract; encrypted persistence has separate GUI proof.
   return new Connections(file, {
-    isEncryptionAvailable: () => false, getSelectedStorageBackend: () => "basic_text",
-    encryptString: () => { throw new Error("Fixture keyring is unavailable"); },
-    decryptString: () => { throw new Error("Fixture keyring is unavailable"); },
+    isAsyncEncryptionAvailable: async () => false, getSelectedStorageBackend: () => "basic_text",
+    encryptStringAsync: async () => { throw new Error("Fixture keyring is unavailable"); },
+    decryptStringAsync: async () => { throw new Error("Fixture keyring is unavailable"); },
   }, process.platform, changed);
 }
 

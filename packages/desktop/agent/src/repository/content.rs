@@ -227,6 +227,7 @@ impl FileSource {
                 let requested = root.join(path);
                 let target = if tokio::fs::symlink_metadata(&requested).await?.is_file() {
                     Some(WorkingPointer::capture(
+                        root.into(),
                         requested,
                         absolute,
                         bytes.clone(),

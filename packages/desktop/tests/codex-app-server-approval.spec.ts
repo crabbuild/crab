@@ -34,7 +34,6 @@ function createFakeProcess() {
   proc.stdin = stdin;
   proc.stdout = stdout;
   proc.stderr = stderr;
-  proc.pid = 12345;
   proc.kill = vi.fn();
   return { proc, stdin, stdout, stderr };
 }
@@ -152,13 +151,27 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([["allow_once", "turn"], ["allow", "session"], ["deny", "turn"]])("returns exactly the requested profile for %s with %s scope", async (decision, scope) => {
+    const permissions = { network: { enabled: true }, fileSystem: { entries: [{ path: { type: "path", path: "/project/reference" }, access: "read" }, { path: { type: "path", path: "/project/output" }, access: "write" }] } };
+    serverWrite(fakeProc.stdout, { id: "permissions", method: "item/permissions/requestApproval", params: {
+      itemId: "permissions-item", cwd: "/project", permissions, reason: "Read reference and write output",
+    } });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    drainFrames(fakeProc.stdin);
+    adapter.respondApproval(JSON.stringify("permissions"), decision);
+    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([{ id: "permissions", result: { permissions: decision === "deny" ? {} : permissions, scope } }]);
+  });
+
   it("allow → acceptForSession", async () => {
     // Server sends an approval request with rpc id 100
     serverWrite(fakeProc.stdout, {
       id: 100,
       method: "item/commandExecution/requestApproval",
       params: {
-        request_id: "req-1",
+        itemId: "item-command",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        startedAtMs: 1,
         command: "rm -rf /",
         reason: "Destructive command",
       },
@@ -169,14 +182,14 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
 
     const approvalEvent = events.find(e => e.type === "approval_request");
     expect(approvalEvent).toBeDefined();
-    expect(approvalEvent!.approval!.requestId).toBe("req-1");
+    expect(approvalEvent!.approval!.requestId).toBe("100");
     expect(approvalEvent!.approval!.kind).toBe("command");
 
     // Drain any frames written during handshake/approval processing
     drainFrames(fakeProc.stdin);
 
     // Respond with "allow" decision
-    adapter.respondApproval!("req-1", "allow");
+    adapter.respondApproval!("100", "allow");
 
     // Read the response frame from stdin
     await new Promise(r => setTimeout(r, 10));
@@ -195,7 +208,10 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
       id: 100,
       method: "item/commandExecution/requestApproval",
       params: {
-        request_id: "req-1",
+        itemId: "item-command",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        startedAtMs: 1,
         command: "rm -rf /",
         reason: "Destructive command",
       },
@@ -206,13 +222,13 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
 
     const approvalEvent = events.find(e => e.type === "approval_request");
     expect(approvalEvent).toBeDefined();
-    expect(approvalEvent!.approval!.requestId).toBe("req-1");
+    expect(approvalEvent!.approval!.requestId).toBe("100");
 
     // Drain any frames
     drainFrames(fakeProc.stdin);
 
     // Respond with "allow_once" decision
-    adapter.respondApproval!("req-1", "allow_once");
+    adapter.respondApproval!("100", "allow_once");
 
     // Read the response frame
     await new Promise(r => setTimeout(r, 10));
@@ -231,7 +247,10 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
       id: 100,
       method: "item/commandExecution/requestApproval",
       params: {
-        request_id: "req-1",
+        itemId: "item-command",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        startedAtMs: 1,
         command: "rm -rf /",
         reason: "Destructive command",
       },
@@ -242,13 +261,13 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
 
     const approvalEvent = events.find(e => e.type === "approval_request");
     expect(approvalEvent).toBeDefined();
-    expect(approvalEvent!.approval!.requestId).toBe("req-1");
+    expect(approvalEvent!.approval!.requestId).toBe("100");
 
     // Drain any frames
     drainFrames(fakeProc.stdin);
 
     // Respond with "deny" decision
-    adapter.respondApproval!("req-1", "deny");
+    adapter.respondApproval!("100", "deny");
 
     // Read the response frame
     await new Promise(r => setTimeout(r, 10));
@@ -274,14 +293,33 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     expect(frames.length).toBe(0);
   });
 
+  it("correlates simultaneous approvals using their wire ids, including string ids", async () => {
+    for (const id of [301, "301"]) {
+      serverWrite(fakeProc.stdout, {
+        id, method: "item/commandExecution/requestApproval",
+        params: { itemId: "item-command", threadId: "thread-1", turnId: "turn-1", startedAtMs: 1, command: "pwd" },
+      });
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    adapter.respondApproval("301", "allow_once");
+    adapter.respondApproval(JSON.stringify("301"), "deny");
+    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([
+      { id: 301, result: { decision: "accept" } },
+      { id: "301", result: { decision: "decline" } },
+    ]);
+  });
+
   it("file change approval also works correctly", async () => {
     // Server sends a file change approval request
     serverWrite(fakeProc.stdout, {
       id: 200,
       method: "item/fileChange/requestApproval",
       params: {
-        request_id: "req-file-1",
-        path: "/etc/passwd",
+        itemId: "item-file",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        startedAtMs: 1,
+        grantRoot: "/etc/passwd",
         reason: "Path outside workspace",
       },
     });
@@ -290,7 +328,7 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     await new Promise(r => setTimeout(r, 20));
 
     const approvalEvent = events.find(e =>
-      e.type === "approval_request" && e.approval?.requestId === "req-file-1"
+      e.type === "approval_request" && e.approval?.requestId === "200"
     );
     expect(approvalEvent).toBeDefined();
     expect(approvalEvent!.approval!.kind).toBe("file");
@@ -300,7 +338,7 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     drainFrames(fakeProc.stdin);
 
     // Respond with "allow" decision
-    adapter.respondApproval!("req-file-1", "allow");
+    adapter.respondApproval!("200", "allow");
 
     await new Promise(r => setTimeout(r, 10));
     const frames = drainFrames(fakeProc.stdin);

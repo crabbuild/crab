@@ -1,148 +1,221 @@
 # SSH Subsystem Architecture
 
-## Overview
+Crab Desktop routes remote repository RPCs over an authenticated SSH channel to
+`crab-desktop-agent`. The sidecar and its Crab CLI come from the same release.
+Remote native Codex/Claude chat dispatch is still an open implementation gate;
+local native-provider proof does not establish remote chat support. See
+[agent chat compatibility](../agent-chat-compatibility.md) for evidence and gaps.
 
-The SSH subsystem enables Crab Desktop to manage repositories on remote
-servers as if they were local. It uses the **Remote Agent** pattern: the
-same `crab-desktop-agent` binary runs on the remote server, and the
-local Electron app tunnels JSON-RPC 2.0 over an SSH channel.
+## Ownership and routing
 
-## Key Principle
+| Surface | Owner | Contract |
+| --- | --- | --- |
+| Authentication and host trust | `electron/ssh-manager.ts`, `ssh-known-hosts.ts` | Verify every direct/jump host before authentication; disconnect cancels pending trust decisions and opening work |
+| Initial/manual/reconnect bootstrap | `electron/ssh-manager.ts` | One connection owns deployment, channel, capability handshake, repository restoration and readiness publication |
+| Runtime acquisition | `electron/ssh-runtime.ts` | Exact app version and remote target; verified private cache; concurrent borrowers share downloads without sharing cancellation |
+| Remote installation | `electron/ssh-deployer.ts` | Matching CLI/sidecar, private staging, acknowledged writes, remote hashes, atomic publication and owned cleanup |
+| Repository RPC | `electron/ssh-router.ts` | Local requests use the local agent; `ssh://profileId/path` requests use that profile's channel; batches become independent NDJSON requests |
+| Native stdio transport | `electron/ssh-native-process.ts`, `agent/src/native_process.rs` | One UUID and exact channel own stdin, output credit and confirmed process-group closure; task lifecycle integration remains open |
+| Capability negotiation | `electron/ssh-capabilities.ts` | Read actual capabilities after channel attachment; clear stale results when the owner changes |
+| Progress UI | `src/components/ssh/DeployProgressIndicator.tsx` | Typed, profile-scoped events; starting completes only after the capability handshake |
 
-The renderer is completely unaware of whether a repo is local or remote.
-All routing happens in the main process via the RPC Router.
+The production open handler uses `RemoteFileBrowser.openAsRepo`, which supplies
+the required `repo_id`, registers the provider before returning, and projects
+the server-local workspace as an SSH handle for renderer worktree routing.
 
-## Components
+The router owns UTF-8 framing and outstanding requests per exact channel. EOF,
+error or close retires that channel's requests. Reconnect queues only inspected
+reads; writes and unclassified calls fail immediately, so uncertain writes are
+never replayed. Acknowledged repository opens are retained in memory; successful
+closes remove them. Each new sidecar reopens those repositories before readiness
+and queued reads. Failed or uncertain opens cannot enter this set, and changing
+the profile host, port or username drops the old endpoint's identities. A connected SSH transport without an attached sidecar advertises
+no repository RPC capabilities.
 
-### Main Process (Electron)
+## Native provider process transport
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  SSH Session Manager (ssh-manager.ts)                    │
-│  • Connection pool (one TCP conn, many channels)        │
-│  • Reconnection state machine                           │
-│  • Suspend/resume detection                             │
-├─────────────────────────────────────────────────────────┤
-│  RPC Router (ssh-router.ts)                             │
-│  • repo_id → local agent OR remote agent                │
-│  • Transparent to renderer                              │
-│  • Batch RPC support                                    │
-├─────────────────────────────────────────────────────────┤
-│  Response Cache (ssh-cache.ts)                          │
-│  • TTL-based caching with adaptive TTL                  │
-│  • Invalidation on write operations                     │
-│  • Prefetching on repo open                             │
-├─────────────────────────────────────────────────────────┤
-│  Agent Deployer (ssh-deployer.ts)                       │
-│  • Detect remote arch, upload binary via SFTP           │
-│  • Version check + hash-based skip                      │
-├─────────────────────────────────────────────────────────┤
-│  Port Forward Manager (ssh-port-forward.ts)             │
-│  • Local → Remote forwards                              │
-│  • Dynamic detection from terminal output               │
-├─────────────────────────────────────────────────────────┤
-│  File Transfer Manager (ssh-file-transfer.ts)           │
-│  • SFTP upload/download with progress                   │
-│  • Transfer queue with concurrency control              │
-├─────────────────────────────────────────────────────────┤
-│  System Health Monitor (ssh-health.ts)                  │
-│  • Polls disk, memory, GPU metrics                      │
-│  • Alerts on threshold breaches                         │
-├─────────────────────────────────────────────────────────┤
-│  Connection Diagnostics (ssh-diagnostics.ts)            │
-│  • Latency test, bandwidth estimate                     │
-│  • Recommendations engine                               │
-├─────────────────────────────────────────────────────────┤
-│  Resilience Manager (ssh-resilience.ts)                 │
-│  • Session persistence across restarts                  │
-│  • Graceful degradation during reconnection             │
-│  • Audit logging                                        │
-├─────────────────────────────────────────────────────────┤
-│  Performance Manager (ssh-performance.ts)               │
-│  • Prefetching, delta updates                           │
-│  • Connection pooling, lazy subscriptions               │
-│  • Response streaming                                   │
-└─────────────────────────────────────────────────────────┘
-```
+Codex app-server and Claude Code share their existing Electron protocol adapters
+across local Node processes and the private remote stdio factory. Six
+`native_process_*` RPCs own open, stdin write, stdin close, output acknowledgement,
+stop and release. Provider protocol parsing, controls and approvals stay in the
+native adapters. The factory sends executable, arguments and working directory;
+credentials and PATH come from the server login. Local environment overrides
+never cross this transport.
 
-### Remote Server
+Each output stream has one 16 KiB frame of credit with exact sequence
+acknowledgement. Stdin is chunked separately and acknowledged after pipe writes.
+Neither receipt establishes provider turn acceptance; that remains the native
+protocol's responsibility. Replacement channels cannot inherit a process's
+writes. Transport loss rejects closure as unconfirmed and never replays stdin.
 
-```
-~/.crab/bin/crab-desktop-agent
-  • Same binary, same JSON-RPC protocol
-  • Full access to local filesystem + git + crab
-  • Spawns CLI tools (crab, git, claude, codex)
-  • System health reporting (disk, mem, GPU)
-```
+The Unix sidecar owns a process group through normal exit or bounded TERM/KILL
+cancellation. It drains supervisors on stdin EOF or TERM/HUP/INT before runtime
+shutdown. Release requires a confirmed close receipt. macOS zombie-only groups
+can return EPERM; a bounded wait must observe ESRCH rather than treating a
+permission failure as success. SIGKILL/crash recovery, session-detached children
+and persistent orphan ownership remain release gates.
 
-## Data Flow
+Opt-in real SSH checks discover models and complete file-writing turns with
+both installed providers using the existing server CLI login. They also verify
+owned child closure when the sidecar receives TERM/HUP. This proves the native
+transport foundation, not remote task UI integration. The current orchestrator
+still calls missing `task_spawn`/`task_iterate`; remote baseline, cancellation,
+recovery and Apply/Discard must join the shared lifecycle before that path works.
+The extended service `processManagement` capability remains disabled because
+its different public handler contract is still unimplemented.
 
-### RPC Call (e.g., git status)
+## Runtime acquisition and installation
 
-1. Renderer calls `window.crab.rpc("git_status_porcelain", { repo_id })`
-2. Main process receives via IPC
-3. RPC Router checks `repo_id` prefix:
-   - Local: forward to local agent process
-   - Remote (`ssh://profileId/path`): forward to remote agent channel
-4. Remote agent processes request, returns JSON-RPC response
-5. Router returns result to renderer via IPC
-
-### Connection Lifecycle
+Supported remote targets are Linux and macOS on x64 or arm64. Development uses
+`resources/native/<mac|linux>-<arch>/runtime.json` and its matching binaries.
+Packaged apps obtain these dedicated assets from the app's exact GitHub release:
 
 ```
-DISCONNECTED → CONNECTING → DEPLOYING → CONNECTED
-                                              ↓
-                                         (network error)
-                                              ↓
-                                        RECONNECTING
-                                         ↙        ↘
-                                   CONNECTED    DISCONNECTED
-                                   (success)    (60s timeout)
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>.json
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>-crab
+Crab-<version>-runtime-<darwin|linux>-<x64|arm64>-crab-desktop-agent
 ```
 
-## Security Model
+Dedicated remote assets have their own checksums: signing an Electron bundle can
+change its embedded binaries. Release assembly requires all four remote targets
+and verifies identity, regular files, size limits and SHA-256 before publication.
+The downloader restricts redirects to approved HTTPS release hosts, bounds sizes
+and duration, and verifies hashes before publishing its cache. Invalid completed
+caches fail with an explicit removal/reconnect instruction.
 
-- Private keys never leave the local machine
-- Credentials stored only in OS keychain
-- Host key verification prevents MITM attacks
-- Remote agent runs as the user (no privilege escalation)
-- Audit log records all connection events (no credentials)
-- Port forwards are explicit and user-configured
+Each remote pair installs under the authenticated user's home directory:
 
-## Error Codes
+```
+.crab/desktop/runtimes/<version>/<platform>-<arch>/<content-hash>/
+  crab
+  crab-desktop-agent
+  git-remote-crab
+```
 
-| Code | Name | Meaning |
-|------|------|---------|
-| 2001 | SSH_AUTH_FAILED | Authentication rejected |
-| 2002 | SSH_HOST_UNREACHABLE | Cannot connect to host |
-| 2003 | SSH_HOST_KEY_CHANGED | Host key mismatch (MITM) |
-| 2004 | SSH_AGENT_DEPLOY_FAILED | Binary upload/chmod failed |
-| 2005 | SSH_AGENT_START_FAILED | Agent process won't start |
-| 2006 | SSH_CHANNEL_CLOSED | SSH channel unexpectedly closed |
-| 2007 | SSH_TIMEOUT | Operation timed out |
-| 2008 | SSH_RECONNECTING | Temporarily unavailable |
-| 2009 | SSH_DISK_FULL | Remote disk full |
-| 2010 | SSH_PERMISSION_DENIED | Remote filesystem permission error |
-| 2011 | SSH_PORT_IN_USE | Port forward failed (port occupied) |
+The Git helper is a hard link to that runtime's CLI. Parent directories and
+executables are checked without accepting symbolic-link leaves. An unpredictable
+upload directory has an SSH stdin-owned cleanup guard. Uploads wait for SFTP
+CLOSE acknowledgements before remote checksums and directory publication. An
+upload without progress for 30 seconds fails; cancellation retires SFTP before
+releasing the cleanup guard, preventing a pending write from racing cleanup.
+Published directories are outside that guard's scope. Reuse verifies all three
+executables again; deployment never replaces a running session's binary or kills
+another session by process name.
 
-## Performance Targets
+The sidecar starts with `CRAB_BIN` pointing to this CLI and its runtime prepended
+to `PATH`. The session manager attaches its sole RPC reader, negotiates capabilities,
+restores its acknowledged repositories and then publishes connected readiness. A transport failure or cancellation
+retires the owned channel and capability cache before recovery.
 
-| Operation | Target | Strategy |
-|-----------|--------|----------|
-| File tree expand | < 200ms | Single RPC, lazy load |
-| Git status | < 300ms | Cached 5s, invalidated on write |
-| Open file preview | < 500ms | Remote agent parses |
-| Terminal keystroke | < 50ms | Direct SSH channel |
-| Diff computation | < 1s | Remote agent computes |
-| File save | < 200ms | Direct write via agent |
+The background indexer owns a private derived cache per sidecar process. Its
+SlateDB instance closes before directory cleanup. Independent profiles and
+replacement sidecars therefore do not open the same writer path; cache contents
+rebuild for each process lifetime. `indexer_status.db_path` reports that current
+private location. The former account-wide cache is no longer opened.
 
-## Caching Strategy
+## Task workspace creation
 
-Adaptive TTL based on connection latency:
+`worktree_create` validates a task UUID and resolves the requested baseline to a
+commit before changing the filesystem. New worktrees reserve
+`$HOME/.crab/worktrees/<full-task-uuid>` atomically; existing paths are rejected.
+Creation never removes another task's worktree or a directory that looks stale.
+The existing core `crab worktree add` contract creates the checkout and branch.
+Failure releases only an empty reservation; a partially created checkout remains
+available for recovery. Missing HOME or invalid refs fail without a fallback.
 
-| RTT | Status TTL | Refs TTL | Summary TTL |
-|-----|-----------|---------|------------|
-| <50ms | 3s | 5s | 5s |
-| 50-100ms | 5s | 10s | 10s |
-| 100-200ms | 10s | 15s | 15s |
-| >200ms | 15s | 30s | 30s |
+`worktree_create` returns the task branch, the resolved `base_ref` commit and
+the repository's `base_branch` at creation (`null` for detached HEAD). Electron
+persists the branch as the Apply destination and the commit as the comparison
+baseline. Apply rejects an absent, deleted or symbolic destination before
+staging source changes. For an inactive destination, it prepares a Git ref
+transaction with dereferencing disabled, verifies the locked branch and checks
+worktree occupancy again before committing. Apply resolves the exact task branch
+to a commit and checks that the saved destination contains that commit before
+removing the remote checkout. Existing saved paths stay opaque.
+
+For a checked-out destination on Unix, Apply holds the real index lock and
+runs Git's merge in a private sparse checkout. The merge hooks project the
+result into the original checkout through Git's protected checkout and run
+there with the private index. Git owns the signing, sign-off and hook policy.
+Apply verifies the exact saved branch while the ref transaction holds HEAD,
+then publishes the ref and index before running `post-merge`. A rejected
+publication rolls back through Git's protected checkout and checks the saved
+working-tree and index state before releasing the lock.
+
+The common Git directory's `crab-desktop-active-apply` record retains the
+original index, ref OIDs, projected commit and index-lock identity when a
+writer or publication cannot be reconciled. An interrupted Apply can have a
+published ref and an old index. Recovery requires comparing the recorded and
+live ref and index states and confirming writer closure before releasing the
+matching lock and the task fence.
+
+## Disposable task workspace ownership
+
+Creation records the task UUID, branch, canonical root, shared Git directory and
+private Git directory in `crab-desktop-task-owner.json` inside the worktree's
+private Git administration directory. Apply, Discard and `worktree_destroy`
+validate this record against the opened repository and live Git identity before
+mutation. Recreated directories, primary checkouts, changed branches and foreign
+task/repository identities cannot authorize cleanup. Old or damaged records
+require explicit ownership recovery; no path-based adoption is performed.
+
+Native process factories can carry the task UUID. Such opens require the saved
+owner even when the directory's `.git` pointer disappeared; they cannot become
+unowned commands during removal. Native writers take shared file leases, while
+task mutations take exclusive leases. Independent sidecars therefore reject
+cleanup while a native writer remains owned. Confirmed physical closure releases
+its lease before publishing the receipt; uncertain closure retains it while
+the sidecar lives. The
+contract uses [Rust file locks](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
+which map to nonblocking flock on supported Unix targets. It coordinates Crab's
+owners, not external editors or arbitrary user commands.
+
+Cleanup delegates to the existing core `crab worktree remove` contract. Git
+refusal preserves files and branches; the sidecar does not recursively delete
+directories or prune other worktrees. Apply propagates status, staging and commit
+errors before merging. A successful merge remains confirmed if later cleanup
+fails: `cleanup_error` and removal flags describe the retained resources. Both
+Electron callers report that warning, and only acknowledged mutations change
+task status. Discard failures and missing remote ownership reach the caller.
+
+The Unix sidecar starts an independent worker for each accepted Apply. The
+worker owns the workspace lease and supervises the Git command group, including
+hooks. Graceful shutdown closes the worker's lifetime pipe and waits for it to
+exit. Killing the sidecar also closes that pipe, so the worker can stop Git
+while it still holds the lease. Apply creates `crab-desktop-task-apply.pending`
+in the task's private Git directory before staging and clears it after a
+completed operation with confirmed writer closure. If the operation is
+interrupted or closure is uncertain, a replacement sidecar rejects Apply,
+Discard, Destroy and native writer opens for that workspace. To recover it,
+confirm its Git writers have stopped, inspect both refs and the source and target
+indexes, then remove the pending file from the task's verified private Git
+directory. Recovery must determine whether Git already published a ref update.
+
+Real SSH proof covers unrelated directories, wrong task/branch/root identities,
+two sidecars competing with a native writer, a recreated directory's rejected
+native open, successful Discard/Destroy, and a confirmed merge whose locked
+worktree remains intact. Full remote startup/snapshot/cancellation integration,
+captured Apply-target ownership, durable mutation recovery, recovery for older
+records, process-name orphan checks and crash/detached-child ownership remain
+release gates. Leases live with Rust owners; canceled mutation RPCs and orphaned
+Git subprocesses still need ownership integration before release.
+
+## Limits and qualification
+
+The sidecar implements core repository RPCs and task comparison. Its capability
+handshake explicitly disables unsupported extended execution, watch and session
+services. The Electron health/audit/diagnostics modules and related design goals
+do not by themselves establish a working remote service; in particular the
+legacy audit bridge is not wired into the production main process.
+
+Real loopback SSH/SFTP proof covers immutable installation, reuse, checksum
+failure, owner cancellation and stalls, including quoted/Unicode home paths.
+The built release pair also creates a worktree through its uploaded CLI and
+returns native comparison bytes through the real session manager and router.
+A renderer fixture checks progress isolation between profiles. Native checks
+also prove concurrent indexer cache ownership and cleanup on macOS.
+Remote native chat, a published release endpoint, packaged main-process bootstrap,
+older Linux ABI support and cross-OS indexer ownership remain qualification gates.
+Cross-platform CI builds and bootstraps each remote target; its results must be
+reviewed before release. The [manual workspace checklist](../remote-workspace-smoke-test.md)
+tracks user-visible remote operations that need separate qualification.

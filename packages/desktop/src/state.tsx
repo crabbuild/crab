@@ -739,15 +739,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Fetch capabilities for repos that don't have them yet. This runs
   // whenever the repo list changes and picks up newly-opened repos.
   // Deferred repos (not yet opened via the agent) are skipped.
-  // Uses a ref to track in-flight fetches to avoid re-fetching on every
-  // state.repos reference change (which would cause an infinite loop).
-  const capsFetchedRef = useRef<Set<string>>(new Set());
+  // Only pending queries are shared. Reopening the same logical repository
+  // must fetch for its new native session, not reuse a completed admission.
+  const capabilitiesPending = useRef(new Map<string, { nativeSessionId: string | null }>());
   useEffect(() => {
     for (const repo of state.repos) {
       if (repo.deferred) continue;
       if (repo.capabilities !== undefined) continue;
-      if (capsFetchedRef.current.has(repo.repo_id)) continue;
-      capsFetchedRef.current.add(repo.repo_id);
+      if (capabilitiesPending.current.get(repo.repo_id)?.nativeSessionId === repo.native_session_id) continue;
+      const request = { nativeSessionId: repo.native_session_id };
+      capabilitiesPending.current.set(repo.repo_id, request);
       // Fire-and-forget: fetch capabilities and dispatch the result.
       mainProcess.getCapabilities(repo.repo_id).then(
         (caps) => {
@@ -757,7 +758,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           // A failed query does not establish native availability.
           dispatch({ type: "repo-capabilities-loaded", repo_id: repo.repo_id, capabilities: noCapabilities(), expected_session_id: repo.native_session_id });
         },
-      );
+      ).finally(() => {
+        if (capabilitiesPending.current.get(repo.repo_id) === request) capabilitiesPending.current.delete(repo.repo_id);
+      });
     }
   }, [state.repos]);
 

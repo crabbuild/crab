@@ -22,7 +22,7 @@ import {
 } from "../electron/codex-shared";
 
 function makeState(): CodexParseState {
-  return { lastAgentMessage: "" };
+  return { agentMessages: new Map(), lastAgentMessage: "" };
 }
 
 describe("parseCodexItem — camelCase wire format (app-server)", () => {
@@ -243,24 +243,16 @@ describe("extractUsageEvent — camelCase wire format", () => {
     const event = extractUsageEvent(usage);
     expect(event).not.toBeNull();
     expect(event!.usage).toEqual({
-      inputTokens: 100,
-      outputTokens: 45, // base + reasoning
+      inputTokens: 80,
+      outputTokens: 40,
       cacheCreationInputTokens: 0,
       cacheReadInputTokens: 20,
     });
   });
 
-  it("still reads legacy snake_case keys", () => {
-    const usage = {
-      input_tokens: 100,
-      output_tokens: 40,
-      cached_input_tokens: 20,
-      reasoning_output_tokens: 5,
-    };
-    const event = extractUsageEvent(usage);
-    expect(event).not.toBeNull();
-    expect(event!.usage.inputTokens).toBe(100);
-    expect(event!.usage.outputTokens).toBe(45);
-    expect(event!.usage.cacheReadInputTokens).toBe(20);
+  it("separates cache creation and cache reads from gross input", () => {
+    expect(extractUsageEvent({ inputTokens: 100, outputTokens: 10, cachedInputTokens: 40, cacheWriteInputTokens: 60, reasoningOutputTokens: 5 })?.usage).toEqual({
+      inputTokens: 0, outputTokens: 10, cacheReadInputTokens: 40, cacheCreationInputTokens: 60,
+    });
   });
 });

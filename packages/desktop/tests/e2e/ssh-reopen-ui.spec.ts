@@ -5,7 +5,7 @@ import { open, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
-import { packagedExecutable } from "./packaged-app";
+import { packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
 for (const localNativeAvailable of [true, false]) test(`saved SSH repositories survive restart, failed restore and deferred selection (${localNativeAvailable ? "local services available" : "local services unavailable"})`, async () => {
@@ -94,8 +94,8 @@ for (const localNativeAvailable of [true, false]) test(`saved SSH repositories s
     const firstId = `ssh://${saved.id}${first}`, secondId = `ssh://${saved.id}${second}`;
     await page.screenshot({ path: test.info().outputPath("ssh-empty-home.png") });
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await prepareFixtureSsh(application!, fixture);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
-    await page.getByRole("dialog", { name: "Verify Host Key", exact: true }).getByRole("button", { name: "Accept", exact: true }).click();
     await page.getByRole("button", { name: `Browse files on ${label}`, exact: true }).click();
     expect(fixture.uploadedBytes).toBe(0);
     await page.getByRole("button", { name: "Open Repo", exact: true }).click();

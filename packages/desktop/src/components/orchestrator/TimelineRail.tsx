@@ -55,7 +55,7 @@ function resolveToolColor(
   events: AgentEvent[],
   eventIndex: number,
 ): "info" | "success" | "error" | "warning" {
-  if (event.type === "approval_request") return "warning";
+  if (event.type === "approval_request" || event.type === "input_request") return "warning";
 
   // Look for a matching tool_result by itemId
   if (event.itemId) {
@@ -100,6 +100,7 @@ function buildLabel(event: AgentEvent): string {
     case "search": return "Search";
     case "web": return "Web fetch";
     case "approval_request": return "Approval";
+    case "input_request": return "Question";
     case "tool_use": return event.tool ?? "Tool";
     default: return event.type;
   }

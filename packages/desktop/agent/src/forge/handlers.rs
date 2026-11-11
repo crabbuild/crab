@@ -13,6 +13,7 @@
 //! process after OAuth/PAT flow), instantiates the provider-specific
 //! [`Forge`] implementation, and delegates to the trait method.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -224,23 +225,19 @@ pub async fn forge_pr_detail(work_dir: &Path, p: ForgePrDetailParams) -> Result<
         .collect();
 
     // Build inline_comments map: { "path": { line_number: [comments] } }
-    let mut inline_map: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut inline_map: BTreeMap<&str, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
     for comment in &inline_comments {
-        let file_entry = inline_map
-            .entry(comment.path.clone())
-            .or_insert_with(|| json!({}));
-        let line_key = comment.line.to_string();
-        let line_arr = file_entry
-            .as_object_mut()
-            .unwrap()
-            .entry(line_key)
-            .or_insert_with(|| json!([]));
-        line_arr.as_array_mut().unwrap().push(json!({
-            "id": comment.id,
-            "author": comment.author,
-            "body": comment.body,
-            "created_at": comment.created_at,
-        }));
+        inline_map
+            .entry(&comment.path)
+            .or_default()
+            .entry(comment.line.to_string())
+            .or_default()
+            .push(json!({
+                "id": comment.id,
+                "author": comment.author,
+                "body": comment.body,
+                "created_at": comment.created_at,
+            }));
     }
 
     Ok(json!({

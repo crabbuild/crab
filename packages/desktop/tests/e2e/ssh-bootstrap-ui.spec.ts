@@ -4,7 +4,7 @@ import { closeSync, existsSync, ftruncateSync, mkdtempSync, mkdirSync, openSync,
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
 test("desktop SSH connection opens and reads a real logical large file through the deployed runtime", async () => {
@@ -75,10 +75,8 @@ test("desktop SSH connection opens and reads a real logical large file through t
     }, { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: source, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: true, autoReconnect: false });
     const id = savedProfile.id;
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await prepareFixtureSsh(application!, fixture);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
-    const trust = page.getByRole("dialog", { name: "Verify Host Key", exact: true });
-    await expect(trust).toBeVisible();
-    await trust.getByRole("button", { name: "Accept", exact: true }).click();
     await expect(page.getByRole("button", { name: `Browse files on ${label}`, exact: true })).toBeVisible({ timeout: 60_000 });
     await page.screenshot({ path: test.info().outputPath("ssh-runtime-connected.png") });
     await page.getByRole("button", { name: `Browse files on ${label}`, exact: true }).click();

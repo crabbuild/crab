@@ -73,6 +73,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - name: Build the matching native CLI and sidecar
         run: node scripts/build-native.mjs
+      - name: Test native desktop integration
+        # Compilation, real CLI tests and Linux tests share the producer toolchain.
+        run: node scripts/build-native.mjs --test
+      - name: Qualify Linux runtime ABI and repository operations
+        if: runner.os == 'Linux'
+        run: node scripts/qualify-linux-runtime.mjs
+      - name: Install SSH runtime qualification dependencies
+        if: runner.os != 'Windows'
+        run: npm ci --ignore-scripts
+      - name: Qualify native SSH runtime download, upload and startup
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1
       - uses: actions/upload-artifact@v4
         with:
           name: Crab-native-${{ matrix.target }}
@@ -81,8 +95,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: runner.os != 'Windows'
         with:
-          name: Crab-ssh-runtime-${{ matrix.target }}
-          path: packages/desktop/resources/native/ssh-runtimes/
+          name: Crab-remote-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: packages/desktop/release/remote-runtime/*
           if-no-files-found: error
   build:
     needs: runtime
@@ -124,7 +138,7 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
       - name: Install macOS SSH terminal test dependency
         if: runner.os == 'macOS'
         run: command -v tmux || brew install tmux
@@ -135,11 +149,6 @@ jobs:
         with:
           name: Crab-native-${{ matrix.target }}
           path: packages/desktop/resources/native/${{ matrix.target }}/
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: Crab-ssh-runtime-*
-          path: packages/desktop/resources/native/ssh-runtimes/
-          merge-multiple: true
       - name: Restore native executable permissions
         if: runner.os != 'Windows'
         run: chmod +x resources/native/${{ matrix.target }}/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
@@ -172,24 +181,35 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
+      - name: Qualify repository sidebar scroll persistence
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-sidebar-scroll"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          fi
+      - name: Qualify local native process group ownership
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-native-owner"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-owner" npm test -- tests/agent-process-live.spec.ts
       - name: Build desktop application
         run: npm run build:renderer && npm run build:electron
-      - name: Test native desktop integration
-        # Worktree integration tests invoke the same CLI bundled with the app.
+      - name: Qualify selected Apply through the task view
         run: |
-          extension=
-          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
-          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked
-          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked native_crab_and_lfs_pointer_previews_use_staging_without_hydrating -- --ignored
-          cargo test --release -p crab-git --locked --features process --lib process::tests
-          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked native_crab_comparison_ -- --ignored --test-threads=1
-          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked materialization_ -- --ignored --test-threads=1
-          CRAB_BIN="$PWD/resources/native/${{ matrix.target }}/crab$extension" \
-            cargo test --release -p crab-desktop-agent --locked native_cleanup_reports_usage_and_preserves_busy_and_retained_state -- --ignored
+          mkdir -p "$RUNNER_TEMP/crab-selected-apply"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-selected-apply" npm test -- tests/selected-apply-live.spec.ts --maxWorkers 1
+          fi
+      - name: Qualify checkpoint ownership and remote availability
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-native-task"
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-native-task-live.spec.ts -t 'checkpoint|availability|apply-source|apply-target|apply-eof|apply-sidecar-kill'
+          CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-task" npm test -- tests/remote-endpoint-live.spec.ts --maxWorkers 1
       - name: Build installers and unpacked application
         env:
           CSC_LINK: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}

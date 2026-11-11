@@ -5,7 +5,7 @@ import { open, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { RepoHandle } from "../../src/ipc";
-import { packagedExecutable } from "./packaged-app";
+import { packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
 type ReplayWindow = Window & { replayResults: Record<string, { status: "pending" | "resolved" | "rejected"; code?: number }> };
@@ -59,8 +59,8 @@ test("queued SSH metadata and Changes recover independently of a blocked sibling
     const saved = await page.evaluate(value => window.crab!.ssh.saveProfile(value), { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: healthy, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: true, autoReconnect: true, operationTimeoutMs: 60_000 });
     const healthyId = `ssh://${saved.id}${healthy}`, blockedId = `ssh://${saved.id}${blocked}`;
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await prepareFixtureSsh(application!, fixture);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
-    await page.getByRole("dialog", { name: "Verify Host Key", exact: true }).getByRole("button", { name: "Accept", exact: true }).click();
     await page.getByRole("button", { name: `Browse files on ${label}`, exact: true }).click();
     await page.getByRole("button", { name: "Open Repo", exact: true }).click();
     await expect(page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "healthy-project", exact: true })).toBeVisible({ timeout: 60_000 });

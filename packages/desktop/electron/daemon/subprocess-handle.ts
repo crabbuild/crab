@@ -83,7 +83,9 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
   kill(signal?: string): void {
     // Neutralized after dispose to prevent SIGHUP-to-recycled-PID
     if (this.disposed) return;
-    this.pty.kill(signal);
+    // ConPTY owns termination on Windows; node-pty rejects signal arguments
+    // before killing anything, leaving the shell and its working directory live.
+    this.pty.kill(process.platform === "win32" ? undefined : signal);
   }
 
   forceKill(): void {

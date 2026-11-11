@@ -18,6 +18,8 @@ export async function terminalSshServer(root: string, remotePath = process.env.P
   const libraryPath = process.env.CRAB_TEST_DYLD_LIBRARY_PATH ?? process.env.DYLD_LIBRARY_PATH;
   const prefix = libraryPath ? `export DYLD_LIBRARY_PATH='${libraryPath.replace(/'/g, "'\\''")}'; ` : "";
   const server = new Server({ hostKeys: [privateKey] }, connection => {
+    // Match OpenSSH; ssh2's Connection declaration omits this server method.
+    (connection as Connection & { setNoDelay(noDelay: boolean): void }).setNoDelay(true);
     connections.add(connection);
     connection.on("error", () => {});
     connection.on("close", () => connections.delete(connection));
@@ -42,9 +44,10 @@ export async function terminalSshServer(root: string, remotePath = process.env.P
         } else {
           const child = spawn("/bin/sh", ["-c", prefix + info.command], { cwd: root, env });
           children.add(child);
+          stream.pipe(child.stdin);
           child.stdout.pipe(stream, { end: false });
           child.stderr.pipe(stream.stderr, { end: false });
-          child.on("exit", code => { children.delete(child); stream.exit(code ?? 1); stream.end(); });
+          child.on("close", code => { children.delete(child); stream.exit(code ?? 1); stream.end(); });
           stream.on("close", () => child.kill());
         }
       });
@@ -59,9 +62,9 @@ export async function terminalSshServer(root: string, remotePath = process.env.P
     async connect() {
       const client = new Client();
       await new Promise<void>((resolve, reject) => {
-        client.once("error", reject).once("ready", resolve).connect({
+        client.once("error", reject).once("ready", () => { client.setNoDelay(true); resolve(); }).connect({
           host: "127.0.0.1", port: address.port, username: "fixture", password: "fixture-only",
-          hostHash: "sha256", hostVerifier: hash => hash === fingerprint,
+          hostHash: "sha256", hostVerifier: (hash: string) => hash === fingerprint,
         });
       });
       return client;

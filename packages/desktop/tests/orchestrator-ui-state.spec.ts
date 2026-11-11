@@ -7,79 +7,13 @@
  * - setTaskUIState and getTaskUIState work correctly
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { Orchestrator, type PersistedChatUIState } from "../electron/orchestrator";
-
-// ─── Mocks ───────────────────────────────────────────────────────────────────
-
-vi.mock("../electron/orchestrator-worktree", () => ({
-  createWorktree: vi.fn(async (_repoPath: string, taskId: string, _baseRef: string) => {
-    return path.join(os.tmpdir(), `crab-agent-${taskId}`);
-  }),
-  removeWorktree: vi.fn(async () => {}),
-  readTaskMetadata: vi.fn(() => undefined),
-}));
-
-vi.mock("../electron/orchestrator-adapters", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../electron/orchestrator-adapters")>();
-  return {
-    ...actual,
-    createAdapter: vi.fn(() => ({
-      name: "Mock Agent",
-      binary: "mock-agent",
-      spawn: vi.fn(),
-      cancel: vi.fn(),
-      iterate: vi.fn(),
-      sendMessage: vi.fn(),
-      respondApproval: vi.fn(),
-      onEvent: vi.fn(() => () => {}),
-      onExit: vi.fn(() => () => {}),
-    })),
-  };
-});
-
-vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
-}));
-
-vi.mock("node:util", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:util")>();
-  return {
-    ...actual,
-    promisify: vi.fn(() => {
-      return async (...args: any[]) => {
-        const cmdArgs = args[1] as string[];
-        if (cmdArgs.includes("rev-parse") && cmdArgs.includes("HEAD")) {
-          return { stdout: "abc123def456789\n", stderr: "" };
-        }
-        if (cmdArgs.includes("rev-parse") && cmdArgs.includes("--abbrev-ref")) {
-          return { stdout: "main\n", stderr: "" };
-        }
-        return { stdout: "abc123def456789\n", stderr: "" };
-      };
-    }),
-  };
-});
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function createTempPersistPath(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crab-orch-ui-state-test-"));
-  return path.join(dir, "agent-tasks.sqlite");
-}
-
-function cleanupPath(filePath: string): void {
-  try {
-    const dir = path.dirname(filePath);
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // Best-effort cleanup.
-  }
-}
 
 const SAMPLE_UI_STATE: PersistedChatUIState = {
   cardCollapse: {
@@ -98,19 +32,34 @@ const SAMPLE_UI_STATE: PersistedChatUIState = {
   vimNavigation: false,
 };
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
 describe("Orchestrator UI State persistence", () => {
+  let directory: string;
   let persistPath: string;
+  let repoPath: string;
   let orchestrator: Orchestrator;
+  const owners: Orchestrator[] = [];
+  const openStore = (file = persistPath) => {
+    const owner = new Orchestrator({ persistPath: file, timeoutMs: 5000 });
+    owners.push(owner);
+    return owner;
+  };
+  const createTask = (prompt: string) => orchestrator.createTask(prompt, "codex", repoPath, undefined, { worktreeMode: "primary" });
 
   beforeEach(() => {
-    persistPath = createTempPersistPath();
-    orchestrator = new Orchestrator({ persistPath, timeoutMs: 5000 });
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "crab-orch-ui-state-test-"));
+    persistPath = path.join(directory, "agent-tasks.sqlite");
+    repoPath = path.join(directory, "repo");
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main", repoPath]);
+    const hooks = path.join(directory, "hooks");
+    fs.mkdirSync(hooks);
+    execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+      "-c", "commit.gpgSign=false", "-c", `core.hooksPath=${hooks}`, "commit", "--quiet", "--allow-empty", "-m", "Initial"], { cwd: repoPath });
+    orchestrator = openStore();
   });
 
-  afterEach(() => {
-    cleanupPath(persistPath);
+  afterEach(async () => {
+    await Promise.all(owners.splice(0).map(owner => owner.shutdown()));
+    fs.rmSync(directory, { recursive: true, force: true });
   });
 
   describe("SQLite-only cutoff", () => {
@@ -138,7 +87,7 @@ describe("Orchestrator UI State persistence", () => {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(legacyJsonPath, JSON.stringify(legacyData, null, 2), "utf-8");
 
-      const orch2 = new Orchestrator({ persistPath: legacyJsonPath, timeoutMs: 5000 });
+      const orch2 = openStore(legacyJsonPath);
       const task = orch2.getTask("task-legacy-1");
 
       expect(task).toBeUndefined();
@@ -152,7 +101,7 @@ describe("Orchestrator UI State persistence", () => {
     });
 
     it("sets and gets UI state on an existing task", async () => {
-      const task = await orchestrator.createTask("Test task", "codex", "/tmp/repo", "main");
+      const task = await createTask("Test task");
 
       await orchestrator.setTaskUIState(task.id, SAMPLE_UI_STATE);
 
@@ -166,26 +115,26 @@ describe("Orchestrator UI State persistence", () => {
     });
 
     it("persists uiState to disk after setTaskUIState", async () => {
-      const task = await orchestrator.createTask("Test task", "codex", "/tmp/repo", "main");
+      const task = await createTask("Test task");
 
       await orchestrator.setTaskUIState(task.id, SAMPLE_UI_STATE);
 
       expect(fs.existsSync(persistPath)).toBe(true);
       expect(fs.existsSync(persistPath.replace(/\.sqlite$/, ".json"))).toBe(false);
 
-      const orch2 = new Orchestrator({ persistPath, timeoutMs: 5000 });
+      const orch2 = openStore();
       expect(orch2.getTask(task.id)?.uiState).toEqual(SAMPLE_UI_STATE);
     });
   });
 
   describe("round-trip persistence", () => {
     it("writing then reading round-trips a sample UI state", async () => {
-      const task = await orchestrator.createTask("Round-trip test", "codex", "/tmp/repo", "main");
+      const task = await createTask("Round-trip test");
 
       await orchestrator.setTaskUIState(task.id, SAMPLE_UI_STATE);
 
       // Create a new orchestrator that loads from the same file
-      const orch2 = new Orchestrator({ persistPath, timeoutMs: 5000 });
+      const orch2 = openStore();
       const loaded = orch2.getTask(task.id);
 
       expect(loaded).toBeDefined();
@@ -193,7 +142,7 @@ describe("Orchestrator UI State persistence", () => {
     });
 
     it("round-trips partial UI state (only some fields set)", async () => {
-      const task = await orchestrator.createTask("Partial state", "codex", "/tmp/repo", "main");
+      const task = await createTask("Partial state");
 
       const partialState: PersistedChatUIState = {
         compactView: false,
@@ -202,7 +151,7 @@ describe("Orchestrator UI State persistence", () => {
 
       await orchestrator.setTaskUIState(task.id, partialState);
 
-      const orch2 = new Orchestrator({ persistPath, timeoutMs: 5000 });
+      const orch2 = openStore();
       const loaded = orch2.getTask(task.id);
 
       expect(loaded!.uiState).toEqual(partialState);
@@ -215,9 +164,9 @@ describe("Orchestrator UI State persistence", () => {
 
   describe("SQLite storage", () => {
     it("keeps tasks loadable when uiState is unset", async () => {
-      const task = await orchestrator.createTask("No UI state", "codex", "/tmp/repo", "main");
+      const task = await createTask("No UI state");
 
-      const orch2 = new Orchestrator({ persistPath, timeoutMs: 5000 });
+      const orch2 = openStore();
       const loaded = orch2.getTask(task.id);
 
       expect(loaded).toBeDefined();
@@ -226,7 +175,7 @@ describe("Orchestrator UI State persistence", () => {
     });
 
     it("round-trips sidebar hierarchy and pin metadata", async () => {
-      const parent = await orchestrator.createTask("Parent task", "codex", "/tmp/repo", "main");
+      const parent = await createTask("Parent task");
       await orchestrator.setTaskPinned(parent.id, true);
       await orchestrator.renameTask(parent.id, "Renamed parent");
       const child = orchestrator.createChildTaskForAgent(
@@ -238,7 +187,7 @@ describe("Orchestrator UI State persistence", () => {
       );
       await orchestrator.persistTasks();
 
-      const orch2 = new Orchestrator({ persistPath, timeoutMs: 5000 });
+      const orch2 = openStore();
       const loadedParent = orch2.getTask(parent.id);
       const loadedChild = orch2.getTask(child.id);
 
@@ -258,8 +207,8 @@ describe("Orchestrator UI State persistence", () => {
     });
 
     it("can clear and reassign task parents", async () => {
-      const parent = await orchestrator.createTask("Parent", "codex", "/tmp/repo", "main");
-      const otherParent = await orchestrator.createTask("Other parent", "codex", "/tmp/repo", "main");
+      const parent = await createTask("Parent");
+      const otherParent = await createTask("Other parent");
       const child = orchestrator.createChildTaskForAgent(parent.id, "codex", "Child", "tests", "agent-2");
       await orchestrator.persistTasks();
 

@@ -91,7 +91,7 @@ test("tracking wizard commits literal selected files and preserves unrelated sta
     const beforeCommit = git(["rev-parse", "HEAD"]).toString();
     await page.getByRole("button", { name: "Commit", exact: true }).click();
     await expect.poll(() => git(["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);
-    await expect(page.getByText("Committed", { exact: false })).toBeVisible();
+    await expect(page.getByText(/^Committed/)).toBeVisible();
     expect(git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]).toString().split("\0").filter(Boolean).sort()).toEqual([".gitattributes", ...selected].sort());
     expect(git(["ls-files", "--stage", "-z", "--", "other.txt"])).toEqual(unrelated);
     expect(git(["show", "HEAD:other.txt"]).toString()).toBe("original\n");
@@ -327,7 +327,9 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
       const oid = git(["rev-parse", ":lfs.safetensors"]).toString().trim();
       git(["update-index", "--cacheinfo", `100755,${oid},lfs.safetensors`]);
     }
-    const index = readFileSync(path.join(source, ".git", "index"));
+    // Publication refreshes verified stat entries; pointer identities, modes and
+    // unrelated staging remain unchanged. Raw index cache bytes are not stable.
+    const index = git(["ls-files", "--stage", "-z"]);
     const untouched = readFileSync(path.join(source, "large.safetensors"));
     await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
     await expect.poll(async () => {
@@ -355,7 +357,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
     if (process.platform !== "win32") expect(statSync(path.join(source, "lfs.safetensors")).mode & 0o100).toBe(0o100);
     expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(untouched);
-    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
     await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
     await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(3);
     await expect(page.getByText("3 of 3 files materialized", { exact: true })).toBeVisible();
@@ -370,7 +372,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect(page.getByRole("alert").filter({ hasText: "Hydrate lfs.safetensors" })).toBeVisible();
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
-    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
     await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
     const partial = page.getByText("1 of 2 files materialized", { exact: true });
     await expect(partial.locator("..").getByText("Materialization failed", { exact: true })).toBeVisible();
@@ -379,12 +381,12 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await page.getByRole("button", { name: /^Hydrate 1 file/ }).click();
     await expect(page.getByRole("main").getByText("Hydrated lfs.safetensors", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
-    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
 
     git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Commit mixed pointer selection"]);
     writeFileSync(path.join(source, "unrelated.txt"), "unrelated staged edit\n");
     git(["add", "--", "unrelated.txt"]);
-    const dehydrateIndex = readFileSync(path.join(source, ".git", "index"));
+    const dehydrateIndex = git(["ls-files", "--stage", "-z"]);
     const dehydrate = async (count: number) => {
       await page.getByRole("button", { name: new RegExp(`^Dehydrate ${count} file`) }).click();
       await page.getByRole("dialog", { name: "Dehydrate files?" }).getByRole("button", { name: "Dehydrate", exact: true }).click();
@@ -417,7 +419,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(pointers.get("staged.safetensors"));
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
     if (process.platform !== "win32") expect(statSync(path.join(source, "lfs.safetensors")).mode & 0o100).toBe(0o100);
-    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(dehydrateIndex);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(dehydrateIndex);
     expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(untouched);
     await page.screenshot({ path: test.info().outputPath("bulk-crab-lfs-dehydration.png") });
     const primary = page.getByRole("navigation", { name: "Primary", exact: true });
@@ -436,7 +438,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
-    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(dehydrateIndex);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(dehydrateIndex);
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

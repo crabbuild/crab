@@ -1,4 +1,3 @@
-import { HostKeyPrompts } from "./components/ssh/HostKeyPrompts";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace, repositoryKey } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
@@ -506,8 +505,7 @@ function Shell() {
     prevRepoIdsRef.current = state.repos.map((r) => r.repo_id);
   }, [state.repos]);
 
-  // handleNavigate, handleBack, handleForward use the nav instance declared above.
-  const handleNavigate = useCallback((entry: NavEntry) => {
+  const handleViewChanged = useCallback((entry: NavEntry) => {
     setTerminalRepoId(entry.view === "terminal" ? active?.repo_id ?? null : null);
     if (entry.view === "terminal") setTerminalActivated(true);
     // Restored entries already own this position in history. Compare routes
@@ -516,6 +514,10 @@ function Shell() {
     // Attach the current workspace repo path to the entry for cross-repo nav.
     nav.push({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
   }, [nav, activeWorkspaceRelativePath, active?.repo_id]);
+
+  const handleNavigate = useCallback((entry: NavEntry) => {
+    nav.navigate({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
+  }, [nav, activeWorkspaceRelativePath]);
 
   const handleBack = useCallback(() => {
     nav.back();
@@ -574,8 +576,8 @@ function Shell() {
             <RepoDetail
               key={active.repo_id}
               repo={active}
-              navEntry={nav.current}
-              onNavigate={handleNavigate}
+              restoreEntry={nav.restoreEntry}
+              onNavigate={handleViewChanged}
               activityDrawerOpen={drawerOpen}
               onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
             />
@@ -626,7 +628,6 @@ function Shell() {
         }}
       />
       <ToastManager />
-      <HostKeyPrompts />
       <Welcome />
       {fuzzySwitcher.open && state.workspaces.length > 0 && (
         <FuzzySwitcher

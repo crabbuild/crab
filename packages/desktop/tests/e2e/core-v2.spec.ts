@@ -1,4 +1,4 @@
-import { test, expect, _electron as electron } from "@playwright/test";
+import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import * as path from "node:path";
@@ -7,6 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parse } from "yaml";
 import { call, packagedExecutable } from "./packaged-app";
+import { DaemonClient } from "../../electron/daemon/daemon-client";
+import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
+import { socketAddress } from "../../electron/daemon/socket-address";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -15,6 +18,52 @@ const nextVersion = prerelease
   ? `${coreVersion}-${prerelease.split(".")[0]}.${Number(prerelease.split(".")[1]) + 1}`
   : `${major}.${minor}.${patch + 1}`;
 
+
+async function closeFixtureTerminals(application: ElectronApplication, directory: string): Promise<void> {
+  const repoPath = realpathSync(directory);
+  const page = await application.firstWindow();
+  const sessions = await page.evaluate(repoPath => window.crab.termListDaemonSessions(repoPath), repoPath);
+  // App quit detaches durable PTYs. Explicitly terminate only this fixture's
+  // repository sessions before deleting directories their shells still own.
+  await page.evaluate(async ({ sessions, repoPath }) => {
+    await Promise.all(sessions.map(session => window.crab.termKillDaemonSession(session.daemonSessionId, repoPath)));
+  }, { sessions, repoPath });
+  await expect.poll(() => sessions.filter(session => {
+    if (!session.pid) throw new Error("Fixture terminal has no process identity");
+    try { process.kill(session.pid, 0); return true; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      return false;
+    }
+  }).map(session => session.pid), { timeout: 10_000 }).toEqual([]);
+}
+
+async function closeFixtureDaemon(home: string): Promise<void> {
+  // Only callers that created this HOME own its daemon. Tests inheriting the
+  // developer's HOME must leave that durable process running.
+  const socketDir = path.join(home, ".crab", "desktop", "daemon");
+  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
+  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
+  const client = new DaemonClient({
+    socketDir, daemonEntryPath: "",
+    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
+  });
+  try {
+    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
+  } finally { client.disconnect(); }
+  await expect.poll(() => {
+    try { process.kill(pid, 0); return false; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      return true;
+    }
+  }, { timeout: 10_000 }).toBe(true);
+  const address = socketAddress(`${base}.sock`);
+  if (process.platform !== "win32" && address !== `${base}.sock`) {
+    rmSync(path.dirname(address), { recursive: true });
+  }
+}
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
@@ -157,8 +206,8 @@ test("workflow commands stream output and surface failures through the packaged 
     expect(rendererErrors).toEqual([]);
   } finally {
     await application.close();
-    // Agent discovery probes can finish writing after Electron closes.
-    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+    await closeFixtureDaemon(home);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -206,7 +255,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Skills", exact: true })).toHaveCount(0);
     const agentDetection = await page.evaluate(() => window.crab.orchestrator.detectAgents());
-    expect(agentDetection.success).toBe(true);
+    if (!agentDetection.success || !agentDetection.agents) throw new Error(agentDetection.error ?? "Agent detection returned no result");
     await page.getByRole("button", { name: "Chat", exact: true }).click();
     if (!agentDetection.agents.some((agent: { available: boolean }) => agent.available)) {
       await page.getByRole("button", { name: "Skip for now", exact: true }).click();
@@ -354,7 +403,8 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
 
   } finally {
-    await application.close();
+    try { await closeFixtureTerminals(application, root); }
+    finally { await application.close(); }
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -369,7 +419,7 @@ test("terminal restore is isolated by profile and repository", async () => {
   mkdirSync(repository);
   execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
   const profile = path.join(root, "profile-a");
-  const env = { ...process.env, HOME: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
+  const env = { ...process.env, HOME: testHome, USERPROFILE: testHome, CRAB_CACHE_DIR: path.join(root, "cache") };
   let application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
   const savedLayout = { version: 1, tabs: [{ id: "old-tab", title: "Other repository shell", shell: "", cwd: path.join(root, "removed-repository") }], splits: [], activeTabIndex: 0 };
   try {
@@ -404,9 +454,10 @@ test("terminal restore is isolated by profile and repository", async () => {
     expect((await page.evaluate(() => window.crab.termRestoreState("other-repository"))).layout).toBeNull();
     expect(existsSync(path.join(testHome, ".crab-desktop", "terminal-state.json"))).toBe(false);
   } finally {
-    await application.close();
-    // Agent version probes can finish writing their isolated HOME after Electron exits.
-    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+    try { await closeFixtureTerminals(application, repository); }
+    finally { await application.close(); }
+    await closeFixtureDaemon(testHome);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -480,6 +531,16 @@ test("workspace sidebar filters, pins, remembers recents and restores collapse a
     const repositoryList = page.getByLabel("Repository list", { exact: true });
     await expect.poll(() => repositoryList.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
     const position = await repositoryList.evaluate(element => element.scrollTop);
+    const flushed = await page.evaluate(async () => {
+      await new Promise(requestAnimationFrame);
+      const list = document.querySelector<HTMLElement>('[aria-label="Repository list"]')!;
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+      list.scrollTop = list.scrollHeight;
+      window.dispatchEvent(new Event("beforeunload"));
+      return { visible: list.scrollTop, saved: Object.entries(localStorage).filter(([key]) => key.startsWith("crab.repoSidebarScroll.")).map(([, value]) => Number(value)) };
+    });
+    expect(flushed.saved).toContain(flushed.visible);
     await page.screenshot({ path: test.info().outputPath("workspace-sidebar-compact.png") });
     await application.close();
     application = await launch();
@@ -487,6 +548,13 @@ test("workspace sidebar filters, pins, remembers recents and restores collapse a
     await page.setViewportSize({ width: 880, height: 560 });
     await expect(region().getByRole("button", { name: "Pin repo-30", exact: true })).toBeAttached({ timeout: 15_000 });
     await expect.poll(() => page.getByLabel("Repository list", { exact: true }).evaluate(element => element.scrollTop)).toBeGreaterThan(position - 50);
+    await page.getByRole("textbox", { name: "Filter repositories", exact: true }).fill("repo-25");
+    await expect(region().getByRole("button", { name: "Pin repo-30", exact: true })).toHaveCount(0);
+    const filteredPositions = await page.evaluate(() => {
+      window.dispatchEvent(new Event("beforeunload"));
+      return Object.entries(localStorage).filter(([key]) => key.startsWith("crab.repoSidebarScroll.")).map(([, value]) => Number(value));
+    });
+    expect(filteredPositions).toContain(flushed.visible);
   } finally {
     await application.close();
     rmSync(root, { recursive: true, force: true });

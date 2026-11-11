@@ -13,6 +13,9 @@ import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { Orchestrator, Task } from "../electron/orchestrator";
+import { RpcRouter } from "../electron/ssh-router";
+import { CheckpointManager } from "../electron/orchestrator-checkpoints";
+import * as diff from "../electron/orchestrator-diff";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -56,7 +59,18 @@ vi.mock("node:util", async (importOriginal) => {
 
 // ─── Mock RPC Router ─────────────────────────────────────────────────────────
 
+const fixtureEndpoint = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:fixture" };
+
 class MockRpcRouter extends EventEmitter {
+  private readonly owner = {};
+  remoteEndpoint(_profileId: string) { return { ...fixtureEndpoint }; }
+  assertRemoteEndpoint = RpcRouter.prototype.assertRemoteEndpoint;
+  remoteChannelOwner(_profileId: string) { return this.owner; }
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (owner !== this.owner) return Promise.reject(new Error("Fixture channel changed"));
+    return this.sendToRemoteAgent(profileId, method, params);
+  }
+
   calls: Array<{ profileId: string; method: string; params: unknown }> = [];
   nextResult: unknown = {};
   shouldFail = false;
@@ -112,6 +126,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     branch: `agent/${id.slice(0, 8)}`,
     worktreePath: `/home/user/worktrees/agent-${id.slice(0, 8)}`,
     baseRef: "abc123def456",
+    baseBranch: "main",
     repoPath: "ssh://gpu-server/home/user/repos/ml-project",
     createdAt: Date.now(),
     events: [],
@@ -119,6 +134,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     todos: [],
     isRemote: true,
     remoteProfileId: "gpu-server",
+    remoteEndpoint: fixtureEndpoint,
     ...overrides,
   };
 
@@ -163,13 +179,34 @@ describe("Remote Apply/Discard", () => {
       timeoutMs: 60_000,
       rpcRouter: mockRouter as any,
     });
+    // Ref storage is qualified over real SSH separately; this fixture owns
+    // mutation receipts without inventing a native process transport.
+    const checkpoints = new CheckpointManager();
+    vi.spyOn(checkpoints, "cleanup").mockResolvedValue();
+    vi.spyOn(orchestrator, "checkpointManager").mockReturnValue(checkpoints);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     cleanupPath(persistPath);
   });
 
   describe("applyTask (remote)", () => {
+    it.each([true, false])("reports recovered Apply when source cleanup succeeds=%s", async removed => {
+      const task = injectRemoteTask(orchestrator);
+      const warnings: string[] = [];
+      orchestrator.on("orchestrator:error", ({ message }) => warnings.push(message));
+      mockRouter.nextResult = {
+        applied: true, worktree_removed: removed, branch_deleted: removed,
+        recovery_warning: "Check whether the post-merge hook completed.",
+        cleanup_error: removed ? null : "New source edits retained",
+      };
+      await orchestrator.applyTask(task.id);
+      expect({ status: task.status, warnings }).toEqual({ status: "applied", warnings: [removed
+        ? "Check whether the post-merge hook completed."
+        : "Task applied; remote cleanup needs attention: New source edits retained\nCheck whether the post-merge hook completed."] });
+    });
+
     it("sends task_apply RPC to the remote agent", async () => {
       const task = injectRemoteTask(orchestrator);
 
@@ -190,7 +227,7 @@ describe("Remote Apply/Discard", () => {
           repo_id: task.repoPath,
           task_id: task.id,
           branch: task.branch,
-          base_ref: task.baseRef,
+          base_branch: task.baseBranch,
           worktree_path: task.worktreePath,
         },
       });
@@ -240,16 +277,34 @@ describe("Remote Apply/Discard", () => {
     });
 
     it("does not send RPC for local tasks", async () => {
+      const apply = vi.spyOn(diff, "applyAll").mockResolvedValue({ success: true });
       const task = injectLocalTask(orchestrator);
 
       await orchestrator.applyTask(task.id);
 
       expect(mockRouter.calls).toHaveLength(0);
+      expect(apply).toHaveBeenCalledWith(task);
       expect(task.status).toBe("applied");
     });
   });
 
   describe("discardTask (remote)", () => {
+    it.each(["router", "profile"] as const)("cannot discard a remote workspace with missing %s ownership", async missing => {
+      const task = injectRemoteTask(orchestrator);
+      if (missing === "profile") delete task.remoteProfileId;
+      else (orchestrator as unknown as { rpcRouter: undefined }).rpcRouter = undefined;
+      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("Remote task repository endpoint is unavailable");
+      expect(task.status).not.toBe("discarded");
+    });
+
+    it.each(["apply", "discard"] as const)("does not record %s without a confirmed remote receipt", async operation => {
+      const task = injectRemoteTask(orchestrator);
+      mockRouter.nextResult = {};
+      const action = operation === "apply" ? orchestrator.applyTask(task.id) : orchestrator.discardTask(task.id);
+      await expect(action).rejects.toThrow(`Remote ${operation} was not confirmed`);
+      expect(["applied", "discarded"]).not.toContain(task.status);
+    });
+
     it("sends task_discard RPC to the remote agent", async () => {
       const task = injectRemoteTask(orchestrator);
 
@@ -297,15 +352,22 @@ describe("Remote Apply/Discard", () => {
       expect(events[0]).toEqual({ taskId: task.id, status: "discarded" });
     });
 
-    it("succeeds even if the remote RPC fails (best-effort)", async () => {
+    it("retains task state and reports a failed remote discard", async () => {
       const task = injectRemoteTask(orchestrator);
       mockRouter.shouldFail = true;
       mockRouter.failError = "SSH connection lost";
 
-      // Discard should NOT throw — it's best-effort for cleanup.
-      await orchestrator.discardTask(task.id);
+      await expect(orchestrator.discardTask(task.id)).rejects.toThrow("SSH connection lost");
+      expect(task.status).not.toBe("discarded");
+    });
 
-      expect(task.status).toBe("discarded");
+    it("preserves confirmed discard and reports incomplete branch cleanup", async () => {
+      const task = injectRemoteTask(orchestrator);
+      mockRouter.nextResult = { discarded: true, worktree_removed: true, branch_deleted: false, cleanup_error: "branch ref is locked" };
+      const errors: string[] = [];
+      orchestrator.on("orchestrator:error", value => errors.push(value.message));
+      await orchestrator.discardTask(task.id);
+      expect({ status: task.status, errors }).toEqual({ status: "discarded", errors: ["Task discarded; remote cleanup needs attention: branch ref is locked"] });
     });
 
     it("throws if task is not found", async () => {
@@ -343,7 +405,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Fix the bug",
@@ -377,7 +439,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-xyz" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-xyz", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Add feature",
@@ -411,7 +473,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-fail" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-fail", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Risky change",
@@ -437,7 +499,7 @@ describe("Remote Apply/Discard", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-disc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-disc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Experiment",

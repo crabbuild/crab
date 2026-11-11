@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSy
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Server, utils, type Connection } from "ssh2";
+import type { MessageBoxOptions, MessageBoxReturnValue } from "electron";
 import { call, packagedExecutable } from "./packaged-app";
 
 function keyPair() {
@@ -15,7 +16,7 @@ function keyPair() {
   return { privateKey, key, fingerprint: "SHA256:" + createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "") };
 }
 
-test("packaged SSH connection test gates credentials on visible host trust and detects rotation", async () => {
+test("packaged SSH connection test gates credentials on native host trust and detects rotation", async () => {
   test.setTimeout(90_000);
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-ssh-trust-"));
   const auth = keyPair();
@@ -66,6 +67,23 @@ test("packaged SSH connection test gates credentials on visible host trust and d
     execFileSync("git", ["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "SSH trust navigation fixture"], { cwd: source, env });
     application = await electron.launch({ executablePath: packagedExecutable(), env, args: [`--user-data-dir=${profile}`] });
     application.process().stderr?.on("data", data => { stderr = (stderr + data.toString()).slice(-48_000); });
+    // Script only the OS decision. The UI action, real SSH authentication and
+    // durable pins still use the packaged production trust/connection owners.
+    await application.evaluate(({ dialog }) => {
+      const state = globalThis as typeof globalThis & { fixtureHostTrust?: { options: MessageBoxOptions; reply: (result: MessageBoxReturnValue) => void } };
+      Object.defineProperty(dialog, "showMessageBox", { value: (_parent: unknown, options: MessageBoxOptions) => new Promise<MessageBoxReturnValue>(reply => { state.fixtureHostTrust = { options, reply }; }) });
+    });
+    const nativePrompt = async () => {
+      await expect.poll(() => application!.evaluate(() => (globalThis as typeof globalThis & { fixtureHostTrust?: { options: MessageBoxOptions } }).fixtureHostTrust?.options.title)).toMatch(/SSH host key/i);
+      return application!.evaluate(() => (globalThis as typeof globalThis & { fixtureHostTrust: { options: MessageBoxOptions } }).fixtureHostTrust.options);
+    };
+    const answer = async (response: number, checkboxChecked = false) => application!.evaluate((_electron, result) => {
+      const state = globalThis as typeof globalThis & { fixtureHostTrust?: { reply: (result: MessageBoxReturnValue) => void } };
+      const pending = state.fixtureHostTrust;
+      if (!pending) throw new Error("No native host-key request");
+      delete state.fixtureHostTrust;
+      pending.reply(result);
+    }, { response, checkboxChecked });
     const paths = await application.evaluate(({ app }) => ({ userData: app.getPath("userData"), userDataSwitch: app.commandLine.getSwitchValue("user-data-dir") }));
     expect(realpathSync(paths.userData)).toBe(realpathSync(profile));
     writeFileSync(test.info().outputPath("application-profile.json"), JSON.stringify(paths, null, 2));
@@ -87,23 +105,20 @@ test("packaged SSH connection test gates credentials on visible host trust and d
     await form.getByRole("textbox", { name: "Key file path", exact: true }).fill(authPath);
     const start = form.getByRole("button", { name: "Test SSH connection", exact: true });
     await start.click();
-    const trust = page.getByRole("dialog", { name: "Verify Host Key", exact: true });
-    await expect(trust.getByText(host.fingerprint, { exact: true })).toBeVisible();
-    await expect(trust.getByRole("button", { name: "Reject", exact: true })).toBeFocused();
-    await page.keyboard.press("Tab"); await expect(trust.getByRole("button", { name: "Accept", exact: true })).toBeFocused();
-    await page.keyboard.press("Tab"); await expect(trust.getByRole("button", { name: "Close", exact: true })).toBeFocused();
-    await page.screenshot({ path: test.info().outputPath("unknown-host-trust.png") });
+    const unknown = await nativePrompt();
+    expect(unknown).toMatchObject({ title: "Verify SSH host key", defaultId: 0, cancelId: 0, buttons: ["Reject", "Trust key"] });
+    expect(unknown.detail).toContain(host.fingerprint);
+    writeFileSync(test.info().outputPath("unknown-host-trust.json"), JSON.stringify(unknown, null, 2));
     expect(attempts).toBe(0);
-    await trust.getByRole("button", { name: "Reject", exact: true }).click();
-    await expect(form.getByRole("alert")).toContainText(/verification failed/i);
+    await answer(0);
+    await expect(form.getByRole("alert")).toContainText(/verification.*rejected/i);
     expect(attempts).toBe(0);
     await start.click();
-    await expect(trust).toBeVisible();
-    // Test Connection uses a five-second network deadline. Reviewing the
-    // actual dialog beyond it must neither authenticate nor expire that clock.
+    await nativePrompt();
+    // Reviewing trust does not consume the five-second network handshake budget.
     await page.waitForTimeout(5200);
     expect(attempts).toBe(0);
-    await trust.getByRole("button", { name: "Accept", exact: true }).click();
+    await answer(1);
     await expect(form.getByRole("alert")).toContainText("Connection successful");
     expect(attempts).toBeGreaterThan(0);
     const pins = JSON.parse(readFileSync(path.join(profile, "ssh-known-hosts.json"), "utf8")) as Array<{ fingerprint: string; port: number }>;
@@ -112,23 +127,23 @@ test("packaged SSH connection test gates credentials on visible host trust and d
     await start.click();
     await expect.poll(() => attempts).toBeGreaterThan(prior);
     await expect(form.getByRole("alert")).toContainText("Connection successful");
-    await expect(trust).toHaveCount(0);
+    expect(await application.evaluate(() => "fixtureHostTrust" in globalThis)).toBe(false);
     await closeServer(); attempts = 0;
     const rotated = keyPair(); await listen(rotated, port);
     await start.click();
-    const changed = page.getByRole("alertdialog", { name: /Host Key Changed/ });
-    await expect(changed.getByText(host.fingerprint, { exact: true })).toBeVisible();
-    await expect(changed.getByText(rotated.fingerprint, { exact: true })).toBeVisible();
-    await expect(changed.getByRole("button", { name: /Accept new key/ })).toBeDisabled();
-    await page.screenshot({ path: test.info().outputPath("changed-host-key.png") });
-    await changed.getByRole("button", { name: "Reject", exact: true }).click();
-    await expect(form.getByRole("alert")).toContainText(/verification failed/i);
+    const changed = await nativePrompt();
+    expect(changed).toMatchObject({ title: "SSH host key changed", defaultId: 0, cancelId: 0, checkboxChecked: false });
+    expect(changed.detail).toContain(host.fingerprint);
+    expect(changed.detail).toContain(rotated.fingerprint);
+    expect(changed.checkboxLabel).toBe("I verified that this key change is expected");
+    writeFileSync(test.info().outputPath("changed-host-trust.json"), JSON.stringify(changed, null, 2));
+    await answer(0);
+    await expect(form.getByRole("alert")).toContainText(/verification.*rejected/i);
     expect(attempts).toBe(0);
     expect(JSON.parse(readFileSync(path.join(profile, "ssh-known-hosts.json"), "utf8"))).toMatchObject([{ fingerprint: host.fingerprint }]);
     await start.click();
-    await expect(changed).toBeVisible();
-    await changed.getByRole("checkbox").check();
-    await changed.getByRole("button", { name: /Accept new key/ }).click();
+    await nativePrompt();
+    await answer(1, true);
     await expect(form.getByRole("alert")).toContainText("Connection successful");
     expect(JSON.parse(readFileSync(path.join(profile, "ssh-known-hosts.json"), "utf8"))).toMatchObject([{ fingerprint: rotated.fingerprint }]);
     await page.screenshot({ path: test.info().outputPath("verified-rotated-connection.png") });

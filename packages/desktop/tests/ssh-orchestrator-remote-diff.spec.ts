@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { Orchestrator, Task } from "../electron/orchestrator";
+import { RpcRouter } from "../electron/ssh-router";
 import { computeRemoteDiff, parseDiffOutput } from "../electron/orchestrator-diff";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
@@ -57,7 +58,18 @@ vi.mock("node:util", async (importOriginal) => {
 
 // ─── Mock RPC Router ─────────────────────────────────────────────────────────
 
+const fixtureEndpoint = { host: "fixture.example.invalid", port: 22, username: "fixture", hostKey: "SHA256:fixture" };
+
 class MockRpcRouter extends EventEmitter {
+  private readonly owner = {};
+  remoteEndpoint(_profileId: string) { return { ...fixtureEndpoint }; }
+  assertRemoteEndpoint = RpcRouter.prototype.assertRemoteEndpoint;
+  remoteChannelOwner(_profileId: string) { return this.owner; }
+  requestOnRemoteChannel(profileId: string, owner: object, method: string, params: unknown): Promise<unknown> {
+    if (owner !== this.owner) return Promise.reject(new Error("Fixture channel changed"));
+    return this.sendToRemoteAgent(profileId, method, params);
+  }
+
   calls: Array<{ profileId: string; method: string; params: unknown }> = [];
   nextResult: unknown = {};
   shouldFail = false;
@@ -120,6 +132,7 @@ function injectRemoteTask(orchestrator: Orchestrator, overrides: Partial<Task> =
     todos: [],
     isRemote: true,
     remoteProfileId: "gpu-server",
+    remoteEndpoint: fixtureEndpoint,
     ...overrides,
   };
 
@@ -302,18 +315,14 @@ describe("Remote Diff Computation", () => {
       );
     });
 
-    it("handles missing fields in the RPC response gracefully", async () => {
+    it("rejects an incomplete RPC response instead of inventing file identity", async () => {
       const task = injectRemoteTask(orchestrator);
 
-      // Simulate a response with missing optional fields.
       mockRouter.nextResult = {
         diff: "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1,2 @@\n hello\n+world\n",
       };
 
-      const diff = await computeRemoteDiff(task, mockRouter as any);
-
-      expect(diff.files).toHaveLength(1);
-      expect(diff.headRef).toBe("unknown");
+      await expect(computeRemoteDiff(task, mockRouter as any)).rejects.toThrow();
     });
   });
 
@@ -337,7 +346,7 @@ describe("Remote Diff Computation", () => {
       const remoteOrch = new RemoteOrchestrator(mockRouter as any, {} as any);
 
       // Create a task in the remote orchestrator.
-      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc" };
+      mockRouter.nextResult = { path: "/home/user/worktrees/task-abc", branch: "agent/remote-fixture", base_ref: "a".repeat(40) };
       const task = await remoteOrch.createTask({
         repoId: "ssh://gpu-server/home/user/repos/project",
         prompt: "Fix the bug",
@@ -357,6 +366,7 @@ describe("Remote Diff Computation", () => {
       expect(diffCall!.params).toMatchObject({
         repo_id: task.repoId,
         task_id: task.id,
+        worktree_path: task.worktreePath,
         branch: task.branch,
         base_ref: task.baseRef,
       });

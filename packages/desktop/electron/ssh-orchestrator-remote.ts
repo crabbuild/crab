@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import type { RpcRouter } from "./ssh-router";
 import type { SshSessionManager } from "./ssh-manager";
 import { parseRepoId } from "./ssh-types";
+import { confirmRemoteTaskOperation } from "./ssh-task-outcome";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ export interface RemoteOrchestratorEvents {
   "remote-task:activity": (payload: { taskId: string; event: unknown }) => void;
   "remote-task:diff-ready": (payload: { taskId: string; diff: string }) => void;
 }
+
 
 function branchNameFromBaseRef(baseRef: string): string | undefined {
   if (baseRef === "HEAD" || /^[0-9a-f]{7,40}$/i.test(baseRef)) {
@@ -115,7 +117,7 @@ export class RemoteOrchestrator extends EventEmitter {
     }
 
     const taskId = crypto.randomUUID();
-    const branch = `task/${taskId.slice(0, 8)}`;
+    const branch = `task/${taskId}`;
     const baseRef = params.baseRef ?? "HEAD";
 
     const task: RemoteTask = {
@@ -143,9 +145,17 @@ export class RemoteOrchestrator extends EventEmitter {
         repo_id: params.repoId,
         branch,
         base_ref: task.baseRef,
-      }) as { path: string };
+        task_id: taskId,
+      }) as { path: string; branch: string; base_ref: string };
 
+      if (!worktreeResult || typeof worktreeResult.path !== "string" || !worktreeResult.path.startsWith("/")
+        || typeof worktreeResult.branch !== "string" || !worktreeResult.branch
+        || typeof worktreeResult.base_ref !== "string" || !/^[a-f0-9]{40}$/.test(worktreeResult.base_ref)) {
+        throw new Error("Remote workspace creation returned an invalid path, branch or baseline");
+      }
       task.worktreePath = worktreeResult.path;
+      task.branch = worktreeResult.branch;
+      task.baseRef = worktreeResult.base_ref;
     } catch (err) {
       task.status = "failed";
       this.emitStatusChange(task);
@@ -193,10 +203,13 @@ export class RemoteOrchestrator extends EventEmitter {
   async computeDiff(taskId: string): Promise<string> {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
+    const worktreePath = task.worktreePath;
+    if (!worktreePath) throw new Error("Remote task has no saved workspace path");
 
     const result = await this.router.route(task.repoId, "task_compute_diff", {
       repo_id: task.repoId,
       task_id: taskId,
+      worktree_path: worktreePath,
       branch: task.branch,
       base_ref: task.baseRef,
     }) as { diff: string };
@@ -216,17 +229,20 @@ export class RemoteOrchestrator extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
-    await this.router.route(task.repoId, "task_apply", {
+    const result = await this.router.route(task.repoId, "task_apply", {
       repo_id: task.repoId,
       task_id: taskId,
       branch: task.branch,
       base_ref: task.baseRef,
       base_branch: task.baseBranch,
+      worktree_path: task.worktreePath,
     });
+    const warning = confirmRemoteTaskOperation(result, "apply");
 
     task.status = "applied";
     task.completedAt = Date.now();
     this.emitStatusChange(task);
+    if (warning) this.emit("remote-task:activity", { taskId, event: { type: "error", timestamp: Date.now(), error: warning } });
   }
 
   /**
@@ -236,16 +252,18 @@ export class RemoteOrchestrator extends EventEmitter {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
-    await this.router.route(task.repoId, "task_discard", {
+    const result = await this.router.route(task.repoId, "task_discard", {
       repo_id: task.repoId,
       task_id: taskId,
       branch: task.branch,
       worktree_path: task.worktreePath,
     });
+    const warning = confirmRemoteTaskOperation(result, "discard");
 
     task.status = "discarded";
     task.completedAt = Date.now();
     this.emitStatusChange(task);
+    if (warning) this.emit("remote-task:activity", { taskId, event: { type: "error", timestamp: Date.now(), error: warning } });
   }
 
   /**

@@ -6,7 +6,7 @@ import type { SafeStorage } from "electron";
 import type { StorageConnection, StorageConnectionInfo } from "./storage-connection-types";
 import { parseRepoId } from "./ssh-types";
 
-type Encryption = Pick<SafeStorage, "isEncryptionAvailable" | "encryptString" | "decryptString" | "getSelectedStorageBackend">;
+type Encryption = Pick<SafeStorage, "isAsyncEncryptionAvailable" | "encryptStringAsync" | "decryptStringAsync" | "getSelectedStorageBackend">;
 type Send = (method: string, params: unknown) => Promise<unknown>;
 type IdentityChanged = (keys: string[], state: "changed" | "removed") => Promise<void>;
 interface Vault { connections: StorageConnection[]; bindings: Record<string, string> }
@@ -91,70 +91,87 @@ function info({ id, name, provider, bucket, region, endpoint }: StorageConnectio
 }
 
 export class StorageConnections {
-  private mutations: Promise<unknown> = Promise.resolve();
+  private operations: Promise<unknown> = Promise.resolve();
   private cached: Vault | undefined;
   private inFlight = new Set<StorageConnection>();
   private sessions = new Map<string, RepositoryBinding>();
 
   constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform, private identityChanged: IdentityChanged, private sourceChanged?: (repoIds: string[]) => void) {}
 
-  private available(): boolean {
-    return this.encryption.isEncryptionAvailable() &&
-      !(this.platform === "linux" && this.encryption.getSelectedStorageBackend() === "basic_text");
+  private async available(): Promise<boolean> {
+    if (!await this.encryption.isAsyncEncryptionAvailable()) return false;
+    const backend = this.platform === "linux" ? this.encryption.getSelectedStorageBackend() : undefined;
+    return backend !== "basic_text" && backend !== "unknown";
   }
 
-  private requireEncryption(): void {
-    if (!this.available()) throw new Error("Unlock or configure your operating system keyring to use saved storage connections.");
+  private async requireEncryption(): Promise<void> {
+    if (!await this.available()) throw new Error("Unlock or configure your operating system keyring to use saved storage connections.");
   }
 
-  private async read(): Promise<Vault> {
+  private queued<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operations.then(operation);
+    this.operations = result.catch(() => {});
+    return result;
+  }
+
+  private read(): Promise<Vault> {
+    return this.queued(() => this.load());
+  }
+
+  private async load(): Promise<Vault> {
     if (this.cached) return structuredClone(this.cached);
     let bytes: Buffer;
     try { bytes = await readFile(this.file); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(this.cached ?? { connections: [], bindings: {} });
-      throw error;
-    }
-    // A concurrent initial read or commit may have published the vault while
-    // this read was in flight. Keep that authority and its source generations.
-    if (this.cached) return structuredClone(this.cached);
-    this.requireEncryption();
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { connections: [], bindings: {} }; throw error; }
+    await this.requireEncryption();
+    let vault: Vault;
+    let rotate: boolean;
     try {
-      const data: unknown = JSON.parse(this.encryption.decryptString(bytes));
+      const decrypted = await this.encryption.decryptStringAsync(bytes);
+      const data: unknown = JSON.parse(decrypted.result);
       if (!record(data) || !Array.isArray(data.connections) || !record(data.bindings)) throw new Error();
       const connections = data.connections.map(connection);
       const bindings: Record<string, string> = {};
       for (const [key, value] of Object.entries(data.bindings)) if (typeof value === "string") bindings[key] = value;
-      this.cached = { connections, bindings };
-      return structuredClone(this.cached);
+      vault = { connections, bindings };
+      rotate = decrypted.shouldReEncrypt;
     } catch { throw new Error("Could not unlock saved storage connections. Restore the device keyring before trying again."); }
+    // Rotation writes share the mutation queue: a read must not overwrite a
+    // connection saved while the native key provider was initializing.
+    if (rotate) await this.persist(vault);
+    else this.cached = vault;
+    return structuredClone(vault);
   }
 
   private mutate<T>(change: (vault: Vault) => T | Promise<T>): Promise<T> {
-    const operation = this.mutations.then(async () => {
-      this.requireEncryption();
-      const vault = await this.read();
+    return this.queued(async () => {
+      await this.requireEncryption();
+      const vault = await this.load();
       const before = { connections: vault.connections, bindings: { ...vault.bindings } };
       const result = await change(vault);
-      const encrypted = this.encryption.encryptString(JSON.stringify(vault));
-      await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-      const temporary = `${this.file}.${randomUUID()}`;
-      try {
-        await writeFile(temporary, encrypted, { mode: 0o600, flag: "wx" });
-        await rename(temporary, this.file);
-        this.cached = vault;
-        const affected: string[] = [];
-        for (const [repoId, session] of this.sessions) {
-          if (sameSource(selectedConnection(before, session.key), selectedConnection(vault, session.key))) continue;
-          session.generation++;
-          if (session.admitted !== undefined) affected.push(repoId);
-        }
-        if (affected.length) this.sourceChanged?.(affected);
-      } finally { await rm(temporary, { force: true }); }
+      await this.persist(vault);
+      // Publish source generations only after the encrypted vault is durable;
+      // an old capture must retire before a request can reuse the new binding.
+      const affected: string[] = [];
+      for (const [repoId, session] of this.sessions) {
+        if (sameSource(selectedConnection(before, session.key), selectedConnection(vault, session.key))) continue;
+        session.generation++;
+        if (session.admitted !== undefined) affected.push(repoId);
+      }
+      if (affected.length) this.sourceChanged?.(affected);
       return result;
     });
-    this.mutations = operation.catch(() => {});
-    return operation;
+  }
+
+  private async persist(vault: Vault): Promise<void> {
+    const encrypted = await this.encryption.encryptStringAsync(JSON.stringify(vault));
+    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const temporary = `${this.file}.${randomUUID()}`;
+    try {
+      await writeFile(temporary, encrypted, { mode: 0o600, flag: "wx" });
+      await rename(temporary, this.file);
+      this.cached = vault;
+    } finally { await rm(temporary, { force: true }); }
   }
 
   redactText(message: string): string {
@@ -221,7 +238,7 @@ export class StorageConnections {
       const vault = await this.read();
       const repoId = text(payload.repo_id);
       const selected_id = vault.bindings[this.sessions.get(repoId)?.key ?? repoId] ?? null;
-      return { connections: vault.connections.map(info), selected_id, secure_storage: this.available() };
+      return { connections: vault.connections.map(info), selected_id, secure_storage: await this.available() };
     }
     if (method === "storage_connections_save") {
       const next = connection(payload.connection);
@@ -302,7 +319,7 @@ export class StorageConnections {
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
     const capture = method === "files_materialize" || method === "files_dehydrate" || method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
-    const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
+    const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && await this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
       ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method));
     // Local browsing and app startup do not depend on an unlocked cloud keyring.
     const vault = needsAuth ? await this.read() : undefined;
@@ -316,7 +333,7 @@ export class StorageConnections {
     // Record explicit identity before opening or cloning. If encrypted storage
     // cannot be written, do not create a cloud session or an unbound checkout.
     if (explicit && opening && key) {
-      if (id || vault?.bindings[key] || this.available()) {
+      if (id || vault?.bindings[key] || await this.available()) {
         selected = await this.mutate(vault => {
           const current = id ? vault.connections.find(item => item.id === id) : undefined;
           if (id && !current) throw new Error("This repository's saved connection was removed. Select another connection in Storage settings.");

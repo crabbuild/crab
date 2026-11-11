@@ -244,6 +244,11 @@ timer:
 - **On graceful shutdown**: a final checkpoint is written before the
   daemon exits
 
+Authenticated shutdown requests, idle expiry and successful daemon replacement
+all delegate to the process owner. It closes the socket server, disposes history,
+quota and memory timers, then exits; the RPC acknowledgement precedes that work.
+Closing the desktop application still detaches its durable terminal sessions.
+
 Checkpoints are atomic (write to a temp file, then rename) and bounded
 to a single small JSON file per session. The history directory is
 pruned at startup to enforce a 7-day age cap and a 100 MB total size

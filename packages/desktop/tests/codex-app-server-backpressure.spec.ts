@@ -36,7 +36,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 99999,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),
@@ -198,7 +197,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
       // Third attempt succeeds
       serverWrite(stdout, {
         id: retryReq!.id,
-        result: { turnId: "turn_bp_1" },
+        result: { turn: { id: "turn_bp_1" } },
       });
 
       // Send turn/started notification

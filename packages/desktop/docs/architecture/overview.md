@@ -26,7 +26,7 @@ the UI, process management, and data operations.
                              │ IPC whitelist: 200+ methods
 ┌────────────────────────────▼───────────────────────────────────┐
 │                     MAIN PROCESS (Privileged)                  │
-│  Electron 33 · Node.js                                         │
+│  Electron 45 · Node 24                                         │
 │                                                                │
 │  ┌─────────────┐ ┌──────────────┐ ┌────────────────────────┐   │
 │  │ Agent       │ │ Orchestrator │ │ Terminal Pool          │   │
@@ -139,14 +139,14 @@ App Shutdown
 |-------|-----------|---------|
 | Renderer | React 18 | UI framework |
 | Renderer | Tailwind CSS 3 | Styling |
-| Renderer | Vite 5 | Build tool + HMR |
+| Renderer | Vite 8 | Build tool + HMR |
 | Renderer | TypeScript 5.9 | Type safety |
 | Renderer | @tanstack/react-virtual | Virtual scrolling |
 | Renderer | @xyflow/react | Workflow DAG editor |
 | Renderer | @xterm/xterm | Terminal emulator |
 | Renderer | Monaco Editor | Code editing + diffs |
 | Renderer | @pierre/trees | File tree rendering |
-| Main | Electron 33 | Desktop shell |
+| Main | Electron 45 / Node 24 | Desktop shell |
 | Main | node-pty | Terminal PTY |
 | Main | better-sqlite3 | Local persistence |
 | Kernel runtime | Jupyter Client (user's Python) | Authenticated protocol, readiness and kernel process ownership |

@@ -63,7 +63,7 @@ app.whenReady().then(async () => {
     });
     const profiles = { get: () => profile, list: () => [profile] };
     const remote = new RemoteTerminalManager(sessions, () => profile);
-    registerSshIpcHandlers(profiles, sessions, remote);
+    registerSshIpcHandlers(profiles, sessions, {}, { list: () => [], remove: () => false }, remote);
   }
   win = new BrowserWindow({ width: 1200, height: 820, title: 'Crab Terminal Recovery Verification', webPreferences: { preload: path.join(desktop, 'dist-electron/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   win.webContents.on('console-message', (_event, level, message) => { if (level >= 2) console.log('[renderer]', message); });

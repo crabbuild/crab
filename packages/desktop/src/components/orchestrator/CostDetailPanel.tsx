@@ -6,25 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Coins, Loader2, TrendingUp } from "lucide-react";
 
-// ── Types ───────────────────────────────────────────────────────────
-
-interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  timestamp: number;
-  turnId: string;
-}
-
-interface WorkspaceCost {
-  workspaceId: string;
-  agentType: string;
-  model: string;
-  usage: TokenUsage[];
-  estimatedCostUsd: number;
-  budgetLimitUsd?: number;
-}
+import type { CostTracker, WorkspaceCost } from "../../../electron/orchestrator-cost";
 
 interface Props {
   workspaceId: string;
@@ -38,7 +20,8 @@ function formatTokenCount(count: number): string {
   return String(count);
 }
 
-function formatCost(usd: number): string {
+function formatCost(usd: number | undefined): string {
+  if (usd === undefined) return "Unavailable";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(2)}`;
 }
@@ -52,30 +35,11 @@ function formatTimestamp(ts: number): string {
   });
 }
 
-/**
- * Estimate cost for a single turn using simplified pricing.
- * Uses the same logic as the electron CostTracker but client-side
- * for display purposes.
- */
-function estimateTurnCost(usage: TokenUsage): number {
-  // Approximate: $3/M input, $15/M output (Sonnet pricing as default)
-  const inputRate = 3.0 / 1_000_000;
-  const outputRate = 15.0 / 1_000_000;
-  const cacheReadRate = inputRate * 0.1;
-  const cacheWriteRate = inputRate * 1.25;
-
-  return (
-    usage.inputTokens * inputRate +
-    usage.outputTokens * outputRate +
-    usage.cacheReadTokens * cacheReadRate +
-    usage.cacheWriteTokens * cacheWriteRate
-  );
-}
-
 // ── Component ───────────────────────────────────────────────────────
 
 export function CostDetailPanel({ workspaceId }: Props) {
   const [costData, setCostData] = useState<WorkspaceCost | null>(null);
+  const [turnCosts, setTurnCosts] = useState<ReturnType<CostTracker["getPerTurnCosts"]>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -86,6 +50,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
       const result = await (window as any).crab.orchestrator?.getCost(workspaceId);
       if (result?.success) {
         setCostData(result.cost ?? null);
+        setTurnCosts(result.turns ?? []);
       } else if (result?.error) {
         setError(result.error);
       }
@@ -134,14 +99,14 @@ export function CostDetailPanel({ workspaceId }: Props) {
   }
 
   // Compute totals
-  const totalInput = costData.usage.reduce((s, u) => s + u.inputTokens, 0);
+  const totalInput = costData.usage.reduce((s, u) => s + u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens, 0);
   const totalOutput = costData.usage.reduce((s, u) => s + u.outputTokens, 0);
 
   // Compute cumulative costs for the chart
   const cumulativeCosts: number[] = [];
   let runningTotal = 0;
-  for (const usage of costData.usage) {
-    runningTotal += estimateTurnCost(usage);
+  for (const usage of turnCosts) {
+    runningTotal += usage.cost ?? 0;
     cumulativeCosts.push(runningTotal);
   }
   const maxCost = cumulativeCosts[cumulativeCosts.length - 1] || 1;
@@ -155,11 +120,11 @@ export function CostDetailPanel({ workspaceId }: Props) {
           <span>Cost Summary</span>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-3">
-          <SummaryCard label="Total Cost" value={formatCost(costData.estimatedCostUsd)} />
+          <SummaryCard label="Estimated Cost" value={formatCost(costData.estimatedCostUsd)} />
           <SummaryCard label="Tokens In" value={formatTokenCount(totalInput)} />
           <SummaryCard label="Tokens Out" value={formatTokenCount(totalOutput)} />
         </div>
-        {costData.budgetLimitUsd != null && (
+        {costData.budgetLimitUsd != null && costData.estimatedCostUsd !== undefined && (
           <div className="mt-2 text-[10px] text-gx-muted">
             Budget: {formatCost(costData.budgetLimitUsd)} · Used{" "}
             {Math.round((costData.estimatedCostUsd / costData.budgetLimitUsd) * 100)}%
@@ -168,13 +133,13 @@ export function CostDetailPanel({ workspaceId }: Props) {
       </div>
 
       {/* Cumulative Chart */}
-      <div className="border-b border-gx-border p-4">
+      {costData.estimatedCostUsd !== undefined && <div className="border-b border-gx-border p-4">
         <div className="mb-2 flex items-center gap-2 text-xs font-medium text-gx-text">
           <TrendingUp size={13} />
           <span>Cumulative Cost</span>
         </div>
         <CumulativeChart costs={cumulativeCosts} maxCost={maxCost} />
-      </div>
+      </div>}
 
       {/* Per-Turn Breakdown Table */}
       <div className="flex-1 p-4">
@@ -191,7 +156,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
               </tr>
             </thead>
             <tbody>
-              {costData.usage.map((usage, idx) => (
+              {turnCosts.map((usage, idx) => (
                 <tr
                   key={usage.turnId}
                   className="border-b border-gx-border/50 last:border-0 hover:bg-gx-surface/50 transition-colors"
@@ -199,13 +164,13 @@ export function CostDetailPanel({ workspaceId }: Props) {
                   <td className="px-2 py-1.5 font-mono text-gx-muted">{idx + 1}</td>
                   <td className="px-2 py-1.5 text-gx-text">{formatTimestamp(usage.timestamp)}</td>
                   <td className="px-2 py-1.5 text-right text-gx-text">
-                    {formatTokenCount(usage.inputTokens)}
+                    {formatTokenCount(usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)}
                   </td>
                   <td className="px-2 py-1.5 text-right text-gx-text">
                     {formatTokenCount(usage.outputTokens)}
                   </td>
                   <td className="px-2 py-1.5 text-right font-mono text-gx-accent">
-                    {formatCost(estimateTurnCost(usage))}
+                    {formatCost(usage.cost)}
                   </td>
                 </tr>
               ))}

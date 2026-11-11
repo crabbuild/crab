@@ -11,7 +11,6 @@ import {
   ChatInput,
   ChatInputAgent,
   ChatInputHandle,
-  ChatInputModel,
   ChatInputSubmission,
   ChatMode,
 } from "./ChatInput";
@@ -19,14 +18,14 @@ import { AgentIcon } from "./AgentIcon";
 import { SlashCommand } from "./SlashCommandDropdown";
 import { WorkspaceTemplate } from "./TemplatePicker";
 import { AgentWorkflowDefinition, HydratedWorktreeEntry, rpc } from "../../ipc";
-import { chatInputModelsForAgent, modelsForAgent, IntelligenceLevel } from "./model-catalog";
+import { useAgentModels } from "./model-catalog";
+import { ModelDiscoveryStatus } from "./ModelDiscoveryStatus";
 
 // ── Types ───────────────────────────────────────────────────────────
 
 interface DetectedAgent {
   type: string;
   name: string;
-  command: string;
   version?: string;
   available: boolean;
 }
@@ -42,7 +41,7 @@ export interface NewChatSubmission {
   agentType: string;
   model: string | null;
   /** Intelligence/reasoning effort level for the selected model. */
-  intelligence: IntelligenceLevel | null;
+  intelligence: string | null;
   baseBranch: string;
   worktree: WorktreeChoice;
   planFirst: boolean;
@@ -96,7 +95,9 @@ export function NewChatLanding({
 }: Props) {
   const [agentType, setAgentType] = useState(agents.find((a) => a.available)?.type ?? agents[0]?.type ?? "");
   const [selectedModel, setSelectedModel] = useState("");
-  const [intelligence, setIntelligence] = useState<IntelligenceLevel | null>(null);
+  const modelDiscovery = useAgentModels(agentType, repoPath);
+  const models = modelDiscovery.models;
+  const [intelligence, setIntelligence] = useState<string | null>(null);
   const [baseBranch, setBaseBranch] = useState(branches[0] ?? "main");
   const [worktreeChoice, setWorktreeChoice] = useState<WorktreeChoice>({ mode: "primary" });
   const [branchTouched, setBranchTouched] = useState(false);
@@ -150,14 +151,13 @@ export function NewChatLanding({
 
   // Set default intelligence when model changes.
   useEffect(() => {
-    const models = modelsForAgent(agentType);
-    const model = models.find((m) => m.value === selectedModel) ?? models.find((m) => m.tier === "recommended");
+    const model = models.find(model => model.value === selectedModel);
     if (model?.defaultIntelligence) {
       setIntelligence(model.defaultIntelligence);
     } else {
       setIntelligence(null);
     }
-  }, [selectedModel, agentType]);
+  }, [selectedModel, models]);
 
   // Update branch when branches list changes. The branch list is ordered with
   // the currently checked-out branch first, so keep that as the default until
@@ -181,17 +181,7 @@ export function NewChatLanding({
     [agents],
   );
 
-  const chatInputModels: ChatInputModel[] = useMemo(
-    () => chatInputModelsForAgent(agentType),
-    [agentType],
-  );
-
-  // Available intelligence levels for the currently selected model.
-  const availableLevels: IntelligenceLevel[] = useMemo(() => {
-    const models = modelsForAgent(agentType);
-    const model = models.find((m) => m.value === selectedModel) ?? models.find((m) => m.tier === "recommended");
-    return model?.intelligenceLevels ?? [];
-  }, [agentType, selectedModel]);
+  const availableLevels = models.find(model => model.value === selectedModel)?.intelligenceLevels ?? [];
 
   // Detect worktree/branch conflicts.
   const worktreeConflict = useMemo(() => {
@@ -265,6 +255,7 @@ export function NewChatLanding({
 
         {/* Main input area */}
         <div className="relative">
+          <ModelDiscoveryStatus discovery={modelDiscovery} />
           <ChatInput
             ref={chatInputRef}
             placeholder="Ask anything. / for commands, @ for context, # for files…"
@@ -274,12 +265,12 @@ export function NewChatLanding({
             agents={chatInputAgents}
             agentType={agentType}
             onAgentChange={setAgentType}
-            models={chatInputModels}
+            models={models}
             model={selectedModel}
             onModelChange={setSelectedModel}
             intelligenceLevels={availableLevels}
             intelligence={intelligence ?? undefined}
-            onIntelligenceChange={(level) => setIntelligence(level as IntelligenceLevel)}
+            onIntelligenceChange={(level) => setIntelligence(level)}
             mode={mode}
             onModeChange={setMode}
             slashCommands={effectiveCommands}

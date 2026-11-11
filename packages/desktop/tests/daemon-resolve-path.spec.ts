@@ -9,6 +9,13 @@ import {
   type ResolveDaemonPathOptions,
 } from "../electron/daemon/resolve-daemon-path";
 
+// These unit fixtures model logical package paths as ordinary directories.
+// Packaged smoke tests qualify Electron's actual ASAR loader separately.
+const runtime = process as { noAsar?: boolean };
+let previousNoAsar: boolean | undefined;
+beforeEach(() => { previousNoAsar = runtime.noAsar; runtime.noAsar = true; });
+afterEach(() => { if (previousNoAsar === undefined) delete runtime.noAsar; else runtime.noAsar = previousNoAsar; });
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

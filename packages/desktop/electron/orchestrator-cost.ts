@@ -2,7 +2,7 @@
  * Cost & Token Tracker for the Crab Desktop Orchestrator.
  *
  * Accumulates TokenUsage records per workspace, estimates costs
- * using a provider pricing table, enforces budget limits, and
+ * using provider-reported estimates, enforces budget limits, and
  * persists cost data to disk. Emits `budget-warning` when a
  * workspace exceeds its configured budget.
  */
@@ -21,6 +21,10 @@ export interface TokenUsage {
   cacheWriteTokens: number;
   timestamp: number;
   turnId: string;
+  model?: string;
+  estimatedCostUsd?: number;
+  /** Present only on provider cumulative snapshots, never on priced deltas. */
+  sessionId?: string;
 }
 
 export interface WorkspaceCost {
@@ -28,33 +32,14 @@ export interface WorkspaceCost {
   agentType: string;
   model: string;
   usage: TokenUsage[];
-  estimatedCostUsd: number;
+  estimatedCostUsd?: number;
   budgetLimitUsd?: number;
+  cumulativeUsage?: Record<string, TokenUsage>;
 }
 
 interface PersistedCostData {
   workspaces: WorkspaceCost[];
 }
-
-// ─── Pricing Table ───────────────────────────────────────────────────────────
-
-/**
- * Per-token pricing in USD. Updated periodically as providers change rates.
- * Cache read tokens are priced at 10% of input; cache write tokens at 125%
- * of input (following Anthropic's published pricing).
- *
- * Latest Claude rate card (April 2026): Opus 4.7 keeps the $5/$25 split
- * from 4.6; Sonnet 4.6 is $3/$15; Haiku 4.5 is $1/$5. GPT-5-family rates
- * match the published Codex pricing.
- */
-const PRICING: Record<string, { input: number; output: number }> = {
-  "claude-opus-4-7": { input: 5.0 / 1_000_000, output: 25.0 / 1_000_000 },
-  "claude-sonnet-4-6": { input: 3.0 / 1_000_000, output: 15.0 / 1_000_000 },
-  "claude-haiku-4-5": { input: 1.0 / 1_000_000, output: 5.0 / 1_000_000 },
-  "gpt-5.3-codex": { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 },
-  "gpt-5-codex": { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 },
-  "gpt-5.5": { input: 2.5 / 1_000_000, output: 10.0 / 1_000_000 },
-};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -104,11 +89,34 @@ export class CostTracker extends EventEmitter {
     entry.agentType = agentType;
     entry.model = model;
 
-    entry.usage.push(usage);
-    entry.estimatedCostUsd = this.calculateCost(entry);
+    let record = { ...usage, model };
+    if (usage.sessionId) {
+      const key = JSON.stringify([usage.sessionId, model]);
+      entry.cumulativeUsage ??= {};
+      const previous = entry.cumulativeUsage[key];
+      // A crashed provider may report zeroed final totals. Keep the prior
+      // high-water mark; resets receive a new session ID from the provider.
+      if (previous && (usage.estimatedCostUsd! < previous.estimatedCostUsd!
+        || usage.inputTokens < previous.inputTokens || usage.outputTokens < previous.outputTokens
+        || usage.cacheReadTokens < previous.cacheReadTokens || usage.cacheWriteTokens < previous.cacheWriteTokens)) return;
+      entry.cumulativeUsage[key] = record;
+      record = {
+        ...record, sessionId: undefined,
+        inputTokens: usage.inputTokens - (previous?.inputTokens ?? 0),
+        outputTokens: usage.outputTokens - (previous?.outputTokens ?? 0),
+        cacheReadTokens: usage.cacheReadTokens - (previous?.cacheReadTokens ?? 0),
+        cacheWriteTokens: usage.cacheWriteTokens - (previous?.cacheWriteTokens ?? 0),
+        estimatedCostUsd: usage.estimatedCostUsd! - (previous?.estimatedCostUsd ?? 0),
+      };
+      if (!record.inputTokens && !record.outputTokens && !record.cacheReadTokens && !record.cacheWriteTokens && !record.estimatedCostUsd) return;
+    }
+    entry.usage.push(record);
+    entry.estimatedCostUsd = entry.usage.every(record => record.estimatedCostUsd !== undefined)
+      ? entry.usage.reduce((sum, record) => sum + record.estimatedCostUsd!, 0)
+      : undefined;
 
     // Check budget and emit warning if exceeded.
-    if (entry.budgetLimitUsd != null && entry.estimatedCostUsd > entry.budgetLimitUsd) {
+    if (entry.budgetLimitUsd != null && entry.estimatedCostUsd !== undefined && entry.estimatedCostUsd > entry.budgetLimitUsd) {
       this.emit("budget-warning", {
         workspaceId,
         cost: entry.estimatedCostUsd,
@@ -138,7 +146,7 @@ export class CostTracker extends EventEmitter {
   getPerTurnCosts(workspaceId: string): Array<{
     turnId: string;
     timestamp: number;
-    cost: number;
+    cost?: number;
     inputTokens: number;
     outputTokens: number;
     cacheReadTokens: number;
@@ -147,27 +155,18 @@ export class CostTracker extends EventEmitter {
     const entry = this.costs.get(workspaceId);
     if (!entry) return [];
 
-    const pricing = PRICING[entry.model];
-    const inputRate = pricing?.input ?? PRICING["claude-opus-4-7"].input;
-    const outputRate = pricing?.output ?? PRICING["claude-opus-4-7"].output;
-    const cacheReadRate = inputRate * 0.1;
-    const cacheWriteRate = inputRate * 1.25;
-
-    return [...entry.usage]
-      .sort((a, b) => a.timestamp - b.timestamp)
-      .map((u) => ({
-        turnId: u.turnId,
-        timestamp: u.timestamp,
-        cost:
-          u.inputTokens * inputRate +
-          u.outputTokens * outputRate +
-          u.cacheReadTokens * cacheReadRate +
-          u.cacheWriteTokens * cacheWriteRate,
-        inputTokens: u.inputTokens,
-        outputTokens: u.outputTokens,
-        cacheReadTokens: u.cacheReadTokens,
-        cacheWriteTokens: u.cacheWriteTokens,
-      }));
+    const turns = new Map<string, { turnId: string; timestamp: number; cost?: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }>();
+    for (const usage of entry.usage) {
+      const turn = turns.get(usage.turnId);
+      if (!turn) { turns.set(usage.turnId, { ...usage, cost: usage.estimatedCostUsd }); continue; }
+      turn.cost = turn.cost !== undefined && usage.estimatedCostUsd !== undefined ? turn.cost + usage.estimatedCostUsd : undefined;
+      turn.inputTokens += usage.inputTokens;
+      turn.outputTokens += usage.outputTokens;
+      turn.cacheReadTokens += usage.cacheReadTokens;
+      turn.cacheWriteTokens += usage.cacheWriteTokens;
+      turn.timestamp = Math.max(turn.timestamp, usage.timestamp);
+    }
+    return [...turns.values()].sort((a, b) => a.timestamp - b.timestamp);
   }
 
   /** Sets the budget limit (in USD) for a workspace. */
@@ -193,22 +192,22 @@ export class CostTracker extends EventEmitter {
    * Checks whether a workspace has exceeded its budget.
    * Returns the current cost, limit, and whether the limit is exceeded.
    */
-  checkBudget(workspaceId: string): { exceeded: boolean; cost: number; limit: number } {
+  checkBudget(workspaceId: string): { exceeded: boolean; cost?: number; limit: number } {
     const entry = this.costs.get(workspaceId);
 
     if (!entry || entry.budgetLimitUsd == null) {
-      return { exceeded: false, cost: entry?.estimatedCostUsd ?? 0, limit: 0 };
+      return { exceeded: false, cost: entry ? entry.estimatedCostUsd : 0, limit: 0 };
     }
 
     return {
-      exceeded: entry.estimatedCostUsd > entry.budgetLimitUsd,
+      exceeded: entry.estimatedCostUsd !== undefined && entry.estimatedCostUsd > entry.budgetLimitUsd,
       cost: entry.estimatedCostUsd,
       limit: entry.budgetLimitUsd,
     };
   }
 
   /**
-   * Exports all cost data as a CSV string suitable for team billing.
+   * Export recorded tokens and provider estimates as CSV.
    * Columns: workspace_id, agent_type, model, total_input_tokens,
    * total_output_tokens, total_cache_read_tokens, total_cache_write_tokens,
    * estimated_cost_usd, budget_limit_usd, first_usage, last_usage.
@@ -256,7 +255,7 @@ export class CostTracker extends EventEmitter {
         totals.output,
         totals.cacheRead,
         totals.cacheWrite,
-        entry.estimatedCostUsd.toFixed(6),
+        entry.estimatedCostUsd?.toFixed(6) ?? "",
         entry.budgetLimitUsd?.toFixed(2) ?? "",
         firstUsage,
         lastUsage,
@@ -293,6 +292,10 @@ export class CostTracker extends EventEmitter {
       if (!data.workspaces || !Array.isArray(data.workspaces)) return;
 
       for (const entry of data.workspaces) {
+        // Totals come from per-record provider estimates. An older local
+        // price-table total cannot price records without provider evidence.
+        entry.estimatedCostUsd = entry.usage.every(record => record.estimatedCostUsd !== undefined)
+          ? entry.usage.reduce((sum, record) => sum + record.estimatedCostUsd!, 0) : undefined;
         this.costs.set(entry.workspaceId, entry);
       }
     } catch {
@@ -300,35 +303,4 @@ export class CostTracker extends EventEmitter {
     }
   }
 
-  // ─── Private Helpers ─────────────────────────────────────────────────────
-
-  /**
-   * Calculates the total estimated cost for a workspace based on its
-   * usage records and the pricing table. Falls back to the most expensive
-   * model pricing if the model is unknown.
-   */
-  private calculateCost(entry: WorkspaceCost): number {
-    const pricing = PRICING[entry.model];
-
-    // Fallback: use claude-opus pricing (most expensive) for unknown models.
-    const inputRate = pricing?.input ?? PRICING["claude-opus-4-7"].input;
-    const outputRate = pricing?.output ?? PRICING["claude-opus-4-7"].output;
-
-    // Cache read tokens are discounted (10% of input rate).
-    const cacheReadRate = inputRate * 0.1;
-    // Cache write tokens are slightly more expensive (125% of input rate).
-    const cacheWriteRate = inputRate * 1.25;
-
-    let totalCost = 0;
-
-    for (const usage of entry.usage) {
-      totalCost +=
-        usage.inputTokens * inputRate +
-        usage.outputTokens * outputRate +
-        usage.cacheReadTokens * cacheReadRate +
-        usage.cacheWriteTokens * cacheWriteRate;
-    }
-
-    return totalCost;
-  }
 }

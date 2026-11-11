@@ -277,6 +277,28 @@ describe("CodexRpcClient", () => {
   });
 
   describe("close()", () => {
+    it("rejects requests immediately when the server closes stdout", async () => {
+      const { client, stdout } = createTestClient();
+      const pending = client.send("thread/start");
+      stdout.emit("end");
+      await expect(pending).rejects.toThrow("transport closed");
+    });
+
+    it("rejects a request in backoff without waiting for its retry timer", async () => {
+      vi.useFakeTimers();
+      try {
+        const { client, stdin, stdout } = createTestClient();
+        const pending = client.send("thread/start");
+        const sent = JSON.parse(drainFrames(stdin)[0]);
+        serverWrite(stdout, { id: sent.id, error: { code: -32001, message: "Server overloaded" } });
+        client.close();
+        await expect(pending).rejects.toThrow("transport closed");
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("rejects all pending requests with 'transport closed'", async () => {
       const { client } = createTestClient({ requestTimeoutMs: 60_000 });
 

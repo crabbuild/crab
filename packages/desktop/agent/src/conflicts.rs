@@ -38,7 +38,7 @@ pub struct ApplyResolutionParams {
 /// Runs `git status --porcelain` and filters to conflict codes:
 /// UU, AA, DD, DU, UD, AU, UA.
 pub async fn conflict_list(work_dir: &Path) -> Result<Value> {
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["status", "--porcelain=v1", "-z"])
         .current_dir(work_dir)
         .output()
@@ -102,9 +102,9 @@ pub async fn conflict_read_sides(
     work_dir: &Path,
     params: &ConflictReadSidesParams,
 ) -> Result<Value> {
-    let base = read_stage(work_dir, 1, &params.path).await;
-    let current = read_stage(work_dir, 2, &params.path).await;
-    let incoming = read_stage(work_dir, 3, &params.path).await;
+    let base = read_stage(work_dir, 1, &params.path).await?;
+    let current = read_stage(work_dir, 2, &params.path).await?;
+    let incoming = read_stage(work_dir, 3, &params.path).await?;
 
     Ok(json!({
         "base": base,
@@ -133,7 +133,7 @@ pub async fn git_apply_resolution(
         .map_err(AgentError::Io)?;
 
     // Stage the resolved file.
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["add", "--", &params.path])
         .current_dir(work_dir)
         .output()
@@ -159,20 +159,19 @@ fn is_conflict_code(code: &str) -> bool {
 
 /// Read a file from a specific index stage via `git show :<stage>:<path>`.
 /// Returns `None` if the stage doesn't exist (command fails).
-async fn read_stage(work_dir: &Path, stage: u8, path: &str) -> Option<String> {
+async fn read_stage(work_dir: &Path, stage: u8, path: &str) -> Result<Option<String>> {
     let spec = format!(":{stage}:{path}");
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["show", &spec])
         .current_dir(work_dir)
         .output()
-        .await
-        .ok()?;
+        .await?;
 
     if !out.status.success() {
-        return None;
+        return Ok(None);
     }
 
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
 // ---- Tests -----------------------------------------------------------

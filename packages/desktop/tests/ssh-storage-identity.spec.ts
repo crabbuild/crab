@@ -17,8 +17,8 @@ async function fixture() {
   // Encryption primitives are qualified in storage-connections.spec.ts; this
   // fixture exercises real vault selection and transport composition.
   const storage = new StorageConnections(path.join(directory, "vault"), {
-    isEncryptionAvailable: () => true, getSelectedStorageBackend: () => "gnome_libsecret",
-    encryptString: value => Buffer.from(value), decryptString: value => value.toString(),
+    isAsyncEncryptionAvailable: async () => true, getSelectedStorageBackend: () => "gnome_libsecret",
+    encryptStringAsync: async value => Buffer.from(value), decryptStringAsync: async value => ({ result: value.toString(), shouldReEncrypt: false }),
   }, "darwin", async () => {});
   const frames: Array<{ id: number; method: string; params: Record<string, unknown> }> = [];
   const channel = Object.assign(new EventEmitter(), {

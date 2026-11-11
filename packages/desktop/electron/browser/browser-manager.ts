@@ -3,7 +3,7 @@ facade for guest registration, download lifecycle, anti-detection, permission
 routing, context-menu delegation, and viewport emulation. Keeping authority
 in one file avoids scattering the browser security boundary across modules. */
 
-import { app,clipboard,session,webContents,BrowserWindow,dialog,type Session } from 'electron';
+import { app,clipboard,ClipboardItem,session,webContents,BrowserWindow,dialog,type Session } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -652,7 +652,7 @@ class BrowserManager {
   }
 
   /**
-   * Full-page screenshot to clipboard using capturePage() + clipboard.writeImage().
+   * Copies the captured page as a PNG clipboard item after the native write succeeds.
    */
   async screenshotToClipboard(browserTabId: string): Promise<boolean> {
     const wcId = this.webContentsIdByTabId.get(browserTabId);
@@ -661,7 +661,8 @@ class BrowserManager {
     if (!guest || guest.isDestroyed()) return false;
     try {
       const image = await guest.capturePage();
-      clipboard.writeImage(image);
+      const png = new Blob([new Uint8Array(image.toPNG())], { type: 'image/png' });
+      await clipboard.write([new ClipboardItem({ 'image/png': png })]);
       return true;
     } catch {
       return false;

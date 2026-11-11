@@ -78,16 +78,28 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
         }));
         sftp.on("STAT", (request, name) => operation(request, async () => sftp.attrs(request, attrs(await fs.stat(inside(name))))));
         sftp.on("LSTAT", (request, name) => operation(request, async () => sftp.attrs(request, attrs(await fs.lstat(inside(name))))));
-        sftp.on("OPEN", (request, name, flags) => operation(request, async () => {
+        sftp.on("MKDIR", (request, name, attributes) => operation(request, async () => {
+          await fs.mkdir(inside(name), { mode: attributes.mode ?? 0o700 }); sftp.status(request, status.OK);
+        }));
+        sftp.on("SETSTAT", (request, name, attributes) => operation(request, async () => {
+          if (attributes.mode !== undefined) await fs.chmod(inside(name), attributes.mode);
+          sftp.status(request, status.OK);
+        }));
+        sftp.on("OPEN", (request, name, flags, attributes) => operation(request, async () => {
           const mode = utils.sftp.flagsToString(flags);
           if (!mode) throw new Error("Unsupported SFTP flags");
-          const file = await fs.open(inside(name), mode, 0o600), value = next++;
+          const file = await fs.open(inside(name), mode, attributes.mode ?? 0o600), value = next++;
           files.set(value, file); openFiles++;
           sftp.handle(request, handle(value));
         }));
         sftp.on("FSTAT", (request, value) => operation(request, async () => {
           const file = files.get(id(value)); if (!file) throw new Error("Missing SFTP handle");
           sftp.attrs(request, attrs(await file.stat()));
+        }));
+        sftp.on("FSETSTAT", (request, value, attributes) => operation(request, async () => {
+          const file = files.get(id(value)); if (!file) throw new Error("Missing SFTP handle");
+          if (attributes.mode !== undefined) await file.chmod(attributes.mode);
+          sftp.status(request, status.OK);
         }));
         sftp.on("WRITE", (request, value, offset, bytes) => operation(request, async () => {
           const file = files.get(id(value)); if (!file) throw new Error("Missing SFTP handle");
@@ -129,8 +141,10 @@ export async function sshFixture(base: string, environment: NodeJS.ProcessEnv) {
   server.on("error", (error: Error) => failures.push(error)); server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Missing SSH fixture address");
   return {
-    home, keyPath, port: address.port, commands, failures, requests,
-    verify: async (_hostname: string, _port: number, key: Buffer) => key.length === hostKey.getPublicSSH().length && timingSafeEqual(key, hostKey.getPublicSSH()),
+    home, keyPath, port: address.port, publicHostKey: hostKey.getPublicSSH(), commands, failures, requests,
+    verify: async (_hostname: string, _port: number, key: Buffer) => {
+      if (key.length !== hostKey.getPublicSSH().length || !timingSafeEqual(key, hostKey.getPublicSSH())) throw new Error("Unexpected SSH fixture host key");
+    },
     get uploadedBytes() { return uploadedBytes; }, get openFiles() { return openFiles; },
     get connectionAttempts() { return connectionAttempts; },
     setAccepting(value: boolean) { accepting = value; },

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SSH progress ownership qualification</title></head>
+<body><div id="root"></div><script type="module">
+import React, { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { DeployProgressIndicator } from "/src/components/ssh/DeployProgressIndicator.tsx";
+import "/src/index.css";
+const progress = new Set(); const failures = new Set();
+window.crab = { ssh: {
+  onDeployProgress(listener) { progress.add(listener); return () => progress.delete(listener); },
+  onAgentUnavailable(listener) { failures.add(listener); return () => failures.delete(listener); },
+} };
+window.sshProgressFixture = { ready: false, progress(payload) { for (const listener of progress) listener(payload); }, failure(payload) { for (const listener of failures) listener(payload); }, counts() { return [progress.size, failures.size]; } };
+function App() {
+  const [profile, select] = useState("first");
+  useEffect(() => { window.sshProgressFixture.ready = true; }, []);
+  return React.createElement("main", { style: { padding: 24, maxWidth: 720 } },
+    React.createElement("button", { onClick: () => select("first") }, "First profile"),
+    React.createElement("button", { onClick: () => select("second") }, "Second profile"),
+    React.createElement(DeployProgressIndicator, { profileId: profile }));
+}
+createRoot(document.getElementById("root")).render(React.createElement(App));
+</script></body></html>

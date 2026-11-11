@@ -472,7 +472,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
               title="Refresh"
               aria-label="Refresh branches"
             >
-              <RefreshCw size={14} />
+              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             </button>
           </span>
         }
@@ -525,7 +525,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
 
       {/* Body */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
-        {loading && (
+        {loading && !refs && (
           <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
             <Loader2 size={12} className="animate-spin" /> Loading branches…
           </div>
@@ -535,7 +535,8 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
             {error}
           </div>
         )}
-        {!loading && refs && (
+        {/* Preserve mounted actions and their geometry while background reads run. */}
+        {refs && (
           <div className="py-1">
             <TreeSection
               title="Local"
@@ -1025,9 +1026,8 @@ function BranchRow({
       await rpc.gitPushBranch(repoId, branch.name);
       onRefresh();
       onPushSuccess?.(branch.name);
-    } catch {
-      // Error handling is minimal — the parent error state will catch
-      // persistent issues on the next refresh.
+    } catch (error) {
+      publishToast({ kind: "error", title: `Push ${branch.name} failed`, body: error instanceof Error ? error.message : String(error), duration: 0 });
     } finally {
       setActionBusy(null);
     }
@@ -1045,8 +1045,8 @@ function BranchRow({
     try {
       await rpc.gitPullMode(repoId, { mode });
       onRefresh();
-    } catch {
-      // Swallow — refresh will show updated state.
+    } catch (error) {
+      publishToast({ kind: "error", title: `Pull ${branch.name} failed`, body: error instanceof Error ? error.message : String(error), duration: 0 });
     } finally {
       setActionBusy(null);
     }
@@ -1058,8 +1058,8 @@ function BranchRow({
     try {
       await rpc.gitFetchBranch(repoId, branch.name);
       onRefresh();
-    } catch {
-      // Swallow — refresh will show updated state.
+    } catch (error) {
+      publishToast({ kind: "error", title: `Fetch ${branch.name} failed`, body: error instanceof Error ? error.message : String(error), duration: 0 });
     } finally {
       setActionBusy(null);
     }
@@ -1118,7 +1118,7 @@ function BranchRow({
 
       {/* Hover-revealed action buttons */}
       {hasUpstream && (
-        <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <span className={clsx("relative flex shrink-0 items-center gap-0.5 transition-opacity", pullModeOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
           {ahead > 0 && (
             <button
               type="button"
@@ -1217,7 +1217,7 @@ function PullModeDropdown({ repoId, branchName, onSelect, onClose }: PullModeDro
   return (
     <div
       ref={ref}
-      className="absolute z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg"
+      className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg"
       role="menu"
       onClick={(e) => e.stopPropagation()}
     >

@@ -38,10 +38,12 @@ pub(crate) async fn output(
 
 fn git_command(root: &Path, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new("git");
+    // Captured reads must not refresh index stats during an explicit mutation.
     command
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

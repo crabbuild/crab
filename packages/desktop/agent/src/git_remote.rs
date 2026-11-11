@@ -100,8 +100,7 @@ pub async fn git_push(work_dir: &Path, params: &PushParams) -> Result<Value> {
 /// Run a git command and return `{ status: 0, stdout, stderr }` on
 /// success, or `AgentError::Cli` on non-zero exit.
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<Value> {
-    let mut command = crate::shellout::git_command();
-    crate::storage_auth::configure_command(&mut command)?;
+    let mut command = crate::shellout::git_command()?;
     let out = command
         .args(args)
         .current_dir(work_dir)

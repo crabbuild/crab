@@ -91,7 +91,7 @@ test("packaged SSH reader drains cancelled staging admission and materializes ex
         session.once("exec", (accept, reject, info) => {
           if (info.command !== "crab-desktop-agent") { reject(); return; }
           const stream = accept();
-          const child = spawn(agent, ["--index-dir", path.join(root, `index-${children.length}`)], { cwd: source, env, stdio: "pipe" });
+          const child = spawn(agent, [], { cwd: source, env, stdio: "pipe" });
           children.push(child);
           let stderr = "";
           child.stderr.on("data", data => { stderr = (stderr + data.toString()).slice(-8192); });

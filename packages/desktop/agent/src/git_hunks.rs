@@ -105,6 +105,10 @@ pub async fn diff_index_patch(
     let mut args: Vec<String> = vec![
         "diff".into(),
         "--no-color".into(),
+        // These patches drive staging and apply; display drivers and one-way
+        // converters can omit paths or produce content Git cannot apply.
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
         // Binary files: emit a literal-patch so `git apply --cached`
         // can round-trip them. Text hunks still render the usual way.
         "--binary".into(),
@@ -113,7 +117,7 @@ pub async fn diff_index_patch(
         args.push("--".into());
         args.push(p.to_owned());
     }
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(&args)
         .current_dir(work_dir)
         .output()
@@ -144,6 +148,8 @@ pub async fn diff_cached_patch(work_dir: &Path, path: Option<&str>) -> Result<Va
         "diff".into(),
         "--cached".into(),
         "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
         // Same rationale as `diff_index_patch` — keep binary files
         // round-trippable via `git apply`.
         "--binary".into(),
@@ -152,7 +158,7 @@ pub async fn diff_cached_patch(work_dir: &Path, path: Option<&str>) -> Result<Va
         args.push("--".into());
         args.push(p.to_owned());
     }
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(&args)
         .current_dir(work_dir)
         .output()
@@ -261,7 +267,7 @@ async fn validate_anchors_against_index(work_dir: &Path, hunks: &[HunkAnchor]) -
         // Unstage patches come from `git diff --cached`, so the
         // "new side" of the hunk is the index content; that's what
         // we compare against for staleness detection.
-        let out = crate::shellout::git_command()
+        let out = crate::shellout::git_command()?
             .args(["show", &format!(":{}", h.path)])
             .current_dir(work_dir)
             .output()
@@ -517,7 +523,7 @@ async fn run_git_apply(work_dir: &Path, patch: &str, cached: bool, reverse: bool
     args.push("--unidiff-zero");
     args.push("-");
 
-    let mut child = crate::shellout::git_command()
+    let mut child = crate::shellout::git_command()?
         .args(&args)
         .current_dir(work_dir)
         .stdin(std::process::Stdio::piped())
@@ -714,6 +720,37 @@ mod tests {
             .and_then(|p| p.as_str())
             .map(|s| s.to_owned())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn staging_patches_bypass_display_drivers_and_converters() {
+        let (_directory, root) = git_init_repo();
+        write_file(&root, ".gitattributes", "file.txt diff=fixture\n");
+        seed_committed_file(&root, "file.txt", "original\n");
+        write_file(&root, "file.txt", "staged\n");
+        assert!(sh(&root, &["add", "file.txt"]).status.success());
+        write_file(&root, "file.txt", "working\n");
+        for key in ["diff.fixture.command", "diff.fixture.textconv"] {
+            assert!(
+                sh(&root, &["config", key, "desktop-diff-driver-must-not-run"])
+                    .status
+                    .success()
+            );
+        }
+        let working = fetch_patch(&root, Some("file.txt")).await;
+        let staged = diff_cached_patch(&root, Some("file.txt"))
+            .await
+            .expect("cached patch");
+        assert_eq!(
+            (
+                working.contains("-staged\n+working\n"),
+                staged["patch"]
+                    .as_str()
+                    .expect("patch")
+                    .contains("-original\n+staged\n")
+            ),
+            (true, true)
+        );
     }
 
     /// Parse the first hunk out of a unified `git diff` output for a

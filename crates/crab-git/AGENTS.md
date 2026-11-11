@@ -53,6 +53,10 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 
 `facade` enables the optional high-level gix dependency. `process` enables the shared `process::OwnedChild` group/job lifetime owner used by CLI and desktop. Neither is enabled by default. Git-spawning tests need Git on PATH; inspect locked dependency source before altering validation or process contracts.
 
+`index_stat` also uses `facade`. CLI and desktop publication share its locked
+stat-cache writer. Retain the stat captured during verification and fence native
+updates with the expected blob; never stamp a later external edit as clean.
+
 ## Verification
 
 `process::tests` covers Darwin exit/permission races. Process callers must stop

@@ -145,7 +145,9 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   ], []);
 
   const handleToolbarAction = useCallback(async (actionId: string) => {
-    if (actionId === "crab.track") {
+    if (actionId === "crab.push") {
+      setShowPush(true);
+    } else if (actionId === "crab.track") {
       const pattern = window.prompt("Enter file pattern to track (e.g. *.bin, models/):");
       if (!pattern) return;
       await executeCommand("crab.track", commandContext, pattern);
@@ -412,7 +414,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       ) : (
         <FilesPanel
           loading={loading}
-          error={error}
+          error={error ?? stagingStatsHook.error}
           phase={phase}
           untrackedFiles={untrackedFiles}
           stagingStats={stagingStats}
@@ -1144,84 +1146,83 @@ function FilesPanel({
       {loading && <div className="flex items-center gap-2 p-4 text-xs text-gx-muted"><Loader2 size={12} className="animate-spin" /> Scanning...</div>}
       {error && phase !== "tracking" && <div className="mx-4 mt-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{error}</div>}
 
-      {!loading && (
-        <div className="min-h-0 flex-1 overflow-auto">
-          {/* ── Staged in Crab section (with commit + push CTAs) ── */}
-          <StagedSection
-            stats={stagingStats}
-            loading={stagingStatsLoading}
-            gitStatusByPath={gitStatusByPath}
-            needsCommit={needsCommit}
-            hasUnpushedCommits={hasUnpushedCommits}
-            removingFiles={removingFiles}
-            onRemoveFile={handleRemoveFile}
-            onShowPush={onShowPush}
-            onCommit={handleCommit}
-          />
+      {/* Keep the commit draft mounted while scans refresh the file list. */}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {/* ── Staged in Crab section (with commit + push CTAs) ── */}
+        <StagedSection
+          stats={stagingStats}
+          loading={stagingStatsLoading}
+          gitStatusByPath={gitStatusByPath}
+          needsCommit={needsCommit}
+          hasUnpushedCommits={hasUnpushedCommits}
+          removingFiles={removingFiles}
+          onRemoveFile={handleRemoveFile}
+          onShowPush={onShowPush}
+          onCommit={handleCommit}
+        />
 
-          {/* ── Untracked section ── */}
-          {untrackedFiles.length > 0 && (
-            <div>
-              <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover" onClick={() => onSetExpandUntracked(!expandUntracked)}>
-                {expandUntracked ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-                <FileWarning size={11} className="text-gx-warn" />
-                Not Tracked ({untrackedFiles.length})
-              </button>
-              {expandUntracked && (
-                <div className="ml-6 border-l border-gx-border/30">
-                  {phase === "browse" && untrackedFiles.length > 1 && (
-                    <div className="flex items-center gap-3 border-b border-gx-border/50 px-4 py-1.5 text-[10px] text-gx-muted">
-                      <button type="button" className="hover:text-gx-text" onClick={onSelectAll}>Select all</button>
-                      <button type="button" className="hover:text-gx-text" onClick={onSelectNone}>Clear</button>
-                      {selected.size > 0 && <span className="ml-auto text-gx-accent">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
-                    </div>
-                  )}
-                  {viewMode === "list"
-                    ? untrackedFiles.map((f) => <FileRow key={f.path} file={f} selected={selected.has(f.path)} onToggle={() => onToggleSelect(f.path)} progress={trackingProgress.get(f.path)} selectable={phase === "browse"} onContextMenu={(e) => onFileContextMenu(e, f.path)} />)
-                    : viewMode === "tree"
-                    ? <TreeView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} progress={trackingProgress} selectable={phase === "browse"} onFileContextMenu={onFileContextMenu} />
-                    : <CardView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} selectable={phase === "browse"} />
-                  }
-                  {phase === "browse" && selected.size > 0 && (
-                    <div className="border-t border-gx-border/50 px-4 py-3">
-                      <button type="button" className="btn btn-primary text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</button>
-                      <p className="mt-1.5 text-[10px] text-gx-muted">Files will be chunked, deduplicated, and staged for push.</p>
-                    </div>
-                  )}
-                  {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-gx-accent"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── Tracking result ── */}
-          {phase === "tracked" && trackResult && (
-            <div className="mx-4 my-3 rounded border border-gx-success/30 bg-gx-success/5 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-gx-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
-              {trackResult.errors > 0 && <div className="mt-2 text-xs text-gx-error">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
-              <div className="mt-3 flex gap-2">
-                <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}><Upload size={11} /> Push</button>
-                <button type="button" className="btn text-xs" onClick={onReset}>Done</button>
+        {/* ── Untracked section ── */}
+        {untrackedFiles.length > 0 && (
+          <div>
+            <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover" onClick={() => onSetExpandUntracked(!expandUntracked)}>
+              {expandUntracked ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+              <FileWarning size={11} className="text-gx-warn" />
+              Not Tracked ({untrackedFiles.length})
+            </button>
+            {expandUntracked && (
+              <div className="ml-6 border-l border-gx-border/30">
+                {phase === "browse" && untrackedFiles.length > 1 && (
+                  <div className="flex items-center gap-3 border-b border-gx-border/50 px-4 py-1.5 text-[10px] text-gx-muted">
+                    <button type="button" className="hover:text-gx-text" onClick={onSelectAll}>Select all</button>
+                    <button type="button" className="hover:text-gx-text" onClick={onSelectNone}>Clear</button>
+                    {selected.size > 0 && <span className="ml-auto text-gx-accent">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
+                  </div>
+                )}
+                {viewMode === "list"
+                  ? untrackedFiles.map((f) => <FileRow key={f.path} file={f} selected={selected.has(f.path)} onToggle={() => onToggleSelect(f.path)} progress={trackingProgress.get(f.path)} selectable={phase === "browse"} onContextMenu={(e) => onFileContextMenu(e, f.path)} />)
+                  : viewMode === "tree"
+                  ? <TreeView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} progress={trackingProgress} selectable={phase === "browse"} onFileContextMenu={onFileContextMenu} />
+                  : <CardView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} selectable={phase === "browse"} />
+                }
+                {phase === "browse" && selected.size > 0 && (
+                  <div className="border-t border-gx-border/50 px-4 py-3">
+                    <button type="button" className="btn btn-primary text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</button>
+                    <p className="mt-1.5 text-[10px] text-gx-muted">Files will be chunked, deduplicated, and staged for push.</p>
+                  </div>
+                )}
+                {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-gx-accent"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
               </div>
-            </div>
-          )}
-          {phase === "error" && (
-            <div className="mx-4 my-3 space-y-2">
-              <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error"><XCircle size={12} /> {error}</div>
-              <button type="button" className="btn text-xs" onClick={onReset}>Try Again</button>
-            </div>
-          )}
+            )}
+          </div>
+        )}
 
-          {/* Empty */}
-          {untrackedFiles.length === 0 && !loading && !(stagingStats && (stagingStats.chunk_count ?? 0) > 0) && (
-            <div className="flex flex-col items-center justify-center p-8 text-center">
-              <FolderOpen size={32} className="mb-3 text-gx-muted/40" />
-              <div className="text-sm text-gx-text">No large files to track</div>
-              <div className="mt-1 text-xs text-gx-muted">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
+        {/* ── Tracking result ── */}
+        {phase === "tracked" && trackResult && (
+          <div className="mx-4 my-3 rounded border border-gx-success/30 bg-gx-success/5 p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-gx-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
+            {trackResult.errors > 0 && <div className="mt-2 text-xs text-gx-error">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
+            <div className="mt-3 flex gap-2">
+              <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}><Upload size={11} /> Push</button>
+              <button type="button" className="btn text-xs" onClick={onReset}>Done</button>
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+        {phase === "error" && (
+          <div className="mx-4 my-3 space-y-2">
+            <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error"><XCircle size={12} /> {error}</div>
+            <button type="button" className="btn text-xs" onClick={onReset}>Try Again</button>
+          </div>
+        )}
+
+        {/* Empty */}
+        {untrackedFiles.length === 0 && !loading && !error && !stagingStats?.files?.length && (
+          <div className="flex flex-col items-center justify-center p-8 text-center">
+            <FolderOpen size={32} className="mb-3 text-gx-muted/40" />
+            <div className="text-sm text-gx-text">No large files to track</div>
+            <div className="mt-1 text-xs text-gx-muted">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

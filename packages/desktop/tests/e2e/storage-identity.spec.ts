@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { AgentEvent } from "../../src/ipc";
-import { call, packagedExecutable } from "./packaged-app";
+import { call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 import type { RepoHandle } from "../../src/ipc";
 
@@ -135,8 +135,8 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     const saved = await page.evaluate(value => window.crab.ssh.saveProfile(value), { label, host: "127.0.0.1", port: remote.port, username: "fixture", remotePath: directories[0], authMethod: { type: "key" as const, keyPath: remote.keyPath }, autoDeployAgent: false, autoReconnect: false });
     const [alphaId, betaId] = directories.map(directory => `ssh://${saved.id}${directory}`);
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await prepareFixtureSsh(application!, remote);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
-    await page.getByRole("dialog", { name: "Verify Host Key", exact: true }).getByRole("button", { name: "Accept", exact: true }).click();
     await page.getByRole("button", { name: `Browse files on ${label}`, exact: true }).click();
     await page.getByRole("button", { name: "Open Repo", exact: true }).click();
     await expect(page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "alpha-project", exact: true })).toBeVisible({ timeout: 60_000 });

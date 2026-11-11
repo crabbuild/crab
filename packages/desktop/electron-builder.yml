@@ -24,9 +24,6 @@ asarUnpack:
 extraResources:
   - from: resources/native/${os}-${arch}
     to: agent
-  - from: resources/native/ssh-runtimes
-    to: ssh-runtimes
-    filter: ["*.json", "*.tar.gz"]
   - from: resources/shell-integration
     to: shell-integration
 beforePack: scripts/verify-native.cjs

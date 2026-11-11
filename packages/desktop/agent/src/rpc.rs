@@ -83,7 +83,7 @@ impl<T: Serialize> Notification<T> {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RpcError {
     pub code: i32,
     pub message: String,
@@ -217,6 +217,8 @@ impl From<crate::AgentError> for RpcError {
             | E::Cleanup { .. }
             | E::Preview { .. }
             | E::Other(_) => (1000, None),
+            #[cfg(unix)]
+            E::ApplyWorker(error) => return error.clone(),
         };
         Self {
             code,

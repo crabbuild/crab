@@ -51,6 +51,7 @@ class MockClientChannel extends EventEmitter {
 
 class MockClient extends EventEmitter {
   connect = vi.fn();
+  setNoDelay = vi.fn();
   end = vi.fn();
   destroy = vi.fn(() => { this.emit("close"); return this; });
   exec = vi.fn();
@@ -62,7 +63,7 @@ class MockClient extends EventEmitter {
 let mockClientInstances: MockClient[] = [];
 
 vi.mock("ssh2", () => ({
-  Client: vi.fn(() => {
+  Client: vi.fn(function () {
     const client = new MockClient();
     mockClientInstances.push(client);
     return client;
@@ -122,12 +123,12 @@ function nativeRuntime(manager: SshSessionManager) {
   let cached = false;
   const send = vi.fn(async (_profile: string, method: string, params: Record<string, unknown>): Promise<unknown> => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
   const replay = vi.fn(async () => {});
-  manager.configureAgentDeployment({
-    agentDeployer: { ensureAgent: vi.fn(async () => {
+  manager.setAgentDependencies({
+    createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent: vi.fn(async () => {
       const channel = new MockClientChannel();
       channel.end.mockImplementation(() => { channel.emit("close", 0); });
       channels.push(channel); return channel;
-    }) } as unknown as AgentDeployer,
+    }) }) as unknown as AgentDeployer,
     capabilityNegotiator: {
       getCached: () => cached ? capabilities : null,
       negotiate: async () => { cached = true; return capabilities; },
@@ -146,7 +147,7 @@ describe("SshSessionManager", () => {
   beforeEach(() => {
     mockClientInstances = [];
     process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock";
-    manager = new SshSessionManager();
+    manager = new SshSessionManager(async () => {});
   });
 
   afterEach(() => {
@@ -253,12 +254,12 @@ describe("SshSessionManager", () => {
       const channels: MockClientChannel[] = [];
       const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
       const send = vi.fn(async (_profile: string, method: string, params: { repo_id: string }) => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
-      manager.configureAgentDeployment({
-        agentDeployer: { ensureAgent: vi.fn(async () => {
+      manager.setAgentDependencies({
+        createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent: vi.fn(async () => {
           const channel = new MockClientChannel();
           channel.end.mockImplementation(() => { channel.emit("close", 0); });
           channels.push(channel); return channel;
-        }) } as unknown as AgentDeployer,
+        }) }) as unknown as AgentDeployer,
         capabilityNegotiator: { getCached: () => capabilities, negotiate: async () => capabilities, clearCache: vi.fn() } as unknown as CapabilityNegotiator,
         rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
       });
@@ -502,12 +503,12 @@ describe("SshSessionManager", () => {
       const initial = await connectProfile(manager, profile);
       let fail!: (error: Error) => void;
       const ensureAgent = vi.fn(() => new Promise<never>((_resolve, reject) => { fail = reject; }));
-      manager.configureAgentDeployment({
-        agentDeployer: { ensureAgent } as unknown as AgentDeployer,
+      manager.setAgentDependencies({
+        createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent }) as unknown as AgentDeployer,
         capabilityNegotiator: { clearCache: vi.fn() } as unknown as CapabilityNegotiator,
         rpcRouter: { clearQueue: vi.fn() } as unknown as RpcRouter,
       });
-      profile.autoDeployAgent = true;
+      manager.getConnection(profile.id)!.profile.autoDeployAgent = true;
       initial.emit("end");
       await vi.advanceTimersByTimeAsync(1000);
       const replacement = mockClientInstances.at(-1)!;

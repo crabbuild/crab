@@ -1,7 +1,7 @@
 # Desktop large-file completion
 
-The interface may expose fewer navigation destinations; the capabilities remain
-complete. Completion requires a user action, a real native/storage side effect,
+The interface may expose fewer navigation destinations. That does not reduce
+the required capabilities. Completion requires a user action, a real native/storage side effect,
 and an accurate visible result. Compilation and mocked tests alone do not prove
 completion. This record tracks implementation and qualification separately. The acceptance
 matrix and remaining priorities below are the current scope; checkpoint sections
@@ -15,23 +15,23 @@ record historical evidence rather than separate work queues.
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
-| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. The complete lifecycle, missing directory trees and extensions/profiles remain open. |
+| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. A continuous packaged macOS Crab/LFS track, stage, commit, push, lazy-clone, cold-hydrate, small-edit, fetch/pull, literal-path rename and removal sequence is qualified against writable RustFS. Safe binary discard, missing directory trees and extensions/profiles remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
-| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. Full lifecycle, dedup, interruption/restart and cross-platform/provider evidence remain required. |
+| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Safe discard, missing directory trees, cold interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
 
-Work through the P0 rows in order. Prove one full Crab and LFS workflow through
-Files, Activity and Settings before expanding the format or platform matrix.
+Work through the P0 rows in order. Extend the qualified Crab/LFS workflow
+through Files, Activity and Settings before expanding the format or platform matrix.
 The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Tracking and selected commits are qualified below. Next prove one continuous UI track, stage, commit, push, fetch/pull and lazy-clone sequence for both formats against writable storage, including exact identities, small-edit Crab deduplication and unrelated-index preservation. Repeat after editing, renaming or removing a file. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
+| P0 | Close remaining working-tree lifecycle gaps | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | The continuous edit/publish/synchronize sequence now proves exact Crab/LFS bytes, cold reconstruction, small-edit Crab deduplication and unrelated-index preservation against writable storage. Rename/removal now also preserve exact bytes, clean clone status and unrelated staging, with no additional Crab xorbs for the rename/delete push. Next qualify safe whole-file binary discard/restore and missing parent directories. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
 | P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
-| P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Cover removal during SDK opening, real jump-host cancellation and repeated shutdown. |
+| P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
 | P1 | Complete advanced repository workflows | Existing provider mutations, [captured diffs](../agent/src/repository/content/diff.rs) and workspace operation owners. | Finish standalone editor RPC parity and task-worktree ownership. Qualify LFS migration, extensions and supported locks, ordinary Git captures, review and mode diffs, plain Git patch cancellation and crash drafts. Distinguish optional SDK configuration absence from missing content objects. |
 | P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Load picker profiles from the canonical `crab.toml` policy, removing the retired `.crab/prefetch.toml` parser. Complete remaining format comparisons. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
@@ -40,19 +40,88 @@ File details, Activity and Settings remain the consolidation points. Reuse one
 captured read/reconstruction path, one vault, one repository operation owner and
 the existing cache. Fewer navigation destinations must not remove capabilities
 or hide unsupported actions. Each row closes with user action → real side effect
-→ visible result, including failure and cleanup. Full Crab/LFS round trips,
-multi-GiB bounds, small-edit dedup, cold interruption/restart, corrupt/missing
-objects and the cross-OS/provider matrix remain release gates for the whole
-feature; a successful preview smoke does not substitute for them.
+→ visible result, including failure and cleanup. The qualified macOS Crab/LFS
+round trip and small-edit dedup are bounded results. Multi-GiB bounds, cold
+interruption/restart, corrupt/missing objects, published SSH runtime downloads
+and the cross-OS/provider matrix remain release gates for the whole feature.
 
 Consolidate each opportunity at its existing owner: keep selection and file
 details in Files, transfer outcomes and retry in Activity, and credentials,
-offline retention and budgets in Settings. The next lifecycle test should reuse
-the writable RustFS qualification fixture rather than the read-only two-store
-identity proxy. Only after that sequence passes should transfer interruption
-and restart be added to the same workflow. This keeps one ordered queue instead
-of separate feature, UI and platform backlogs. P1 work can reuse that fixture
-once its own P0 owner and failure behavior are qualified.
+offline retention and budgets in Settings. The continuous lifecycle test reuses
+the writable RustFS qualification fixture. Extend it with safe discard, missing
+directory trees and transfer interruption/restart; keep the read-only two-store proxy for identity
+isolation. This keeps one ordered queue instead of separate feature, UI and
+platform backlogs. P1 work can reuse that fixture once its own P0 owner and
+failure behavior are qualified.
+
+## Current qualified boundary
+
+The combined `crab-v2` native task/process runtime and this branch pass the
+packaged macOS arm64 writable-store lifecycle. Both Crab and LFS files pass
+track → stage → scoped commit → push → lazy clone → cold hydrate → small edit →
+stage/commit/push → fetch/pull/hydrate. The extension renames the Crab file to a
+literal bracket path, deletes the LFS file, publishes and synchronizes those
+changes, then verifies the renamed content and clean clone status. Unrelated
+staging survives throughout. The test compares captured chunk identities and
+actual newly stored xorb bytes; these are storage measurements, not network
+transfer counters. Rename/removal adds no Crab xorbs.
+
+The same test refreshes branch metadata while the Pull menu is open, then
+performs a real pull. Branch refresh retains the tree and action geometry;
+keyboard focus and an open menu retain visible actions. Global Settings commands
+reach the mounted repository instead of only recording a history observation.
+Reopening the repository queries capabilities for its current native session. Only pending requests for
+the same session are shared, and stale responses cannot enable a replacement.
+
+The current SSH deployment owner consumes an exact-version, exact-target
+CLI/sidecar pair from official release assets. It verifies the device cache and
+immutable remote install; development uses the native build directory. The old
+archive catalog and renderer-owned host-trust prompts are retired. A parented
+native dialog owns trust decisions, and each sidecar process owns a private
+native index. The dedicated trust test scripts the OS decision while exercising
+real SSH authentication, rejection, rotation and durable pins. Other SSH
+fixtures pin only their owned loopback server's public key in an isolated app
+profile; they do not claim to test the native dialog. Unreleased fixture runtimes
+are cached through the actual resolver from the build's hashed release outputs.
+The public download for this alpha version returned HTTP 404 during qualification;
+availability and download of every published runtime pair remain a release gate.
+
+Local process launch retains cancellation through asynchronous environment
+preparation and acknowledges initialization writes at the child pipe. The router
+retains source/session fencing, saved-identity injection and acknowledged native
+EOF cleanup. Native task processes capture one SSH channel and verified endpoint;
+they cannot move writes to a replacement. Apply workers inherit only the selected
+storage identity, including Git filters and hooks. A real SFTP/native-worker test
+checks the selected identity and rejects inherited ambient session credentials.
+
+The rebuilt package also passes six real-store preview/tracking and saved-identity
+cases, including SSH cold reads, replacement/removal, restart and distinct
+same-URL snapshots. Workspace settings remain disabled for read-only snapshots.
+Hydration/dehydration assert pointer IDs, modes and unrelated staging; verified
+Git stat-cache updates are intentionally allowed. Eight packaged SSH cases also
+pass: paired deployment, real previews/materialization, cancellation, host-trust
+rejection/rotation, reconnecting edits, blocked-sibling metadata and saved reopen
+with local services both available and unavailable.
+
+Current proof includes 410 focused TypeScript cases, 21 native content cases,
+handshake method uniqueness, native process/shutdown cases, real SSH deployment
+and Apply worker execution, project types, serial native/renderer/Electron builds,
+packaging and producer/asset hash verification. Production native Clippy's
+`unwrap_used` gate passes on the combined base; older checkpoint failures at three
+base sites are historical. The repository still has no ESLint configuration,
+and broad test-tsconfig errors and the cross-platform/provider matrix are not
+qualified. Local packages are unsigned and credential fixtures use Electron's
+test keychain. These bounded results do not establish full completion.
+
+Resume the ordered P0 queue: safe discard/missing directories, durable Activity
+recovery and budgets, then remaining recovery parity. New formats and providers
+reuse those owners and their error/cleanup contract. Evidence is recorded in
+`lifecycle-qualified-lifecycle.log`, `desktop-lifecycle-proof/`,
+`lifecycle-qualified-two-store.log`, `selected-tracking-remote-proof/`,
+`lifecycle-qualified-ssh.log`, `lifecycle-final-ssh-proof/`,
+`lifecycle-integration-focused-final.log`, `lifecycle-integration-native-content.log`,
+`lifecycle-integrated-native-ssh.log` and `lifecycle-qualified-preflight.json`
+in the external build directory.
 
 ## Selected tracking and commit checkpoint
 

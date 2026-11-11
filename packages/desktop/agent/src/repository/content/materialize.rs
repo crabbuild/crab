@@ -4,9 +4,11 @@ use std::time::{Duration, Instant};
 use super::*;
 
 pub(super) struct WorkingPointer {
+    root: PathBuf,
     requested: PathBuf,
     path: PathBuf,
-    original: Option<(Bytes, Option<SystemTime>)>,
+    original: Option<std::fs::Metadata>,
+    bytes: Bytes,
     index: Option<IndexPointer>,
 }
 
@@ -205,9 +207,17 @@ impl Dehydration {
                 }
                 temporary.as_file().set_permissions(current.permissions())?;
                 scope.check()?;
-                Ok(self.bytes.len() as u64)
+                let update = crab_git::index_stat::IndexStatUpdate::from_file(
+                    PathBuf::from(&self.index.path),
+                    temporary.as_file(),
+                    &self.bytes,
+                )
+                .map_err(std::io::Error::other)?;
+                Ok((self.bytes.len() as u64, update))
             })();
-            publish(temporary, path, true, prepared)
+            let (written, update) = publish(temporary, path, true, prepared)?;
+            refresh_stat_cache(&self.index.root, update);
+            Ok(written)
         })
         .await
         .map_err(std::io::Error::other)?
@@ -259,21 +269,24 @@ fn unchanged_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool
 
 impl WorkingPointer {
     pub(super) fn capture(
+        root: PathBuf,
         requested: PathBuf,
         path: PathBuf,
         bytes: Bytes,
         metadata: std::fs::Metadata,
     ) -> Self {
         Self {
+            root,
             requested,
             path,
-            original: Some((bytes, metadata.modified().ok())),
+            original: Some(metadata),
+            bytes,
             index: None,
         }
     }
 
     fn check(&self) -> Result<Option<std::fs::Permissions>> {
-        let Some((original, modified)) = &self.original else {
+        let Some(original) = &self.original else {
             let parent = self.requested.parent().ok_or_else(changed)?;
             if std::fs::canonicalize(parent)?.join(self.requested.file_name().ok_or_else(changed)?)
                 != self.path
@@ -288,17 +301,17 @@ impl WorkingPointer {
         };
         let metadata = std::fs::symlink_metadata(&self.requested)?;
         if !metadata.is_file()
-            || metadata.modified().ok() != *modified
-            || metadata.len() != original.len() as u64
+            || metadata.modified().ok() != original.modified().ok()
+            || metadata.len() != self.bytes.len() as u64
             || std::fs::canonicalize(&self.requested)? != self.path
         {
             return Err(changed());
         }
-        let mut bytes = Vec::with_capacity(original.len() + 1);
+        let mut bytes = Vec::with_capacity(self.bytes.len() + 1);
         std::fs::File::open(&self.requested)?
-            .take(original.len() as u64 + 1)
+            .take(self.bytes.len() as u64 + 1)
             .read_to_end(&mut bytes)?;
-        if bytes != *original {
+        if bytes != self.bytes {
             return Err(changed());
         }
         Ok(Some(metadata.permissions()))
@@ -332,6 +345,11 @@ impl FileSource {
                     ));
                 };
                 let oid = oid.ok_or_else(changed)?;
+                let len = command::blob_size(root, &oid, &scope).await?;
+                if len >= crab_git::MAX_LFS_POINTER_SIZE as u64 {
+                    return Err(changed());
+                }
+                let bytes = command::blob(root, &oid, 0, len as usize, len, &scope).await?;
                 let mut source = Self::git_blob(repo, root, oid.clone(), scope).await?;
                 let Some(Source::Pointer { target, .. }) = Arc::get_mut(&mut source.source) else {
                     return Err(AgentError::Other(
@@ -346,9 +364,11 @@ impl FileSource {
                     ));
                 }
                 *target = Some(WorkingPointer {
+                    root: root.into(),
                     path: parent.join(requested.file_name().ok_or_else(changed)?),
                     requested,
                     original: None,
+                    bytes,
                     index: Some(IndexPointer {
                         root: root.into(),
                         path: path.into(),
@@ -431,13 +451,34 @@ impl FileSource {
                         file.set_permissions(permissions)?;
                     }
                 }
-                Ok::<_, AgentError>(written)
+                let relative = target
+                    .requested
+                    .strip_prefix(&target.root)
+                    .map_err(std::io::Error::other)?;
+                let update = crab_git::index_stat::IndexStatUpdate::from_file(
+                    relative.into(),
+                    temporary.as_file(),
+                    &target.bytes,
+                )
+                .map_err(std::io::Error::other)?;
+                Ok::<_, AgentError>((written, update))
             })();
-            publish(temporary, &target.path, target.original.is_some(), prepared)
+            let (written, update) =
+                publish(temporary, &target.path, target.original.is_some(), prepared)?;
+            refresh_stat_cache(&target.root, update);
+            Ok(written)
         })
         .await
         .map_err(std::io::Error::other)?;
         result.map_err(|error| scope.record(error))
+    }
+}
+
+fn refresh_stat_cache(root: &Path, update: crab_git::index_stat::IndexStatUpdate) {
+    // Publication is already complete. Like CLI hydration, this advisory cache
+    // must not turn verified bytes into a failed transfer when Git holds a lock.
+    if let Err(error) = crab_git::index_stat::refresh(root, &[update]) {
+        tracing::warn!(error = %error, "published file but could not refresh Git stat cache");
     }
 }
 

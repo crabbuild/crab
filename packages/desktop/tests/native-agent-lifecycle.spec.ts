@@ -98,8 +98,8 @@ describe("native agent process ownership", () => {
     // This fixture exercises lifecycle routing; vault encryption has its own
     // authenticated-encryption tests in storage-connections.spec.ts.
     const encryption = {
-      isEncryptionAvailable: () => true, getSelectedStorageBackend: () => "gnome_libsecret" as const,
-      encryptString: (value: string) => Buffer.from(value), decryptString: (value: Buffer) => value.toString(),
+      isAsyncEncryptionAvailable: async () => true, getSelectedStorageBackend: () => "gnome_libsecret" as const,
+      encryptStringAsync: async (value: string) => Buffer.from(value), decryptStringAsync: async (value: Buffer) => ({ result: value.toString(), shouldReEncrypt: false }),
     };
     const vault = path.join(vaultDirectory, "connections.enc");
     const store = new StorageConnections(vault, encryption, "darwin", (keys, state) => agent.storageIdentityChanged(keys, state));

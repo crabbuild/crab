@@ -23,8 +23,20 @@ interface PendingRequest {
   params: object | undefined;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  timeoutMs: number;
   retryCount: number;
+}
+
+export type CodexRequestId = number | string;
+
+export class CodexRpcError extends Error {
+  constructor(message: string, readonly code: number) { super(message); }
+}
+
+interface CodexRequestOptions {
+  /** Zero disables the local timer for long-running server operations. */
+  timeoutMs?: number;
 }
 
 export interface BackpressureConfig {
@@ -47,9 +59,10 @@ export class CodexRpcClient {
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private notificationHandlers = new Map<string, (params: unknown) => void>();
-  private serverRequestHandler: ((id: number, method: string, params: unknown) => void) | null = null;
+  private serverRequestHandler: ((id: CodexRequestId, method: string, params: unknown) => void) | null = null;
   private unhandledNotificationHandler: ((method: string, params: unknown) => void) | null = null;
   private closed = false;
+  private closeHandler: (() => void) | null = null;
   private requestTimeoutMs: number;
   private backpressure: BackpressureConfig;
   private log: (msg: string) => void;
@@ -62,25 +75,29 @@ export class CodexRpcClient {
 
     this.rl = createInterface({ input: stdout });
     this.rl.on("line", (line: string) => this.handleLine(line));
+    this.rl.on("close", () => this.close());
+    stdin.on("error", () => this.close());
+    stdout.on("error", () => this.close());
   }
 
   /** Send a request and await the response. */
-  send(method: string, params?: object): Promise<unknown> {
+  send(method: string, params?: object, options?: CodexRequestOptions): Promise<unknown> {
     if (this.closed) {
       return Promise.reject(new Error("transport closed"));
     }
 
     const id = this.nextId++;
     const frame = JSON.stringify({ id, method, params }) + "\n";
+    const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
 
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = timeoutMs > 0 ? setTimeout(() => {
         const entry = this.pending.get(id);
         if (entry) {
           this.pending.delete(id);
           reject(new Error(`request timeout: ${method}`));
         }
-      }, this.requestTimeoutMs);
+      }, timeoutMs) : undefined;
 
       const entry: PendingRequest = {
         id,
@@ -89,6 +106,7 @@ export class CodexRpcClient {
         resolve,
         reject,
         timer,
+        timeoutMs,
         retryCount: 0,
       };
       this.pending.set(id, entry);
@@ -112,7 +130,7 @@ export class CodexRpcClient {
    * Register the handler for server-initiated requests (messages with
    * both `id` and `method`). Exactly one handler per client.
    */
-  onServerRequest(handler: (id: number, method: string, params: unknown) => void): void {
+  onServerRequest(handler: (id: CodexRequestId, method: string, params: unknown) => void): void {
     this.serverRequestHandler = handler;
   }
 
@@ -125,15 +143,18 @@ export class CodexRpcClient {
     this.unhandledNotificationHandler = handler;
   }
 
+  onClose(handler: () => void): void { this.closeHandler = handler; }
+
   /** Respond to a server-initiated request. */
-  respond(id: number, result: object): void {
-    if (this.closed) return;
+  respond(id: CodexRequestId, result: object): boolean {
+    if (this.closed) return false;
     const frame = JSON.stringify({ id, result }) + "\n";
     this.stdin.write(frame);
+    return true;
   }
 
   /** Respond to a server-initiated request with an error. */
-  respondError(id: number, code: number, message: string): void {
+  respondError(id: CodexRequestId, code: number, message: string): void {
     if (this.closed) return;
     const frame = JSON.stringify({ id, error: { code, message } }) + "\n";
     this.stdin.write(frame);
@@ -157,6 +178,7 @@ export class CodexRpcClient {
 
     this.rl.close();
     this.stdin.end();
+    this.closeHandler?.();
   }
 
   private handleLine(line: string): void {
@@ -198,9 +220,7 @@ export class CodexRpcClient {
         // Exhausted retries — reject with the server error
         clearTimeout(entry.timer);
         this.pending.delete(msg.id);
-        const err = new Error(msg.error.message ?? "server overloaded");
-        (err as any).code = msg.error.code;
-        entry.reject(err);
+        entry.reject(new CodexRpcError(msg.error.message ?? "server overloaded", msg.error.code));
         return;
       }
 
@@ -208,9 +228,7 @@ export class CodexRpcClient {
       if (msg.error) {
         clearTimeout(entry.timer);
         this.pending.delete(msg.id);
-        const err = new Error(msg.error.message ?? "rpc error");
-        (err as any).code = msg.error.code;
-        entry.reject(err);
+        entry.reject(new CodexRpcError(msg.error.message ?? "rpc error", msg.error.code));
         return;
       }
 
@@ -241,9 +259,8 @@ export class CodexRpcClient {
   }
 
   private retryRequest(entry: PendingRequest): void {
-    // Remove old pending entry
+    // Keep the request tracked during backoff so close() rejects it immediately.
     clearTimeout(entry.timer);
-    this.pending.delete(entry.id);
 
     entry.retryCount++;
 
@@ -255,23 +272,24 @@ export class CodexRpcClient {
     const jitter = Math.random() * baseDelay * 0.5;
     const delay = Math.min(baseDelay + jitter, this.backpressure.capMs);
 
-    setTimeout(() => {
+    entry.timer = setTimeout(() => {
       if (this.closed) {
         entry.reject(new Error("transport closed"));
         return;
       }
 
       // Assign a new id for the retry
+      this.pending.delete(entry.id);
       const newId = this.nextId++;
       entry.id = newId;
 
-      const timer = setTimeout(() => {
+      const timer = entry.timeoutMs > 0 ? setTimeout(() => {
         const e = this.pending.get(newId);
         if (e) {
           this.pending.delete(newId);
           e.reject(new Error(`request timeout: ${e.method}`));
         }
-      }, this.requestTimeoutMs);
+      }, entry.timeoutMs) : undefined;
       entry.timer = timer;
 
       this.pending.set(newId, entry);

@@ -325,7 +325,7 @@ describe("RpcRouter — timeout handling", () => {
 });
 
 describe("RpcRouter — call queuing during reconnection", () => {
-  it("queues read-only calls during reconnection", async () => {
+  it.each(["git_status_porcelain", "git_worktree_list"])("queues %s during reconnection", async method => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();
     sm.setStatus("server", "reconnecting");
@@ -333,7 +333,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     // This should be queued, not rejected
-    const promise = router.route("ssh://server/repo", "git_status_porcelain", {});
+    const promise = router.route("ssh://server/repo", method, {});
 
     // Simulate reconnection success
     sm.setStatus("server", "connected");
@@ -358,7 +358,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     const { router } = createRouter(sm);
 
-    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range", "read_bytes", "read_text", "preview_parquet", "rpc/cancel", "forge_list_prs", "staging_stats", "git_worktree_list", "git_stash_list", "unknown_operation"]) {
+    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range", "read_bytes", "read_text", "preview_parquet", "rpc/cancel", "forge_list_prs", "staging_stats", "git_stash_list", "unknown_operation"]) {
       await expect(
         router.route("ssh://server/repo", method, { repo_id: "ssh://server/repo" }),
       ).rejects.toThrow("Connection lost: live operations are unavailable during reconnection");

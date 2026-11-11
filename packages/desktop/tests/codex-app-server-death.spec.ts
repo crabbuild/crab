@@ -35,7 +35,6 @@ function createFakeProcess() {
     stdin,
     stdout,
     stderr,
-    pid: 99999,
     kill: vi.fn(),
     ref: vi.fn(),
     unref: vi.fn(),
@@ -76,7 +75,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     vi.clearAllMocks();
   });
 
-  it("emits one error + one done('') + emitExit(1) when process dies mid-turn", async () => {
+  it.each(["process", "transport"])("closes a failed turn once after %s termination", async termination => {
     const { fakeProc, stdin, stdout } = createFakeProcess();
     mockedSpawn.mockReturnValue(fakeProc as any);
 
@@ -128,7 +127,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     // Server responds to turn/start
     serverWrite(stdout, {
       id: turnStartRequest!.id,
-      result: { turnId: "turn_death" },
+      result: { turn: { id: "turn_death" } },
     });
 
     // 4. Server sends turn/started notification (sets activeTurnId)
@@ -144,7 +143,8 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     events.length = 0;
 
     // --- Mid-turn: process dies (exit code 1) ---
-    fakeProc.emit("exit", 1, null);
+    if (termination === "process") fakeProc.emit("close", 1, null);
+    else stdout.end();
 
     // Give the adapter time to process the exit event
     await new Promise((r) => setTimeout(r, 30));
@@ -154,14 +154,18 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     // Exactly one error event about process exit
     const errorEvents = events.filter((e) => e.type === "error");
     expect(errorEvents).toHaveLength(1);
-    expect(errorEvents[0].error).toContain("process exited mid-turn");
+    expect(errorEvents[0].error).toContain(termination === "process" ? "process exited mid-turn" : "connection closed");
 
     // Exactly one done event with empty content
     const doneEvents = events.filter((e) => e.type === "done");
     expect(doneEvents).toHaveLength(1);
     expect(doneEvents[0].content).toBe("");
 
-    // emitExit(1) was called (verified via onExit listener)
+    if (termination === "transport") {
+      expect(exitCode).toBeNull();
+      fakeProc.emit("close", 1, null);
+    }
+    // Transport failure completes the turn; process ownership ends on close.
     expect(exitCode).toBe(1);
 
     // Ordering: error before done
@@ -209,7 +213,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     }
     serverWrite(stdout, {
       id: turnStartRequest!.id,
-      result: { turnId: "turn_idle" },
+      result: { turn: { id: "turn_idle" } },
     });
 
     // Send turn/started then turn/completed (turn finishes normally)
@@ -218,6 +222,9 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
       params: { turn: { id: "turn_idle" }, threadId: "thr_no_turn" },
     });
     await new Promise((r) => setTimeout(r, 10));
+    // Node's exit event may precede stdout draining and the close event.
+    fakeProc.emit("exit", 0, null);
+    expect(exitCode).toBeNull();
     serverWrite(stdout, {
       method: "turn/completed",
       params: {
@@ -232,7 +239,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     events.length = 0;
 
     // Process exits when no turn is active
-    fakeProc.emit("exit", 0, null);
+    fakeProc.emit("close", 0, null);
     await new Promise((r) => setTimeout(r, 30));
 
     // Should NOT emit error or done (no active turn)

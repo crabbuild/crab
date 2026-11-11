@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type {} from "../../src/ipc";
-import { packagedExecutable } from "./packaged-app";
+import { packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 
 test("physical documents and editor saves cannot cross an unobserved SSH repository replacement", async () => {
@@ -37,8 +37,8 @@ test("physical documents and editor saves cannot cross an unobserved SSH reposit
     const label = "Physical session ownership";
     const saved = await page.evaluate(value => window.crab.ssh.saveProfile(value), { label, host: "127.0.0.1", port: fixture.port, username: "fixture", remotePath: source, authMethod: { type: "key" as const, keyPath: fixture.keyPath }, autoDeployAgent: true, autoReconnect: true, operationTimeoutMs: 30_000 });
     await page.getByRole("button", { name: "SSH Connections", exact: true }).click();
+    await prepareFixtureSsh(application!, fixture);
     await page.getByRole("button", { name: `Connect to ${label}`, exact: true }).click();
-    await page.getByRole("dialog", { name: "Verify Host Key", exact: true }).getByRole("button", { name: "Accept", exact: true }).click();
     await page.getByRole("button", { name: `Browse files on ${label}`, exact: true }).click();
     await page.getByRole("button", { name: "Open Repo", exact: true }).click();
     await expect(page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: "session-project", exact: true })).toBeVisible({ timeout: 60_000 });

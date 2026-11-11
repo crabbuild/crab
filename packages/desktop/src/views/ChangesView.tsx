@@ -36,7 +36,7 @@ import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
 import { executeCommand, CommandContext } from "../lib/command-registry";
 import { CommitComposer } from "./CommitComposer";
-import { hunkToAnchor, lineToDiscardAnchor, ParsedHunk, parsePatch } from "../lib/parse-patch";
+import { hunkToAnchor, lineToDiscardAnchor, ParsedHunk } from "../lib/parse-patch";
 import { deriveFileStatesFromPatches } from "../lib/file-state";
 import { countDiscardedLines, shouldConfirmDiscard } from "../lib/discard-threshold";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
@@ -654,58 +654,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     [requestDiscard],
   );
 
-  /**
-   * Whole-file staging for pointer blobs. `<InlinePatchDiff />`
-   * swaps its per-hunk toolbar for a `<PointerFileCard />` when it
-   * detects a Crab / LFS pointer signature in the patch; the
-   * card calls these callbacks once with every hunk for that file
-   * so we can batch into a single `git_stage_hunks` /
-   * `git_unstage_hunks` / `git_discard_hunks` RPC.
-   *
-   * For the stage direction: when the source patch has no hunks
-   * (untracked pointer file), fall back to `rpc.add` which shells
-   * `crab add` to stage the file whole-file. The unstage and
-   * discard directions don't need that fallback — you can't
-   * unstage something that isn't staged, and you can't discard a
-   * file that only exists in the working tree (it's already in
-   * the state the user wants).
-   */
-  const onStageFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) {
-        // Untracked pointer file — fall back to whole-file add via
-        // gitAddPaths which routes through the RPC router for both
-        // local and remote repos.
-        const path = hunks[0]?.path;
-        if (path) {
-          void runStagingOp(
-            () => rpc.gitAddPaths(repo.repo_id, [path]),
-            "Staged pointer",
-          );
-        }
-        return;
-      }
-      void runStagingOp(
-        () => rpc.gitStageHunks(repo.repo_id, anchors),
-        "Staged pointer",
-      );
-    },
-    [repo.repo_id, runStagingOp],
-  );
-
-  const onUnstageFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) return;
-      void runStagingOp(
-        () => rpc.gitUnstageHunks(repo.repo_id, anchors),
-        "Unstaged pointer",
-      );
-    },
-    [repo.repo_id, runStagingOp],
-  );
-
   const onDiscardFile = useCallback(
     ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
       const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
@@ -715,16 +663,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     [requestDiscard],
   );
 
-  /**
-   * Toggle every hunk for one file from its current tri-state.
-   *
-   *   - `empty` / `partial` (intent `stage`): parse the worktree-
-   *     vs-index patch, slice to this file, stage every hunk.
-   *     For untracked files there's no patch — fall back to
-   *     `rpc.add` which stages the file whole-file.
-   *   - `full` (intent `unstage`): parse the cached patch, slice
-   *     to this file, unstage every hunk.
-   */
+  // Whole-file actions use Git paths; pointer/binary contents are not text
+  // hunks. Inline text selections keep their separate anchor validation.
   const onToggleFile = useCallback(
     async (path: string, intent: "stage" | "unstage") => {
       if (togglingPaths.has(path)) return;
@@ -734,31 +674,10 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         return next;
       });
       try {
-        const source = intent === "stage" ? workTreePatch : cachedPatch;
-        const parsed = parsePatch(source);
-        const hunks: HunkAnchor[] = parsed.hunks
-          .filter((h) => h.path === path)
-          .map(hunkToAnchor);
-
-        if (hunks.length === 0) {
-          // Untracked file or no-op: fall back to whole-file staging
-          // via `git add` which handles untracked paths correctly.
-          // Only makes sense for the stage direction; unstage with no
-          // hunks is a no-op.
-          if (intent === "stage") {
-            await runStagingOp(
-              () => rpc.gitAddPaths(repo.repo_id, [path]),
-              "Staged file",
-            );
-          }
-          return;
-        }
-
         await runStagingOp(
-          () =>
-            intent === "stage"
-              ? rpc.gitStageHunks(repo.repo_id, hunks)
-              : rpc.gitUnstageHunks(repo.repo_id, hunks),
+          () => intent === "stage"
+            ? rpc.gitAddPaths(repo.repo_id, [path])
+            : rpc.gitResetPaths(repo.repo_id, [path]),
           intent === "stage" ? "Staged file" : "Unstaged file",
         );
       } finally {
@@ -769,7 +688,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         });
       }
     },
-    [togglingPaths, workTreePatch, cachedPatch, runStagingOp, repo.repo_id],
+    [togglingPaths, runStagingOp, repo.repo_id],
   );
 
   // --- Multi-select + Batch operations ---
@@ -1160,8 +1079,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                 onUnstageHunk={onUnstageHunk}
                 onDiscardHunk={onDiscardHunk}
                 onDiscardLine={onDiscardLine}
-                onStageFile={onStageFile}
-                onUnstageFile={onUnstageFile}
+                onStageFile={({ path }) => onToggleFile(path, "stage")}
+                onUnstageFile={({ path }) => onToggleFile(path, "unstage")}
                 onDiscardFile={onDiscardFile}
                 toast={toast}
                 onDismissToast={() => setToast(null)}

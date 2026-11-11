@@ -4,7 +4,6 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { bundleSshRuntime } from "./bundle-ssh-runtime.mjs";
 import verifyNative from "./verify-native.cjs";
 import configureUpdater from "./configure-updater.cjs";
 import { createRequire } from "node:module";
@@ -28,16 +27,6 @@ for (const [platform, os, arch, index] of [["darwin", "mac", "arm64", 3], ["linu
     }
     await writeFile(path.join(directory, `git-remote-crab${extension}`), `crab ${platform} ${arch}`);
     await writeFile(path.join(directory, "runtime.json"), JSON.stringify({ version: "2.0.0", platform, arch, hashes }));
-    const remoteInput = path.join(root, "remote-source");
-    await mkdir(remoteInput);
-    const remoteHashes = {};
-    for (const name of ["crab", "crab-desktop-agent"]) {
-      const bytes = Buffer.from(`remote ${name}`);
-      await writeFile(path.join(remoteInput, name), bytes);
-      remoteHashes[name] = createHash("sha256").update(bytes).digest("hex");
-    }
-    await writeFile(path.join(remoteInput, "runtime.json"), JSON.stringify({ version: "2.0.0", platform: "linux", arch: "x64", hashes: remoteHashes }));
-    await bundleSshRuntime(remoteInput, path.join(root, "resources", "native", "ssh-runtimes"));
     const context = { arch: index, electronPlatformName: platform, packager: { projectDir: root, appInfo: { version: "2.0.0" } } };
     await verifyNative(context);
     await writeFile(path.join(directory, `crab${extension}`), "stale CLI");
@@ -58,7 +47,7 @@ for (const platform of [Platform.MAC, Platform.WINDOWS, Platform.LINUX]) {
         info: { config }, appInfo: { updaterCacheDirName: "crab-desktop-updater" },
         expandMacro: value => value, getResourcesDir: () => root,
         isForceCodeSigningVerification: true,
-        signtoolManager: { value: Promise.resolve({ computedPublisherName: { value: Promise.resolve(["Crab"]) } }) },
+        signingManager: { value: Promise.resolve({ computedPublisherName: { value: Promise.resolve(["Crab"]) } }) },
       };
       await configureUpdater({ arch: 1, appOutDir: root, packager });
       const actual = parse(await readFile(path.join(root, "app-update.yml"), "utf8"));

@@ -179,7 +179,7 @@ helper acknowledges `Closed`, including when `Ready` has not yet been emitted.
 `file_materialize {repo_id, file_id, op_id}` writes a captured working Crab or
 LFS pointer through 1 MiB ranges to a same-directory temporary file. It verifies
 the complete content identity and rechecks the working pointer before atomic
-replacement, preserving permissions and the Git index. Historical, remote and
+replacement, preserving permissions and indexed pointer identities. Historical, remote and
 symlink captures cannot be materialized. The result contains `written_bytes`
 only after publication; complete-response preview limits do not apply.
 
@@ -199,7 +199,13 @@ normal reconstruction source must verify against that pointer. The reader's
 `crab.toml` always-profile protection. Ordinary reader opens omit that field.
 The reconstruction reader and its staging pin stay owned through publication.
 The writer checks the index, commit and working-file metadata again before
-atomic replacement, preserves permissions, and leaves the index untouched.
+atomic replacement, preserves permissions, and retains index object IDs and modes.
+
+Verified publication refreshes the Git stat cache through the same locked
+writer as the CLI. The writer uses the captured output stat and expected index
+blob, skips changed identities and preserves sibling staging. It never stamps
+a later external edit as clean. A cache-refresh failure is advisory after
+verified bytes have been published; it does not reverse that publication.
 
 The operation has a repository-owned scope. Closing its view cancels ordinary
 queries and waits for materialization before releasing the native source;
@@ -270,11 +276,28 @@ replayed nor served as stale cache results during reconnection.
 - `git_merge`, `git_rebase`, `git_cherry_pick`, `git_revert`
 - `git_stash_list`, `git_stash_save`, `git_stash_apply`, `git_stash_pop`
 
+Native Git commands inherit the request's selected storage identity, including
+status and diff commands that invoke clean filters. They do not change the
+agent's process environment. Background work must retain its own request scope.
+Inspection suppresses Git's optional index-cache writes, matching the Electron
+inspection owner. Mandatory staging/commit locks and verified stat publication
+remain enabled.
+`git_add_paths` and `git_reset_paths` require a nonempty literal selection;
+the explicit `.` selection serves Stage All/Unstage All. Whole-file binary and
+pointer actions use these path operations. Hunk patch APIs disable external
+diff drivers and text converters: display-only output cannot safely drive
+staging or `git apply`.
+
 ### Crab Operations
 - `clone`, `push`, `add`, `hydrate`, `dehydrate`, `status`
 - `crab_track_and_add`, `crab_add_structured`, `crab_push_structured`
 - `hydration_status`
 - `staging_stats`, `staging_clean`
+
+`staging_stats` returns the CLI envelope's flat `data` object, including `files`
+and `lifecycle`. A file recipe with zero local segment chunks still appears:
+its Git pointer may need committing even when its payload is reused or prepared
+outside those segments. Statistics errors remain visible in Track & Stage.
 
 `crab_track_and_add` accepts exact regular repository paths. New paths receive
 anchored literal Crab attributes; existing Crab/LFS routing is retained. Git's

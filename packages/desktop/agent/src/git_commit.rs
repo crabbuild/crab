@@ -113,12 +113,11 @@ pub async fn git_commit(work_dir: &Path, params: &GitCommitParams) -> Result<Val
 
     debug!(args = ?args, "git commit");
 
-    let mut command = crate::shellout::git_command();
+    let mut command = crate::shellout::git_command()?;
     command
         .arg("--literal-pathspecs")
         .args(&args)
         .current_dir(work_dir);
-    crate::storage_auth::configure_command(&mut command)?;
     let out = command.output().await?;
 
     if !out.status.success() {

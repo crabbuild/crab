@@ -292,13 +292,19 @@ describe("DaemonSpawner", () => {
   // -------------------------------------------------------------------------
 
   describe("cleanupStaleSocket", () => {
-    it("removes stale socket/token/pid files when process is dead", () => {
-      const socketPath = path.join(tmpDir, "daemon-v1.sock");
-      const tokenPath = path.join(tmpDir, "daemon-v1.token");
-      const pidPath = path.join(tmpDir, "daemon-v1.pid");
+    it.each(["short", "long"])("removes stale socket/token/pid files for a %s control path", length => {
+      const directory = length === "long" ? path.join(tmpDir, "nested-home-".repeat(6)) : tmpDir;
+      fs.mkdirSync(directory, { recursive: true });
+      const socketPath = path.join(directory, "daemon-v1.sock");
+      const tokenPath = path.join(directory, "daemon-v1.token");
+      const pidPath = path.join(directory, "daemon-v1.pid");
+      const address = socketAddress(socketPath);
 
       // Create stale files with a PID that doesn't exist
-      fs.writeFileSync(socketPath, "");
+      if (process.platform !== "win32") {
+        fs.mkdirSync(path.dirname(address), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(address, "");
+      }
       fs.writeFileSync(tokenPath, "old-token");
       fs.writeFileSync(
         pidPath,
@@ -306,16 +312,18 @@ describe("DaemonSpawner", () => {
       );
 
       const spawner = new DaemonSpawner({
-        socketDir: tmpDir,
+        socketDir: directory,
         entryPath: "/fake/entry.js",
       });
 
-      const cleaned = spawner.cleanupStaleSocket(socketPath, pidPath);
-
-      expect(cleaned).toBe(true);
-      expect(fs.existsSync(socketPath)).toBe(false);
-      expect(fs.existsSync(tokenPath)).toBe(false);
-      expect(fs.existsSync(pidPath)).toBe(false);
+      try {
+        expect(spawner.cleanupStaleSocket(socketPath, pidPath)).toBe(true);
+        expect([address, tokenPath, pidPath].filter(file => fs.existsSync(file))).toEqual([]);
+      } finally {
+        if (process.platform !== "win32" && address !== socketPath) {
+          fs.rmSync(path.dirname(address), { recursive: true, force: true });
+        }
+      }
     });
 
     it("does not remove files when process is alive", () => {
@@ -324,7 +332,7 @@ describe("DaemonSpawner", () => {
       const pidPath = path.join(tmpDir, "daemon-v1.pid");
 
       // Use current process PID (which is alive)
-      fs.writeFileSync(socketPath, "");
+      if (process.platform !== "win32") fs.writeFileSync(socketAddress(socketPath), "");
       fs.writeFileSync(tokenPath, "token");
       fs.writeFileSync(
         pidPath,
@@ -339,7 +347,7 @@ describe("DaemonSpawner", () => {
       const cleaned = spawner.cleanupStaleSocket(socketPath, pidPath);
 
       expect(cleaned).toBe(false);
-      expect(fs.existsSync(socketPath)).toBe(true);
+      if (process.platform !== "win32") expect(fs.existsSync(socketAddress(socketPath))).toBe(true);
       expect(fs.existsSync(tokenPath)).toBe(true);
       expect(fs.existsSync(pidPath)).toBe(true);
     });
@@ -349,7 +357,7 @@ describe("DaemonSpawner", () => {
       const tokenPath = path.join(tmpDir, "daemon-v1.token");
       const pidPath = path.join(tmpDir, "daemon-v1.pid");
 
-      fs.writeFileSync(socketPath, "");
+      if (process.platform !== "win32") fs.writeFileSync(socketAddress(socketPath), "");
       fs.writeFileSync(tokenPath, "token");
       // No PID file — should treat as stale
 
@@ -369,7 +377,7 @@ describe("DaemonSpawner", () => {
       const socketPath = path.join(tmpDir, "daemon-v1.sock");
       const pidPath = path.join(tmpDir, "daemon-v1.pid");
 
-      fs.writeFileSync(socketPath, "");
+      if (process.platform !== "win32") fs.writeFileSync(socketAddress(socketPath), "");
       fs.writeFileSync(pidPath, "not valid json {{{");
 
       const spawner = new DaemonSpawner({
@@ -435,38 +443,6 @@ describe("DaemonSpawner", () => {
       });
 
       await expect(spawner.spawn("/nonexistent/daemon.js")).rejects.toThrow();
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // validateSocketPathLength tests
-  // -------------------------------------------------------------------------
-
-  describe("validateSocketPathLength", () => {
-    it("accepts paths within the limit", () => {
-      const spawner = new DaemonSpawner({
-        socketDir: tmpDir,
-        entryPath: "/fake/entry.js",
-      });
-
-      expect(() => spawner.validateSocketPathLength("/tmp/short.sock")).not.toThrow();
-    });
-
-    it("applies the platform IPC address limit", () => {
-      const spawner = new DaemonSpawner({
-        socketDir: tmpDir,
-        entryPath: "/fake/entry.js",
-      });
-
-      // Create a path that exceeds 104 bytes (macOS limit)
-      const longPath = "/tmp/" + "a".repeat(200) + ".sock";
-
-      const validate = () => spawner.validateSocketPathLength(longPath);
-      if (process.platform === "win32") {
-        expect(validate).not.toThrow();
-      } else {
-        expect(validate).toThrow(/Socket path exceeds/);
-      }
     });
   });
 
