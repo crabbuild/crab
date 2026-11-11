@@ -403,10 +403,6 @@ export class Orchestrator extends EventEmitter {
       branch = meta?.originalBranch ?? `agent/${id}`;
     }
 
-    if (worktreeMode !== "primary") {
-      this.ensureContextDirectory(worktreePath);
-    }
-
     const now = Date.now();
     const task: Task = {
       id,
@@ -2857,16 +2853,6 @@ export class Orchestrator extends EventEmitter {
       throw new Error(
         `Could not switch working directory to branch "${branch}". Commit, stash, or discard conflicting local changes first. ${message}`,
       );
-    }
-  }
-
-  private ensureContextDirectory(worktreePath: string): void {
-    try {
-      const contextPath = path.join(worktreePath, ".context");
-      fs.mkdirSync(contextPath, { recursive: true });
-      fs.writeFileSync(path.join(contextPath, ".gitignore"), "*\n", "utf-8");
-    } catch {
-      // Best-effort.
     }
   }
 

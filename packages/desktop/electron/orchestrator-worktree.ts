@@ -439,6 +439,24 @@ export async function removeWorktree(
   if (!options.preserveBranch && branch !== savedBranch) throw new Error("Task workspace ownership does not match its saved branch");
   const { stdout } = await execFile("git", ["symbolic-ref", "HEAD"], { cwd: worktreePath });
   if (stdout.trim() !== `refs/heads/${savedBranch}`) throw new Error("Task workspace branch changed; recover its ownership before removal");
+  if (options.preserveBranch) {
+    // Git's removal check honors display settings and omits ignored data.
+    // Archive may delete only bytes represented by its preserved commit.
+    const { stdout: status } = await execFile("git", ["--no-optional-locks", "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none"], { cwd: worktreePath });
+    if (status.length) throw new Error("Archive retained modified, untracked or ignored source files. Save or move them before archiving.");
+    const { stdout: entries } = await execFile("git", ["ls-files", "-v", "-z", "--full-name"], { cwd: worktreePath, encoding: "buffer" });
+    for (const entry of new TextDecoder("utf-8", { fatal: true }).decode(entries).split("\0")) {
+      if (!/^[a-zS] /.test(entry)) continue;
+      // Missing sparse files contain no source bytes. Materialized excluded
+      // files can hide edits from status and must retain their checkout.
+      try { fs.lstatSync(path.join(worktreePath, entry.slice(2))); }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      throw new Error("Archive retained files excluded by index flags. Save or move them before archiving.");
+    }
+  }
   await execCrabWorktreeJson(repoPath, ["worktree", "--json", "remove", ...(options.preserveBranch ? [] : ["--force"]), worktreePath]);
   if (options.preserveBranch) return;
   try { await execFile("git", ["branch", "-D", "--", branch], { cwd: repoPath }); }

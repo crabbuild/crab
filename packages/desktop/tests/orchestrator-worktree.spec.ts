@@ -12,6 +12,8 @@ import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Orchestrator } from "../electron/orchestrator";
+import { addContextFile, listContextFiles } from "../electron/orchestrator-preferences";
 
 import {
   createWorktree,
@@ -356,6 +358,68 @@ describe("orchestrator-worktree", () => {
   });
 
   describe("removeWorktree", () => {
+    it("creates context files on demand and retains them when Archive cannot save them", async () => {
+      const orchestrator = new Orchestrator({ persistPath: path.join(repoDir, "tasks.sqlite") });
+      try {
+        const task = await orchestrator.createTask("Pinned context", "codex", repoDir);
+        expect({ exists: fs.existsSync(path.join(task.worktreePath, ".context")), files: listContextFiles(task.worktreePath) }).toEqual({ exists: false, files: [] });
+        addContextFile(task.worktreePath, "NOTES.md", "private context notes\n");
+        const rejected = await orchestrator.archiveTask(task.id).then(() => false, () => true);
+        expect({ rejected, status: task.status, notes: fs.readFileSync(path.join(task.worktreePath, ".context/NOTES.md"), "utf8") }).toEqual({
+          rejected: true, status: "stopped", notes: "private context notes\n",
+        });
+      } finally { await orchestrator.shutdown(); }
+    });
+
+    it.each(["ignored", "assume-unchanged", "skip-worktree"])("refuses Archive without losing %s source files or persisting archived state", async mode => {
+      const persistPath = path.join(repoDir, "tasks.sqlite");
+      const orchestrator = new Orchestrator({ persistPath });
+      try {
+        const task = await orchestrator.createTask("Preserve excluded source", "codex", repoDir);
+        const name = mode === "ignored" ? "private.txt" : "README.md";
+        if (mode === "ignored") {
+          fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${name}\n`);
+        } else await execFile("git", ["update-index", `--${mode}`, "--", name], { cwd: task.worktreePath });
+        fs.writeFileSync(path.join(task.worktreePath, name), "private source bytes\n");
+        const rejected = await orchestrator.archiveTask(task.id).then(() => false, () => true);
+        const reopened = new Orchestrator({ persistPath });
+        try {
+          expect({ rejected, current: task.status, saved: reopened.getTask(task.id)?.status,
+            source: fs.existsSync(path.join(task.worktreePath, name)) ? fs.readFileSync(path.join(task.worktreePath, name), "utf8") : null }).toEqual({
+            rejected: true, current: "stopped", saved: "stopped", source: "private source bytes\n",
+          });
+        } finally { await reopened.shutdown(); }
+      } finally { await orchestrator.shutdown(); }
+    });
+
+    it.each(["hidden-untracked", "ignored", "assume-unchanged", "skip-worktree"])("retains %s source bytes during archive cleanup", async mode => {
+      const taskId = `excluded-archive-${mode}`;
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const branch = readTaskMetadata(workspace)!.originalBranch;
+      const name = mode === "hidden-untracked" || mode === "ignored" ? "pending.txt" : "README.md";
+      await execFile("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repoDir });
+      if (mode === "ignored") {
+        fs.mkdirSync(path.join(repoDir, ".git/info"), { recursive: true });
+        fs.writeFileSync(path.join(repoDir, ".git/info/exclude"), `${name}\n`);
+      }
+      if (mode === "assume-unchanged" || mode === "skip-worktree") await execFile("git", ["update-index", `--${mode}`, "--", name], { cwd: workspace });
+      fs.writeFileSync(path.join(workspace, name), "excluded source bytes\n");
+      const rejected = await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath: workspace, branch }, { preserveBranch: true }).then(() => false, () => true);
+      expect({ rejected, source: fs.existsSync(path.join(workspace, name)) ? fs.readFileSync(path.join(workspace, name), "utf8") : null,
+        branch: await branchExists(repoDir, branch) }).toEqual({ rejected: true, source: "excluded source bytes\n", branch: true });
+    });
+
+    it("allows archive cleanup when sparse source files are absent", async () => {
+      const taskId = "sparse-archive-task";
+      const workspace = await createWorktree(repoDir, taskId, "main");
+      const branch = readTaskMetadata(workspace)!.originalBranch;
+      await execFile("git", ["update-index", "--skip-worktree", "--", "README.md"], { cwd: workspace });
+      fs.unlinkSync(path.join(workspace, "README.md"));
+      await removeWorktree({ id: taskId, repoPath: repoDir, worktreePath: workspace, branch }, { preserveBranch: true });
+      expect({ removed: !fs.existsSync(workspace), branch: await branchExists(repoDir, branch) }).toEqual({ removed: true, branch: true });
+    });
+
     it("refuses archive cleanup with unsaved work and leaves the tree and branch intact", async () => {
       const taskId = "unsaved-archive-task";
       const workspace = await createWorktree(repoDir, taskId, "main");

@@ -30,13 +30,18 @@ import type { RpcRouter } from "../electron/ssh-router";
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
 // Mock the worktree module — no real git operations.
+const mockWorktreeRoots = new Set<string>();
+function mockWorktree(taskId: string): string {
+  const directory = path.join(os.tmpdir(), `crab-agent-${taskId}`);
+  fs.mkdirSync(directory, { recursive: true });
+  mockWorktreeRoots.add(directory);
+  return directory;
+}
 vi.mock("../electron/orchestrator-worktree", async importOriginal => ({
   ...await importOriginal<typeof import("../electron/orchestrator-worktree")>(),
-  createWorktree: vi.fn(async (_repoPath: string, taskId: string, _baseRef: string) => {
-    return path.join(os.tmpdir(), `crab-agent-${taskId}`);
-  }),
+  createWorktree: vi.fn(async (_repoPath: string, taskId: string, _baseRef: string) => mockWorktree(taskId)),
   removeWorktree: vi.fn(async () => {}),
-  restoreWorktree: vi.fn(async (_repoPath: string, taskId: string) => path.join(os.tmpdir(), `crab-agent-${taskId}`)),
+  restoreWorktree: vi.fn(async (_repoPath: string, taskId: string) => mockWorktree(taskId)),
   readTaskMetadata: vi.fn(() => undefined),
   migrateWorktreeMetadata: vi.fn(),
   assertWorkspace: vi.fn(async () => {}),
@@ -246,6 +251,8 @@ describe("Orchestrator", () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     cleanupPath(persistPath);
+    for (const directory of mockWorktreeRoots) fs.rmSync(directory, { recursive: true, force: true });
+    mockWorktreeRoots.clear();
   });
 
   describe("hunk workspace owner", () => {

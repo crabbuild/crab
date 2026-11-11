@@ -2594,6 +2594,44 @@ Evidence: `apply-source-hidden-local-before.json`,
 `apply-source-ssh-siblings.json`, `apply-source-rust-final.log`,
 `apply-source-cleanup-rust.log` and `apply-source-packaged.json`.
 Desktop CI includes the three new live SSH cases. Current-head cross-platform
-proof remains pending. Local Archive uses a separate cleanup owner and still
-needs the same source-data audit; selected-file Apply and local/Windows active
-publication remain separate release gates.
+proof remains pending. Local Archive uses a separate cleanup owner, qualified
+below; selected-file Apply and local/Windows active publication remain
+separate release gates.
+
+### Archive source preservation
+
+All four local cleanup probes lose hidden untracked, ignored,
+assume-unchanged or skip-worktree source bytes before the fix. Three actual
+Archive actions also persist archived state while deleting excluded files.
+Archive now checks all source data before asking the core CLI for non-forced
+removal. It retains excluded files and uses the existing durable state rollback
+on refusal. Sparse omissions remain removable; explicit Discard is unchanged.
+The core CLI delegates this removal to Git, so the Git contracts above apply
+to both local and SSH cleanup owners.
+
+Context insertion already creates `.context/` and its ignore marker on demand;
+listing and handoff readers support an absent folder. The duplicate eager
+creation in task setup is removed so a new clean workspace has no ignored
+marker blocking Archive. Actual context notes remain protected. Existing
+workspaces containing ignored files, including context markers or notes,
+must retain or move them before Archive can remove the checkout. Archive does
+not save ignored data into the branch. Context-file persistence outside the
+checkout remains a separate product gap.
+
+The source guard adds 18 production lines while removing 14 lines of duplicate
+context setup. All 46 worktree cases pass, including three actual Archive
+actions with a reopened SQLite owner, context insertion and sparse omission.
+All 202 state-machine cases and nine selected real writer/Archive/Discard
+siblings pass. The rebuilt
+unsigned macOS package passes clean Archive and three retained-source cases
+using its bundled main-process modules, SQLite and CLI. Production types and
+Electron build pass. The fixture type probe has the same single pre-existing
+unused `foundSuffix` diagnostic; compiler settings and assertions are intact.
+State-machine worktree doubles now create and clean their own directories,
+matching the real creation/restoration dependency instead of relying on
+context setup to materialize nonexistent paths.
+
+Evidence: `archive-source-before.json`, `archive-source-action-before.json`,
+`archive-source-final-worktree.json`, `archive-source-final-git.json`,
+`archive-source-final-orchestrator.json`, `archive-source-packaged.json` and
+`archive-source-fixture-type-baseline.json`. Cross-platform CI remains pending.
