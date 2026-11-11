@@ -147,6 +147,7 @@ export class DaemonServer {
   private idleTimeoutMs: number;
   private startedAt: number = Date.now();
   private disposed = false;
+  private shutdownPending = false;
   private metrics: DaemonMetrics;
   private hooks: DaemonServerHooks;
 
@@ -610,6 +611,11 @@ export class DaemonServer {
     if (!request || !request.type) return;
 
     const isNotification = request.id?.startsWith(NOTIFY_PREFIX) ?? false;
+    // Seal intake for cold restores and upgrades too, not just normal spawns.
+    if (this.shutdownPending) {
+      if (!isNotification && request.id) this.sendResponse(client, { id: request.id, ok: false, error: "Terminal service is restarting; retry opening the terminal." });
+      return;
+    }
 
     // Handle async requests separately
     if (request.type === "prepare-upgrade") {
@@ -809,6 +815,10 @@ export class DaemonServer {
 
       case "shutdown": {
         const { killSessions } = request.payload;
+        // Check and reserve retirement in the same request turn. A separate
+        // client may create a terminal after the caller's idle health check.
+        if (!killSessions && this.host.sessionCount > 0) return { acknowledged: false };
+        this.shutdownPending = true;
         // Send the acknowledgement before the process owner closes clients.
         setImmediate(() => this.requestShutdown("request", killSessions));
         return { acknowledged: true };
@@ -839,6 +849,7 @@ export class DaemonServer {
         this.sendResponse(client, { id: requestId, ok: false, error: "Daemon replacement is deferred while terminals are running. Application updates preserve these sessions; end the terminals before replacing their daemon." });
         return;
       }
+      this.shutdownPending = true;
       // Gather live session info for serialization
       const sessions = this.host.getLiveSessionInfo();
       const ptyFds = this.host.getPtyFds();
@@ -855,6 +866,8 @@ export class DaemonServer {
         },
       });
 
+      if (!result.success) this.shutdownPending = false;
+
       this.sendResponse(client, {
         id: requestId,
         ok: result.success,
@@ -862,6 +875,7 @@ export class DaemonServer {
         ...(result.success ? {} : { error: result.error }),
       } as DaemonResponse);
     } catch (err: unknown) {
+      this.shutdownPending = false;
       const message = err instanceof Error ? err.message : String(err);
       this.sendResponse(client, { id: requestId, ok: false, error: message });
     }
@@ -1199,6 +1213,7 @@ export class DaemonServer {
 
   private buildPingResponse(): PingResponse {
     return {
+      idleShutdownSupported: true,
       uptime: Date.now() - this.startedAt,
       sessions: this.host.sessionCount,
       clients: this.clients.size,

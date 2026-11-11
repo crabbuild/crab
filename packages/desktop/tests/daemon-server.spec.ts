@@ -900,6 +900,41 @@ describe("DaemonServer", () => {
   // -------------------------------------------------------------------------
 
   describe("shutdown", () => {
+    it("refuses idle shutdown while a terminal is alive", async () => {
+      const paths = createServerPaths(tmpDir);
+      const onShutdownRequested = vi.fn();
+      server = new DaemonServer({ ...paths, spawnSubprocess: spawner, idleTimeoutMs: 0, onShutdownRequested });
+      await server.start();
+      const socket = await connectSocket(paths.socketPath);
+      try {
+        await sendHello(socket, server.authToken);
+        await sendRequest(socket, { id: "create-live", type: "createOrAttach", payload: { sessionId: "live", cols: 80, rows: 24 } });
+        const response = await sendRequest(socket, { id: "idle-stop", type: "shutdown", payload: { killSessions: false } });
+        expect(response).toEqual({ id: "idle-stop", ok: true, payload: { acknowledged: false } });
+        await new Promise(resolve => setImmediate(resolve));
+        expect(onShutdownRequested).not.toHaveBeenCalled();
+      } finally { socket.destroy(); }
+    });
+
+    it.each(["createOrAttach", "cold-restore-resume", "prepare-upgrade"] as const)("refuses %s after accepting idle shutdown", async type => {
+      const paths = createServerPaths(tmpDir);
+      const onShutdownRequested = vi.fn();
+      server = new DaemonServer({ ...paths, spawnSubprocess: spawner, idleTimeoutMs: 0, onShutdownRequested });
+      await server.start();
+      const socket = await connectSocket(paths.socketPath);
+      try {
+        await sendHello(socket, server.authToken);
+        await sendRequest(socket, { id: "idle-stop", type: "shutdown", payload: { killSessions: false } });
+        const request: DaemonRequest = type === "createOrAttach"
+          ? { id: "create-late", type, payload: { sessionId: "late", cols: 80, rows: 24 } }
+          : type === "cold-restore-resume"
+            ? { id: "restore-late", type, payload: { sessionId: "late" } }
+            : { id: "upgrade-late", type, payload: { successorPath: "/new/daemon.cjs" } };
+        const response = await sendRequest(socket, request);
+        expect(response.ok).toBe(false);
+      } finally { socket.destroy(); }
+    });
+
     it.each([true, false])("acknowledges shutdown before delegating killSessions=%s to the owner", async killSessions => {
       const paths = createServerPaths(tmpDir);
       const onShutdownRequested = vi.fn();

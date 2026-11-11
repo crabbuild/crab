@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync, cpSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
@@ -231,16 +231,19 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   const executablePath = packagedExecutable();
   const root = mkdtempSync(path.join(tmpdir(), "crab-desktop-smoke-"));
   const cache = path.join(root, "cache");
+  const home = path.join(root, "home");
   mkdirSync(cache);
+  mkdirSync(home);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root });
   git(["init", "--initial-branch=main"]);
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
-  git(["add", "desktop-smoke.txt"]);
+  writeFileSync(path.join(root, "README.md"), "# Crab markdown preview\n\nOne set of mode controls.\n");
+  git(["add", "desktop-smoke.txt", "README.md"]);
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
   git(["branch", "topic"]);
   const application = await electron.launch({
     executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
-    env: { ...process.env, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
+    env: { ...process.env, HOME: home, USERPROFILE: home, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
   });
   try {
     expect(await application.evaluate(({ app }) => app.getVersion())).toBe(desktopVersion);
@@ -322,6 +325,15 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await page.screenshot({ path: test.info().outputPath("repository-opened.png") });
     await page.locator('[role="treeitem"][data-item-path="desktop-smoke.txt"]').click();
     await expect(page.getByText("Crab Desktop v2 real-sidecar smoke", { exact: true }).first()).toBeVisible();
+    await page.locator('[role="treeitem"][data-item-path="README.md"]').click();
+    await page.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Crab markdown preview", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Rendered", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Source", exact: true })).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath("markdown-single-toolbar.png") });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await expect(page.locator(".monaco-editor:visible")).toBeVisible();
+    expect(readFileSync(path.join(root, "README.md"), "utf8")).toBe("# Crab markdown preview\n\nOne set of mode controls.\n");
     await page.screenshot({ path: test.info().outputPath("desktop-v2.png") });
     const primary = page.getByRole("navigation", { name: "Primary", exact: true });
     await expect(primary.getByRole("button", { name: "Data Workflows", exact: true })).toBeVisible();
@@ -420,10 +432,77 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   } finally {
     try { await closeFixtureTerminals(application, root); }
     finally { await application.close(); }
+    await closeFixtureDaemon(home);
     rmSync(root, { recursive: true, force: true });
   }
 });
 
+for (const deletion of ["before-launch", "after-launch"] as const) {
+  test(`terminal recovers when an idle daemon's bundle is removed ${deletion}`, async () => {
+    test.skip(process.platform !== "darwin", "macOS node-pty spawns through an on-disk helper");
+    test.setTimeout(120_000);
+    const executablePath = packagedExecutable();
+    const root = realpathSync(mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "terminal-runtime-recovery-")));
+    const home = path.join(root, "home");
+    const repository = path.join(root, "repository");
+    const previousApp = path.join(root, "PreviousCrab.app");
+    mkdirSync(home);
+    mkdirSync(repository);
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
+    cpSync(path.resolve(path.dirname(executablePath), "../.."), previousApp, { recursive: true, verbatimSymlinks: true });
+    const env = { ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache") };
+    const profile = path.join(root, "profile");
+    const pidFile = path.join(home, ".crab/desktop/daemon", `daemon-v${PROTOCOL_VERSION}.pid`);
+    let application: ElectronApplication | undefined;
+    let repositoryOpened = false;
+    try {
+      application = await electron.launch({ executablePath: path.join(previousApp, "Contents/MacOS/Crab"), args: [`--user-data-dir=${profile}`], env });
+      let page = await application.firstWindow();
+      await page.getByRole("button", { name: "Skip", exact: true }).click();
+      await page.getByRole("button", { name: "No thanks", exact: true }).click();
+      await expect.poll(async () => (await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
+      const previous = JSON.parse(readFileSync(pidFile, "utf8")) as { pid: number; entryPath: string };
+      expect(previous.entryPath.startsWith(previousApp)).toBe(true);
+      const previousPid = previous.pid;
+      await application.close();
+      application = undefined;
+      if (deletion === "before-launch") rmSync(previousApp, { recursive: true, force: true });
+      application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], env });
+      page = await application.firstWindow();
+      await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+      if (deletion === "after-launch") {
+        await expect.poll(async () => (await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
+        expect(JSON.parse(readFileSync(pidFile, "utf8")).pid).toBe(previousPid);
+        expect(await application.evaluate((_, entry) => process.getBuiltinModule("fs").existsSync(entry), previous.entryPath)).toBe(true);
+        rmSync(previousApp, { recursive: true, force: true });
+        expect(await application.evaluate((_, entry) => process.getBuiltinModule("fs").existsSync(entry), previous.entryPath)).toBe(true);
+      }
+      const handle = await call(page, "open_local", { repo_id: "runtime-recovery", path: repository });
+      await page.evaluate(({ handle, repository }) => {
+        window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repository } }));
+      }, { handle, repository });
+      repositoryOpened = true;
+      await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Terminal", exact: true }).click();
+      const terminal = page.getByRole("region", { name: "Terminal page", exact: true });
+      const proof = path.join(root, "terminal-proof.txt");
+      await expect(terminal.locator(".xterm-helper-textarea:visible").first()).toBeVisible({ timeout: 10_000 });
+      await terminal.locator(".xterm-helper-textarea:visible").first().focus();
+      await page.keyboard.type(`node -e "require('fs').writeFileSync(process.argv[1],process.cwd())" "${proof}"`);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => existsSync(proof) ? readFileSync(proof, "utf8") : "").toBe(realpathSync(repository));
+      expect(JSON.parse(readFileSync(pidFile, "utf8")).pid).not.toBe(previousPid);
+      await page.screenshot({ path: test.info().outputPath("terminal-runtime-recovered.png") });
+    } finally {
+      if (application) {
+        try { if (repositoryOpened) await closeFixtureTerminals(application, repository); }
+        finally { await application.close(); }
+      }
+      if (existsSync(pidFile)) await closeFixtureDaemon(home);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+}
 
 test("terminal restore is isolated by profile and repository", async () => {
   test.setTimeout(60_000);
