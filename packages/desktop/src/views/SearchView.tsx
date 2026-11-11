@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback,useEffect,useMemo,useRef,useState } from "react";
 import { useSessionScroll } from "../hooks/useSessionScroll";
 import clsx from "clsx";
@@ -348,10 +349,10 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
   return (
     <>
       {/* ── Search header ──────────────────────────────────────── */}
-      <div className="shrink-0 border-b border-gx-border px-3 py-2">
+      <div className="shrink-0 border-b border-border px-3 py-2">
         {/* Title row with view mode toggles */}
         <div className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gx-muted">
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             <Search size={11} />
             <span>Search</span>
           </div>
@@ -403,7 +404,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
           <button
             type="button"
             onClick={() => setShowReplace(!showReplace)}
-            className="shrink-0 rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             title={showReplace ? "Hide Replace" : "Show Replace"}
           >
             {showReplace ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -411,10 +412,10 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
 
           <div className="flex flex-1 flex-col gap-1.5">
             {/* Search field + toggles */}
-            <div className="flex items-center rounded border border-gx-border bg-gx-bg-sub focus-within:border-gx-accent">
-              <input
+            <div className="flex items-center rounded border border-border bg-background focus-within:border-primary">
+              <Input
                 ref={searchInputRef}
-                className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus-visible:outline-none"
+                className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
                 placeholder="Search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -443,9 +444,9 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
             {/* Replace field + buttons */}
             {showReplace && (
               <div className="flex items-center gap-1">
-                <div className="flex flex-1 items-center rounded border border-gx-border bg-gx-bg-sub focus-within:border-gx-accent">
-                  <input
-                    className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus-visible:outline-none"
+                <div className="flex flex-1 items-center rounded border border-border bg-background focus-within:border-primary">
+                  <Input
+                    className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
                     placeholder="Replace"
                     value={replaceValue}
                     onChange={(e) => setReplaceValue(e.target.value)}
@@ -461,7 +462,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
                   type="button"
                   onClick={handleReplaceAll}
                   disabled={replacing || !query.trim() || !matches || matches.length === 0}
-                  className="shrink-0 rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-40"
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
                   title="Replace All"
                 >
                   <ReplaceAll size={14} />
@@ -475,18 +476,18 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {showFilters && (
           <div className="mt-2 space-y-1.5 pl-[22px]">
             <div>
-              <label className="text-[10px] text-gx-muted">files to include</label>
-              <input
-                className="mt-0.5 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus-visible:outline-none focus:border-gx-accent"
+              <label className="text-[10px] text-muted-foreground">files to include</label>
+              <Input
+                className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
                 placeholder="e.g. *.ts, src/**"
                 value={includeInput}
                 onChange={(e) => setIncludeInput(e.target.value)}
               />
             </div>
             <div>
-              <label className="text-[10px] text-gx-muted">files to exclude</label>
-              <input
-                className="mt-0.5 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus-visible:outline-none focus:border-gx-accent"
+              <label className="text-[10px] text-muted-foreground">files to exclude</label>
+              <Input
+                className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
                 placeholder="e.g. *.lock, node_modules/**"
                 value={excludeInput}
                 onChange={(e) => setExcludeInput(e.target.value)}
@@ -497,7 +498,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
 
         {/* Result summary */}
         {matches && !loading && !searchAllRepos && (
-          <div className="mt-2 text-[11px] text-gx-muted">
+          <div className="mt-2 text-[11px] text-muted-foreground">
             {totalMatches} result{totalMatches !== 1 ? "s" : ""} in {totalFiles} file
             {totalFiles !== 1 ? "s" : ""}
             {truncated && " (truncated)"}
@@ -506,7 +507,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
 
         {/* Workspace search summary */}
         {workspaceResults && !workspaceLoading && searchAllRepos && (
-          <div className="mt-2 text-[11px] text-gx-muted">
+          <div className="mt-2 text-[11px] text-muted-foreground">
             {workspaceResults.totalMatches} result{workspaceResults.totalMatches !== 1 ? "s" : ""} across{" "}
             {workspaceResults.groups.filter((g) => g.matches.length > 0).length} repo
             {workspaceResults.groups.filter((g) => g.matches.length > 0).length !== 1 ? "s" : ""}
@@ -515,7 +516,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
 
         {/* Replace feedback */}
         {replaceResult && (
-          <div className="mt-1 rounded border border-gx-success/40 bg-gx-success/10 px-2 py-1 text-[11px] text-gx-success">
+          <div className="mt-1 rounded border border-success/40 bg-success/10 px-2 py-1 text-[11px] text-success">
             Replaced {replaceResult.replacements} occurrence
             {replaceResult.replacements !== 1 ? "s" : ""} in{" "}
             {replaceResult.files.length} file{replaceResult.files.length !== 1 ? "s" : ""}
@@ -531,12 +532,12 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         className={clsx("min-h-0 flex-1", viewMode === "tree" ? "overflow-auto" : "overflow-hidden")}
       >
         {(loading || workspaceLoading) && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Searching…
           </div>
         )}
         {err && (
-          <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {err}
           </div>
         )}
@@ -545,7 +546,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {searchAllRepos && workspaceResults && !workspaceLoading && (
           <>
             {workspaceResults.totalMatches === 0 && (
-              <div className="p-3 text-xs text-gx-muted">No results found across workspace repos.</div>
+              <div className="p-3 text-xs text-muted-foreground">No results found across workspace repos.</div>
             )}
             <WorkspaceSearchResultsView
               results={workspaceResults}
@@ -562,7 +563,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         {!searchAllRepos && (
           <>
             {matches && matches.length === 0 && !loading && (
-              <div className="p-3 text-xs text-gx-muted">No results found.</div>
+              <div className="p-3 text-xs text-muted-foreground">No results found.</div>
             )}
 
             {viewMode === "tree" && grouped.length > 0 && (
@@ -591,7 +592,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
             )}
 
             {truncated && (
-              <div className="px-3 py-2 text-[11px] text-gx-muted">
+              <div className="px-3 py-2 text-[11px] text-muted-foreground">
                 Results truncated. Refine your query to see more.
               </div>
             )}
@@ -642,25 +643,25 @@ function WorkspaceSearchResultsView({
               <button
                 type="button"
                 onClick={() => toggleRepo(group.relativePath)}
-                className="flex w-full items-center gap-1.5 px-2 py-1 text-left hover:bg-gx-surface-hover"
+                className="flex w-full items-center gap-1.5 px-2 py-1 text-left hover:bg-accent"
               >
                 {isCollapsed ? (
-                  <ChevronRight size={12} className="shrink-0 text-gx-muted" />
+                  <ChevronRight size={12} className="shrink-0 text-muted-foreground" />
                 ) : (
-                  <ChevronDown size={12} className="shrink-0 text-gx-muted" />
+                  <ChevronDown size={12} className="shrink-0 text-muted-foreground" />
                 )}
-                <Layers size={11} className="shrink-0 text-gx-accent" />
-                <span className="text-[11px] font-medium text-gx-text">
+                <Layers size={11} className="shrink-0 text-primary" />
+                <span className="text-[11px] font-medium text-foreground">
                   {group.repoName}
                 </span>
-                <span className="ml-auto shrink-0 rounded-full bg-gx-surface px-1.5 py-0.5 text-[10px] text-gx-muted">
+                <span className="ml-auto shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {group.matches.length}
                 </span>
               </button>
 
               {/* Error indicator */}
               {group.error && (
-                <div className="mx-2 mt-0.5 rounded border border-gx-error/40 bg-gx-error/10 px-2 py-1 text-[10px] text-gx-error">
+                <div className="mx-2 mt-0.5 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[10px] text-destructive">
                   {group.error}
                 </div>
               )}
@@ -678,7 +679,7 @@ function WorkspaceSearchResultsView({
               )}
 
               {group.truncated && !isCollapsed && (
-                <div className="px-4 py-0.5 text-[10px] text-gx-muted">
+                <div className="px-4 py-0.5 text-[10px] text-muted-foreground">
                   Results truncated for this repo.
                 </div>
               )}
@@ -721,7 +722,7 @@ function WorkspaceRepoMatchList({
     <ul className="pl-4 text-[12px]">
       {grouped.map((g) => (
         <li key={g.path}>
-          <div className="flex items-center gap-1 px-2 py-0.5 text-gx-muted">
+          <div className="flex items-center gap-1 px-2 py-0.5 text-muted-foreground">
             <FileText size={10} className="shrink-0" />
             <span className="truncate font-mono text-[10.5px]">{g.path}</span>
             <span className="ml-auto shrink-0 text-[9px]">{g.items.length}</span>
@@ -775,36 +776,36 @@ function TreeResults({
         <li key={g.path} role="treeitem" aria-expanded={!g.collapsed}>
           {/* File header */}
           <div
-            className="group flex items-center gap-1 px-2 py-0.5 hover:bg-gx-surface-hover"
+            className="group flex items-center gap-1 px-2 py-0.5 hover:bg-accent"
           >
             <button
               type="button"
               onClick={() => onToggleCollapse(g.path)}
-              className="shrink-0 rounded p-0.5 text-gx-muted"
+              className="shrink-0 rounded p-0.5 text-muted-foreground"
               aria-label={g.collapsed ? "Expand" : "Collapse"}
             >
               {g.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
             </button>
-            <FileText size={12} className="shrink-0 text-gx-muted" />
+            <FileText size={12} className="shrink-0 text-muted-foreground" />
             <button
               type="button"
               onClick={() => {
                 const entry = entryByPath.get(g.path);
                 if (entry) onOpenFile(g.path, entry);
               }}
-              className="min-w-0 flex-1 truncate text-left font-mono text-[11.5px] text-gx-text hover:underline"
+              className="min-w-0 flex-1 truncate text-left font-mono text-[11.5px] text-foreground hover:underline"
               title={g.path}
             >
               {g.path}
             </button>
-            <span className="shrink-0 rounded-full bg-gx-surface px-1.5 py-0.5 text-[10px] text-gx-muted">
+            <span className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
               {g.items.length}
             </span>
             {showReplace && (
               <button
                 type="button"
                 onClick={() => onReplaceInFile(g.path)}
-                className="shrink-0 rounded p-0.5 text-gx-muted opacity-0 hover:bg-gx-surface-hover hover:text-gx-text group-hover:opacity-100"
+                className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground group-hover:opacity-100"
                 title={`Replace all in ${g.path}`}
               >
                 <Replace size={12} />
@@ -1050,18 +1051,18 @@ function MatchRow({
         if (entry) onOpenFile(m.path, entry, m.line);
       }}
       className={clsx(
-        "flex w-full items-baseline gap-2 px-4 py-0.5 text-left font-mono text-[11.5px] text-gx-muted hover:bg-gx-surface-hover",
+        "flex w-full items-baseline gap-2 px-4 py-0.5 text-left font-mono text-[11.5px] text-muted-foreground hover:bg-accent",
       )}
       style={{ height: MATCH_ROW_HEIGHT }}
       title={showPath ? `${m.path}:${m.line}` : m.content}
     >
       {showPath && (
-        <span className="shrink-0 max-w-[120px] truncate text-[10px] text-gx-muted opacity-70">
+        <span className="shrink-0 max-w-[120px] truncate text-[10px] text-muted-foreground opacity-70">
           {m.path}
         </span>
       )}
       <span className="shrink-0 text-[10px] opacity-60">{m.line}</span>
-      <span className="truncate text-gx-text">{highlighted}</span>
+      <span className="truncate text-foreground">{highlighted}</span>
     </button>
   );
 }
@@ -1088,7 +1089,7 @@ function highlightMatch(
       re.test(part) ? (
         <mark
           key={i}
-          className="rounded-sm bg-gx-accent/30 text-gx-text"
+          className="rounded-sm bg-primary/30 text-foreground"
         >
           {part}
         </mark>
@@ -1127,8 +1128,8 @@ function ToggleButton({
       className={clsx(
         "shrink-0 rounded p-0.5 mx-0.5 transition-colors",
         active
-          ? "bg-gx-accent/20 text-gx-accent"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "bg-primary/20 text-primary"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
       aria-pressed={active}
@@ -1157,8 +1158,8 @@ function ToolbarButton({
       className={clsx(
         "rounded p-1 transition-colors",
         active
-          ? "bg-gx-accent/20 text-gx-accent"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "bg-primary/20 text-primary"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
       aria-pressed={active}

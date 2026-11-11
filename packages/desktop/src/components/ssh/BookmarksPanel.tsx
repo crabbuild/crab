@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * Bookmarks Panel — bookmark list above directory tree, add/remove with
  * label input, recent files list, connection initiation on selection,
@@ -86,39 +87,39 @@ function AddBookmarkForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2"
+      className="border border-border border-border rounded-md p-3 space-y-2"
     >
       <div>
-        <label htmlFor="bk-path" className="text-xs text-gray-500 dark:text-gray-400">
+        <label htmlFor="bk-path" className="text-xs text-muted-foreground text-muted-foreground">
           Remote Path
         </label>
-        <input
+        <Input
           id="bk-path"
           type="text"
           value={path}
           onChange={(e) => { setPath(e.target.value); setError(null); }}
           placeholder="/home/user/project"
-          className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+          className="w-full px-2 py-1 text-sm border border-border border-border rounded bg-background bg-card"
           required
         />
       </div>
       <div>
-        <label htmlFor="bk-label" className="text-xs text-gray-500 dark:text-gray-400">
+        <label htmlFor="bk-label" className="text-xs text-muted-foreground text-muted-foreground">
           Label (1-100 characters)
         </label>
-        <input
+        <Input
           id="bk-label"
           type="text"
           value={label}
           onChange={(e) => { setLabel(e.target.value); setError(null); }}
           placeholder="My Project"
           maxLength={100}
-          className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+          className="w-full px-2 py-1 text-sm border border-border border-border rounded bg-background bg-card"
           required
         />
       </div>
       {error && (
-        <p className="flex items-center gap-1 text-[10px] text-red-500" role="alert">
+        <p className="flex items-center gap-1 text-[10px] text-destructive" role="alert">
           <AlertCircle className="w-3 h-3" />
           {error}
         </p>
@@ -127,13 +128,13 @@ function AddBookmarkForm({
         <button
           type="button"
           onClick={onCancel}
-          className="px-3 py-1 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+          className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
         </button>
         <button
           type="submit"
-          className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+          className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
           Add Bookmark
         </button>
@@ -155,22 +156,22 @@ function PathNotFoundBanner({
   onDismiss: () => void;
 }) {
   return (
-    <div className="border border-amber-200 dark:border-amber-700 rounded-md p-2 bg-amber-50 dark:bg-amber-900/20 space-y-1.5">
+    <div className="border border-warning border-warning rounded-md p-2 bg-warning/10 bg-warning/20 space-y-1.5">
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-2">
-          <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+          <AlertCircle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
           <div>
-            <p className="text-xs text-amber-700 dark:text-amber-300 font-medium">
+            <p className="text-xs text-warning text-warning font-medium">
               Path not found
             </p>
-            <p className="text-[10px] text-gray-600 dark:text-gray-400 font-mono truncate">
+            <p className="text-[10px] text-muted-foreground text-muted-foreground font-mono truncate">
               {path}
             </p>
           </div>
         </div>
         <button
           onClick={onDismiss}
-          className="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded"
+          className="p-0.5 text-muted-foreground hover:text-muted-foreground hover:text-muted-foreground rounded"
           aria-label="Dismiss"
         >
           <X className="w-3 h-3" />
@@ -179,13 +180,13 @@ function PathNotFoundBanner({
       <div className="flex justify-end gap-2">
         <button
           onClick={onDismiss}
-          className="px-2 py-0.5 text-[10px] text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+          className="px-2 py-0.5 text-[10px] text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Keep
         </button>
         <button
           onClick={onRemove}
-          className="px-2 py-0.5 text-[10px] text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
+          className="px-2 py-0.5 text-[10px] text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
         >
           Remove entry
         </button>
@@ -226,19 +227,19 @@ export function BookmarksPanel({
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="Bookmarks and Recent Files">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-700">
-        <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-300 flex items-center gap-1.5">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border border-border">
+        <h3 className="text-xs font-semibold text-muted-foreground text-muted-foreground flex items-center gap-1.5">
           <Bookmark className="w-4 h-4" />
           Bookmarks
         </h3>
         <div className="flex items-center gap-1">
           {connecting && (
-            <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" aria-label="Connecting" />
+            <Loader2 className="w-3.5 h-3.5 text-info animate-spin" aria-label="Connecting" />
           )}
           {!showAddForm && (
             <button
               onClick={() => setShowAddForm(true)}
-              className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+              className="flex items-center gap-1 px-2 py-1 text-xs text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
               aria-label="Add bookmark"
             >
               <Plus className="w-3 h-3" />
@@ -267,7 +268,7 @@ export function BookmarksPanel({
         {/* Bookmarks list */}
         <section>
           {bookmarks.length === 0 && !showAddForm ? (
-            <p className="text-xs text-gray-500 dark:text-gray-400 italic text-center py-2">
+            <p className="text-xs text-muted-foreground text-muted-foreground italic text-center py-2">
               No bookmarks yet.
             </p>
           ) : (
@@ -275,26 +276,26 @@ export function BookmarksPanel({
               {bookmarks.map((bk) => (
                 <li
                   key={bk.id}
-                  className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-50 dark:hover:bg-gray-800 group cursor-pointer"
+                  className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-background hover:bg-card group cursor-pointer"
                   onClick={() => onSelectBookmark(bk)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => { if (e.key === "Enter") onSelectBookmark(bk); }}
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <FolderOpen className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
+                    <FolderOpen className="w-3.5 h-3.5 text-info text-info shrink-0" />
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-gray-700 dark:text-gray-300 truncate">
+                      <p className="text-xs font-medium text-foreground text-muted-foreground truncate">
                         {bk.label}
                       </p>
-                      <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate font-mono">
+                      <p className="text-[10px] text-muted-foreground text-muted-foreground truncate font-mono">
                         {bk.path}
                       </p>
                     </div>
                   </div>
                   <button
                     onClick={(e) => { e.stopPropagation(); onRemoveBookmark(bk.id); }}
-                    className="p-0.5 text-gray-400 hover:text-red-500 dark:hover:text-red-400 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="p-0.5 text-muted-foreground hover:text-destructive hover:text-destructive rounded opacity-0 group-hover:opacity-100 transition-opacity"
                     aria-label={`Remove bookmark ${bk.label}`}
                     title="Remove bookmark"
                   >
@@ -309,7 +310,7 @@ export function BookmarksPanel({
         {/* Recent files */}
         {sortedRecents.length > 0 && (
           <section>
-            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-300 flex items-center gap-1 mb-1.5">
+            <h4 className="text-xs font-medium text-muted-foreground text-muted-foreground flex items-center gap-1 mb-1.5">
               <Clock className="w-3.5 h-3.5" />
               Recent Files
             </h4>
@@ -317,22 +318,22 @@ export function BookmarksPanel({
               {sortedRecents.map((recent) => (
                 <li
                   key={`${recent.profileId}-${recent.path}`}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer"
+                  className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-background hover:bg-card cursor-pointer"
                   onClick={() => onSelectRecent(recent)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => { if (e.key === "Enter") onSelectRecent(recent); }}
                 >
-                  <FileText className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 shrink-0" />
+                  <FileText className="w-3.5 h-3.5 text-muted-foreground text-muted-foreground shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium text-gray-700 dark:text-gray-300 truncate">
+                    <p className="text-xs font-medium text-foreground text-muted-foreground truncate">
                       {recent.fileName}
                     </p>
-                    <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate font-mono">
+                    <p className="text-[10px] text-muted-foreground text-muted-foreground truncate font-mono">
                       {recent.path}
                     </p>
                   </div>
-                  <span className="text-[10px] text-gray-400 dark:text-gray-500 shrink-0">
+                  <span className="text-[10px] text-muted-foreground text-muted-foreground shrink-0">
                     {formatTimestamp(recent.lastAccessedAt)}
                   </span>
                 </li>

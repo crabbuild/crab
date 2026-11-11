@@ -1,3 +1,4 @@
+import { Textarea } from "@/components/ui/textarea";
 import {
 useCallback,
 useEffect,
@@ -1114,7 +1115,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
   // ── Render ────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full w-full flex-col bg-gx-bg">
+    <div className="flex h-full w-full flex-col bg-background">
       <BrowserToolbar
         tabs={tabs.map((t) => ({
           id: t.id,
@@ -1166,7 +1167,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
         {/* Loading progress bar — Chrome-style thin line */}
         {activeTab?.loading && !showFailureOverlay ? (
           <div className="pointer-events-none absolute top-0 left-0 right-0 z-30 h-0.5">
-            <div className="h-full w-full animate-browser-loading bg-gx-accent opacity-80" />
+            <div className="h-full w-full animate-browser-loading bg-primary opacity-80" />
           </div>
         ) : null}
 
@@ -1184,21 +1185,21 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* History panel */}
         {showHistoryPanel ? (
-          <div className="absolute inset-0 z-30 flex bg-gx-bg">
+          <div className="absolute inset-0 z-30 flex bg-background">
             <div className="flex h-full w-full flex-col">
-              <div className="flex items-center justify-between border-b border-gx-border px-4 py-2">
-                <h3 className="text-sm font-semibold text-gx-text">History</h3>
+              <div className="flex items-center justify-between border-b border-border px-4 py-2">
+                <h3 className="text-sm font-semibold text-foreground">History</h3>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    className="rounded px-2 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                    className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => { setHistoryEntries([]); setShowHistoryPanel(false); }}
                   >
                     Clear
                   </button>
                   <button
                     type="button"
-                    className="rounded px-2 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                    className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => setShowHistoryPanel(false)}
                   >
                     Close
@@ -1207,7 +1208,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
               </div>
               <div className="flex-1 overflow-y-auto">
                 {historyEntries.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+                  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                     No history yet
                   </div>
                 ) : (
@@ -1215,19 +1216,19 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     <button
                       key={entry.url}
                       type="button"
-                      className="flex w-full items-center gap-3 px-4 py-2 text-left text-xs hover:bg-gx-surface-hover transition border-b border-gx-border/30"
+                      className="flex w-full items-center gap-3 px-4 py-2 text-left text-xs hover:bg-accent transition border-b border-border/30"
                       onClick={() => {
                         if (activeTabId) navigateTab(activeTabId, entry.url);
                         setShowHistoryPanel(false);
                       }}
                     >
                       <div className="flex min-w-0 flex-1 flex-col">
-                        <span className="truncate font-medium text-gx-text">{entry.title || entry.url}</span>
-                        <span className="truncate text-[10px] text-gx-muted">{entry.url} · {entry.visitCount} visits</span>
+                        <span className="truncate font-medium text-foreground">{entry.title || entry.url}</span>
+                        <span className="truncate text-[10px] text-muted-foreground">{entry.url} · {entry.visitCount} visits</span>
                       </div>
                       <button
                         type="button"
-                        className="shrink-0 rounded p-0.5 text-gx-muted/40 hover:text-gx-error transition"
+                        className="shrink-0 rounded p-0.5 text-muted-foreground/40 hover:text-destructive transition"
                         onClick={(e) => { e.stopPropagation(); setHistoryEntries(removeHistoryEntry(entry.url)); }}
                         title="Remove from history"
                       >
@@ -1243,13 +1244,13 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* Profile manager panel */}
         {showProfileManager ? (
-          <div className="absolute inset-0 z-30 flex bg-gx-bg">
+          <div className="absolute inset-0 z-30 flex bg-background">
             <div className="flex h-full w-full flex-col">
-              <div className="flex items-center justify-between border-b border-gx-border px-4 py-2">
-                <h3 className="text-sm font-semibold text-gx-text">Session Profiles</h3>
+              <div className="flex items-center justify-between border-b border-border px-4 py-2">
+                <h3 className="text-sm font-semibold text-foreground">Session Profiles</h3>
                 <button
                   type="button"
-                  className="rounded px-2 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                  className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                   onClick={() => setShowProfileManager(false)}
                 >
                   Close
@@ -1258,13 +1259,13 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
               <div className="flex-1 overflow-y-auto p-3">
                 <button
                   type="button"
-                  className="mb-3 w-full rounded-md border border-gx-border bg-gx-surface px-3 py-1.5 text-left text-xs text-gx-text hover:bg-gx-surface-hover transition"
+                  className="mb-3 w-full rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs text-foreground hover:bg-accent transition"
                   onClick={handleCreateProfile}
                 >
                   + Create New Profile
                 </button>
                 {sessionProfiles.length === 0 ? (
-                  <div className="text-center text-xs text-gx-muted mt-4">
+                  <div className="text-center text-xs text-muted-foreground mt-4">
                     No profiles yet. Create one to start managing separate browsing sessions.
                   </div>
                 ) : (
@@ -1272,17 +1273,17 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     {sessionProfiles.map((profile) => (
                       <div
                         key={profile.id}
-                        className={`rounded-md border px-3 py-2 text-left transition ${activeProfileId === profile.id ? 'border-gx-accent bg-gx-accent/10' : 'border-gx-border bg-gx-surface'}`}
+                        className={`rounded-md border px-3 py-2 text-left transition ${activeProfileId === profile.id ? 'border-primary bg-primary/10' : 'border-border bg-card'}`}
                       >
                         <div className="flex items-center justify-between">
                           <div>
-                            <div className="text-xs font-medium text-gx-text">{profile.label}</div>
-                            <div className="text-[10px] text-gx-muted">{profile.scope}</div>
+                            <div className="text-xs font-medium text-foreground">{profile.label}</div>
+                            <div className="text-[10px] text-muted-foreground">{profile.scope}</div>
                           </div>
                           <div className="flex items-center gap-1">
                             <button
                               type="button"
-                              className="rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                              className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                               onClick={() => {
                                 handleSelectProfile(profile.id);
                                 setShowProfileManager(false);
@@ -1292,14 +1293,14 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                             </button>
                             <button
                               type="button"
-                              className="rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                              className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
                               onClick={() => handleImportCookies(profile.id)}
                             >
                               Import Cookies
                             </button>
                             <button
                               type="button"
-                              className="rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-error transition"
+                              className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-destructive transition"
                               onClick={() => handleDeleteProfile(profile.id)}
                             >
                               Delete
@@ -1319,26 +1320,26 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
         <BrowserMobileDriverOverlay presetId={viewportPresetId} />
         {/* Error overlay */}
         {showFailureOverlay ? (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-gx-bg px-6">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background px-6">
             <div className="flex max-w-sm flex-col items-center px-8 py-8 text-center opacity-80">
-              <div className="mb-4 rounded-full border border-gx-border/70 bg-gx-bg-sub/30 p-3">
-                <TriangleAlert size={20} className="text-gx-warning" />
+              <div className="mb-4 rounded-full border border-border/70 bg-background/30 p-3">
+                <TriangleAlert size={20} className="text-warning" />
               </div>
-              <h2 className="text-base font-semibold text-gx-text/85">
+              <h2 className="text-base font-semibold text-foreground/85">
                 {loadErrorMeta.host
                   ? `Can't reach ${loadErrorMeta.host}`
                   : "Can't load this page"}
               </h2>
-              <p className="mt-2 text-sm text-gx-muted">
+              <p className="mt-2 text-sm text-muted-foreground">
                 {formatLoadFailureDescription()}
               </p>
               {loadErrorHint ? (
-                <p className="mt-2 text-xs text-gx-muted/80">{loadErrorHint}</p>
+                <p className="mt-2 text-xs text-muted-foreground/80">{loadErrorHint}</p>
               ) : null}
               <div className="mt-5 flex items-center gap-2">
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition"
+                  className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
                     const wv = activeTabId ? webviewRefs.current.get(activeTabId) : null;
                     if (!wv) return;
@@ -1351,7 +1352,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 </button>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition"
+                  className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
                     handleCopyUrl(activeTab?.url ?? "");
                     setPermissionNotice("Copied the current page URL.");
@@ -1363,7 +1364,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                 </button>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition"
+                  className="inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
                   onClick={() => {
                     if (activeTab?.url) handleOpenExternally(activeTab.url);
                   }}
@@ -1380,12 +1381,12 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
         {activeTab && isBlankTab && !showFailureOverlay ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             <div className="flex flex-col items-center px-8 py-8 text-center opacity-60">
-              <div className="mb-4 rounded-full border border-gx-border/70 bg-gx-bg-sub/30 p-3">
-                <Globe size={20} className="text-gx-muted" />
+              <div className="mb-4 rounded-full border border-border/70 bg-background/30 p-3">
+                <Globe size={20} className="text-muted-foreground" />
               </div>
               <div className="text-center">
-                <p className="text-base font-semibold text-gx-text/85">New Tab</p>
-                <p className="mt-2 text-sm text-gx-muted">
+                <p className="text-base font-semibold text-foreground/85">New Tab</p>
+                <p className="mt-2 text-sm text-muted-foreground">
                   Enter a URL or search term above.
                 </p>
               </div>
@@ -1407,47 +1408,47 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
         {/* Grab Action Popover — shown after element selection */}
         {grabResult && grabActionPosition && !showAnnotationDialog ? (
           <div
-            className="fixed z-50 min-w-[16rem] overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-xl"
+            className="fixed z-50 min-w-[16rem] overflow-hidden rounded-lg border border-border bg-card shadow-xl"
             style={{ left: Math.min(grabActionPosition.x, window.innerWidth - 280), top: Math.min(grabActionPosition.y, window.innerHeight - 220) }}
           >
             {/* Element info header */}
-            <div className="border-b border-gx-border px-3 py-2">
-              <div className="text-xs font-medium text-gx-text">
+            <div className="border-b border-border px-3 py-2">
+              <div className="text-xs font-medium text-foreground">
                 &lt;{grabResult.target?.tagName || 'element'}&gt;
               </div>
-              <div className="mt-0.5 text-[11px] text-gx-muted truncate max-w-[240px]">
+              <div className="mt-0.5 text-[11px] text-muted-foreground truncate max-w-[240px]">
                 {grabResult.target?.textSnippet || grabResult.target?.selector || ''}
               </div>
             </div>
             {/* Actions */}
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
               onClick={handleGrabCopyText}
             >
               Copy Text
             </button>
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
               onClick={handleGrabCopyHTML}
             >
               Copy HTML
             </button>
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
               onClick={handleGrabScreenshot}
             >
               Crop Screenshot
             </button>
-            <div className="my-1 border-t border-gx-border" />
+            <div className="my-1 border-t border-border" />
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-accent hover:bg-gx-accent/10 transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-primary hover:bg-primary/10 transition"
               onClick={() => { setGrabActionPosition(null); setShowAnnotationDialog(true); }}
             >
               Annotate...
             </button>
-            <div className="my-1 border-t border-gx-border" />
+            <div className="my-1 border-t border-border" />
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-muted hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent transition"
               onClick={handleDismissGrab}
             >
               Dismiss
@@ -1460,21 +1461,21 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
           <>
             <div className="fixed inset-0 z-40" onClick={handleDismissGrab} />
             <div className="fixed inset-0 z-50 flex items-center justify-center">
-              <div className="w-[22rem] rounded-lg border border-gx-border bg-gx-surface shadow-xl">
-                <div className="border-b border-gx-border px-4 py-3">
-                  <div className="text-sm font-medium text-gx-text">New Annotation</div>
-                  <div className="mt-1 text-[11px] text-gx-muted">
+              <div className="w-[22rem] rounded-lg border border-border bg-card shadow-xl">
+                <div className="border-b border-border px-4 py-3">
+                  <div className="text-sm font-medium text-foreground">New Annotation</div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
                     &lt;{grabResult.target?.tagName || 'element'}&gt; — {grabResult.target?.textSnippet?.slice(0, 60) || ''}
                   </div>
                 </div>
                 <div className="px-4 py-3 space-y-3">
                   <div>
-                    <label className="block text-[11px] font-medium text-gx-muted mb-1">Intent</label>
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Intent</label>
                     <div className="flex gap-1">
                       {['fix','change','question','approve'].map((intent) => (
                         <button
                           key={intent}
-                          className={`rounded px-2.5 py-1 text-[11px] transition ${annotationIntent === intent ? 'bg-gx-accent text-white' : 'text-gx-muted hover:bg-gx-surface-hover'}`}
+                          className={`rounded px-2.5 py-1 text-[11px] transition ${annotationIntent === intent ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}
                           onClick={() => setAnnotationIntent(intent)}
                         >
                           {intent}
@@ -1483,12 +1484,12 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-gx-muted mb-1">Priority</label>
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Priority</label>
                     <div className="flex gap-1">
                       {['blocking','important','suggestion'].map((p) => (
                         <button
                           key={p}
-                          className={`rounded px-2.5 py-1 text-[11px] transition ${annotationPriority === p ? 'bg-gx-accent text-white' : 'text-gx-muted hover:bg-gx-surface-hover'}`}
+                          className={`rounded px-2.5 py-1 text-[11px] transition ${annotationPriority === p ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}`}
                           onClick={() => setAnnotationPriority(p)}
                         >
                           {p}
@@ -1497,9 +1498,9 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-gx-muted mb-1">Comment</label>
-                    <textarea
-                      className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted/50 resize-none"
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Comment</label>
+                    <Textarea
+                      className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 resize-none"
                       rows={3}
                       placeholder="Describe what needs attention..."
                       value={annotationComment}
@@ -1508,15 +1509,15 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     />
                   </div>
                 </div>
-                <div className="border-t border-gx-border px-4 py-2 flex justify-end gap-2">
+                <div className="border-t border-border px-4 py-2 flex justify-end gap-2">
                   <button
-                    className="rounded px-3 py-1 text-[11px] text-gx-muted hover:bg-gx-surface-hover transition"
+                    className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent transition"
                     onClick={handleDismissGrab}
                   >
                     Cancel
                   </button>
                   <button
-                    className="rounded px-3 py-1 text-[11px] bg-gx-accent text-white hover:bg-gx-accent/90 transition disabled:opacity-40"
+                    className="rounded px-3 py-1 text-[11px] bg-primary text-primary-foreground hover:bg-primary/90 transition disabled:opacity-40"
                     onClick={handleCreateAnnotation}
                     disabled={!annotationComment.trim()}
                   >
@@ -1530,13 +1531,13 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* Annotation Sidebar — shown when page has annotations */}
         {pageAnnotations.length > 0 ? (
-          <div className="absolute right-2 top-2 z-30 w-[17rem] max-h-[60vh] overflow-y-auto rounded-lg border border-gx-border bg-gx-surface shadow-lg">
-            <div className="sticky top-0 bg-gx-surface border-b border-gx-border px-3 py-2 flex items-center justify-between">
-              <div className="text-xs font-medium text-gx-text">
+          <div className="absolute right-2 top-2 z-30 w-[17rem] max-h-[60vh] overflow-y-auto rounded-lg border border-border bg-card shadow-lg">
+            <div className="sticky top-0 bg-card border-b border-border px-3 py-2 flex items-center justify-between">
+              <div className="text-xs font-medium text-foreground">
                 Annotations ({pageAnnotations.length})
               </div>
               <button
-                className="text-[11px] text-gx-muted hover:text-gx-text transition"
+                className="text-[11px] text-muted-foreground hover:text-foreground transition"
                 onClick={() => {
                   void window.crab.browser.setAnnotationViewportBridge({
                     browserPageId: activeTabId!,
@@ -1552,29 +1553,29 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
               </button>
             </div>
             {pageAnnotations.map((a: any) => (
-              <div key={a.id} className="border-b border-gx-border/50 px-3 py-2 last:border-b-0">
+              <div key={a.id} className="border-b border-border/50 px-3 py-2 last:border-b-0">
                 <div className="flex items-start gap-2">
-                  <span className={`mt-0.5 shrink-0 rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-bold text-white ${
-                    a.intent === 'fix' ? 'bg-red-500' :
-                    a.intent === 'change' ? 'bg-amber-500' :
-                    a.intent === 'question' ? 'bg-blue-500' : 'bg-green-500'
+                  <span className={`mt-0.5 shrink-0 rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-bold ${
+                    a.intent === 'fix' ? 'bg-destructive' :
+                    a.intent === 'change' ? 'bg-warning' :
+                    a.intent === 'question' ? 'bg-info text-info-foreground' : 'bg-success text-success-foreground'
                   }`}>
                     {pageAnnotations.indexOf(a) + 1}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
-                      <span className="text-[10px] font-medium text-gx-muted">{a.intent}</span>
-                      <span className="text-[10px] text-gx-muted/60">{a.priority}</span>
+                      <span className="text-[10px] font-medium text-muted-foreground">{a.intent}</span>
+                      <span className="text-[10px] text-muted-foreground/60">{a.priority}</span>
                     </div>
-                    <div className="mt-0.5 text-[11px] text-gx-text leading-tight">
+                    <div className="mt-0.5 text-[11px] text-foreground leading-tight">
                       {a.comment}
                     </div>
-                    <div className="mt-0.5 text-[10px] text-gx-muted/60 truncate">
+                    <div className="mt-0.5 text-[10px] text-muted-foreground/60 truncate">
                       &lt;{a.payload.target?.tagName || 'element'}&gt; {a.payload.target?.textSnippet?.slice(0, 50) || ''}
                     </div>
                   </div>
                   <button
-                    className="shrink-0 text-[10px] text-gx-muted/50 hover:text-red-400 transition"
+                    className="shrink-0 text-[10px] text-muted-foreground/50 hover:text-destructive transition"
                     onClick={() => handleDeleteAnnotation(a.id)}
                   >
                     ×
@@ -1604,7 +1605,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
 
         {/* Permission notice toast */}
         {permissionNotice ? (
-          <div className="absolute bottom-3 left-3 z-40 rounded-md border border-gx-warn/50 bg-gx-surface px-3 py-2 shadow-lg text-xs text-gx-text">
+          <div className="absolute bottom-3 left-3 z-40 rounded-md border border-warning/50 bg-card px-3 py-2 shadow-lg text-xs text-foreground">
             {permissionNotice}
           </div>
         ) : null}
@@ -1615,26 +1616,26 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
             {[...downloads.values()].slice(0, 2).map((d) => {
               const progress = d.totalBytes > 0 ? Math.round((d.receivedBytes / d.totalBytes) * 100) : 0;
               return (
-                <div key={d.downloadId} className="rounded-md border border-gx-border bg-gx-surface px-2.5 py-1.5 shadow-lg text-[11px] text-gx-text leading-tight">
+                <div key={d.downloadId} className="rounded-md border border-border bg-card px-2.5 py-1.5 shadow-lg text-[11px] text-foreground leading-tight">
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate">{d.filename}</span>
                     {d.status === "downloading" ? (
-                      <span className="shrink-0 text-gx-muted">{progress}%</span>
+                      <span className="shrink-0 text-muted-foreground">{progress}%</span>
                     ) : d.status === "completed" ? (
-                      <span className="shrink-0 text-gx-success">Done</span>
+                      <span className="shrink-0 text-success">Done</span>
                     ) : d.status === "canceled" ? (
-                      <span className="shrink-0 text-gx-muted">Canceled</span>
+                      <span className="shrink-0 text-muted-foreground">Canceled</span>
                     ) : (
-                      <span className="shrink-0 text-gx-error">Failed</span>
+                      <span className="shrink-0 text-destructive">Failed</span>
                     )}
                   </div>
                   {d.status === "downloading" && d.totalBytes > 0 ? (
-                    <div className="mt-1 h-1 w-full rounded-full bg-gx-border overflow-hidden">
-                      <div className="h-full rounded-full bg-gx-accent transition-all" style={{ width: progress + "%" }} />
+                    <div className="mt-1 h-1 w-full rounded-full bg-border overflow-hidden">
+                      <div className="h-full rounded-full bg-primary transition-all" style={{ width: progress + "%" }} />
                     </div>
                   ) : null}
                   {d.status === "downloading" && d.speed > 0 ? (
-                    <div className="mt-0.5 text-[10px] text-gx-muted/70">
+                    <div className="mt-0.5 text-[10px] text-muted-foreground/70">
                       {formatBytes(d.speed)}/s
                       {d.totalBytes > d.receivedBytes ? (
                         <span className="ml-1">
@@ -1644,7 +1645,7 @@ export function BrowserView({ repoPath: _repoPath }: BrowserViewProps) {
                     </div>
                   ) : null}
                   {d.status === "completed" && d.savePath ? (
-                    <div className="mt-1 truncate text-[10px] text-gx-muted">{d.savePath}</div>
+                    <div className="mt-1 truncate text-[10px] text-muted-foreground">{d.savePath}</div>
                   ) : null}
                 </div>
               );

@@ -24,11 +24,11 @@ export function CodexReviewCard({ event, collapsed: collapsedProp, onToggleColla
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Eye size={11} className="shrink-0 text-gx-info" />
-        <span className="font-medium text-gx-text/80">
+        <Eye size={11} className="shrink-0 text-info" />
+        <span className="font-medium text-foreground/80">
           {action === "started" ? "Reviewing" : "Review complete"}
         </span>
-        {review && <span className="truncate text-gx-text/60">{review}</span>}
+        {review && <span className="truncate text-foreground/60">{review}</span>}
       </>
     );
     return (
@@ -41,13 +41,13 @@ export function CodexReviewCard({ event, collapsed: collapsedProp, onToggleColla
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-md border border-gx-info/30 bg-gx-info/5 px-2.5 py-1.5">
-      <Eye size={11} className="shrink-0 text-gx-info" />
-      <span className="text-[10px] font-medium text-gx-info">
+    <div className="flex items-center gap-2 rounded-md border border-info/30 bg-info/5 px-2.5 py-1.5">
+      <Eye size={11} className="shrink-0 text-info" />
+      <span className="text-[10px] font-medium text-info">
         {action === "started" ? "Reviewing" : "Review complete"}
       </span>
       {review && (
-        <span className="text-[10px] text-gx-text/60 truncate">
+        <span className="text-[10px] text-foreground/60 truncate">
           {review}
         </span>
       )}
@@ -66,8 +66,8 @@ export function ContextCompactionCard({ event, collapsed: collapsedProp, onToggl
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Minimize2 size={11} className="shrink-0 text-gx-muted" />
-        <span className="italic text-gx-muted">{message}</span>
+        <Minimize2 size={11} className="shrink-0 text-muted-foreground" />
+        <span className="italic text-muted-foreground">{message}</span>
       </>
     );
     return (
@@ -81,11 +81,11 @@ export function ContextCompactionCard({ event, collapsed: collapsedProp, onToggl
 
   return (
     <div className={clsx(
-      "flex items-center gap-2 rounded-md border border-gx-border/30",
-      "bg-gx-surface-hover/50 px-2.5 py-1.5",
+      "flex items-center gap-2 rounded-md border border-border/30",
+      "bg-accent/50 px-2.5 py-1.5",
     )}>
-      <Minimize2 size={11} className="shrink-0 text-gx-muted" />
-      <span className="text-[10px] text-gx-muted italic">
+      <Minimize2 size={11} className="shrink-0 text-muted-foreground" />
+      <span className="text-[10px] text-muted-foreground italic">
         {message}
       </span>
     </div>

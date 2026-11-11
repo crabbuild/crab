@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * Mount status panel showing detailed information about a specific mount.
  *
@@ -134,14 +135,14 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
   const displayName = mountpoint.split("/").pop() || mountpoint;
 
   return (
-    <div className="flex flex-col border-l border-gx-border bg-gx-surface w-80">
+    <div className="flex flex-col border-l border-border bg-card w-80">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-gx-border px-4 py-3">
-        <HardDrive size={14} className="text-gx-accent shrink-0" />
-        <h3 className="flex-1 truncate text-sm font-semibold text-gx-text">{displayName}</h3>
+      <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+        <HardDrive size={14} className="text-primary shrink-0" />
+        <h3 className="flex-1 truncate text-sm font-semibold text-foreground">{displayName}</h3>
         <button
           type="button"
-          className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
           onClick={onClose}
           aria-label="Close panel"
         >
@@ -153,12 +154,12 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
       <div className="flex-1 overflow-auto px-4 py-3 space-y-4">
         {loading && (
           <div className="flex items-center justify-center py-8">
-            <Loader2 size={16} className="animate-spin text-gx-muted" />
+            <Loader2 size={16} className="animate-spin text-muted-foreground" />
           </div>
         )}
 
         {error && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+          <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
           </div>
         )}
@@ -177,11 +178,11 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
             </div>
 
             {/* Actions */}
-            <div className="space-y-2 pt-2 border-t border-gx-border">
+            <div className="space-y-2 pt-2 border-t border-border">
               {/* Refresh */}
               <button
                 type="button"
-                className="flex w-full items-center gap-2 rounded border border-gx-border px-3 py-2 text-xs text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50"
+                className="flex w-full items-center gap-2 rounded border border-border px-3 py-2 text-xs text-foreground hover:bg-accent transition disabled:opacity-50"
                 onClick={handleRefresh}
                 disabled={refreshing}
               >
@@ -193,7 +194,7 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
               {!showSwitchInput ? (
                 <button
                   type="button"
-                  className="flex w-full items-center gap-2 rounded border border-gx-border px-3 py-2 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+                  className="flex w-full items-center gap-2 rounded border border-border px-3 py-2 text-xs text-foreground hover:bg-accent transition"
                   onClick={() => setShowSwitchInput(true)}
                 >
                   <GitBranch size={12} />
@@ -201,9 +202,9 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
                 </button>
               ) : (
                 <div className="flex items-center gap-1">
-                  <input
+                  <Input
                     type="text"
-                    className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+                    className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
                     placeholder="branch name"
                     value={switchRef}
                     onChange={(e) => setSwitchRef(e.target.value)}
@@ -213,7 +214,7 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
                   />
                   <button
                     type="button"
-                    className="rounded bg-gx-accent px-2 py-1.5 text-xs text-white hover:bg-gx-accent/90 transition disabled:opacity-50"
+                    className="rounded bg-primary px-2 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
                     onClick={handleSwitchRef}
                     disabled={switching || !switchRef.trim()}
                   >
@@ -221,7 +222,7 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
                   </button>
                   <button
                     type="button"
-                    className="rounded p-1.5 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+                    className="rounded p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent transition"
                     onClick={() => { setShowSwitchInput(false); setSwitchRef(""); }}
                     aria-label="Cancel"
                   >
@@ -233,7 +234,7 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
               {/* Unmount */}
               <button
                 type="button"
-                className="flex w-full items-center gap-2 rounded border border-gx-error/40 px-3 py-2 text-xs text-gx-error hover:bg-gx-error/10 transition disabled:opacity-50"
+                className="flex w-full items-center gap-2 rounded border border-destructive/40 px-3 py-2 text-xs text-destructive hover:bg-destructive/10 transition disabled:opacity-50"
                 onClick={handleUnmount}
                 disabled={unmounting}
               >
@@ -255,8 +256,8 @@ export function MountStatusPanel({ mountpoint, onClose, onUnmounted }: MountStat
 function StatusField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div>
-      <dt className="text-[10px] font-medium text-gx-muted uppercase tracking-wider">{label}</dt>
-      <dd className={`mt-0.5 text-xs text-gx-text truncate ${mono ? "font-mono" : ""}`}>{value}</dd>
+      <dt className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>
+      <dd className={`mt-0.5 text-xs text-foreground truncate ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
   );
 }

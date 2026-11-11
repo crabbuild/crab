@@ -38,7 +38,7 @@ const CATEGORY_ICONS: Record<string, typeof Terminal> = {
 
 function CategoryIcon({ category }: { category?: string }) {
   const Icon = (category && CATEGORY_ICONS[category]) || Terminal;
-  return <Icon size={12} className="shrink-0 text-gx-accent" />;
+  return <Icon size={12} className="shrink-0 text-primary" />;
 }
 
 // ── Source badge colors ─────────────────────────────────────────────
@@ -46,11 +46,11 @@ function CategoryIcon({ category }: { category?: string }) {
 function sourceBadgeClass(source: SlashCommand["source"]): string {
   switch (source) {
     case "builtin":
-      return "bg-gx-accent/15 text-gx-accent";
+      return "bg-primary/15 text-primary";
     case "repo":
-      return "bg-gx-success/15 text-gx-success";
+      return "bg-success/15 text-success";
     case "user":
-      return "bg-gx-thinking/15 text-gx-thinking";
+      return "bg-thinking/15 text-thinking";
   }
 }
 
@@ -191,15 +191,15 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
       ref={listRef}
       role="listbox"
       aria-label="Slash commands"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,40vh,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,40vh,var(--composer-popup-height))] overflow-auto rounded-lg border border-border bg-background shadow-lg z-50"
     >
       {/* Header */}
-      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gx-border/50 bg-gx-bg/95 backdrop-blur-sm px-3 py-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border/50 bg-background/95 backdrop-blur-sm px-3 py-1.5">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           Commands
         </span>
         {filter && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             {flatList.length} match{flatList.length !== 1 ? "es" : ""}
           </span>
         )}
@@ -207,14 +207,14 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
 
       {flatList.length === 0 ? (
         <div className="px-3 py-3 text-center">
-          <div className="text-[11px] text-gx-muted mb-2">
+          <div className="text-[11px] text-muted-foreground mb-2">
             No commands match "/{filter}"
           </div>
           {onCreateCommand && (
             <button
               type="button"
               onClick={() => onCreateCommand(filter)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-gx-accent/10 px-2.5 py-1 text-[11px] font-medium text-gx-accent hover:bg-gx-accent/20 transition"
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20 transition"
             >
               <Plus size={11} />
               Create "/{filter}"
@@ -227,7 +227,7 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
             <div key={category}>
               {/* Category header — only show when there are multiple categories */}
               {grouped.size > 1 && (
-                <div className="sticky top-7 z-[5] bg-gx-bg/90 px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted/70">
+                <div className="sticky top-7 z-[5] bg-background/90 px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/70">
                   {category}
                 </div>
               )}
@@ -244,8 +244,8 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
                     onMouseEnter={() => setActiveIndex(idx)}
                     className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
                       idx === activeIndex
-                        ? "bg-gx-accent/10 text-gx-text"
-                        : "text-gx-text hover:bg-gx-surface-hover"
+                        ? "bg-primary/10 text-foreground"
+                        : "text-foreground hover:bg-accent"
                     }`}
                   >
                     <CategoryIcon category={cmd.category} />
@@ -253,12 +253,12 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
                       <div className="flex items-baseline gap-1.5">
                         <span className="font-medium">/{cmd.name}</span>
                         {cmd.argumentHint && (
-                          <span className="text-[10px] text-gx-muted/70 font-mono">
+                          <span className="text-[10px] text-muted-foreground/70 font-mono">
                             {cmd.argumentHint}
                           </span>
                         )}
                       </div>
-                      <div className="text-[10px] text-gx-muted truncate">
+                      <div className="text-[10px] text-muted-foreground truncate">
                         {cmd.description}
                       </div>
                     </div>
@@ -275,11 +275,11 @@ export function SlashCommandDropdown({ commands, filter, onSelect, visible, onCr
 
           {/* Create command footer */}
           {onCreateCommand && (
-            <div className="border-t border-gx-border/50 px-3 py-1.5">
+            <div className="border-t border-border/50 px-3 py-1.5">
               <button
                 type="button"
                 onClick={() => onCreateCommand()}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
               >
                 <Plus size={11} />
                 <span>Create custom command…</span>

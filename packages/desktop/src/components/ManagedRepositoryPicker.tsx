@@ -1,3 +1,6 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
@@ -30,10 +33,10 @@ interface Props {
 }
 
 const ACCESS_TONE = {
-  success: "border-gx-success/30 bg-gx-success/10 text-gx-success",
-  warn: "border-gx-warn/30 bg-gx-warn/10 text-gx-warn",
-  muted: "border-gx-border bg-gx-bg-sub text-gx-muted",
-  error: "border-gx-error/30 bg-gx-error/10 text-gx-error",
+  success: "border-success/30 bg-success/10 text-success",
+  warn: "border-warning/30 bg-warning/10 text-warning",
+  muted: "border-border bg-background text-muted-foreground",
+  error: "border-destructive/30 bg-destructive/10 text-destructive",
 } as const;
 
 export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Props) {
@@ -220,7 +223,7 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
 
   if (loadingProfiles && profiles === null) {
     return (
-      <div className="flex items-center justify-center rounded-lg border border-gx-border bg-gx-bg-sub py-10 text-sm text-gx-muted">
+      <div className="flex items-center justify-center rounded-lg border border-border bg-background py-10 text-sm text-muted-foreground">
         <Loader2 size={16} className="mr-2 animate-spin" />
         Loading managed services…
       </div>
@@ -229,16 +232,16 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
 
   return (
     <div className="space-y-4">
-      <section className="rounded-lg border border-gx-border bg-gx-bg-sub p-3">
+      <section className="rounded-lg border border-border bg-background p-3">
         <div className="flex items-start gap-3">
-          <div className="rounded-md bg-gx-accent/10 p-2 text-gx-accent">
+          <div className="rounded-md bg-primary/10 p-2 text-primary">
             <Cloud size={18} />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-medium text-gx-text">
+            <h3 className="text-sm font-medium text-foreground">
               {profiles?.profiles.length ? "Managed service" : "Connect a managed service"}
             </h3>
-            <p className="mt-0.5 text-[11px] text-gx-muted">
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
               Sign in to Crab Cloud or an enterprise deployment. Credentials stay in the shared Crab token store.
             </p>
           </div>
@@ -247,9 +250,9 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
         {profiles?.profiles.length ? (
           <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
             <label className="min-w-0">
-              <span className="mb-1 block text-[11px] text-gx-muted">Service profile</span>
-              <select
-                className="input-field w-full text-sm"
+              <span className="mb-1 block text-[11px] text-muted-foreground">Service profile</span>
+              <NativeSelect
+                className="w-full text-sm"
                 value={authority}
                 onChange={(event) => void selectProfile(event.target.value)}
               >
@@ -258,40 +261,40 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                     {profile.authority}{profile.discovered ? "" : " (not discovered)"}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn self-end"
+              className="self-end"
               onClick={() => authority && void loadOrganizations(authority)}
               disabled={!authority || loadingCatalog}
             >
               <RefreshCw size={13} className={loadingCatalog ? "animate-spin" : ""} />
               Refresh
-            </button>
+            </Button>
           </div>
         ) : null}
 
         <div className="mt-3 flex gap-2">
-          <input
-            className="input-field min-w-0 flex-1 font-mono text-xs"
+          <Input
+            className="min-w-0 flex-1 font-mono text-xs"
             aria-label="Managed service origin"
             value={serviceOrigin}
             onChange={(event) => setServiceOrigin(event.target.value)}
             placeholder="https://crab.build"
           />
-          <button
+          <Button variant="default"
             type="button"
-            className="btn btn-primary shrink-0"
+            className="shrink-0"
             onClick={() => void signIn()}
             disabled={signingIn || !serviceOrigin.trim()}
           >
             {signingIn ? <Loader2 size={13} className="animate-spin" /> : <Server size={13} />}
             {profiles?.profiles.length ? "Add service" : "Sign in"}
-          </button>
+          </Button>
         </div>
         {signingIn && loginLines.length > 0 && (
-          <p className="mt-2 truncate font-mono text-[10px] text-gx-muted">
+          <p className="mt-2 truncate font-mono text-[10px] text-muted-foreground">
             {loginLines[loginLines.length - 1]?.line}
           </p>
         )}
@@ -299,14 +302,14 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
 
       {profiles?.profiles.length && authority ? (
         <>
-          <section className="rounded-lg border border-gx-border p-3">
+          <section className="rounded-lg border border-border p-3">
             <div className="flex items-end gap-2">
               <label className="min-w-0 flex-1">
-                <span className="mb-1 flex items-center gap-1 text-[11px] text-gx-muted">
+                <span className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground">
                   <Building2 size={12} /> Organization
                 </span>
-                <select
-                  className="input-field w-full text-sm"
+                <NativeSelect
+                  className="w-full text-sm"
                   value={organization}
                   onChange={(event) => setOrganization(event.target.value)}
                   disabled={organizations.length === 0}
@@ -317,32 +320,32 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                       {item.slug}{item.state === "active" ? "" : ` (${item.state})`}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               {organizationCursor && (
-                <button
+                <Button variant="outline"
                   type="button"
-                  className="btn"
+
                   onClick={() => void loadOrganizations(authority, organizationCursor, true)}
                   disabled={loadingCatalog}
                 >
                   More
-                </button>
+                </Button>
               )}
             </div>
 
-            <div className="mt-3 flex gap-2 border-t border-gx-border pt-3">
-              <input
-                className="input-field min-w-0 flex-1 font-mono text-xs"
+            <div className="mt-3 flex gap-2 border-t border-border pt-3">
+              <Input
+                className="min-w-0 flex-1 font-mono text-xs"
                 aria-label="New repository name"
                 value={repositorySlug}
                 onChange={(event) => setRepositorySlug(event.target.value)}
                 placeholder="new-repository"
                 disabled={activeOrganization?.state !== "active"}
               />
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn shrink-0"
+                className="shrink-0"
                 onClick={() => void createRepository()}
                 disabled={
                   creating ||
@@ -352,19 +355,19 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
               >
                 {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
                 Create
-              </button>
+              </Button>
             </div>
           </section>
 
           <section aria-label="Managed repository catalog">
             <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-medium uppercase tracking-wide text-gx-muted">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Repositories
               </h3>
               {repositoryCursor && (
                 <button
                   type="button"
-                  className="text-[11px] text-gx-accent hover:text-gx-accent-hover"
+                  className="text-[11px] text-primary hover:text-primary-hover"
                   onClick={() => void loadRepositories(
                     authority,
                     organization,
@@ -379,7 +382,7 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
             </div>
             <div className="space-y-2">
               {!loadingCatalog && repositories.length === 0 && (
-                <div className="rounded-lg border border-dashed border-gx-border px-4 py-7 text-center text-xs text-gx-muted">
+                <div className="rounded-lg border border-dashed border-border px-4 py-7 text-center text-xs text-muted-foreground">
                   No repositories are visible in this organization.
                 </div>
               )}
@@ -393,8 +396,8 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                     className={clsx(
                       "w-full rounded-lg border p-3 text-left transition",
                       selected
-                        ? "border-gx-accent bg-gx-accent/10"
-                        : "border-gx-border bg-gx-bg-sub hover:border-gx-accent/50",
+                        ? "border-primary bg-primary/10"
+                        : "border-border bg-background hover:border-primary/50",
                       !access.canClone && "cursor-not-allowed opacity-75",
                     )}
                     onClick={() => access.canClone && onSelectRepository(repository.canonical_url)}
@@ -403,12 +406,12 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="truncate font-mono text-xs text-gx-text">
+                          <span className="truncate font-mono text-xs text-foreground">
                             {repository.canonical_url}
                           </span>
-                          {selected && <Check size={13} className="shrink-0 text-gx-accent" />}
+                          {selected && <Check size={13} className="shrink-0 text-primary" />}
                         </div>
-                        <p className="mt-1 text-[10px] text-gx-muted">{access.detail}</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground">{access.detail}</p>
                       </div>
                       <span className={clsx(
                         "shrink-0 rounded border px-1.5 py-0.5 text-[10px]",
@@ -426,13 +429,13 @@ export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Pro
       ) : null}
 
       {loadingCatalog && repositories.length === 0 && authority && (
-        <div className="flex items-center justify-center py-4 text-xs text-gx-muted">
+        <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
           <Loader2 size={14} className="mr-2 animate-spin" /> Loading catalog…
         </div>
       )}
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           <div>
             <p>{error.message}</p>

@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 /**
  * Preset dropdown UI for the terminal create (+) button.
  *
@@ -263,7 +265,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
       <button
         type="button"
         onClick={onSpawnPlain}
-        className="flex h-full items-center px-1.5 text-gx-muted hover:text-gx-text"
+        className="flex h-full items-center px-1.5 text-muted-foreground hover:text-foreground"
         title="New terminal (⌘⇧`)"
       >
         <Plus size={12} />
@@ -273,7 +275,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
       <button
         type="button"
         onClick={() => { setOpen(!open); setShowForm(false); setHoveredId(null); }}
-        className="flex h-full items-center px-0.5 text-gx-muted hover:text-gx-text"
+        className="flex h-full items-center px-0.5 text-muted-foreground hover:text-foreground"
         title="Terminal presets"
       >
         <ChevronDown size={10} />
@@ -281,13 +283,13 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
 
       {/* Dropdown menu */}
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[240px] rounded border border-gx-border bg-gx-surface shadow-lg">
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[240px] rounded border border-border bg-card shadow-lg">
           {!showForm ? (
             <div className="py-1">
               {/* Built-in presets */}
               {grouped.builtin.length > 0 && (
                 <>
-                  <div className="px-3 py-1 text-[10px] font-medium uppercase text-gx-muted tracking-wide">
+                  <div className="px-3 py-1 text-[10px] font-medium uppercase text-muted-foreground tracking-wide">
                     Agent CLIs
                   </div>
                   {grouped.builtin.map((preset) => (
@@ -297,16 +299,16 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                       onMouseEnter={() => handleMouseEnter(preset.id)}
                       onMouseLeave={handleMouseLeave}
                     >
-                      <div className="flex w-full items-center hover:bg-gx-surface-hover">
+                      <div className="flex w-full items-center hover:bg-accent">
                         {/* Main preset button — clicking launches the default command */}
                         <button
                           type="button"
                           onClick={() => handleSelect(preset)}
-                          className="flex flex-1 items-center gap-2 pl-3 pr-1 py-1.5 text-left text-[11px] text-gx-text"
+                          className="flex flex-1 items-center gap-2 pl-3 pr-1 py-1.5 text-left text-[11px] text-foreground"
                         >
                           <AgentIcon agentName={preset.icon} size={12} className={agentAccentColor(preset.icon)} />
                           <span className="truncate">{preset.name}</span>
-                          <span className="ml-auto text-gx-muted font-mono text-[10px]">{preset.command}</span>
+                          <span className="ml-auto text-muted-foreground font-mono text-[10px]">{preset.command}</span>
                         </button>
                         {/* Chevron — clicking toggles the sub-menu (fallback for hover) */}
                         {preset.subOptions && preset.subOptions.length > 0 && (
@@ -316,7 +318,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                               e.stopPropagation();
                               setHoveredId((prev) => (prev === preset.id ? null : preset.id));
                             }}
-                            className="flex items-center justify-center px-2 py-1.5 text-gx-muted hover:text-gx-text shrink-0"
+                            className="flex items-center justify-center px-2 py-1.5 text-muted-foreground hover:text-foreground shrink-0"
                           >
                             <ChevronRight size={10} />
                           </button>
@@ -326,7 +328,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                       {/* Flyout sub-menu (appears on hover/click to the right) */}
                       {hoveredId === preset.id && preset.subOptions && preset.subOptions.length > 0 && (
                         <div
-                          className="fixed z-[9999] min-w-[220px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg"
+                          className="fixed z-[9999] min-w-[220px] rounded border border-border bg-card py-1 shadow-lg"
                           ref={(el) => {
                             if (!el) return;
                             // Position the flyout to the right of the parent row
@@ -352,20 +354,20 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                                   <button
                                     type="button"
                                     onClick={() => setChoicesForSub((prev) => (prev === sub.id ? null : sub.id))}
-                                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                                     title={sub.description}
                                   >
                                     <span className="truncate">{sub.label}</span>
                                     <ChevronRight size={9} className="ml-auto shrink-0 opacity-60" />
                                   </button>
                                   {choicesForSub === sub.id && (
-                                    <div className="border-l-2 border-gx-accent/30 ml-3 pl-1 py-0.5">
+                                    <div className="border-l-2 border-primary/30 ml-3 pl-1 py-0.5">
                                       {sub.choices.map((choice) => (
                                         <button
                                           key={choice.id}
                                           type="button"
                                           onClick={() => handleChoiceSelect(preset, sub, choice)}
-                                          className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text rounded"
+                                          className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground rounded"
                                           title={choice.description}
                                         >
                                           <span className="truncate">{choice.label}</span>
@@ -383,15 +385,15 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                                           }}
                                           className="flex items-center gap-1"
                                         >
-                                          <input
+                                          <Input
                                             type="text"
                                             value={inputForSub?.subId === sub.id ? inputValue : ""}
                                             onChange={(e) => { setInputValue(e.target.value); setInputForSub({ presetId: preset.id, subId: sub.id, command: sub.command, placeholder: sub.inputPlaceholder || "custom" }); }}
                                             placeholder={sub.inputPlaceholder || "custom value"}
-                                            className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-gx-border bg-gx-bg text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                                            className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-border bg-background text-foreground font-mono focus:outline-none focus:border-primary"
                                             autoFocus={choicesForSub === sub.id}
                                           />
-                                          <button type="submit" className="text-[10px] text-gx-accent hover:text-gx-text px-1">↵</button>
+                                          <button type="submit" className="text-[10px] text-primary hover:text-foreground px-1">↵</button>
                                         </form>
                                       </div>
                                     </div>
@@ -411,7 +413,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                                       });
                                       setInputValue("");
                                     }}
-                                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                                     title={sub.description}
                                   >
                                     <span className="truncate">{sub.label}</span>
@@ -423,18 +425,18 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                                         onSubmit={(e) => { e.preventDefault(); handleInputSubmit(preset, sub); }}
                                         className="flex items-center gap-1"
                                       >
-                                        <input
+                                        <Input
                                           type="text"
                                           value={inputValue}
                                           onChange={(e) => setInputValue(e.target.value)}
                                           placeholder={sub.inputPlaceholder || "value"}
-                                          className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-gx-border bg-gx-bg text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                                          className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-border bg-background text-foreground font-mono focus:outline-none focus:border-primary"
                                           autoFocus
                                         />
                                         <button
                                           type="submit"
                                           disabled={!inputValue.trim()}
-                                          className="text-[10px] text-gx-accent hover:text-gx-text px-1 disabled:opacity-30"
+                                          className="text-[10px] text-primary hover:text-foreground px-1 disabled:opacity-30"
                                         >
                                           ↵
                                         </button>
@@ -447,7 +449,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                                 <button
                                   type="button"
                                   onClick={() => handleSubOptionSelect(preset, sub)}
-                                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                                   title={sub.description}
                                 >
                                   <span className="truncate">{sub.label}</span>
@@ -466,19 +468,19 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
               {/* Custom commands */}
               {grouped.custom.length > 0 && (
                 <>
-                  <div className="border-t border-gx-border my-1" />
-                  <div className="px-3 py-1 text-[10px] font-medium uppercase text-gx-muted tracking-wide">
+                  <div className="border-t border-border my-1" />
+                  <div className="px-3 py-1 text-[10px] font-medium uppercase text-muted-foreground tracking-wide">
                     Custom Commands
                   </div>
                   {grouped.custom.map((cmd, idx) => (
                     <div
                       key={cmd.id}
-                      className="group flex items-center gap-1 px-3 py-1.5 hover:bg-gx-surface-hover"
+                      className="group flex items-center gap-1 px-3 py-1.5 hover:bg-accent"
                     >
                       <button
                         type="button"
                         onClick={() => handleSelect(cmd)}
-                        className="flex-1 text-left text-[11px] text-gx-text truncate"
+                        className="flex-1 text-left text-[11px] text-foreground truncate"
                       >
                         {cmd.name}
                       </button>
@@ -486,7 +488,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleMoveUp(cmd.id); }}
-                          className="p-0.5 text-gx-muted hover:text-gx-text"
+                          className="p-0.5 text-muted-foreground hover:text-foreground"
                           title="Move up"
                           disabled={idx === 0}
                         >
@@ -495,7 +497,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleMoveDown(cmd.id); }}
-                          className="p-0.5 text-gx-muted hover:text-gx-text"
+                          className="p-0.5 text-muted-foreground hover:text-foreground"
                           title="Move down"
                           disabled={idx === grouped.custom.length - 1}
                         >
@@ -504,7 +506,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleEdit(cmd); }}
-                          className="p-0.5 text-gx-muted hover:text-gx-text"
+                          className="p-0.5 text-muted-foreground hover:text-foreground"
                           title="Edit"
                         >
                           <Pencil size={10} />
@@ -512,7 +514,7 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleDelete(cmd.id); }}
-                          className="p-0.5 text-gx-muted hover:text-gx-error"
+                          className="p-0.5 text-muted-foreground hover:text-destructive"
                           title="Delete"
                         >
                           <Trash2 size={10} />
@@ -524,11 +526,11 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
               )}
 
               {/* Add custom command */}
-              <div className="border-t border-gx-border my-1" />
+              <div className="border-t border-border my-1" />
               <button
                 type="button"
                 onClick={handleAddCustom}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 <Plus size={12} />
                 Add Custom Command
@@ -537,62 +539,62 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
           ) : (
             /* Custom command form */
             <div className="p-3 flex flex-col gap-2">
-              <div className="text-[11px] font-medium text-gx-text">
+              <div className="text-[11px] font-medium text-foreground">
                 {editingId ? "Edit Command" : "Add Custom Command"}
               </div>
 
               {/* Name field */}
               <div>
-                <label className="text-[10px] text-gx-muted">Name *</label>
-                <input
+                <label className="text-[10px] text-muted-foreground">Name *</label>
+                <Input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   placeholder="My Tool"
-                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-gx-border bg-gx-surface-hover text-gx-text focus:outline-none focus:border-gx-accent"
+                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-border bg-accent text-foreground focus:outline-none focus:border-primary"
                   autoFocus
                 />
               </div>
 
               {/* Command field */}
               <div>
-                <label className="text-[10px] text-gx-muted">Shell Command *</label>
-                <input
+                <label className="text-[10px] text-muted-foreground">Shell Command *</label>
+                <Input
                   type="text"
                   value={formData.command}
                   onChange={(e) => setFormData({ ...formData, command: e.target.value })}
                   placeholder="mytool --interactive"
-                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-gx-border bg-gx-surface-hover text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-border bg-accent text-foreground font-mono focus:outline-none focus:border-primary"
                 />
               </div>
 
               {/* Working directory (optional) */}
               <div>
-                <label className="text-[10px] text-gx-muted">Working Directory (optional)</label>
-                <input
+                <label className="text-[10px] text-muted-foreground">Working Directory (optional)</label>
+                <Input
                   type="text"
                   value={formData.cwd}
                   onChange={(e) => setFormData({ ...formData, cwd: e.target.value })}
                   placeholder="/path/to/project"
-                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-gx-border bg-gx-surface-hover text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-border bg-accent text-foreground font-mono focus:outline-none focus:border-primary"
                 />
               </div>
 
               {/* Environment variables (optional) */}
               <div>
-                <label className="text-[10px] text-gx-muted">Environment Variables (optional, KEY=VALUE per line)</label>
-                <textarea
+                <label className="text-[10px] text-muted-foreground">Environment Variables (optional, KEY=VALUE per line)</label>
+                <Textarea
                   value={formData.env}
                   onChange={(e) => setFormData({ ...formData, env: e.target.value })}
                   placeholder="API_KEY=xxx&#10;DEBUG=1"
                   rows={2}
-                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-gx-border bg-gx-surface-hover text-gx-text font-mono focus:outline-none focus:border-gx-accent resize-none"
+                  className="w-full mt-0.5 px-2 py-1 text-[11px] rounded border border-border bg-accent text-foreground font-mono focus:outline-none focus:border-primary resize-none"
                 />
               </div>
 
               {/* Errors */}
               {formErrors.length > 0 && (
-                <div className="text-[10px] text-gx-error">
+                <div className="text-[10px] text-destructive">
                   {formErrors.join(". ")}
                 </div>
               )}
@@ -602,14 +604,14 @@ export function PresetDropdown({ onSelect, onSpawnPlain }: PresetDropdownProps) 
                 <button
                   type="button"
                   onClick={handleSave}
-                  className="px-3 py-1 text-[11px] rounded bg-gx-accent text-white hover:opacity-90"
+                  className="px-3 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:opacity-90"
                 >
                   {editingId ? "Save" : "Add"}
                 </button>
                 <button
                   type="button"
                   onClick={() => { setShowForm(false); setEditingId(null); }}
-                  className="px-3 py-1 text-[11px] rounded text-gx-muted hover:text-gx-text"
+                  className="px-3 py-1 text-[11px] rounded text-muted-foreground hover:text-foreground"
                 >
                   Cancel
                 </button>

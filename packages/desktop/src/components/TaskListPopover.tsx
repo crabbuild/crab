@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { CheckSquare, Link2, Plus, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
@@ -102,8 +103,8 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={clsx(
-          "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-gx-bg-sub hover:text-gx-text",
-          open ? "bg-gx-bg-sub text-gx-text" : "text-gx-muted",
+          "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-background hover:text-foreground",
+          open ? "bg-background text-foreground" : "text-muted-foreground",
         )}
         title="Task list"
         aria-label={error ? "Task list: unavailable" : `Task list: ${done} of ${total} done`}
@@ -118,29 +119,29 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
       {open && (
         <div
           ref={popoverRef}
-          className="absolute bottom-full right-0 z-50 mb-2 w-80 rounded-lg border border-gx-border bg-gx-surface shadow-xl"
+          className="absolute bottom-full right-0 z-50 mb-2 w-80 rounded-lg border border-border bg-card shadow-xl"
           role="dialog"
           aria-label="Task list"
         >
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-gx-border px-3 py-2">
-            <span className="text-xs font-medium text-gx-text">Tasks</span>
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-xs font-medium text-foreground">Tasks</span>
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               aria-label="Close task list"
             >
               <X size={14} />
             </button>
           </div>
 
-          {error && <div role="alert" className="px-3 py-2 text-xs text-gx-error">{error} <button type="button" className="underline" onClick={reload}>Retry loading tasks</button></div>}
+          {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error} <button type="button" className="underline" onClick={reload}>Retry loading tasks</button></div>}
           {/* Task list */}
           <fieldset disabled={!canEdit || loading}>
           <div className="max-h-64 overflow-y-auto">
             {tasks.length === 0 && !loading && !error && canEdit && (
-              <div className="px-3 py-4 text-center text-xs text-gx-muted">
+              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
                 No tasks yet. Add one below.
               </div>
             )}
@@ -156,24 +157,24 @@ export function TaskListPopover({ onNavigateFile, onNavigateCommit }: TaskListPo
           </div>
 
           {/* Add task input */}
-          <div className="border-t border-gx-border px-3 py-2">
+          <div className="border-t border-border px-3 py-2">
             <div className="flex items-center gap-2">
-              <Plus size={12} className="shrink-0 text-gx-muted" />
-              <input
+              <Plus size={12} className="shrink-0 text-muted-foreground" />
+              <Input
                 ref={inputRef}
                 type="text"
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder="Add a task…"
-                className="flex-1 bg-transparent text-xs text-gx-text placeholder:text-gx-muted outline-none"
+                className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
                 aria-label="New task title"
               />
               <button
                 type="button"
                 onClick={handleAdd}
                 disabled={!canEdit || loading || !newTitle.trim()}
-                className="text-xs text-gx-accent hover:text-gx-accent/80 disabled:opacity-40"
+                className="text-xs text-primary hover:text-primary/80 disabled:opacity-40"
                 aria-label="Add task"
               >
                 Add
@@ -201,7 +202,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
 
   return (
     <div
-      className="group flex items-center gap-2 px-3 py-1.5 hover:bg-gx-bg-sub"
+      className="group flex items-center gap-2 px-3 py-1.5 hover:bg-background"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -212,8 +213,8 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
         className={clsx(
           "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
           task.done
-            ? "border-gx-accent bg-gx-accent text-white"
-            : "border-gx-border hover:border-gx-accent",
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border hover:border-primary",
         )}
         aria-label={task.done ? `Mark "${task.title}" as not done` : `Mark "${task.title}" as done`}
       >
@@ -228,7 +229,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
       <span
         className={clsx(
           "flex-1 truncate text-xs",
-          task.done ? "text-gx-muted line-through" : "text-gx-text",
+          task.done ? "text-muted-foreground line-through" : "text-foreground",
         )}
         title={task.title}
       >
@@ -240,7 +241,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
         <button
           type="button"
           onClick={() => onAnchorClick(task.anchor!)}
-          className="flex items-center gap-0.5 text-[10px] text-gx-accent hover:underline"
+          className="flex items-center gap-0.5 text-[10px] text-primary hover:underline"
           title={task.anchor}
           aria-label={`Navigate to ${formatAnchor(task.anchor)}`}
         >
@@ -254,7 +255,7 @@ function TaskRow({ task, onToggle, onRemove, onAnchorClick }: TaskRowProps) {
         type="button"
         onClick={onRemove}
         className={clsx(
-          "shrink-0 text-gx-muted hover:text-gx-error",
+          "shrink-0 text-muted-foreground hover:text-destructive",
           hovered ? "opacity-100" : "opacity-0",
         )}
         aria-label={`Delete task "${task.title}"`}

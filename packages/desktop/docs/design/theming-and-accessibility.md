@@ -6,57 +6,47 @@ high-contrast modes.
 
 ## Theme System
 
+Desktop controls follow [shadcn/ui's semantic roles](https://ui.shadcn.com/docs/theming)
+and [Geist's neutral palette structure](https://vercel.com/geist/colors).
+Primary actions use black/white; success, warning, destructive, info, and
+thinking colors communicate state. Navigation and selection use neutral
+surfaces. See [`../../DESIGN.md`](../../DESIGN.md) for component guidance.
+
 ### Theme Variants
 
 | Theme | Description |
 |-------|-------------|
-| Dark | Default dark theme with blue accents |
-| Light | Light background with dark text |
-| High Contrast Dark | Maximum contrast for low-vision users |
-| High Contrast Light | Maximum contrast on light background |
-| System | Follows OS dark/light preference |
+| Dark | Black background, light text and primary actions |
+| Light | White background, dark text and primary actions |
+| High Contrast Dark | Stronger text, input borders and focus indicators |
+| High Contrast Light | Stronger text, input borders and focus indicators |
+| System | Follows OS dark/light preference, including live changes |
 
-### CSS Custom Properties
+### Canonical Tokens
 
-All colors are defined as CSS custom properties on `:root`, enabling
-instant theme switching without re-rendering:
+`theme-tokens.json` owns all four palettes as RGB channel triples. The
+Tailwind plugin generates `:root` defaults and `.theme-*` variables;
+`index.html` applies the saved theme before React mounts. SettingsProvider
+keeps the theme synchronized with user/workspace settings and OS changes.
+There is no parallel palette in `index.css` or theme asset JSON files.
 
-```css
-:root[data-theme="dark"] {
-  --gx-bg: #0f1115;
-  --gx-bg-sub: #13161b;
-  --gx-surface: #1a1d24;
-  --gx-surface-hover: #242832;
-  --gx-border: #2a2e38;
-  --gx-text: #e7eaf1;
-  --gx-muted: #8b919e;
-  --gx-accent: #4f8cff;
-  --gx-success: #34d399;
-  --gx-warn: #fbbf24;
-  --gx-error: #f87171;
-  --gx-info: #60a5fa;
-  --gx-thinking: #a78bfa;
-}
-```
+Use `bg-background`, `bg-card`, `text-foreground`, `text-muted-foreground`,
+`border-border`, and paired `bg-primary text-primary-foreground` utilities.
+The RGB representation supports Tailwind v3 opacity modifiers such as
+`bg-success/10`. `accent` denotes a neutral hover/selection surface;
+`primary` denotes an action, with its own foreground pair.
 
-### Tailwind Integration
+Shared Button, Input, Textarea, NativeSelect, Badge, Tabs, Dialog, and
+Resizable components live in `src/components/ui/`. Their source follows
+shadcn composition adapted to React 18, Tailwind v3 and desktop density.
+Native form events and refs remain intact. Tab triggers and panels share
+a Radix root; modal dialogs trap focus and restore the trigger.
 
-Theme tokens are mapped to Tailwind utilities:
-
-```typescript
-// tailwind.config.ts
-colors: {
-  "gx-bg": "var(--gx-bg)",
-  "gx-surface": "var(--gx-surface)",
-  "gx-border": "var(--gx-border)",
-  "gx-text": "var(--gx-text)",
-  "gx-muted": "var(--gx-muted)",
-  // ...
-}
-```
-
-Components use semantic tokens (`text-gx-text`, `bg-gx-surface`)
-rather than raw color values, ensuring automatic theme adaptation.
+Geist and Geist Mono are bundled WOFF2 fonts, requiring no network access.
+Terminals and editors retain their own font settings and syntax/ANSI
+palettes. Default terminal chrome and Electron prompt dialogs read the
+same canonical palette; repository trees inherit live CSS variables even
+inside their shadow roots.
 
 ### Editor Themes
 
@@ -84,7 +74,6 @@ Users can import VS Code themes:
 1. Settings → Appearance → Import Theme
 2. Select a `.json` theme file
 3. The theme is converted to Crab Desktop's token format
-4. Available in the theme dropdown
 
 ## Accessibility
 
@@ -157,11 +146,19 @@ High contrast themes provide:
 npm run test:a11y  # Playwright + axe-core
 ```
 
-The a11y test suite:
-1. Launches the full Electron app
-2. Navigates to each major view
-3. Runs axe-core accessibility analysis
-4. Fails on any Level A or AA violations
+Theme qualification runs with:
+
+```bash
+npm test -- tests/theme-tokens.spec.ts
+npx playwright test --project=theme-system
+```
+
+Token tests check readable foreground/background pairs. Browser tests use
+the production settings provider and controls to exercise four themes,
+form submission, forwarded refs, keyboard tabs, modal focus, persistence,
+OS theme changes, bundled fonts, and axe-core AA checks. The browser fixture
+stubs the main-process settings mirror and activity history only. Native
+application smoke testing complements this isolated component proof.
 
 ### What's Tested
 

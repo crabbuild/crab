@@ -126,12 +126,12 @@ export function ToolGroup({
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5",
           "text-[10px] text-left rounded-md",
-          "bg-gx-surface/40 hover:bg-gx-surface-hover cursor-pointer",
+          "bg-card/40 hover:bg-accent cursor-pointer",
           "transition-colors",
         )}
       >
-        <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-        <span className="text-gx-muted">
+        <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+        <span className="text-muted-foreground">
           {memberCount} tool call{memberCount !== 1 ? "s" : ""}
           {durationStr && <span className="ml-1">· {durationStr}</span>}
         </span>
@@ -149,12 +149,12 @@ export function ToolGroup({
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5",
           "text-[10px] text-left rounded-md",
-          "bg-gx-surface/40 hover:bg-gx-surface-hover cursor-pointer",
+          "bg-card/40 hover:bg-accent cursor-pointer",
           "transition-colors",
         )}
       >
-        <span className="inline-block h-2 w-2 rounded-full bg-gx-info animate-pulse shrink-0" />
-        <span className="text-gx-muted">
+        <span className="inline-block h-2 w-2 rounded-full bg-info animate-pulse shrink-0" />
+        <span className="text-muted-foreground">
           Working… {elapsedStr}
         </span>
       </button>
@@ -175,12 +175,12 @@ export function ToolGroup({
           className={clsx(
             "flex w-full items-center gap-2 px-2.5 py-1",
             "text-[10px] text-left rounded-md",
-            "hover:bg-gx-surface-hover cursor-pointer",
+            "hover:bg-accent cursor-pointer",
             "transition-colors",
           )}
         >
-          <ChevronRight size={10} className="shrink-0 text-gx-muted/60 rotate-90 transition-transform" />
-          <span className="text-gx-muted">
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground/60 rotate-90 transition-transform" />
+          <span className="text-muted-foreground">
             {memberCount} tool call{memberCount !== 1 ? "s" : ""}
             {durationStr && <span className="ml-1">· {durationStr}</span>}
           </span>

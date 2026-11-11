@@ -117,7 +117,7 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12 text-gx-muted">
+      <div className="flex items-center justify-center py-12 text-muted-foreground">
         <RefreshCw className="w-4 h-4 animate-spin mr-2" />
         <span className="text-xs">Loading sync pairs…</span>
       </div>
@@ -127,9 +127,9 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center py-12 gap-2">
-        <AlertTriangle className="w-5 h-5 text-red-400" />
-        <p className="text-xs text-red-400">{error}</p>
-        <button onClick={fetchPairs} className="text-xs text-gx-accent hover:underline">
+        <AlertTriangle className="w-5 h-5 text-destructive" />
+        <p className="text-xs text-destructive">{error}</p>
+        <button onClick={fetchPairs} className="text-xs text-primary hover:underline">
           Retry
         </button>
       </div>
@@ -139,11 +139,11 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
   if (pairs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 gap-3 text-center px-6">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gx-accent/10">
-          <FolderSync size={24} className="text-gx-accent" />
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+          <FolderSync size={24} className="text-primary" />
         </div>
-        <h3 className="text-sm font-medium text-gx-text">No sync pairs configured</h3>
-        <p className="text-xs text-gx-muted max-w-xs">
+        <h3 className="text-sm font-medium text-foreground">No sync pairs configured</h3>
+        <p className="text-xs text-muted-foreground max-w-xs">
           Right-click a folder in the File Browser and select "Sync this folder locally" to set up bidirectional sync.
         </p>
       </div>
@@ -153,14 +153,14 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gx-border">
-        <h2 className="text-xs font-semibold text-gx-text flex items-center gap-2">
-          <ArrowUpDown className="w-4 h-4 text-gx-accent" />
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <h2 className="text-xs font-semibold text-foreground flex items-center gap-2">
+          <ArrowUpDown className="w-4 h-4 text-primary" />
           Sync Pairs ({pairs.length})
         </h2>
         <button
           onClick={fetchPairs}
-          className="p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover rounded transition"
+          className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition"
           aria-label="Refresh"
           title="Refresh"
         >
@@ -171,16 +171,16 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
       {/* Pair list */}
       <div className="flex-1 overflow-y-auto">
         {pairs.map((pair) => (
-          <div key={pair.id} className="border-b border-gx-border last:border-b-0">
+          <div key={pair.id} className="border-b border-border last:border-b-0">
             {/* Pair row */}
-            <div className="flex items-center gap-3 px-4 py-3 hover:bg-gx-surface-hover transition">
+            <div className="flex items-center gap-3 px-4 py-3 hover:bg-accent transition">
               {/* Status indicator */}
               <div
                 className={clsx(
                   "w-2 h-2 rounded-full shrink-0",
-                  pair.status === "active" && "bg-green-500",
-                  pair.status === "paused" && "bg-yellow-500",
-                  pair.status === "error" && "bg-red-500",
+                  pair.status === "active" && "bg-success",
+                  pair.status === "paused" && "bg-warning",
+                  pair.status === "error" && "bg-destructive",
                 )}
                 title={pair.status}
               />
@@ -191,23 +191,23 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                 onClick={() => setExpandedPairId(expandedPairId === pair.id ? null : pair.id)}
               >
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-medium text-gx-text truncate">
+                  <span className="text-xs font-medium text-foreground truncate">
                     {basename(pair.remoteDir)}
                   </span>
-                  <span className="text-[10px] text-gx-muted">↔</span>
-                  <span className="text-xs text-gx-muted truncate">
+                  <span className="text-[10px] text-muted-foreground">↔</span>
+                  <span className="text-xs text-muted-foreground truncate">
                     {basename(pair.localDir)}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 mt-0.5">
-                  <span className="text-[10px] text-gx-muted capitalize">{pair.status}</span>
+                  <span className="text-[10px] text-muted-foreground capitalize">{pair.status}</span>
                   {pair.lastSyncAt && (
-                    <span className="text-[10px] text-gx-muted">
+                    <span className="text-[10px] text-muted-foreground">
                       · Last sync: {formatTimestamp(pair.lastSyncAt)}
                     </span>
                   )}
                   {(pair.pendingChanges ?? 0) > 0 && (
-                    <span className="text-[10px] text-blue-400">
+                    <span className="text-[10px] text-info">
                       · {pair.pendingChanges} pending
                     </span>
                   )}
@@ -219,7 +219,7 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                 {pair.status === "active" ? (
                   <button
                     onClick={() => handlePause(pair.id)}
-                    className="p-1 text-gx-muted hover:text-yellow-500 hover:bg-gx-surface-hover rounded transition"
+                    className="p-1 text-muted-foreground hover:text-warning hover:bg-accent rounded transition"
                     title="Pause sync"
                     aria-label="Pause sync"
                   >
@@ -228,7 +228,7 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                 ) : (
                   <button
                     onClick={() => handleStart(pair.id)}
-                    className="p-1 text-gx-muted hover:text-green-500 hover:bg-gx-surface-hover rounded transition"
+                    className="p-1 text-muted-foreground hover:text-success hover:bg-accent rounded transition"
                     title="Start sync"
                     aria-label="Start sync"
                   >
@@ -237,7 +237,7 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
                 )}
                 <button
                   onClick={() => handleRemove(pair.id)}
-                  className="p-1 text-gx-muted hover:text-red-400 hover:bg-gx-surface-hover rounded transition"
+                  className="p-1 text-muted-foreground hover:text-destructive hover:bg-accent rounded transition"
                   title="Remove sync pair"
                   aria-label="Remove sync pair"
                 >
@@ -249,24 +249,24 @@ export function SyncManagementPanel({ profileId }: SyncManagementPanelProps) {
             {/* Expanded details: paths + conflicts */}
             {expandedPairId === pair.id && (
               <div className="px-4 pb-3 space-y-2">
-                <div className="rounded border border-gx-border bg-gx-bg-sub p-2 space-y-1">
+                <div className="rounded border border-border bg-background p-2 space-y-1">
                   <div className="flex items-center gap-2 text-[11px]">
-                    <span className="text-gx-muted w-14 shrink-0">Remote:</span>
-                    <span className="text-gx-text font-mono truncate">{pair.remoteDir}</span>
+                    <span className="text-muted-foreground w-14 shrink-0">Remote:</span>
+                    <span className="text-foreground font-mono truncate">{pair.remoteDir}</span>
                   </div>
                   <div className="flex items-center gap-2 text-[11px]">
-                    <span className="text-gx-muted w-14 shrink-0">Local:</span>
-                    <span className="text-gx-text font-mono truncate">{pair.localDir}</span>
+                    <span className="text-muted-foreground w-14 shrink-0">Local:</span>
+                    <span className="text-foreground font-mono truncate">{pair.localDir}</span>
                   </div>
                   {pair.ignorePatterns.length > 0 && (
                     <div className="flex items-start gap-2 text-[11px]">
-                      <span className="text-gx-muted w-14 shrink-0">Ignore:</span>
-                      <span className="text-gx-muted font-mono">{pair.ignorePatterns.join(", ")}</span>
+                      <span className="text-muted-foreground w-14 shrink-0">Ignore:</span>
+                      <span className="text-muted-foreground font-mono">{pair.ignorePatterns.join(", ")}</span>
                     </div>
                   )}
                 </div>
                 {/* Conflicts for this pair */}
-                <div className="max-h-48 overflow-y-auto rounded border border-gx-border">
+                <div className="max-h-48 overflow-y-auto rounded border border-border">
                   <SyncConflictList syncPairId={pair.id} />
                 </div>
               </div>

@@ -39,13 +39,13 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Braces size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">LSP</span>
-        <span className="text-[9px] text-gx-muted">{operation}</span>
-        {symbol && <code className="font-mono text-gx-text/70 truncate">{symbol}</code>}
-        {!symbol && shortPath && <span className="truncate text-gx-text/70">{shortPath}</span>}
+        <Braces size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">LSP</span>
+        <span className="text-[9px] text-muted-foreground">{operation}</span>
+        {symbol && <code className="font-mono text-foreground/70 truncate">{symbol}</code>}
+        {!symbol && shortPath && <span className="truncate text-foreground/70">{shortPath}</span>}
         {hasDiagnostics && (
-          <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-gx-warn">
+          <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-warning">
             <AlertTriangle size={9} /> {diagnostics.length}
           </span>
         )}
@@ -61,60 +61,60 @@ export function LSPCard({ event, defaultExpanded = false, collapsed: collapsedPr
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => (hasOutput || hasDiagnostics) && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          (hasOutput || hasDiagnostics) && "hover:bg-gx-surface-hover cursor-pointer",
+          (hasOutput || hasDiagnostics) && "hover:bg-accent cursor-pointer",
           !(hasOutput || hasDiagnostics) && "cursor-default",
         )}
       >
-        <Braces size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">LSP</span>
+        <Braces size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">LSP</span>
 
         {/* Operation badge */}
-        <span className="shrink-0 rounded bg-gx-surface-hover px-1 py-0.5 text-[8px] font-medium text-gx-muted border border-gx-border/50">
+        <span className="shrink-0 rounded bg-accent px-1 py-0.5 text-[8px] font-medium text-muted-foreground border border-border/50">
           {operation}
         </span>
 
         {/* Symbol or file */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
           {symbol && (
-            <code className="font-mono text-gx-text/80">{symbol}</code>
+            <code className="font-mono text-foreground/80">{symbol}</code>
           )}
           {shortPath && (
-            <span className="text-[9px] text-gx-muted/60 truncate">{shortPath}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">{shortPath}</span>
           )}
         </span>
 
         {/* Diagnostic count */}
         {hasDiagnostics && (
           <span className="shrink-0 flex items-center gap-0.5 text-[9px]">
-            <AlertTriangle size={9} className="text-gx-warn" />
-            <span className="text-gx-warn">{diagnostics.length}</span>
+            <AlertTriangle size={9} className="text-warning" />
+            <span className="text-warning">{diagnostics.length}</span>
           </span>
         )}
 
         {(hasOutput || hasDiagnostics) && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {expanded && (hasOutput || hasDiagnostics) && (
-        <div className="border-t border-gx-border/30 max-h-[250px] overflow-auto">
+        <div className="border-t border-border/30 max-h-[250px] overflow-auto">
           {/* Diagnostics list */}
           {hasDiagnostics && (
             <div className="px-2.5 py-2 space-y-1">
               {diagnostics.map((diag, idx) => (
                 <div key={idx} className="flex items-start gap-1.5 text-[10px]">
                   <DiagnosticIcon severity={diag.severity} />
-                  <span className="flex-1 text-gx-text/70">{diag.message}</span>
+                  <span className="flex-1 text-foreground/70">{diag.message}</span>
                   {diag.line && (
-                    <span className="shrink-0 text-[9px] text-gx-muted font-mono">L{diag.line}</span>
+                    <span className="shrink-0 text-[9px] text-muted-foreground font-mono">L{diag.line}</span>
                   )}
                 </div>
               ))}
@@ -179,11 +179,11 @@ function parseDiagnostics(output: string): Diagnostic[] {
 function DiagnosticIcon({ severity }: { severity: Diagnostic["severity"] }) {
   switch (severity) {
     case "error":
-      return <AlertTriangle size={10} className="text-gx-error shrink-0 mt-0.5" />;
+      return <AlertTriangle size={10} className="text-destructive shrink-0 mt-0.5" />;
     case "warning":
-      return <AlertTriangle size={10} className="text-gx-warn shrink-0 mt-0.5" />;
+      return <AlertTriangle size={10} className="text-warning shrink-0 mt-0.5" />;
     default:
-      return <Info size={10} className="text-gx-info shrink-0 mt-0.5" />;
+      return <Info size={10} className="text-info shrink-0 mt-0.5" />;
   }
 }
 
@@ -213,7 +213,7 @@ function LspOutput({ output }: { output: string }) {
   }
 
   return (
-    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
       {text}
     </pre>
   );

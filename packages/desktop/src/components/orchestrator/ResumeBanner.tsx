@@ -86,8 +86,8 @@ export function ResumeBanner({ taskId, lastMessageTs, onResume }: Props) {
   }
 
   return (
-    <div className="mx-3 mt-2 flex items-center gap-2 rounded-md border border-gx-info/40 bg-gx-info/10 px-3 py-2 text-[11px] text-gx-text">
-      <Clock size={12} className="shrink-0 text-gx-info" />
+    <div className="mx-3 mt-2 flex items-center gap-2 rounded-md border border-info/40 bg-info/10 px-3 py-2 text-[11px] text-foreground">
+      <Clock size={12} className="shrink-0 text-info" />
       <span className="flex-1">
         Previous session reached <strong>turn {latest.turnNumber}</strong>
         {checkpointTs ? ` (${formatAgo(checkpointTs)})` : ""}. Resume where you left off?
@@ -95,7 +95,7 @@ export function ResumeBanner({ taskId, lastMessageTs, onResume }: Props) {
       <button
         type="button"
         onClick={onResume}
-        className="inline-flex items-center gap-1 rounded-md bg-gx-accent px-2 py-0.5 text-white hover:bg-gx-accent-hover transition"
+        className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 text-primary-foreground hover:bg-primary-hover transition"
       >
         <RotateCcw size={10} /> Resume
       </button>
@@ -103,7 +103,7 @@ export function ResumeBanner({ taskId, lastMessageTs, onResume }: Props) {
         type="button"
         onClick={dismiss}
         aria-label="Dismiss resume prompt"
-        className="rounded p-0.5 text-gx-muted hover:text-gx-text"
+        className="rounded p-0.5 text-muted-foreground hover:text-foreground"
       >
         <X size={12} />
       </button>

@@ -248,17 +248,17 @@ export function InteractiveDiffGutter({
           >
             {/* Focus indicator for keyboard navigation */}
             {isFocused && (
-              <div className="absolute inset-0 rounded-sm border border-gx-accent bg-gx-accent/10" />
+              <div className="absolute inset-0 rounded-sm border border-primary bg-primary/10" />
             )}
 
             {/* Drag highlight */}
             {isInHighlight && (
-              <div className="absolute inset-0 bg-gx-accent/15" />
+              <div className="absolute inset-0 bg-primary/15" />
             )}
 
             {/* "+" icon on hover */}
             {isHovered && !isInHighlight && (
-              <div className="relative flex h-4 w-4 items-center justify-center rounded bg-gx-accent/20 text-gx-accent transition-opacity">
+              <div className="relative flex h-4 w-4 items-center justify-center rounded bg-primary/20 text-primary transition-opacity">
                 <Plus size={12} strokeWidth={2.5} />
               </div>
             )}

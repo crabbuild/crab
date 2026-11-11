@@ -1,3 +1,4 @@
+import { Textarea } from "@/components/ui/textarea";
 import {
   forwardRef,
   useCallback,
@@ -605,7 +606,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       }}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="relative isolate rounded-lg border border-gx-border bg-gx-bg focus-within:border-gx-accent/70 transition"
+      className="relative isolate rounded-lg border border-border bg-background focus-within:border-primary/70 transition"
     >
       {/* Slash command dropdown (positioned above the input group) */}
       <SlashCommandDropdown
@@ -655,9 +656,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
       />
 
       {/* Textarea */}
-      <textarea
+      <Textarea
         ref={textareaRef}
-        className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-xs leading-5 text-gx-text placeholder:text-gx-muted/60 focus:outline-none"
+        className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-xs leading-5 text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
         placeholder={placeholder ?? "Type a message, / for commands, @ to add context, # for files…"}
         rows={1}
         value={text}
@@ -696,7 +697,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             <Bot size={13} />
           )}
           {selectedAgent && (
-            <span className="text-[10px] font-medium text-gx-text/90">{shortAgentLabel(selectedAgent.name)}</span>
+            <span className="text-[10px] font-medium text-foreground/90">{shortAgentLabel(selectedAgent.name)}</span>
           )}
         </IconButton>
 
@@ -729,10 +730,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             active={openMenu === "model"}
             onClick={() => setOpenMenu(openMenu === "model" ? null : "model")}
           >
-            <Sparkles size={12} className="text-gx-accent" />
+            <Sparkles size={12} className="text-primary" />
             <span className="text-[10px] font-medium">
               {selectedModel ? selectedModel.label : "Default"}
-              {intelligence && <span className="ml-1 text-gx-muted">{intelligenceLabel(intelligence)}</span>}
+              {intelligence && <span className="ml-1 text-muted-foreground">{intelligenceLabel(intelligence)}</span>}
             </span>
           </IconButton>
         )}
@@ -749,8 +750,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           className={clsx(
             "flex h-7 items-center gap-1 rounded-md border px-2 text-[10px] font-medium transition",
             mode === "plan"
-              ? "border-gx-warn/50 bg-gx-warn/10 text-gx-warn hover:bg-gx-warn/15"
-              : "border-gx-border bg-gx-surface text-gx-muted hover:text-gx-text",
+              ? "border-warning/50 bg-warning/10 text-warning hover:bg-warning/15"
+              : "border-border bg-card text-muted-foreground hover:text-foreground",
           )}
         >
           {mode === "plan" ? <ClipboardList size={11} /> : <Zap size={11} />}
@@ -761,7 +762,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
           <button
             type="button"
             onClick={onStop}
-            className="ml-1 flex h-7 w-7 items-center justify-center rounded-md bg-gx-error/20 text-gx-error hover:bg-gx-error/30 transition"
+            className="ml-1 flex h-7 w-7 items-center justify-center rounded-md bg-destructive/20 text-destructive hover:bg-destructive/30 transition"
             aria-label="Stop agent"
           >
             <Square size={13} />
@@ -774,8 +775,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             className={clsx(
               "ml-1 flex h-7 w-7 items-center justify-center rounded-md transition",
               canSubmit
-                ? "bg-gx-accent text-white hover:bg-gx-accent-hover"
-                : "bg-gx-surface text-gx-muted cursor-not-allowed",
+                ? "bg-primary text-primary-foreground hover:bg-primary-hover"
+                : "bg-card text-muted-foreground cursor-not-allowed",
             )}
             aria-label="Send message"
           >
@@ -801,12 +802,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             />
           ))}
           {agents.filter((a) => a.available).length === 0 && (
-            <div className="px-3 py-2 text-[10px] text-gx-muted">No agents installed.</div>
+            <div className="px-3 py-2 text-[10px] text-muted-foreground">No agents installed.</div>
           )}
           {/* Divider + Add Agent shortcut */}
-          <div className="my-1 border-t border-gx-border/50" />
+          <div className="my-1 border-t border-border/50" />
           <MenuItem
-            icon={<Plus size={12} className="text-gx-muted" />}
+            icon={<Plus size={12} className="text-muted-foreground" />}
             label="Add Agent…"
             onClick={() => {
               setOpenMenu(null);
@@ -1049,10 +1050,10 @@ function IconButton({
       title={title}
       disabled={disabled}
       className={clsx(
-        "flex h-7 items-center gap-1 rounded-md border px-2 text-gx-muted transition",
+        "flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground transition",
         active
-          ? "border-gx-accent/60 bg-gx-accent/10 text-gx-text"
-          : "border-transparent hover:border-gx-border hover:bg-gx-surface hover:text-gx-text",
+          ? "border-primary/60 bg-primary/10 text-foreground"
+          : "border-transparent hover:border-border hover:bg-card hover:text-foreground",
         disabled && "opacity-40 cursor-not-allowed hover:border-transparent hover:bg-transparent",
       )}
     >
@@ -1074,7 +1075,7 @@ function PopoverMenu({
     <div
       role="menu"
       className={clsx(
-        "absolute bottom-full z-40 mb-2 max-h-[var(--composer-popup-height)] min-w-[200px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-xl",
+        "absolute bottom-full z-40 mb-2 max-h-[var(--composer-popup-height)] min-w-[200px] overflow-auto rounded-lg border border-border bg-background shadow-xl",
         anchor === "left" ? "left-2" : "right-2",
       )}
     >
@@ -1085,7 +1086,7 @@ function PopoverMenu({
 
 function MenuHeader({ label }: { label: string }) {
   return (
-    <div className="px-3 py-1.5 border-b border-gx-border text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+    <div className="px-3 py-1.5 border-b border-border text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
       {label}
     </div>
   );
@@ -1115,16 +1116,16 @@ function MenuItem({
       className={clsx(
         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
         disabled
-          ? "cursor-not-allowed text-gx-muted/60"
+          ? "cursor-not-allowed text-muted-foreground/60"
           : active
-            ? "bg-gx-accent/10 text-gx-text"
-            : "text-gx-text hover:bg-gx-surface-hover",
+            ? "bg-primary/10 text-foreground"
+            : "text-foreground hover:bg-accent",
       )}
     >
-      <span className="shrink-0 text-gx-accent">{icon}</span>
+      <span className="shrink-0 text-primary">{icon}</span>
       <span className="flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[10px] text-gx-muted">{hint}</span>}
-      {active && <Check size={11} className="shrink-0 text-gx-accent" />}
+      {hint && <span className="shrink-0 text-[10px] text-muted-foreground">{hint}</span>}
+      {active && <Check size={11} className="shrink-0 text-primary" />}
     </button>
   );
 }
@@ -1138,13 +1139,13 @@ function AttachmentChip({
 }) {
   const Icon = iconForAttachment(attachment.kind);
   return (
-    <span className="inline-flex items-center gap-1 rounded border border-gx-border bg-gx-surface px-1.5 py-0.5 text-[10px] text-gx-text">
-      <Icon size={10} className="text-gx-accent" />
+    <span className="inline-flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-foreground">
+      <Icon size={10} className="text-primary" />
       <span className="max-w-[160px] truncate">{attachment.label}</span>
       <button
         type="button"
         onClick={onRemove}
-        className="ml-0.5 text-gx-muted hover:text-gx-text"
+        className="ml-0.5 text-muted-foreground hover:text-foreground"
         aria-label={`Remove ${attachment.label}`}
       >
         <X size={10} />
@@ -1199,15 +1200,15 @@ function ModelIntelligencePopover({
   return (
     <div
       role="menu"
-      className="absolute bottom-full right-2 z-40 mb-2 min-w-[180px] rounded-lg border border-gx-border bg-gx-bg shadow-xl"
+      className="absolute bottom-full right-2 z-40 mb-2 min-w-[180px] rounded-lg border border-border bg-background shadow-xl"
     >
       {/* Intelligence section */}
       {intelligenceLevels.length > 0 && (
         <>
-          <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted">
+          <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
             Intelligence
           </div>
-          <button type="button" onClick={() => onIntelligenceChange?.(null)} className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">
+          <button type="button" onClick={() => onIntelligenceChange?.(null)} className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent">
             <span className="flex-1">Default effort</span>{!intelligence && <Check size={11} className="shrink-0" />}
           </button>
           {intelligenceLevels.map((level) => (
@@ -1218,20 +1219,20 @@ function ModelIntelligencePopover({
               className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
                 intelligence === level
-                  ? "text-gx-accent"
-                  : "text-gx-text hover:bg-gx-surface-hover",
+                  ? "text-primary"
+                  : "text-foreground hover:bg-accent",
               )}
             >
               <span className="flex-1">{intelligenceLabel(level)}</span>
               {intelligence === level && <Check size={11} className="shrink-0" />}
             </button>
           ))}
-          <div className="my-1 border-t border-gx-border/50" />
+          <div className="my-1 border-t border-border/50" />
         </>
       )}
 
       {/* Model section */}
-      <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted">
+      <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
         Model
       </div>
       <button
@@ -1239,7 +1240,7 @@ function ModelIntelligencePopover({
         onClick={() => onModelChange("")}
         className={clsx(
           "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-          !selectedModel ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
+          !selectedModel ? "text-primary" : "text-foreground hover:bg-accent",
         )}
       >
         <span className="flex-1">Agent default</span>
@@ -1252,7 +1253,7 @@ function ModelIntelligencePopover({
           onClick={() => onModelChange(m.value)}
           className={clsx(
             "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-            selectedModel === m.value ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
+            selectedModel === m.value ? "text-primary" : "text-foreground hover:bg-accent",
           )}
         >
           <span className="flex-1">{m.label}</span>
@@ -1270,14 +1271,14 @@ function ModelIntelligencePopover({
           <button
             type="button"
             onClick={() => setShowMore(!showMore)}
-            className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent transition"
           >
             <span className="flex-1">More models</span>
-            <ChevronRight size={11} className="shrink-0 text-gx-muted" />
+            <ChevronRight size={11} className="shrink-0 text-muted-foreground" />
           </button>
 
           {showMore && (
-            <div className="absolute right-full top-0 z-50 mr-1 min-w-[150px] rounded-lg border border-gx-border bg-gx-bg shadow-lg">
+            <div className="absolute right-full top-0 z-50 mr-1 min-w-[150px] rounded-lg border border-border bg-background shadow-lg">
               <div className="py-1">
                 {otherModels.map((m) => (
                   <button
@@ -1286,7 +1287,7 @@ function ModelIntelligencePopover({
                     onClick={() => onModelChange(m.value)}
                     className={clsx(
                       "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition",
-                      selectedModel === m.value ? "text-gx-accent" : "text-gx-text hover:bg-gx-surface-hover",
+                      selectedModel === m.value ? "text-primary" : "text-foreground hover:bg-accent",
                     )}
                   >
                     <span className="flex-1">{m.label}</span>

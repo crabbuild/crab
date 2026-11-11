@@ -134,7 +134,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       {/* Composer suggestions stay below navigation; modal dialogs use the document layer. */}
-      <nav aria-label="Agent chat" className="relative z-10 flex shrink-0 border-b border-gx-border bg-gx-surface">
+      <nav aria-label="Agent chat" className="relative z-10 flex shrink-0 border-b border-border bg-card">
         {([
           { id: "chats", label: "Chats", icon: MessageSquare },
           { id: "skills", label: "Skills", icon: Puzzle },
@@ -145,10 +145,10 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
             aria-pressed={section === id}
             onClick={() => setSection(id)}
             className={clsx(
-              "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-gx-accent",
+              "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary",
               section === id
-                ? "border-gx-accent text-gx-text"
-                : "border-transparent text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >
             <Icon size={13} />
@@ -1583,12 +1583,12 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
 
   if (repo.repo_id.startsWith("ssh://") && tasks.length === 0 && setupComplete !== true) {
     return <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-      <p role={availability.error ? "alert" : "status"} className="text-sm text-gx-text">
+      <p role={availability.error ? "alert" : "status"} className="text-sm text-foreground">
         {setupComplete === null ? "Checking agents on this server…" : availability.error ?? "No Codex or Claude Code found on this server’s PATH."}
       </p>
       {setupComplete === false && <>
-        <p className="max-w-md text-xs text-gx-muted">{availability.error ? "Check this SSH account’s connection and agent installation, then retry." : "Install an agent for this SSH account and make it available on the server’s PATH."}</p>
-        <button type="button" onClick={availability.retry} className="rounded-md border border-gx-border px-3 py-1.5 text-sm hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent">Retry server detection</button>
+        <p className="max-w-md text-xs text-muted-foreground">{availability.error ? "Check this SSH account’s connection and agent installation, then retry." : "Install an agent for this SSH account and make it available on the server’s PATH."}</p>
+        <button type="button" onClick={availability.retry} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Retry server detection</button>
       </>}
     </div>;
   }
@@ -1654,7 +1654,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
     <div className="flex h-full w-full">
       {/* Left: Task List */}
       <div
-        className="shrink-0 border-r border-gx-border bg-gx-surface"
+        className="shrink-0 border-r border-border bg-card"
         style={{ width: effectiveTaskListWidth }}
       >
         <TaskList
@@ -1687,7 +1687,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
         {selectedTask ? (
           <>
             {/* Tabs */}
-            <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+            <div className="flex shrink-0 items-center border-b border-border bg-card">
               {(!tabsOverflow || activeTab === "chat") && (
                 <TabButton
                   active={activeTab === "chat"}
@@ -1703,7 +1703,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                   icon={<GitCompare size={13} />}
                   label="Diff"
                   badge={diffStats && diffStats.filesChanged > 0 ? (
-                    <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-gx-accent/15 px-1 text-[10px] font-medium tabular-nums text-gx-accent">
+                    <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/15 px-1 text-[10px] font-medium tabular-nums text-primary">
                       {diffStats.filesChanged}
                     </span>
                   ) : undefined}
@@ -1764,7 +1764,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                 onClick={() => setContextPanelOpen(!contextPanelOpen)}
                 className={clsx(
                   "flex items-center gap-1 px-3 py-2 text-xs transition",
-                  contextPanelOpen ? "text-gx-accent" : "text-gx-muted hover:text-gx-text",
+                  contextPanelOpen ? "text-primary" : "text-muted-foreground hover:text-foreground",
                 )}
                 title="Toggle pinned context"
               >
@@ -1849,7 +1849,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                           setLiveTreeWidth((w) => Math.max(120, Math.min(320, w - delta)));
                         }}
                       />
-                      <div className="shrink-0 border-l border-gx-border" style={{ width: liveTreeWidth }}>
+                      <div className="shrink-0 border-l border-border" style={{ width: liveTreeWidth }}>
                         <LiveFileTree
                           files={liveFilesRef.current[selectedTask.id] ?? new Map()}
                           isStreaming={streamingTasks.has(selectedTask.id)}
@@ -1943,7 +1943,7 @@ function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { act
                 })}
                 {/* Show placeholder when selected task has no worktreePath yet */}
                 {selectedTask && !selectedTask.worktreePath && (
-                  <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+                  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
                     Preparing workspace…
                   </div>
                 )}
@@ -2113,8 +2113,8 @@ function TabButton({
       className={clsx(
         "flex items-center gap-1.5 border-b-2 px-4 py-2 text-xs transition",
         active
-          ? "border-gx-accent text-gx-text"
-          : "border-transparent text-gx-muted hover:text-gx-text",
+          ? "border-primary text-foreground"
+          : "border-transparent text-muted-foreground hover:text-foreground",
       )}
       aria-selected={active}
       role="tab"
@@ -2150,19 +2150,19 @@ function TabOverflowMenu({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-3 py-2 text-xs text-gx-muted hover:text-gx-text transition"
+        className="flex items-center gap-1 px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition"
         aria-label="More tabs"
       >
         <MoreHorizontal size={13} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 rounded-md border border-gx-border bg-gx-surface shadow-lg">
+        <div className="absolute right-0 top-full z-50 mt-1 rounded-md border border-border bg-card shadow-lg">
           {hiddenTabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => { onSelectTab(tab.id); setOpen(false); }}
-              className="block w-full px-4 py-2 text-left text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="block w-full px-4 py-2 text-left text-xs text-foreground hover:bg-accent transition"
             >
               {tab.label}
             </button>

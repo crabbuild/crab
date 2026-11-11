@@ -57,7 +57,7 @@ export function Welcome() {
 
   return (
     <Backdrop>
-      <div className="relative flex w-full max-w-md flex-col items-center rounded-xl border border-gx-border bg-gx-surface p-8 shadow-2xl">
+      <div className="relative flex w-full max-w-md flex-col items-center rounded-xl border border-border bg-card p-8 shadow-2xl">
         <CardContent card={CARDS[step]} />
 
         {/* Dot indicators */}
@@ -67,7 +67,7 @@ export function Welcome() {
               key={i}
               className={clsx(
                 "h-2 w-2 rounded-full transition-colors",
-                i === step ? "bg-gx-accent" : "bg-gx-muted/40",
+                i === step ? "bg-primary" : "bg-muted-foreground/40",
               )}
             />
           ))}
@@ -78,7 +78,7 @@ export function Welcome() {
           <button
             type="button"
             onClick={dismiss}
-            className="rounded px-3 py-1.5 text-sm text-gx-muted hover:text-gx-text transition-colors"
+            className="rounded px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             Skip
           </button>
@@ -87,7 +87,7 @@ export function Welcome() {
             <button
               type="button"
               onClick={dismiss}
-              className="rounded-md bg-gx-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-gx-accent/90 transition-colors"
+              className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
             >
               Get Started
             </button>
@@ -95,7 +95,7 @@ export function Welcome() {
             <button
               type="button"
               onClick={() => setStep((s) => s + 1)}
-              className="rounded-md bg-gx-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-gx-accent/90 transition-colors"
+              className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
             >
               Next
             </button>
@@ -118,11 +118,11 @@ function CardContent({ card }: { card: Card }) {
   const Icon = card.icon;
   return (
     <div className="flex flex-col items-center text-center">
-      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gx-accent/10">
-        <Icon className="h-8 w-8 text-gx-accent" />
+      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
+        <Icon className="h-8 w-8 text-primary" />
       </div>
-      <h2 className="text-lg font-semibold text-gx-text">{card.title}</h2>
-      <p className="mt-2 text-sm leading-relaxed text-gx-muted">{card.description}</p>
+      <h2 className="text-lg font-semibold text-foreground">{card.title}</h2>
+      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{card.description}</p>
     </div>
   );
 }

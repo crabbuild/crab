@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search, ChevronLeft } from "lucide-react";
 import clsx from "clsx";
@@ -261,7 +262,7 @@ export function CommandPalette({
 
       {/* Palette container */}
       <div
-        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
         role="dialog"
@@ -269,22 +270,22 @@ export function CommandPalette({
         aria-modal="true"
       >
         {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2">
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           {mode.kind === "prompt" && (
             <button
               type="button"
-              className="shrink-0 rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => setMode({ kind: "commands", query: "", selectedIndex: 0 })}
               aria-label="Back to commands"
             >
               <ChevronLeft size={16} />
             </button>
           )}
-          <Search size={16} className="shrink-0 text-gx-muted" aria-hidden="true" />
-          <input
+          <Search size={16} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+          <Input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent text-sm text-gx-text placeholder:text-gx-muted focus-visible:outline-none"
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
             placeholder={placeholder}
             value={mode.query}
             onChange={(e) => handleQueryChange(e.target.value)}
@@ -313,7 +314,7 @@ export function CommandPalette({
           {mode.kind === "commands" && (
             <>
               {results.length === 0 ? (
-                <div className="px-3 py-4 text-center text-sm text-gx-muted">
+                <div className="px-3 py-4 text-center text-sm text-muted-foreground">
                   No matching commands
                 </div>
               ) : (
@@ -332,8 +333,8 @@ export function CommandPalette({
                         "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm",
                         isDisabled && "opacity-50 cursor-default",
                         isSelected
-                          ? "bg-gx-accent/15 text-gx-text"
-                          : "text-gx-text/80 hover:bg-gx-surface-hover",
+                          ? "bg-primary/15 text-foreground"
+                          : "text-foreground/80 hover:bg-accent",
                       )}
                       onClick={() => {
                         if (!isDisabled) selectCommand(cmd);
@@ -343,15 +344,15 @@ export function CommandPalette({
                       }
                     >
                       {cmd.icon && (
-                        <cmd.icon size={14} className="shrink-0 text-gx-muted" aria-hidden="true" />
+                        <cmd.icon size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
                       )}
                       <span className="truncate">{cmd.label}</span>
                       <span className="ml-auto flex items-center gap-2">
-                        <span className="shrink-0 rounded bg-gx-bg-sub px-1.5 py-0.5 text-[10px] font-medium text-gx-muted">
+                        <span className="shrink-0 rounded bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                           {cmd.category}
                         </span>
                         {cmd.shortcut && (
-                          <span className="shrink-0 text-[11px] text-gx-muted">
+                          <span className="shrink-0 text-[11px] text-muted-foreground">
                             {cmd.shortcut}
                           </span>
                         )}
@@ -366,7 +367,7 @@ export function CommandPalette({
           {mode.kind === "prompt" && mode.promptConfig.kind === "choice" && (
             <>
               {promptChoices.length === 0 ? (
-                <div className="px-3 py-4 text-center text-sm text-gx-muted">
+                <div className="px-3 py-4 text-center text-sm text-muted-foreground">
                   No matching options
                 </div>
               ) : (
@@ -382,8 +383,8 @@ export function CommandPalette({
                       className={clsx(
                         "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm",
                         isSelected
-                          ? "bg-gx-accent/15 text-gx-text"
-                          : "text-gx-text/80 hover:bg-gx-surface-hover",
+                          ? "bg-primary/15 text-foreground"
+                          : "text-foreground/80 hover:bg-accent",
                       )}
                       onClick={() => submitPrompt(choice.value)}
                       onMouseEnter={() =>
@@ -399,7 +400,7 @@ export function CommandPalette({
           )}
 
           {mode.kind === "prompt" && mode.promptConfig.kind !== "choice" && (
-            <div className="px-3 py-3 text-xs text-gx-muted">
+            <div className="px-3 py-3 text-xs text-muted-foreground">
               Type a value and press Enter to confirm, or Escape to go back.
             </div>
           )}

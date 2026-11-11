@@ -81,31 +81,31 @@ export function WorktreeCompareView({
   }, []);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       {/* Header */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-2">
-        <GitCompareArrows size={14} className="text-gx-accent" />
-        <span className="text-[12px] font-medium text-gx-text">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2">
+        <GitCompareArrows size={14} className="text-primary" />
+        <span className="text-[12px] font-medium text-foreground">
           Compare Worktree Branches
         </span>
-        <span className="flex items-center gap-1.5 text-[11px] text-gx-muted">
-          <span className="rounded bg-gx-accent/15 px-1.5 py-0.5 font-mono text-gx-accent">
+        <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-primary">
             {baseLabel}
           </span>
           <ChevronRight size={10} />
-          <span className="rounded bg-gx-accent/15 px-1.5 py-0.5 font-mono text-gx-accent">
+          <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-primary">
             {headLabel}
           </span>
         </span>
         {files && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             {files.length} file{files.length !== 1 ? "s" : ""} changed
           </span>
         )}
         {onClose && (
           <button
             type="button"
-            className="ml-auto rounded px-2 py-0.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="ml-auto rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close comparison"
           >
@@ -117,17 +117,17 @@ export function WorktreeCompareView({
       {/* Content: split pane with file list on left, diff on right */}
       <div className="min-h-0 flex-1">
         {loading && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 size={14} className="animate-spin" /> Comparing branches…
           </div>
         )}
         {error && (
-          <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
         {!loading && !error && files && files.length === 0 && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <GitCompareArrows size={14} /> No differences between these branches.
           </div>
         )}
@@ -135,8 +135,8 @@ export function WorktreeCompareView({
           <PanelGroup direction="horizontal" className="h-full">
             {/* File list panel */}
             <Panel minSize={15} defaultSize={25} maxSize={40}>
-              <div className="h-full overflow-auto border-r border-gx-border bg-gx-surface">
-                <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-gx-muted">
+              <div className="h-full overflow-auto border-r border-border bg-card">
+                <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                   Changed Files
                 </div>
                 {files.map((file) => (
@@ -145,14 +145,14 @@ export function WorktreeCompareView({
                     type="button"
                     className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] transition ${
                       selectedFile === file.path
-                        ? "bg-gx-accent/10 text-gx-text"
-                        : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                        ? "bg-primary/10 text-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     }`}
                     onClick={() => handleFileSelect(file.path)}
                     title={file.path}
                   >
                     <FileStatusBadge status={file.status} />
-                    <FileText size={11} className="shrink-0 text-gx-muted" />
+                    <FileText size={11} className="shrink-0 text-muted-foreground" />
                     <span className="truncate font-mono">
                       {file.path.split("/").pop() ?? file.path}
                     </span>
@@ -161,7 +161,7 @@ export function WorktreeCompareView({
               </div>
             </Panel>
 
-            <PanelResizeHandle className="w-1 bg-gx-border hover:bg-gx-accent transition-colors" />
+            <PanelResizeHandle className="w-1 bg-border hover:bg-primary transition-colors" />
 
             {/* Diff panel */}
             <Panel minSize={40}>
@@ -173,7 +173,7 @@ export function WorktreeCompareView({
                   head={headBranch}
                 />
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Select a file to view its diff.
                 </div>
               )}
@@ -190,12 +190,12 @@ function FileStatusBadge({ status }: { status: string }) {
   const letter = status.charAt(0).toUpperCase();
   const colorClass =
     letter === "A"
-      ? "text-gx-success bg-gx-success/15"
+      ? "text-success bg-success/15"
       : letter === "D"
-        ? "text-gx-error bg-gx-error/15"
+        ? "text-destructive bg-destructive/15"
         : letter === "R"
-          ? "text-gx-info bg-gx-info/15"
-          : "text-gx-warn bg-gx-warn/15";
+          ? "text-info bg-info/15"
+          : "text-warning bg-warning/15";
 
   return (
     <span

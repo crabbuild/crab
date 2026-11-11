@@ -75,10 +75,10 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
     : tool === "TeamCreate" ? "created"
     : tool === "TeamDelete" ? "disbanded"
     : isCompleted ? "completed" : "spawned";
-  const statusColor = isCompleted ? "text-emerald-500" : "text-blue-400";
+  const statusColor = isCompleted ? "text-success" : "text-info";
   const statusBg = isCompleted
-    ? "bg-emerald-500/10 border-emerald-500/30"
-    : "bg-blue-400/10 border-blue-400/30";
+    ? "bg-success/10 border-success/30"
+    : "bg-info/10 border-info/30";
 
   const canExpand = hasOutput || prompt.length > 80;
 
@@ -87,9 +87,9 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className="shrink-0 text-gx-info" />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <span className="truncate text-gx-text/70">{summary}</span>
+        <Icon size={11} className="shrink-0 text-info" />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <span className="truncate text-foreground/70">{summary}</span>
         <span className={clsx("shrink-0 text-[9px] font-medium", statusColor)}>{statusLabel}</span>
       </>
     );
@@ -103,19 +103,19 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => canExpand && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[11px] text-left transition",
-          canExpand && "hover:bg-gx-surface-hover cursor-pointer",
+          canExpand && "hover:bg-accent cursor-pointer",
           !canExpand && "cursor-default",
         )}
       >
-        <Icon size={12} className="text-gx-info shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-gx-text/80">{summary}</span>
+        <Icon size={12} className="text-info shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">{summary}</span>
 
         <span className={clsx(
           "shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium border",
@@ -131,24 +131,24 @@ export function AgentCard({ event, defaultExpanded = false, collapsed: collapsed
 
         {canExpand && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {expanded && canExpand && (
-        <div className="border-t border-gx-border/30 max-h-[300px] overflow-auto px-2.5 py-2 space-y-2">
+        <div className="border-t border-border/30 max-h-[300px] overflow-auto px-2.5 py-2 space-y-2">
           {prompt.length > 80 && (
             <div>
-              <span className="text-[9px] font-medium text-gx-muted uppercase tracking-wider">Prompt</span>
-              <p className="mt-0.5 text-[10px] leading-relaxed text-gx-text/70 whitespace-pre-wrap">
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Prompt</span>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-foreground/70 whitespace-pre-wrap">
                 {prompt}
               </p>
             </div>
           )}
           {hasOutput && (
             <div>
-              <span className="text-[9px] font-medium text-gx-muted uppercase tracking-wider">Result</span>
+              <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wider">Result</span>
               <div className="mt-0.5">
                 <AgentTextContent text={output.length > 5000 ? output.slice(0, 5000) + "\n\n… (truncated)" : output} />
               </div>
@@ -184,7 +184,7 @@ function AgentTextContent({ text }: { text: string }) {
   }
 
   return (
-    <pre className="font-mono text-[10px] leading-[1.5] text-gx-text/70 whitespace-pre-wrap">
+    <pre className="font-mono text-[10px] leading-[1.5] text-foreground/70 whitespace-pre-wrap">
       {text}
     </pre>
   );

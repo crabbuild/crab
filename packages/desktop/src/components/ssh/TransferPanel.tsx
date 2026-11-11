@@ -50,13 +50,13 @@ const STATUS_LABELS: Record<TransferStatus, string> = {
 };
 
 const STATUS_BADGE_CLASSES: Record<TransferStatus, string> = {
-  active: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
-  queued: "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300",
-  resuming: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300",
-  completed: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
-  failed: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
-  cancelled: "bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400",
-  scheduled: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
+  active: "bg-info/10 text-info bg-info/30 text-info",
+  queued: "bg-card text-muted-foreground bg-card text-muted-foreground",
+  resuming: "bg-warning/10 text-warning bg-warning/30 text-warning",
+  completed: "bg-success/10 text-success bg-success/30 text-success",
+  failed: "bg-destructive/10 text-destructive bg-destructive/30 text-destructive",
+  cancelled: "bg-card text-muted-foreground bg-card text-muted-foreground",
+  scheduled: "bg-thinking/10 text-thinking bg-thinking/30 text-thinking",
 };
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -148,8 +148,8 @@ export function TransferPanel({
         role="region"
         aria-label="File transfers"
       >
-        <Inbox className="w-10 h-10 text-gray-300 dark:text-gray-600 mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
+        <Inbox className="w-10 h-10 text-muted-foreground text-muted-foreground mb-3" />
+        <p className="text-sm text-muted-foreground text-muted-foreground text-center">
           No transfers in progress or recorded.
         </p>
       </div>
@@ -159,8 +159,8 @@ export function TransferPanel({
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="File transfers">
       {/* Header with clear button */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-700">
-        <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border border-border">
+        <span className="text-xs font-semibold text-muted-foreground text-muted-foreground">
           Transfers
         </span>
         <button
@@ -170,8 +170,8 @@ export function TransferPanel({
           className={clsx(
             "flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors",
             hasClearable
-              ? "text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30"
-              : "text-gray-300 dark:text-gray-600 cursor-not-allowed",
+              ? "text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/30"
+              : "text-muted-foreground text-muted-foreground cursor-not-allowed",
           )}
           aria-label="Clear completed and failed transfers"
           title="Clear completed and failed transfers"
@@ -223,15 +223,15 @@ interface TransferGroupProps {
 function TransferGroup({ status, entries, selectedIds, onToggleSelect, onShiftSelect }: TransferGroupProps) {
   return (
     <section aria-label={`${STATUS_LABELS[status]} transfers`}>
-      <header className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-gray-50 dark:bg-gray-800/80 border-b border-gray-100 dark:border-gray-700">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+      <header className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-background bg-card/80 border-b border-border border-border">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground text-muted-foreground">
           {STATUS_LABELS[status]}
         </h3>
-        <span className="text-xs text-gray-400 dark:text-gray-500">
+        <span className="text-xs text-muted-foreground text-muted-foreground">
           ({entries.length})
         </span>
       </header>
-      <ul role="list" className="divide-y divide-gray-100 dark:divide-gray-800">
+      <ul role="list" className="divide-y divide-border divide-border">
         {entries.map((entry) => (
           <TransferRow
             key={entry.id}
@@ -275,8 +275,8 @@ function TransferRow({ entry, isSelected, onToggleSelect, onShiftSelect }: Trans
   return (
     <li
       className={clsx(
-        "flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50",
-        isSelected && "bg-blue-50 dark:bg-blue-900/20",
+        "flex items-center gap-2 px-3 py-2 hover:bg-background hover:bg-card/50",
+        isSelected && "bg-info/10 bg-info/20",
       )}
     >
       {/* Checkbox for selection */}
@@ -291,7 +291,7 @@ function TransferRow({ entry, isSelected, onToggleSelect, onShiftSelect }: Trans
               onShiftSelect(entry.id);
             }
           }}
-          className="shrink-0 w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+          className="shrink-0 w-3.5 h-3.5 rounded border-border border-border text-info focus:ring-info"
           aria-label={`Select transfer ${entry.fileName || fileName}`}
         />
       )}
@@ -299,16 +299,16 @@ function TransferRow({ entry, isSelected, onToggleSelect, onShiftSelect }: Trans
         className={clsx(
           "w-4 h-4 shrink-0",
           entry.direction === "upload"
-            ? "text-blue-500 dark:text-blue-400"
-            : "text-green-500 dark:text-green-400",
+            ? "text-info text-info"
+            : "text-success text-success",
         )}
         aria-label={entry.direction === "upload" ? "Upload" : "Download"}
       />
       <div className="flex-1 min-w-0 cursor-pointer" onClick={handleClick}>
-        <p className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+        <p className="text-sm font-medium text-foreground text-foreground truncate">
           {fileName}
         </p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 truncate" title={filePath}>
+        <p className="text-xs text-muted-foreground text-muted-foreground truncate" title={filePath}>
           {filePath}
         </p>
       </div>

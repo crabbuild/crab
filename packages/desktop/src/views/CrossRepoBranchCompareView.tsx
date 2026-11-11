@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -208,27 +209,27 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
   }, [fetchComparison]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       {/* Header */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-2">
-        <GitCompareArrows size={14} className="text-gx-accent" />
-        <span className="text-[12px] font-medium text-gx-text">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2">
+        <GitCompareArrows size={14} className="text-primary" />
+        <span className="text-[12px] font-medium text-foreground">
           Cross-Repo Branch Comparison
         </span>
-        <span className="flex items-center gap-1.5 text-[11px] text-gx-muted">
+        <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <RepoLabel entry={base.entry} branch={base.branch} connected={baseConnected} />
           <ChevronRight size={10} />
           <RepoLabel entry={head.entry} branch={head.branch} connected={headConnected} />
         </span>
         {compareState.phase === "ready" && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             {compareState.files.length} file{compareState.files.length !== 1 ? "s" : ""} changed
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => void fetchComparison()}
             title="Refresh comparison"
             aria-label="Refresh comparison"
@@ -238,7 +239,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
           {onClose && (
             <button
               type="button"
-              className="rounded px-2 py-0.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={onClose}
               aria-label="Close comparison"
             >
@@ -251,7 +252,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
       {/* Content */}
       <div className="min-h-0 flex-1">
         {compareState.phase === "loading" && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 size={14} className="animate-spin" /> Comparing branches across repos…
           </div>
         )}
@@ -263,7 +264,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
           />
         )}
         {compareState.phase === "ready" && compareState.files.length === 0 && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <GitCompareArrows size={14} /> No differences between these branches.
           </div>
         )}
@@ -271,8 +272,8 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
           <PanelGroup direction="horizontal" className="h-full">
             {/* File list panel */}
             <Panel minSize={15} defaultSize={25} maxSize={40}>
-              <div className="h-full overflow-auto border-r border-gx-border bg-gx-surface">
-                <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-gx-muted">
+              <div className="h-full overflow-auto border-r border-border bg-card">
+                <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                   Changed Files
                 </div>
                 {compareState.files.map((file) => (
@@ -281,14 +282,14 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
                     type="button"
                     className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] transition ${
                       selectedFile === file.path
-                        ? "bg-gx-accent/10 text-gx-text"
-                        : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                        ? "bg-primary/10 text-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     }`}
                     onClick={() => setSelectedFile(file.path)}
                     title={file.path}
                   >
                     <FileStatusBadge status={file.status} />
-                    <FileText size={11} className="shrink-0 text-gx-muted" />
+                    <FileText size={11} className="shrink-0 text-muted-foreground" />
                     <span className="truncate font-mono">
                       {file.path.split("/").pop() ?? file.path}
                     </span>
@@ -297,7 +298,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
               </div>
             </Panel>
 
-            <PanelResizeHandle className="w-1 bg-gx-border transition-colors hover:bg-gx-accent" />
+            <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary" />
 
             {/* Diff panel */}
             <Panel minSize={40}>
@@ -309,7 +310,7 @@ export function CrossRepoBranchCompareView({ base, head, onClose }: Props) {
                   head={headRef.sha}
                 />
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Select a file to view its diff.
                 </div>
               )}
@@ -336,19 +337,19 @@ function RepoLabel({
   const isRemote = false; // In simplified model, determined at workspace level
   const Icon = isRemote ? (connected ? Cloud : CloudOff) : HardDrive;
   const iconColor = !connected
-    ? "text-gx-error"
+    ? "text-destructive"
     : isRemote
-      ? "text-gx-info"
-      : "text-gx-muted";
+      ? "text-info"
+      : "text-muted-foreground";
 
   return (
-    <span className="flex items-center gap-1 rounded bg-gx-accent/15 px-1.5 py-0.5">
+    <span className="flex items-center gap-1 rounded bg-primary/15 px-1.5 py-0.5">
       <Icon size={10} className={iconColor} />
-      <span className="font-mono text-gx-accent">{entry.name}</span>
-      <span className="text-gx-muted">:</span>
-      <span className="font-mono text-gx-accent">{branch}</span>
+      <span className="font-mono text-primary">{entry.name}</span>
+      <span className="text-muted-foreground">:</span>
+      <span className="font-mono text-primary">{branch}</span>
       {isRemote && (
-        <span className="text-[9px] text-gx-muted">(remote)</span>
+        <span className="text-[9px] text-muted-foreground">(remote)</span>
       )}
     </span>
   );
@@ -366,24 +367,24 @@ function DisconnectedError({
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-      <div className="flex items-center gap-3 rounded-lg border border-gx-error/30 bg-gx-error/5 p-4">
-        <AlertTriangle size={20} className="shrink-0 text-gx-error" />
+      <div className="flex items-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+        <AlertTriangle size={20} className="shrink-0 text-destructive" />
         <div className="space-y-1">
-          <div className="text-sm font-medium text-gx-error">
+          <div className="text-sm font-medium text-destructive">
             {side === "both"
               ? "Both sides disconnected"
               : `${side === "base" ? "Base" : "Head"} repository unavailable`}
           </div>
-          <div className="text-xs text-gx-muted">{message}</div>
+          <div className="text-xs text-muted-foreground">{message}</div>
         </div>
       </div>
-      <button
+      <Button variant="outline"
         type="button"
-        className="btn flex items-center gap-1.5 text-xs"
+        className="flex items-center gap-1.5 text-xs"
         onClick={onRetry}
       >
         <RefreshCw size={12} /> Retry
-      </button>
+      </Button>
     </div>
   );
 }
@@ -393,12 +394,12 @@ function FileStatusBadge({ status }: { status: string }) {
   const letter = status.charAt(0).toUpperCase();
   const colorClass =
     letter === "A"
-      ? "text-gx-success bg-gx-success/15"
+      ? "text-success bg-success/15"
       : letter === "D"
-        ? "text-gx-error bg-gx-error/15"
+        ? "text-destructive bg-destructive/15"
         : letter === "R"
-          ? "text-gx-info bg-gx-info/15"
-          : "text-gx-warn bg-gx-warn/15";
+          ? "text-info bg-info/15"
+          : "text-warning bg-warning/15";
 
   return (
     <span

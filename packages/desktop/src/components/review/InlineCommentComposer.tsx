@@ -1,3 +1,4 @@
+import { Textarea } from "@/components/ui/textarea";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Code, Send, X } from "lucide-react";
 
@@ -103,17 +104,17 @@ export function InlineCommentComposer({
     : `L${line}`;
 
   return (
-    <div className="my-1 rounded border border-gx-border bg-gx-surface shadow-sm">
+    <div className="my-1 rounded border border-border bg-card shadow-sm">
       {/* Code context block */}
       {codeContext && (
-        <div className="border-b border-gx-border/50 bg-gx-bg-sub px-3 py-2">
-          <div className="mb-1 flex items-center gap-2 text-[10px] text-gx-muted">
+        <div className="border-b border-border/50 bg-background px-3 py-2">
+          <div className="mb-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             <Code size={10} />
             <span className="font-mono">
               {path}:{lineLabel} ({side})
             </span>
           </div>
-          <pre className="overflow-x-auto whitespace-pre font-mono text-[11px] leading-relaxed text-gx-text/80">
+          <pre className="overflow-x-auto whitespace-pre font-mono text-[11px] leading-relaxed text-foreground/80">
             {codeContext}
           </pre>
         </div>
@@ -125,7 +126,7 @@ export function InlineCommentComposer({
         <div className="mb-1.5 flex items-center gap-1">
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-accent/10 hover:text-gx-accent"
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-primary/10 hover:text-primary"
             onClick={insertSuggestion}
             title="Insert suggestion block pre-filled with selected code"
             aria-label="Suggest change"
@@ -136,9 +137,9 @@ export function InlineCommentComposer({
         </div>
 
         {/* Textarea */}
-        <textarea
+        <Textarea
           ref={textareaRef}
-          className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+          className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
           rows={3}
           placeholder="Write a review comment…"
           value={body}
@@ -153,7 +154,7 @@ export function InlineCommentComposer({
         {validationError && (
           <p
             id="composer-error"
-            className="mt-1 text-[10px] text-red-400"
+            className="mt-1 text-[10px] text-destructive"
             role="alert"
           >
             {validationError}
@@ -162,13 +163,13 @@ export function InlineCommentComposer({
 
         {/* Actions */}
         <div className="mt-2 flex items-center justify-between">
-          <span className="text-[9px] text-gx-muted">
+          <span className="text-[9px] text-muted-foreground">
             {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit · Esc to cancel
           </span>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={onCancel}
               aria-label="Cancel comment"
             >
@@ -177,7 +178,7 @@ export function InlineCommentComposer({
             </button>
             <button
               type="button"
-              className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!body.trim()}
               onClick={handleSubmit}
               aria-label="Submit comment"

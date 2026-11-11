@@ -113,7 +113,7 @@ export function ChangesAndStashesView({ repo, onOpenDiff, activeDiffPath, onComm
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      <div className="flex shrink-0 items-center border-b border-border bg-card">
         <TabButton
           active={activeTab === "changes"}
           onClick={() => setActiveTab("changes")}
@@ -176,8 +176,8 @@ function TabButton({
       className={clsx(
         "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition",
         active
-          ? "text-gx-text"
-          : "text-gx-muted hover:text-gx-text",
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
       )}
       onClick={onClick}
       role="tab"
@@ -190,8 +190,8 @@ function TabButton({
           className={clsx(
             "ml-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium",
             active
-              ? "bg-gx-accent/20 text-gx-accent"
-              : "bg-gx-border text-gx-muted",
+              ? "bg-primary/20 text-primary"
+              : "bg-border text-muted-foreground",
           )}
         >
           {badge > 99 ? "99+" : badge}
@@ -199,7 +199,7 @@ function TabButton({
       )}
       {/* Active indicator */}
       {active && (
-        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-gx-accent" />
+        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-primary" />
       )}
     </button>
   );
@@ -238,23 +238,23 @@ function StashesTabContent({
         />
       </Panel>
 
-      <PanelResizeHandle className="w-px bg-gx-border hover:bg-gx-accent/40 transition-colors" />
+      <PanelResizeHandle className="w-px bg-border hover:bg-primary/40 transition-colors" />
 
       {/* Right: diff preview */}
       <Panel defaultSize={65} minSize={30}>
-        <div className="h-full overflow-auto bg-gx-bg-sub">
+        <div className="h-full overflow-auto bg-background">
           {!selectedStashRef && (
-            <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
               <div className="text-center">
-                <Layers size={20} className="mx-auto mb-2 text-gx-muted/50" />
+                <Layers size={20} className="mx-auto mb-2 text-muted-foreground/50" />
                 <p>Select a stash to preview its changes</p>
               </div>
             </div>
           )}
           {selectedStashRef && patchLoading && (
-            <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
               <span className="flex items-center gap-2">
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-gx-accent border-t-transparent" />
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                 Loading diff…
               </span>
             </div>
@@ -268,7 +268,7 @@ function StashesTabContent({
             </div>
           )}
           {selectedStashRef && !patchLoading && !stashPatch && (
-            <div className="flex h-full items-center justify-center text-xs text-gx-muted">
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
               No diff available for this stash
             </div>
           )}

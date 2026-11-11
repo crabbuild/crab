@@ -69,7 +69,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
   if (loading) {
     return (
       <div
-        className="flex items-center justify-center gap-2 p-6 text-xs text-gx-muted"
+        className="flex items-center justify-center gap-2 p-6 text-xs text-muted-foreground"
         aria-label="Loading cost data"
         role="status"
       >
@@ -82,7 +82,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
   // Error state
   if (error) {
     return (
-      <div className="p-4 text-xs text-gx-error" role="alert">
+      <div className="p-4 text-xs text-destructive" role="alert">
         {error}
       </div>
     );
@@ -91,7 +91,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
   // No data state
   if (!costData || costData.usage.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 p-6 text-xs text-gx-muted">
+      <div className="flex flex-col items-center justify-center gap-2 p-6 text-xs text-muted-foreground">
         <Coins size={20} className="opacity-50" />
         <span>No cost data</span>
       </div>
@@ -114,8 +114,8 @@ export function CostDetailPanel({ workspaceId }: Props) {
   return (
     <div className="flex h-full flex-col overflow-auto" aria-label="Cost detail panel">
       {/* Summary */}
-      <div className="border-b border-gx-border bg-gx-surface p-4">
-        <div className="flex items-center gap-2 text-xs font-medium text-gx-text">
+      <div className="border-b border-border bg-card p-4">
+        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
           <Coins size={13} />
           <span>Cost Summary</span>
         </div>
@@ -125,7 +125,7 @@ export function CostDetailPanel({ workspaceId }: Props) {
           <SummaryCard label="Tokens Out" value={formatTokenCount(totalOutput)} />
         </div>
         {costData.budgetLimitUsd != null && costData.estimatedCostUsd !== undefined && (
-          <div className="mt-2 text-[10px] text-gx-muted">
+          <div className="mt-2 text-[10px] text-muted-foreground">
             Budget: {formatCost(costData.budgetLimitUsd)} · Used{" "}
             {Math.round((costData.estimatedCostUsd / costData.budgetLimitUsd) * 100)}%
           </div>
@@ -133,8 +133,8 @@ export function CostDetailPanel({ workspaceId }: Props) {
       </div>
 
       {/* Cumulative Chart */}
-      {costData.estimatedCostUsd !== undefined && <div className="border-b border-gx-border p-4">
-        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-gx-text">
+      {costData.estimatedCostUsd !== undefined && <div className="border-b border-border p-4">
+        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-foreground">
           <TrendingUp size={13} />
           <span>Cumulative Cost</span>
         </div>
@@ -143,11 +143,11 @@ export function CostDetailPanel({ workspaceId }: Props) {
 
       {/* Per-Turn Breakdown Table */}
       <div className="flex-1 p-4">
-        <h3 className="mb-2 text-xs font-medium text-gx-text">Per-Turn Breakdown</h3>
-        <div className="overflow-x-auto rounded border border-gx-border">
+        <h3 className="mb-2 text-xs font-medium text-foreground">Per-Turn Breakdown</h3>
+        <div className="overflow-x-auto rounded border border-border">
           <table className="w-full text-[11px]" aria-label="Cost breakdown by turn">
             <thead>
-              <tr className="border-b border-gx-border bg-gx-surface text-left text-gx-muted">
+              <tr className="border-b border-border bg-card text-left text-muted-foreground">
                 <th className="px-2 py-1.5 font-medium">Turn</th>
                 <th className="px-2 py-1.5 font-medium">Time</th>
                 <th className="px-2 py-1.5 font-medium text-right">In</th>
@@ -159,17 +159,17 @@ export function CostDetailPanel({ workspaceId }: Props) {
               {turnCosts.map((usage, idx) => (
                 <tr
                   key={usage.turnId}
-                  className="border-b border-gx-border/50 last:border-0 hover:bg-gx-surface/50 transition-colors"
+                  className="border-b border-border/50 last:border-0 hover:bg-card/50 transition-colors"
                 >
-                  <td className="px-2 py-1.5 font-mono text-gx-muted">{idx + 1}</td>
-                  <td className="px-2 py-1.5 text-gx-text">{formatTimestamp(usage.timestamp)}</td>
-                  <td className="px-2 py-1.5 text-right text-gx-text">
+                  <td className="px-2 py-1.5 font-mono text-muted-foreground">{idx + 1}</td>
+                  <td className="px-2 py-1.5 text-foreground">{formatTimestamp(usage.timestamp)}</td>
+                  <td className="px-2 py-1.5 text-right text-foreground">
                     {formatTokenCount(usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)}
                   </td>
-                  <td className="px-2 py-1.5 text-right text-gx-text">
+                  <td className="px-2 py-1.5 text-right text-foreground">
                     {formatTokenCount(usage.outputTokens)}
                   </td>
-                  <td className="px-2 py-1.5 text-right font-mono text-gx-accent">
+                  <td className="px-2 py-1.5 text-right font-mono text-primary">
                     {formatCost(usage.cost)}
                   </td>
                 </tr>
@@ -186,9 +186,9 @@ export function CostDetailPanel({ workspaceId }: Props) {
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded border border-gx-border bg-gx-bg px-2.5 py-2 text-center">
-      <div className="text-[10px] text-gx-muted">{label}</div>
-      <div className="mt-0.5 text-sm font-medium text-gx-text">{value}</div>
+    <div className="rounded border border-border bg-background px-2.5 py-2 text-center">
+      <div className="text-[10px] text-muted-foreground">{label}</div>
+      <div className="mt-0.5 text-sm font-medium text-foreground">{value}</div>
     </div>
   );
 }
@@ -219,7 +219,7 @@ function CumulativeChart({ costs, maxCost }: { costs: number[]; maxCost: number 
         return (
           <div
             key={idx}
-            className="flex-1 rounded-t bg-gx-accent/70 transition-all"
+            className="flex-1 rounded-t bg-primary/70 transition-all"
             style={{ height: `${heightPct}%` }}
             title={`Turn ${idx + 1}: ${formatCost(cost)}`}
           />

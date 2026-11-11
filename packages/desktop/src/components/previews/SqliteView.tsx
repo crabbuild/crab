@@ -51,12 +51,12 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-4 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <Database size={13} className="text-gx-accent" />
+      <div className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <Database size={13} className="text-primary" />
         <FileQueryMode query={query} mode={mode} />
         {data && (
           <>
-            <span><strong className="text-gx-text">{data.table_count}</strong> tables</span>
+            <span><strong className="text-foreground">{data.table_count}</strong> tables</span>
             <span>{formatBytes(data.file_size)}</span>
           </>
         )}
@@ -68,8 +68,8 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
       {mode === "browse" ? (
         data ? <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr]">
           {/* Table list */}
-          <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface p-2">
-            <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Tables</div>
+          <aside className="min-h-0 overflow-auto border-r border-border bg-card p-2">
+            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">Tables</div>
             <ul className="space-y-1">
               {data.tables.map(t => (
                 <li key={t.name}>
@@ -78,21 +78,21 @@ export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
                     onClick={() => setActiveTable(t.name)}
                     className={clsx(
                       "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition",
-                      activeTable === t.name ? "bg-gx-accent/15 text-gx-text" : "text-gx-text hover:bg-gx-surface-hover",
+                      activeTable === t.name ? "bg-primary/15 text-foreground" : "text-foreground hover:bg-accent",
                     )}
                   >
-                    <Table2 size={11} className="shrink-0 text-gx-muted" />
+                    <Table2 size={11} className="shrink-0 text-muted-foreground" />
                     <span className="min-w-0 flex-1 truncate font-mono">{t.name}</span>
-                    <span className="shrink-0 text-[10px] text-gx-muted">{t.row_count.toLocaleString()}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{t.row_count.toLocaleString()}</span>
                   </button>
                 </li>
               ))}
             </ul>
           </aside>
           {/* Data grid */}
-          <div className="min-h-0 overflow-auto bg-gx-bg-sub">
+          <div className="min-h-0 overflow-auto bg-background">
             {table ? <TableGrid table={table} /> : (
-              <div className="flex h-full items-center justify-center text-sm text-gx-muted">Select a table</div>
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Select a table</div>
             )}
           </div>
         </div> : <FileBrowseState error={err} loading="Reading SQLite database…" />
@@ -145,13 +145,13 @@ function TableGrid({ table }: { table: SqliteTable }) {
   return (
     <div className="flex h-full flex-col">
       {/* Schema strip */}
-      <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-1.5">
+      <div className="shrink-0 border-b border-border bg-card px-3 py-1.5">
         <div className="flex flex-wrap gap-2 text-[11px]">
           {table.columns.map(c => (
-            <span key={c.name} className="flex items-center gap-1 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 font-mono">
-              {c.pk && <Key size={9} className="text-gx-warn" />}
-              <span className="text-gx-text">{c.name}</span>
-              <span className="text-gx-muted">{c.type}</span>
+            <span key={c.name} className="flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 font-mono">
+              {c.pk && <Key size={9} className="text-warning" />}
+              <span className="text-foreground">{c.name}</span>
+              <span className="text-muted-foreground">{c.type}</span>
             </span>
           ))}
         </div>
@@ -159,24 +159,24 @@ function TableGrid({ table }: { table: SqliteTable }) {
       {/* Rows */}
       <div className="min-h-0 flex-1 overflow-auto">
         {table.preview_rows.length === 0 ? (
-          <div className="p-4 text-center text-xs text-gx-muted">Table is empty.</div>
+          <div className="p-4 text-center text-xs text-muted-foreground">Table is empty.</div>
         ) : (
           <table className="border-collapse font-mono text-[12px]" style={{ minWidth: "100%" }}>
-            <thead className="sticky top-0 bg-gx-surface">
+            <thead className="sticky top-0 bg-card">
               <tr>
-                <th className="sticky left-0 z-10 w-[42px] min-w-[42px] border-b border-r border-gx-border bg-gx-surface px-2 py-1 text-right text-gx-muted whitespace-nowrap">#</th>
+                <th className="sticky left-0 z-10 w-[42px] min-w-[42px] border-b border-r border-border bg-card px-2 py-1 text-right text-muted-foreground whitespace-nowrap">#</th>
                 {cols.map(c => {
                   const w = colWidths[c];
                   return (
                     <th
                       key={c}
-                      className="relative border-b border-gx-border px-2 py-1 text-left font-semibold text-gx-text whitespace-nowrap"
+                      className="relative border-b border-border px-2 py-1 text-left font-semibold text-foreground whitespace-nowrap"
                       style={w ? { width: w, minWidth: w, maxWidth: w } : { minWidth: 80 }}
                     >
                       <span className="block truncate">{c}</span>
                       {/* Resize handle */}
                       <div
-                        className="absolute right-0 top-0 h-full w-[5px] cursor-col-resize hover:bg-gx-accent/30"
+                        className="absolute right-0 top-0 h-full w-[5px] cursor-col-resize hover:bg-primary/30"
                         onMouseDown={(e) => handleResizeStart(e, c)}
                       />
                     </th>
@@ -186,14 +186,14 @@ function TableGrid({ table }: { table: SqliteTable }) {
             </thead>
             <tbody>
               {table.preview_rows.map((row, ri) => (
-                <tr key={ri} className="odd:bg-gx-surface/50 hover:bg-gx-accent/5">
-                  <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-gx-border/40 bg-inherit px-2 py-1 text-right text-gx-muted whitespace-nowrap">{ri + 1}</td>
+                <tr key={ri} className="odd:bg-card/50 hover:bg-primary/5">
+                  <td className="sticky left-0 z-10 w-[42px] min-w-[42px] border-r border-border/40 bg-inherit px-2 py-1 text-right text-muted-foreground whitespace-nowrap">{ri + 1}</td>
                   {cols.map(c => {
                     const w = colWidths[c];
                     return (
                       <td
                         key={c}
-                        className="border-b border-gx-border/40 px-2 py-1 text-gx-text overflow-hidden text-ellipsis whitespace-nowrap"
+                        className="border-b border-border/40 px-2 py-1 text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
                         style={w ? { width: w, minWidth: w, maxWidth: w } : { maxWidth: 300 }}
                         title={renderCell(row[c])}
                       >

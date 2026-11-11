@@ -230,11 +230,11 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
   };
 
   return (
-    <div className="rounded-md border border-gx-border/40 bg-gx-surface/30 overflow-hidden">
+    <div className="rounded-md border border-border/40 bg-card/30 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2">
-        <FileText size={12} className="shrink-0 text-gx-accent" />
-        <span className="text-[11px] font-medium text-gx-text">
+        <FileText size={12} className="shrink-0 text-primary" />
+        <span className="text-[11px] font-medium text-foreground">
           Edited {turn.fileEditCount} file{turn.fileEditCount !== 1 ? "s" : ""}
         </span>
 
@@ -242,10 +242,10 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
         {(turn.totalAdded > 0 || turn.totalRemoved > 0) && (
           <span className="flex items-center gap-1.5 text-[10px] font-mono">
             {turn.totalAdded > 0 && (
-              <span className="text-gx-success">+{turn.totalAdded}</span>
+              <span className="text-success">+{turn.totalAdded}</span>
             )}
             {turn.totalRemoved > 0 && (
-              <span className="text-gx-error">−{turn.totalRemoved}</span>
+              <span className="text-destructive">−{turn.totalRemoved}</span>
             )}
           </span>
         )}
@@ -254,7 +254,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
 
         {/* Undo button */}
         {undoState === "reverted" ? (
-          <span className="inline-flex items-center gap-0.5 text-[10px] text-gx-warn">
+          <span className="inline-flex items-center gap-0.5 text-[10px] text-warning">
             <Undo2 size={10} /> Reverted
           </span>
         ) : (
@@ -262,7 +262,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
             type="button"
             disabled={undoState === "reverting" || !hunkContext?.taskId}
             onClick={() => void handleUndo()}
-            className="inline-flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[10px] text-gx-error hover:bg-gx-error/15 transition disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/15 transition disabled:opacity-50"
             title="Undo these file edits"
           >
             <Undo2 size={10} />
@@ -276,7 +276,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
             <button
               type="button"
               onClick={() => handleFeedback(4)}
-              className="inline-flex items-center gap-1 rounded border border-gx-success/30 bg-gx-success/5 px-1.5 py-0.5 text-[10px] text-gx-success hover:bg-gx-success/15 transition"
+              className="inline-flex items-center gap-1 rounded border border-success/30 bg-success/5 px-1.5 py-0.5 text-[10px] text-success hover:bg-success/15 transition"
               title="Good result"
             >
               <ThumbsUp size={10} />
@@ -284,21 +284,21 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
             <button
               type="button"
               onClick={() => handleFeedback(1)}
-              className="inline-flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[10px] text-gx-error hover:bg-gx-error/15 transition"
+              className="inline-flex items-center gap-1 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/15 transition"
               title="Needs improvement"
             >
               <ThumbsDown size={10} />
             </button>
           </>
         ) : (
-          <span className="text-[10px] text-gx-muted italic">Thanks!</span>
+          <span className="text-[10px] text-muted-foreground italic">Thanks!</span>
         )}
 
         {/* Agent Review button — triggers codex review mode */}
         <button
           type="button"
           onClick={handleAgentReview}
-          className="inline-flex items-center gap-1 rounded border border-gx-info/30 bg-gx-info/5 px-1.5 py-0.5 text-[10px] text-gx-info hover:bg-gx-info/15 transition"
+          className="inline-flex items-center gap-1 rounded border border-info/30 bg-info/5 px-1.5 py-0.5 text-[10px] text-info hover:bg-info/15 transition"
           title="Ask the agent to review the task changes"
         >
           <SearchCheck size={10} />
@@ -309,7 +309,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
         <button
           type="button"
           onClick={handleReview}
-          className="inline-flex items-center gap-1 rounded border border-gx-accent/30 bg-gx-accent/5 px-1.5 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/15 transition"
+          className="inline-flex items-center gap-1 rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/15 transition"
           title="Open Diff tab to review changes"
         >
           <Eye size={10} />
@@ -318,7 +318,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
       </div>
 
       {/* File list */}
-      <div className="border-t border-gx-border/30">
+      <div className="border-t border-border/30">
         {visibleFiles.map((file) => (
           <FileRow
             key={file.path}
@@ -335,7 +335,7 @@ export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, tas
           <button
             type="button"
             onClick={() => setShowAll(true)}
-            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[10px] text-gx-accent hover:bg-gx-surface-hover transition"
+            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[10px] text-primary hover:bg-accent transition"
           >
             <ChevronRight size={9} />
             Show {hiddenCount} more file{hiddenCount !== 1 ? "s" : ""} ›
@@ -372,25 +372,25 @@ function FileRow({
   }, [file.diff, file.path]);
 
   return (
-    <div className="border-t border-gx-border/20 first:border-t-0">
+    <div className="border-t border-border/20 first:border-t-0">
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-gx-surface-hover transition"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent transition"
         aria-expanded={expanded}
       >
         {expanded
-          ? <ChevronDown size={9} className="shrink-0 text-gx-muted/60" />
-          : <ChevronRight size={9} className="shrink-0 text-gx-muted/60" />
+          ? <ChevronDown size={9} className="shrink-0 text-muted-foreground/60" />
+          : <ChevronRight size={9} className="shrink-0 text-muted-foreground/60" />
         }
 
         {/* File name */}
         <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
-          <span className="text-[10px] text-gx-text/90 font-medium truncate">
+          <span className="text-[10px] text-foreground/90 font-medium truncate">
             {short}
           </span>
           {dir && (
-            <span className="text-[9px] text-gx-muted/60 truncate">{dir}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">{dir}</span>
           )}
         </span>
 
@@ -398,10 +398,10 @@ function FileRow({
         {(file.added > 0 || file.removed > 0) && (
           <span className="flex items-center gap-1 shrink-0 text-[9px] font-mono">
             {file.added > 0 && (
-              <span className="text-gx-success">+{file.added}</span>
+              <span className="text-success">+{file.added}</span>
             )}
             {file.removed > 0 && (
-              <span className="text-gx-error">−{file.removed}</span>
+              <span className="text-destructive">−{file.removed}</span>
             )}
           </span>
         )}
@@ -409,13 +409,13 @@ function FileRow({
 
       {/* Inline diff expansion */}
       {expanded && preparedDiff && (
-        <div className="border-t border-gx-border/20 max-h-[320px] overflow-auto bg-gx-bg/30">
+        <div className="border-t border-border/20 max-h-[320px] overflow-auto bg-background/30">
           <UnifiedDiff patch={preparedDiff} />
         </div>
       )}
 
       {expanded && !preparedDiff && (
-        <div className="border-t border-gx-border/20 px-3 py-2 text-[10px] text-gx-muted italic">
+        <div className="border-t border-border/20 px-3 py-2 text-[10px] text-muted-foreground italic">
           No diff available
         </div>
       )}

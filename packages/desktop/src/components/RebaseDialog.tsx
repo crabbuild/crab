@@ -101,27 +101,27 @@ export function RebaseDialog({
         aria-modal="true"
         aria-labelledby={headingId}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
-        <div className="flex items-start gap-3 border-b border-gx-border p-4">
-          <div className="mt-0.5 shrink-0 rounded bg-gx-accent/15 p-2 text-gx-accent">
+        <div className="flex items-start gap-3 border-b border-border p-4">
+          <div className="mt-0.5 shrink-0 rounded bg-primary/15 p-2 text-primary">
             <GitBranch size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
             <h2
               id={headingId}
-              className="text-[14px] font-semibold text-gx-text"
+              className="text-[14px] font-semibold text-foreground"
             >
               Rebase branch
             </h2>
-            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-gx-muted">
+            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               Rebase{" "}
-              <code className="rounded bg-gx-bg-sub px-1 font-mono text-gx-text">
+              <code className="rounded bg-background px-1 font-mono text-foreground">
                 {branch}
               </code>{" "}
               onto{" "}
-              <code className="rounded bg-gx-bg-sub px-1 font-mono text-gx-text">
+              <code className="rounded bg-background px-1 font-mono text-foreground">
                 {ontoBranch}
               </code>
             </p>
@@ -129,22 +129,22 @@ export function RebaseDialog({
         </div>
 
         {/* Body */}
-        <div className="space-y-4 border-b border-gx-border px-4 py-4">
+        <div className="space-y-4 border-b border-border px-4 py-4">
           {/* Branch / Onto (read-only) */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-[11px] font-medium text-gx-muted">
+              <label className="block text-[11px] font-medium text-muted-foreground">
                 Branch
               </label>
-              <div className="mt-1 truncate rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-[12px] text-gx-text">
+              <div className="mt-1 truncate rounded border border-border bg-background px-2 py-1.5 font-mono text-[12px] text-foreground">
                 {branch}
               </div>
             </div>
             <div>
-              <label className="block text-[11px] font-medium text-gx-muted">
+              <label className="block text-[11px] font-medium text-muted-foreground">
                 Onto
               </label>
-              <div className="mt-1 truncate rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-[12px] text-gx-text">
+              <div className="mt-1 truncate rounded border border-border bg-background px-2 py-1.5 font-mono text-[12px] text-foreground">
                 {ontoBranch}
               </div>
             </div>
@@ -152,7 +152,7 @@ export function RebaseDialog({
 
           {/* Error */}
           {error && (
-            <div className="rounded border border-gx-error/40 bg-gx-error/10 px-3 py-2 text-[11px] text-gx-error">
+            <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
               {error}
             </div>
           )}
@@ -166,8 +166,8 @@ export function RebaseDialog({
             onClick={onCancel}
             disabled={rebasing}
             className={clsx(
-              "rounded border border-gx-border bg-gx-surface px-3 py-1.5 text-[12px] text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border bg-card px-3 py-1.5 text-[12px] text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
               "disabled:opacity-50",
             )}
           >
@@ -178,8 +178,8 @@ export function RebaseDialog({
             onClick={handleRebase}
             disabled={rebasing}
             className={clsx(
-              "flex items-center gap-1.5 rounded border border-gx-accent/60 bg-gx-accent/15 px-3 py-1.5 text-[12px] font-medium text-gx-accent transition",
-              "hover:bg-gx-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "flex items-center gap-1.5 rounded border border-primary/60 bg-primary/15 px-3 py-1.5 text-[12px] font-medium text-primary transition",
+              "hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
               "disabled:opacity-50",
             )}
           >

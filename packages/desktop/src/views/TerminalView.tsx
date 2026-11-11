@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -1454,8 +1455,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
     let content: string;
     if (format === "html") {
       content = t.serialize.serialize({ excludeModes: true });
-      // Wrap in basic HTML with ANSI-to-HTML styling
-      content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Terminal Output</title><style>body{background:#0b0d12;color:#e7eaf1;font-family:monospace;white-space:pre;padding:16px;}</style></head><body>${content}</body></html>`;
+      const palette = resolveTheme(schemeId, theme);
+      content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Terminal Output</title><style>body{background:${palette.background};color:${palette.foreground};font-family:monospace;white-space:pre;padding:16px;}</style></head><body>${content}</body></html>`;
     } else {
       t.xterm.selectAll();
       content = t.xterm.getSelection() || "";
@@ -2092,16 +2093,16 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   );
 
   return (
-    <div className="flex h-full w-full min-w-0 flex-col bg-gx-bg-sub">
+    <div className="flex h-full w-full min-w-0 flex-col bg-background">
       {/* Toolbar row */}
-      <div className="flex shrink-0 items-center gap-1 border-y border-gx-border bg-gx-surface px-2 py-1">
+      <div className="flex shrink-0 items-center gap-1 border-y border-border bg-card px-2 py-1">
         {/* Broadcast toggle */}
         <button
           type="button"
           onClick={() => setBroadcastMode((v) => !v)}
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            broadcastMode ? "bg-gx-warn/20 text-gx-warn" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+            broadcastMode ? "bg-warning/20 text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title="Broadcast input to all terminals"
         >
@@ -2113,7 +2114,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         <button
           type="button"
           onClick={() => { setQuickCmdOpen((v) => !v); setTimeout(() => cmdInputRef.current?.focus(), 50); }}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
           title="Quick commands (⌘⇧R)"
         >
           <Command size={10} />
@@ -2124,7 +2125,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setProfileMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Terminal profiles"
           >
             <UserPlus size={10} />
@@ -2145,15 +2146,15 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setExportMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Export output"
           >
             <FileDown size={10} />
           </button>
           {exportMenuOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1 min-w-[120px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
-              <button type="button" onClick={() => exportOutput("text")} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">Plain Text</button>
-              <button type="button" onClick={() => exportOutput("html")} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">HTML (styled)</button>
+            <div className="absolute left-0 top-full z-50 mt-1 min-w-[120px] rounded border border-border bg-card py-1 shadow-lg">
+              <button type="button" onClick={() => exportOutput("text")} className="block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent">Plain Text</button>
+              <button type="button" onClick={() => exportOutput("html")} className="block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent">HTML (styled)</button>
             </div>
           )}
         </div>
@@ -2163,7 +2164,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setSchemeMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title={`Terminal colour scheme (${getScheme(schemeId).name})`}
             aria-label="Terminal colour scheme"
           >
@@ -2188,7 +2189,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setFontMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Terminal font settings"
             aria-label="Terminal font settings"
           >
@@ -2207,7 +2208,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setScrollbackMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title="Scrollback buffer settings"
             aria-label="Scrollback buffer settings"
           >
@@ -2228,8 +2229,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             className={clsx(
               "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
               pasteGuardConfig.enabled
-                ? "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
-                : "text-gx-warn/70 hover:text-gx-warn hover:bg-gx-warn/10",
+                ? "text-muted-foreground hover:text-foreground hover:bg-accent"
+                : "text-warning/70 hover:text-warning hover:bg-warning/10",
             )}
             title={pasteGuardConfig.enabled ? "Paste protection enabled" : "Paste protection disabled"}
             aria-label="Paste protection settings"
@@ -2253,7 +2254,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setScrollbarMenuOpen((v) => !v)}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent"
             title={`Scrollbar: ${scrollbarMode}`}
             aria-label="Scrollbar mode settings"
           >
@@ -2285,7 +2286,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           }}
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
-            breadcrumbDefault ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+            breadcrumbDefault ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title={breadcrumbDefault ? "Hide breadcrumb bar (all tabs)" : "Show breadcrumb bar (all tabs)"}
           aria-label="Toggle breadcrumb bar"
@@ -2299,8 +2300,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           className={clsx(
             "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
             backgroundDaemonCount > 0
-              ? "text-gx-accent hover:bg-gx-accent/10"
-              : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+              ? "text-primary hover:bg-primary/10"
+              : "text-muted-foreground hover:text-foreground hover:bg-accent",
           )}
           title={backgroundDaemonCount > 0 ? `${backgroundDaemonCount} background daemon session${backgroundDaemonCount === 1 ? "" : "s"}` : "Terminal sessions"}
           aria-label="Terminal sessions"
@@ -2320,11 +2321,11 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           if (!failure) return null;
           return (
             <div className="flex items-center gap-1.5 mr-2 text-[10px]">
-              <span className="text-gx-error">Exit {failure.exitCode}</span>
+              <span className="text-destructive">Exit {failure.exitCode}</span>
               <button
                 type="button"
                 onClick={() => sendErrorToAgent(activeTab)}
-                className="inline-flex items-center gap-1 rounded-md border border-gx-accent/40 bg-gx-accent/10 px-2 py-0.5 text-gx-accent hover:bg-gx-accent/20 transition"
+                className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary hover:bg-primary/20 transition"
                 title="Send the last 200 lines to the agent and ask it to fix this"
               >
                 <SendHorizonal size={9} /> Send error to agent
@@ -2332,7 +2333,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <button
                 type="button"
                 onClick={() => dismissError(activeTab)}
-                className="rounded p-0.5 text-gx-muted hover:text-gx-text"
+                className="rounded p-0.5 text-muted-foreground hover:text-foreground"
                 aria-label="Dismiss exit notice"
               >
                 <X size={10} />
@@ -2342,10 +2343,10 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         })()}
 
         {/* Split buttons */}
-        <button type="button" onClick={() => splitPane("horizontal")} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Split right (⌘\)">
+        <button type="button" onClick={() => splitPane("horizontal")} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Split right (⌘\)">
           <SplitSquareHorizontal size={11} />
         </button>
-        <button type="button" onClick={() => splitPane("vertical")} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Split down (⌘⇧|)">
+        <button type="button" onClick={() => splitPane("vertical")} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Split down (⌘⇧|)">
           <SplitSquareVertical size={11} />
         </button>
 
@@ -2354,23 +2355,23 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <button
             type="button"
             onClick={() => setPresetMenuOpen((v) => !v)}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             title="Preset layouts"
             aria-label="Preset layouts"
           >
             <LayoutGrid size={11} />
           </button>
           {presetMenuOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
+            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-border bg-card py-1 shadow-lg">
               {PRESET_LAYOUTS.map((preset) => (
                 <button
                   key={preset.id}
                   type="button"
                   onClick={() => { applyPresetLayout(preset.cols, preset.rows); setPresetMenuOpen(false); }}
-                  className="block w-full px-3 py-1.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+                  className="block w-full px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
                 >
                   <span className="font-medium">{preset.label}</span>
-                  <span className="ml-2 text-gx-muted">{preset.description}</span>
+                  <span className="ml-2 text-muted-foreground">{preset.description}</span>
                 </button>
               ))}
             </div>
@@ -2380,8 +2381,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
       {/* Quick commands palette */}
       {quickCmdOpen && (
-        <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-2">
-          <input
+        <div className="shrink-0 border-b border-border bg-card px-3 py-2">
+          <Input
             ref={cmdInputRef}
             type="text"
             value={cmdFilter}
@@ -2391,7 +2392,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               if (e.key === "Escape") { setQuickCmdOpen(false); setCmdFilter(""); }
             }}
             placeholder="Type a command or search history…"
-            className="w-full bg-transparent text-[12px] text-gx-text placeholder:text-gx-muted outline-none"
+            className="w-full bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground outline-none"
             autoFocus
           />
           {filteredHistory.length > 0 && (
@@ -2401,7 +2402,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                   key={i}
                   type="button"
                   onClick={() => runQuickCommand(cmd)}
-                  className="block w-full truncate rounded px-2 py-0.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+                  className="block w-full truncate rounded px-2 py-0.5 text-left text-[11px] text-foreground hover:bg-accent"
                 >
                   <span className="font-mono">{cmd}</span>
                 </button>
@@ -2559,14 +2560,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             aria-modal="true"
             aria-labelledby="cold-restore-title"
           >
-            <div className="w-full max-w-md rounded-lg border border-gx-border bg-gx-surface p-5 shadow-xl">
-              <h2 id="cold-restore-title" className="mb-2 text-[13px] font-semibold text-gx-text">
+            <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-xl">
+              <h2 id="cold-restore-title" className="mb-2 text-[13px] font-semibold text-foreground">
                 Restore terminal session?
               </h2>
-              <p className="mb-4 text-[12px] text-gx-muted">
+              <p className="mb-4 text-[12px] text-muted-foreground">
                 A terminal session was saved on {savedLabel}.
                 {pending.cwd && (
-                  <span className="block mt-1 font-mono text-[11px] text-gx-text truncate" title={pending.cwd}>
+                  <span className="block mt-1 font-mono text-[11px] text-foreground truncate" title={pending.cwd}>
                     {pending.cwd}
                   </span>
                 )}
@@ -2574,8 +2575,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
               {/* Env key prompts — only shown when secrets were stripped */}
               {pending.sanitizedKeys.length > 0 && (
-                <div className="mb-4 rounded border border-gx-warn/30 bg-gx-warn/5 p-3">
-                  <p className="mb-2 text-[11px] text-gx-warn">
+                <div className="mb-4 rounded border border-warning/30 bg-warning/5 p-3">
+                  <p className="mb-2 text-[11px] text-warning">
                     These environment variables were stripped on save:{" "}
                     <span className="font-mono">{pending.sanitizedKeys.join(", ")}</span>.
                     Provide values now or leave blank to use defaults.
@@ -2583,8 +2584,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                   <div className="flex flex-col gap-2">
                     {pending.sanitizedKeys.map((key) => (
                       <label key={key} className="flex flex-col gap-0.5">
-                        <span className="text-[10px] font-mono text-gx-muted">{key}</span>
-                        <input
+                        <span className="text-[10px] font-mono text-muted-foreground">{key}</span>
+                        <Input
                           type="password"
                           placeholder="(leave blank for default)"
                           value={pending.envValues[key] ?? ""}
@@ -2602,7 +2603,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                               return next;
                             });
                           }}
-                          className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-text outline-none focus:border-gx-accent"
+                          className="rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground outline-none focus:border-primary"
                         />
                       </label>
                     ))}
@@ -2614,14 +2615,14 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                 <button
                   type="button"
                   onClick={() => discardColdRestore(pending.id)}
-                  className="rounded px-3 py-1.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                  className="rounded px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Discard
                 </button>
                 <button
                   type="button"
                   onClick={() => confirmColdRestore(pending.id)}
-                  className="rounded bg-gx-accent px-3 py-1.5 text-[11px] font-medium text-white hover:bg-gx-accent/90"
+                  className="rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
                 >
                   Restore
                 </button>
@@ -3221,16 +3222,16 @@ function TerminalPane({
   return (
     <div className={clsx(
       "relative flex h-full min-w-0 min-h-0 flex-col",
-      isActive && "ring-1 ring-inset ring-gx-accent/50",
+      isActive && "ring-1 ring-inset ring-primary/50",
       !isActive && "ring-0 opacity-90",
     )} onClick={onActivate}>
       {/* Active pane indicator bar */}
       <div className={clsx(
         "absolute top-0 left-0 right-0 h-[2px] z-10 transition-colors",
-        isActive ? "bg-gx-accent" : "bg-transparent",
+        isActive ? "bg-primary" : "bg-transparent",
       )} />
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      <div className="flex shrink-0 items-center border-b border-border bg-card">
         <TerminalTabStrip
           tabs={pane.tabs as TermTab[]}
           activeTab={pane.activeTab}
@@ -3254,18 +3255,18 @@ function TerminalPane({
         <div className="relative ml-auto flex items-center gap-1 pr-2">
           {/* Scroll lock */}
           <button type="button" onClick={() => onScrollLockToggle(!scrollLocked)}
-            className={clsx("flex items-center rounded px-1 py-0.5", scrollLocked ? "text-gx-warn" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover")}
+            className={clsx("flex items-center rounded px-1 py-0.5", scrollLocked ? "text-warning" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
             title={scrollLocked ? "Scroll locked — new output won't auto-scroll" : "Click to lock scroll"}>
             {scrollLocked ? <Lock size={10} /> : <Unlock size={10} />}
           </button>
 
           {/* Per-pane terminal actions */}
           <button type="button" onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToPreviousPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Previous prompt (⌘↑)">
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Previous prompt (⌘↑)">
             <ArrowUp size={10} />
           </button>
           <button type="button" onClick={() => { const si = pane.activeTab ? shellIntegrationRef.current.get(pane.activeTab) : null; if (si) si.jumpToNextPrompt(); }}
-            className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Next prompt (⌘↓)">
+            className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Next prompt (⌘↓)">
             <ArrowDown size={10} />
           </button>
           <button type="button" onClick={() => {
@@ -3276,7 +3277,7 @@ function TerminalPane({
             let lastExecIndex = -1;
             for (let i = marks.length - 1; i >= 0; i--) { if (marks[i].type === "command-executed") { lastExecIndex = i; break; } }
             if (lastExecIndex >= 0) { const text = si.selectCommandOutput(lastExecIndex); if (text) void navigator.clipboard.writeText(stripAnsiCodes(text)); }
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Copy last command output">
+          }} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Copy last command output">
             <ClipboardCopy size={10} />
           </button>
           <button type="button" onClick={() => {
@@ -3286,7 +3287,7 @@ function TerminalPane({
             if (!si || !term) return;
             const cmd = getLastCommand(term.xterm, si.state.marks);
             if (cmd) void writeTerminalRef.current(pane.activeTab, cmd + "\r");
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Retry last command">
+          }} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Retry last command">
             <RotateCcw size={10} />
           </button>
           <button type="button" onClick={() => {
@@ -3295,7 +3296,7 @@ function TerminalPane({
             if (!t) return; t.xterm.selectAll();
             const text = t.xterm.getSelection(); t.xterm.clearSelection();
             if (text) void navigator.clipboard.writeText(text);
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Copy all output">
+          }} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Copy all output">
             <Copy size={10} />
           </button>
 
@@ -3304,7 +3305,7 @@ function TerminalPane({
             className={clsx(
               "flex items-center rounded px-1 py-0.5",
               pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault)
-                ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent",
             )}
             title={pane.activeTab && (breadcrumbPerTab.get(pane.activeTab) ?? breadcrumbDefault) ? "Hide breadcrumb (this tab)" : "Show breadcrumb (this tab)"}
           >
@@ -3322,33 +3323,33 @@ function TerminalPane({
             mgr.add(line);
             bumpBookmarks();
             setBookmarksPanelOpen(true);
-          }} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Add bookmark at cursor">
+          }} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Add bookmark at cursor">
             <Bookmark size={10} />
           </button>
           {/* Toggle bookmarks panel */}
           {(() => { const mgr = pane.activeTab ? bookmarkManagersRef.current.get(pane.activeTab) : null; const count = mgr?.count ?? 0; return count > 0 ? (
             <button type="button" onClick={() => setBookmarksPanelOpen((v) => !v)}
               className={clsx("flex items-center rounded px-1 py-0.5 text-[9px]",
-                bookmarksPanelOpen ? "text-gx-accent" : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover")}
+                bookmarksPanelOpen ? "text-primary" : "text-muted-foreground hover:text-foreground hover:bg-accent")}
               title={`${count} bookmark${count > 1 ? "s" : ""}`}
             >{count}</button>
           ) : null; })()}
 
           {/* Shell selector */}
-          <button type="button" onClick={() => onShellMenuToggle(!shellMenuOpen)} className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Select shell">
+          <button type="button" onClick={() => onShellMenuToggle(!shellMenuOpen)} className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground" title="Select shell">
             <TerminalIcon size={10} /><DropdownIcon size={8} />
           </button>
           {shellMenuOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
+            <div className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-border bg-card py-1 shadow-lg">
               {availableShells.map((sh) => (
-                <button key={sh} type="button" onClick={() => { onShellMenuToggle(false); onSpawnTab(sh); }} className="block w-full px-3 py-1 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover">
-                  {sh.split("/").pop()}<span className="ml-2 text-gx-muted">{sh}</span>
+                <button key={sh} type="button" onClick={() => { onShellMenuToggle(false); onSpawnTab(sh); }} className="block w-full px-3 py-1 text-left text-[11px] text-foreground hover:bg-accent">
+                  {sh.split("/").pop()}<span className="ml-2 text-muted-foreground">{sh}</span>
                 </button>
               ))}
             </div>
           )}
 
-          {onClose && <button type="button" onClick={onClose} className="flex items-center rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-error" title="Close pane"><X size={12} /></button>}
+          {onClose && <button type="button" onClick={onClose} className="flex items-center rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-destructive" title="Close pane"><X size={12} /></button>}
         </div>
       </div>
 
@@ -3375,19 +3376,19 @@ function TerminalPane({
         // Use bookmarkVersion to track changes
         void bookmarkVersion;
         return bookmarks.length > 0 ? (
-          <div className="shrink-0 border-b border-gx-border bg-gx-surface px-2 py-1 max-h-24 overflow-y-auto">
+          <div className="shrink-0 border-b border-border bg-card px-2 py-1 max-h-24 overflow-y-auto">
             <div className="flex items-center justify-between mb-1">
-              <span className="text-[9px] text-gx-muted uppercase tracking-wider">Bookmarks</span>
-              <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-gx-muted hover:text-gx-text"><X size={9} /></button>
+              <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Bookmarks</span>
+              <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-muted-foreground hover:text-foreground"><X size={9} /></button>
             </div>
             {bookmarks.map((bm) => (
               <div key={bm.id} className="group flex items-center gap-1 py-0.5 text-[10px]">
                 {renamingBookmarkId === bm.id ? (
-                  <input
+                  <Input
                     autoFocus
                     type="text"
                     defaultValue={bm.label}
-                    className="flex-1 bg-transparent text-[10px] text-gx-text outline-none border-b border-gx-accent px-1"
+                    className="flex-1 bg-transparent text-[10px] text-foreground outline-none border-b border-primary px-1"
                     onBlur={(e) => { if (mgr) { mgr.rename(bm.id, e.target.value || bm.label); bumpBookmarks(); } setRenamingBookmarkId(null); }}
                     onKeyDown={(e) => { if (e.key === "Enter") { if (mgr) { mgr.rename(bm.id, (e.target as HTMLInputElement).value || bm.label); bumpBookmarks(); } setRenamingBookmarkId(null); } if (e.key === "Escape") setRenamingBookmarkId(null); }}
                   />
@@ -3396,7 +3397,7 @@ function TerminalPane({
                     type="button"
                     onClick={() => { const t = terminalsRef.current.get(pane.activeTab!); if (t) t.xterm.scrollToLine(bm.line); }}
                     onDoubleClick={() => setRenamingBookmarkId(bm.id)}
-                    className="flex-1 text-left truncate text-gx-text hover:text-gx-accent"
+                    className="flex-1 text-left truncate text-foreground hover:text-primary"
                     title={`Line ${bm.line} — double-click to rename`}
                   >
                     {bm.label}
@@ -3405,7 +3406,7 @@ function TerminalPane({
                 <button
                   type="button"
                   onClick={() => { if (mgr) { mgr.remove(bm.id); bumpBookmarks(); } }}
-                  className="opacity-0 group-hover:opacity-100 text-gx-muted hover:text-gx-error"
+                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
                   title="Remove bookmark"
                 >
                   <X size={8} />
@@ -3414,9 +3415,9 @@ function TerminalPane({
             ))}
           </div>
         ) : (
-          <div className="shrink-0 border-b border-gx-border bg-gx-surface px-2 py-1.5 text-[10px] text-gx-muted flex items-center justify-between">
+          <div className="shrink-0 border-b border-border bg-card px-2 py-1.5 text-[10px] text-muted-foreground flex items-center justify-between">
             <span>No bookmarks — click <Bookmark size={9} className="inline" /> to add one</span>
-            <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-gx-muted hover:text-gx-text"><X size={9} /></button>
+            <button type="button" onClick={() => setBookmarksPanelOpen(false)} className="text-muted-foreground hover:text-foreground"><X size={9} /></button>
           </div>
         );
       })()}
@@ -3426,25 +3427,25 @@ function TerminalPane({
         "min-h-0 min-w-0 flex-1 overflow-hidden relative",
         `scrollbar-mode-${scrollbarMode}`,
         scrollbarMode === "native" && scrollbarAutohide && "scrollbar-autohide",
-        dragOver && "ring-2 ring-inset ring-gx-accent/50",
+        dragOver && "ring-2 ring-inset ring-primary/50",
       )}
         onContextMenu={(e) => { if (pane.activeTab) onContextMenu(e, pane.activeTab); }}
         onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}
       >
         {!pane.activeTab && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-gx-bg-sub">
-            <div className="flex items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-3 py-2 text-[11px] text-gx-muted">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
+            <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
               <button
                 type="button"
                 onClick={() => onSpawnTab()}
-                className="rounded bg-gx-accent px-2 py-1 font-medium text-white hover:bg-gx-accent/90"
+                className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90"
               >
                 New terminal
               </button>
               <button
                 type="button"
                 onClick={onOpenSessionManager}
-                className="rounded border border-gx-border px-2 py-1 text-gx-text hover:bg-gx-surface-hover"
+                className="rounded border border-border px-2 py-1 text-foreground hover:bg-accent"
               >
                 Sessions{backgroundSessionCount > 0 ? ` (${backgroundSessionCount})` : ""}
               </button>
@@ -3453,8 +3454,8 @@ function TerminalPane({
         )}
         {/* Drop indicator overlay (Task 26.2) */}
         {dragOver && (
-          <div className="absolute inset-0 z-30 flex items-center justify-center bg-gx-accent/5 pointer-events-none">
-            <span className="rounded-lg border-2 border-dashed border-gx-accent/40 px-4 py-2 text-[12px] text-gx-accent">
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-primary/5 pointer-events-none">
+            <span className="rounded-lg border-2 border-dashed border-primary/40 px-4 py-2 text-[12px] text-primary">
               Drop to insert path
             </span>
           </div>
@@ -3494,7 +3495,7 @@ function TerminalPane({
       {/* Scroll to bottom button */}
       {showScrollBtn && (
         <button type="button" onClick={onScrollToBottom}
-          className="absolute bottom-8 right-4 z-20 flex items-center gap-1 rounded-full bg-gx-surface border border-gx-border px-2 py-1 text-[10px] text-gx-muted shadow-lg hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="absolute bottom-8 right-4 z-20 flex items-center gap-1 rounded-full bg-card border border-border px-2 py-1 text-[10px] text-muted-foreground shadow-lg hover:text-foreground hover:bg-accent transition"
           title="Scroll to bottom">
           <ArrowDownToLine size={12} /> Bottom
         </button>
@@ -3558,10 +3559,10 @@ function TerminalTabStrip({
               data-tab-id={t.id}
               onClick={() => onSetActiveTab(t.id)}
               className={clsx(
-                "group flex h-7 min-w-[116px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1 border-r border-gx-border px-2 text-[11px]",
+                "group flex h-7 min-w-[116px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
                 activeTab === t.id
-                  ? "bg-gx-bg-sub text-gx-text"
-                  : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                  ? "bg-background text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               title={isDaemon ? "Daemon terminal - survives app restart" : sType === "in-process" ? "Local in-process terminal" : undefined}
             >
@@ -3569,18 +3570,18 @@ function TerminalTabStrip({
                 <span
                   className={clsx(
                     "inline-block h-2 w-2 shrink-0 rounded-full",
-                    tabBadges.get(t.id) === "success" ? "bg-green-500" : "bg-red-500",
+                    tabBadges.get(t.id) === "success" ? "bg-success" : "bg-destructive",
                   )}
                   aria-label={tabBadges.get(t.id) === "success" ? "Command succeeded" : "Command failed"}
                 />
               )}
               {isDaemon && (
-                <Circle size={7} className="shrink-0 fill-gx-accent text-gx-accent" aria-label="Daemon terminal" />
+                <Circle size={7} className="shrink-0 fill-primary text-primary" aria-label="Daemon terminal" />
               )}
               {t.sshRemote && (
                 <span
-                  className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-white"
-                  style={{ backgroundColor: t.sshRemote.colour || "#6366f1" }}
+                  className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-foreground"
+                  style={{ backgroundColor: t.sshRemote.colour || "rgb(var(--info))" }}
                   aria-label={`Remote terminal: ${t.sshRemote.hostname}`}
                 >
                   {t.sshRemote.hostname}
@@ -3588,18 +3589,18 @@ function TerminalTabStrip({
               )}
               {t.coldRestored && (
                 <span
-                  className="inline-flex shrink-0 items-center rounded px-1 py-0.5 text-[8px] font-medium leading-none bg-gx-warn/15 text-gx-warn"
+                  className="inline-flex shrink-0 items-center rounded px-1 py-0.5 text-[8px] font-medium leading-none bg-warning/15 text-warning"
                   title={`Restored from ${new Date(t.coldRestored.savedAt).toLocaleString()}`}
                 >
                   Restored
                 </span>
               )}
               {renamingTab === t.id ? (
-                <input
+                <Input
                   ref={renameInputRef}
                   type="text"
                   defaultValue={t.title}
-                  className="min-w-0 flex-1 bg-transparent text-[11px] text-gx-text outline-none border-b border-gx-accent"
+                  className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none border-b border-primary"
                   onClick={(e) => e.stopPropagation()}
                   onBlur={(e) => onRenameTab(t.id, e.target.value)}
                   onKeyDown={(e) => {
@@ -3623,7 +3624,7 @@ function TerminalTabStrip({
                 onClick={(e) => { e.stopPropagation(); onCloseTab(t.id); }}
                 className={clsx(
                   "shrink-0 opacity-0 transition group-hover:opacity-100",
-                  isDaemon ? "hover:text-gx-accent" : "hover:text-gx-error",
+                  isDaemon ? "hover:text-primary" : "hover:text-destructive",
                 )}
                 aria-label={isDaemon ? "Hide daemon terminal" : "Close terminal"}
                 title={isDaemon ? "Hide tab - session keeps running" : "Close terminal"}
@@ -3638,10 +3639,10 @@ function TerminalTabStrip({
         type="button"
         onClick={onOpenSessionManager}
         className={clsx(
-          "flex h-7 shrink-0 items-center gap-1 border-l border-gx-border px-2 text-[10px]",
+          "flex h-7 shrink-0 items-center gap-1 border-l border-border px-2 text-[10px]",
           backgroundSessionCount > 0
-            ? "text-gx-accent hover:bg-gx-accent/10"
-            : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "text-primary hover:bg-primary/10"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
         title="Open terminal session manager"
         aria-label="Open terminal session manager"
@@ -3708,25 +3709,25 @@ function TerminalSessionManager({
   return (
     <aside
       className={clsx(
-        "flex h-full w-[clamp(300px,24vw,420px)] shrink-0 flex-col bg-gx-surface",
-        side === "left" ? "border-r border-gx-border" : "border-l border-gx-border",
+        "flex h-full w-[clamp(300px,24vw,420px)] shrink-0 flex-col bg-card",
+        side === "left" ? "border-r border-border" : "border-l border-border",
       )}
       aria-label="Terminal sessions"
     >
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-border px-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
           <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-semibold text-gx-text">Terminal Sessions</div>
-            <div className="text-[10px] text-gx-muted">
+            <div className="text-[12px] font-semibold text-foreground">Terminal Sessions</div>
+            <div className="text-[10px] text-muted-foreground">
               {sessions.length} daemon session{sessions.length === 1 ? "" : "s"} · {openTabs.length} open tab{openTabs.length === 1 ? "" : "s"}
             </div>
           </div>
-          <div className="flex shrink-0 items-center rounded border border-gx-border bg-gx-bg-sub p-0.5" aria-label="Pin sidebar side">
+          <div className="flex shrink-0 items-center rounded border border-border bg-background p-0.5" aria-label="Pin sidebar side">
             <button
               type="button"
               onClick={() => onSideChange("left")}
               className={clsx(
                 "rounded px-1 py-0.5",
-                side === "left" ? "bg-gx-accent text-white" : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                side === "left" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               title="Pin sidebar to left"
               aria-label="Pin sidebar to left"
@@ -3739,7 +3740,7 @@ function TerminalSessionManager({
               onClick={() => onSideChange("right")}
               className={clsx(
                 "rounded px-1 py-0.5",
-                side === "right" ? "bg-gx-accent text-white" : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                side === "right" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               title="Pin sidebar to right"
               aria-label="Pin sidebar to right"
@@ -3748,22 +3749,22 @@ function TerminalSessionManager({
               <PanelRightOpen size={12} />
             </button>
           </div>
-          <button type="button" onClick={onRefresh} className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" title="Refresh sessions">
+          <button type="button" onClick={onRefresh} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" title="Refresh sessions">
             <RotateCcw size={13} />
           </button>
-          <button type="button" onClick={onClose} className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text" aria-label="Close">
+          <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close">
             <X size={14} />
           </button>
         </div>
 
-        <div className="shrink-0 border-b border-gx-border px-3 py-2">
-          <div className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5">
-            <Search size={13} className="shrink-0 text-gx-muted" />
-            <input
+        <div className="shrink-0 border-b border-border px-3 py-2">
+          <div className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5">
+            <Search size={13} className="shrink-0 text-muted-foreground" />
+            <Input
               value={search}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder="Search sessions by title, cwd, or agent"
-              className="min-w-0 flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted outline-none"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground outline-none"
               autoFocus
             />
           </div>
@@ -3868,13 +3869,13 @@ function SessionGroup({ title, count, empty, children }: {
   return (
     <section className="mb-3">
       <div className="mb-1 flex items-center justify-between px-1">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-gx-muted">{title}</h3>
-        <span className="text-[10px] text-gx-muted">{count}</span>
+        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+        <span className="text-[10px] text-muted-foreground">{count}</span>
       </div>
       {count > 0 ? (
         <div className="space-y-1">{children}</div>
       ) : (
-        <div className="rounded border border-dashed border-gx-border px-2 py-2 text-[11px] text-gx-muted">{empty}</div>
+        <div className="rounded border border-dashed border-border px-2 py-2 text-[11px] text-muted-foreground">{empty}</div>
       )}
     </section>
   );
@@ -3944,21 +3945,21 @@ function SessionRow({
   actions: React.ReactNode;
 }) {
   return (
-    <div className="group flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-2 hover:border-gx-accent/40">
+    <div className="group flex items-center gap-2 rounded border border-border bg-background px-2 py-2 hover:border-primary/40">
       <button type="button" onClick={onPrimary} className="min-w-0 flex-1 text-left">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12px] font-medium text-gx-text">{title}</span>
-          {pinned && <Pin size={10} className="shrink-0 text-gx-accent" />}
-          <span className="shrink-0 rounded bg-gx-surface px-1 py-0.5 text-[9px] text-gx-muted">{status}</span>
+          <span className="truncate text-[12px] font-medium text-foreground">{title}</span>
+          {pinned && <Pin size={10} className="shrink-0 text-primary" />}
+          <span className="shrink-0 rounded bg-card px-1 py-0.5 text-[9px] text-muted-foreground">{status}</span>
         </div>
-        <div className="mt-0.5 truncate text-[10px] text-gx-muted" title={subtitle}>
+        <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={subtitle}>
           {subtitle}
         </div>
       </button>
       <button
         type="button"
         onClick={onPrimary}
-        className="rounded bg-gx-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-gx-accent/90"
+        className="rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary/90"
       >
         {primaryLabel}
       </button>
@@ -3980,8 +3981,8 @@ function IconButton({ title, onClick, children, danger = false }: {
       className={clsx(
         "rounded p-1",
         danger
-          ? "text-gx-muted hover:bg-gx-error/10 hover:text-gx-error"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={title}
       aria-label={title}
@@ -4012,9 +4013,9 @@ function SchemeMenu({
     <div
       role="menu"
       aria-label="Terminal colour schemes"
-      className="absolute left-0 top-full z-50 mt-1 min-w-[240px] rounded border border-gx-border bg-gx-surface p-1 shadow-xl"
+      className="absolute left-0 top-full z-50 mt-1 min-w-[240px] rounded border border-border bg-card p-1 shadow-xl"
     >
-      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-gx-muted/70">
+      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">
         Colour scheme · {mode === "dark" ? "dark" : "light"}
       </div>
       {TERMINAL_SCHEMES.map((scheme) => {
@@ -4037,14 +4038,14 @@ function SchemeMenu({
             className={clsx(
               "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition",
               selected
-                ? "bg-gx-accent/15 text-gx-text"
-                : "text-gx-text hover:bg-gx-surface-hover",
+                ? "bg-primary/15 text-foreground"
+                : "text-foreground hover:bg-accent",
             )}
             title={scheme.description}
           >
             {/* Swatch row — 4 tiny squares so the user can eyeball the palette. */}
             <div
-              className="flex h-4 w-12 shrink-0 overflow-hidden rounded border border-gx-border/50"
+              className="flex h-4 w-12 shrink-0 overflow-hidden rounded border border-border/50"
               aria-hidden
             >
               {swatches.map((color, i) => (
@@ -4053,7 +4054,7 @@ function SchemeMenu({
             </div>
             <span className="flex-1 truncate">{scheme.name}</span>
             {selected && (
-              <span className="text-[9px] font-semibold text-gx-accent">✓</span>
+              <span className="text-[9px] font-semibold text-primary">✓</span>
             )}
           </button>
         );
@@ -4094,17 +4095,17 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
     <div
       role="dialog"
       aria-label="Scrollback buffer settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[280px] rounded border border-gx-border bg-gx-surface p-3 shadow-xl"
+      className="absolute left-0 top-full z-50 mt-1 w-[280px] rounded border border-border bg-card p-3 shadow-xl"
     >
-      <div className="mb-3 text-[11px] font-medium text-gx-text">
+      <div className="mb-3 text-[11px] font-medium text-foreground">
         Scrollback Buffer
       </div>
 
       {/* Line count slider */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Buffer size</span>
-          <span className="font-mono text-gx-text">
+          <span className="font-mono text-foreground">
             {config.maxLines.toLocaleString()} lines
           </span>
         </label>
@@ -4115,10 +4116,10 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
           step={1000}
           value={config.maxLines}
           onChange={(e) => handleLineCountChange(Number(e.target.value))}
-          className="w-full accent-gx-accent"
+          className="w-full accent-primary"
           aria-label="Scrollback line count"
         />
-        <div className="mt-0.5 flex justify-between text-[9px] text-gx-muted">
+        <div className="mt-0.5 flex justify-between text-[9px] text-muted-foreground">
           <span>1K</span>
           <span>1M</span>
         </div>
@@ -4127,7 +4128,7 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
       {/* Numeric input for precise control */}
       <div className="mb-3">
         <div className="flex items-center gap-2">
-          <input
+          <Input
             type="number"
             min={MIN_MAX_LINES}
             max={MAX_MAX_LINES}
@@ -4137,23 +4138,23 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
               const n = Number(e.target.value);
               if (Number.isFinite(n)) handleLineCountChange(n);
             }}
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-[11px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
             aria-label="Scrollback line count (exact)"
           />
         </div>
       </div>
 
       {/* Memory estimate */}
-      <div className="mb-2 flex items-center justify-between rounded bg-gx-bg-sub px-2 py-1.5 text-[10px]">
-        <span className="text-gx-muted">Estimated memory</span>
-        <span className="font-mono font-medium text-gx-text">
+      <div className="mb-2 flex items-center justify-between rounded bg-background px-2 py-1.5 text-[10px]">
+        <span className="text-muted-foreground">Estimated memory</span>
+        <span className="font-mono font-medium text-foreground">
           {formatMemory(memoryBytes)}
         </span>
       </div>
 
       {/* Warning for high values */}
       {showWarning && (
-        <div className="flex items-start gap-1.5 rounded bg-gx-warn/10 px-2 py-1.5 text-[10px] text-gx-warn">
+        <div className="flex items-start gap-1.5 rounded bg-warning/10 px-2 py-1.5 text-[10px] text-warning">
           <AlertTriangle size={11} className="mt-0.5 shrink-0" />
           <span>
             High scrollback ({config.maxLines.toLocaleString()} lines) will use{" "}
@@ -4163,7 +4164,7 @@ function ScrollbackSettingsMenu({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      <div className="mt-3 text-[9px] text-gx-muted">
+      <div className="mt-3 text-[9px] text-muted-foreground">
         Changes apply to new terminal sessions.
       </div>
     </div>
@@ -4187,29 +4188,29 @@ function PasteGuardSettingsMenu({ config, onChange, onClose }: {
     <div
       role="dialog"
       aria-label="Paste protection settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[260px] rounded border border-gx-border bg-gx-surface p-3 shadow-xl"
+      className="absolute left-0 top-full z-50 mt-1 w-[260px] rounded border border-border bg-card p-3 shadow-xl"
     >
-      <div className="mb-3 text-[11px] font-medium text-gx-text">
+      <div className="mb-3 text-[11px] font-medium text-foreground">
         Paste Protection
       </div>
 
       {/* Enable/disable toggle */}
       <label className="mb-3 flex cursor-pointer items-center justify-between">
-        <span className="text-[11px] text-gx-text">Enable paste guard</span>
+        <span className="text-[11px] text-foreground">Enable paste guard</span>
         <input
           type="checkbox"
           checked={config.enabled}
           onChange={(e) => onChange({ ...config, enabled: e.target.checked })}
-          className="h-4 w-4 rounded border-gx-border accent-gx-accent"
+          className="h-4 w-4 rounded border-border accent-primary"
         />
       </label>
 
       {/* Multi-line threshold */}
       <div className={clsx("transition-opacity", !config.enabled && "opacity-50 pointer-events-none")}>
-        <label className="mb-1 block text-[10px] text-gx-muted">
+        <label className="mb-1 block text-[10px] text-muted-foreground">
           Multi-line threshold (lines)
         </label>
-        <input
+        <Input
           type="number"
           min={1}
           max={1000}
@@ -4220,16 +4221,16 @@ function PasteGuardSettingsMenu({ config, onChange, onClose }: {
               onChange({ ...config, multiLineThreshold: Math.min(n, 1000) });
             }
           }}
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-[11px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+          className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
           aria-label="Multi-line paste threshold"
         />
-        <div className="mt-1 text-[9px] text-gx-muted">
+        <div className="mt-1 text-[9px] text-muted-foreground">
           Pastes with more lines than this will require confirmation.
         </div>
       </div>
 
       {!config.enabled && (
-        <div className="mt-3 flex items-start gap-1.5 rounded bg-gx-warn/10 px-2 py-1.5 text-[10px] text-gx-warn">
+        <div className="mt-3 flex items-start gap-1.5 rounded bg-warning/10 px-2 py-1.5 text-[10px] text-warning">
           <AlertTriangle size={11} className="mt-0.5 shrink-0" />
           <span>
             Paste protection is disabled. All pasted content will be written directly to the terminal without inspection.
@@ -4257,9 +4258,9 @@ function ScrollbarModeMenu({ currentMode, onSelect, onClose }: {
     <div
       role="menu"
       aria-label="Scrollbar mode"
-      className="absolute left-0 top-full z-50 mt-1 w-[220px] rounded border border-gx-border bg-gx-surface p-1 shadow-xl"
+      className="absolute left-0 top-full z-50 mt-1 w-[220px] rounded border border-border bg-card p-1 shadow-xl"
     >
-      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-gx-muted/70">
+      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">
         Scrollbar mode
       </div>
       {SCROLLBAR_MODES.map((mode) => {
@@ -4274,21 +4275,21 @@ function ScrollbarModeMenu({ currentMode, onSelect, onClose }: {
             className={clsx(
               "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition",
               selected
-                ? "bg-gx-accent/15 text-gx-text"
-                : "text-gx-text hover:bg-gx-surface-hover",
+                ? "bg-primary/15 text-foreground"
+                : "text-foreground hover:bg-accent",
             )}
           >
             <span className="flex-1">
               <span className="block">{mode.label}</span>
-              <span className="block text-[9px] text-gx-muted">{mode.description}</span>
+              <span className="block text-[9px] text-muted-foreground">{mode.description}</span>
             </span>
             {selected && (
-              <span className="text-[9px] font-semibold text-gx-accent">✓</span>
+              <span className="text-[9px] font-semibold text-primary">✓</span>
             )}
           </button>
         );
       })}
-      <div className="mt-1 px-2 py-1 text-[9px] text-gx-muted">
+      <div className="mt-1 px-2 py-1 text-[9px] text-muted-foreground">
         Changes apply immediately to all terminals.
       </div>
     </div>
@@ -4303,19 +4304,19 @@ function ProfileMenu({ profiles, onSelect, onSave, onDelete, onClose }: {
 }) {
   const [newName, setNewName] = useState("");
   return (
-    <div className="absolute left-0 top-full z-50 mt-1 min-w-[180px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
+    <div className="absolute left-0 top-full z-50 mt-1 min-w-[180px] rounded border border-border bg-card py-1 shadow-lg">
       {profiles.length > 0 ? profiles.map((p) => (
-        <div key={p.name} className="flex items-center justify-between px-3 py-1 hover:bg-gx-surface-hover">
-          <button type="button" onClick={() => onSelect(p)} className="flex-1 text-left text-[11px] text-gx-text truncate">{p.name}</button>
-          <button type="button" onClick={() => onDelete(p.name)} className="text-gx-muted hover:text-gx-error ml-2"><X size={9} /></button>
+        <div key={p.name} className="flex items-center justify-between px-3 py-1 hover:bg-accent">
+          <button type="button" onClick={() => onSelect(p)} className="flex-1 text-left text-[11px] text-foreground truncate">{p.name}</button>
+          <button type="button" onClick={() => onDelete(p.name)} className="text-muted-foreground hover:text-destructive ml-2"><X size={9} /></button>
         </div>
-      )) : <div className="px-3 py-1 text-[11px] text-gx-muted">No profiles saved</div>}
-      <div className="border-t border-gx-border mt-1 pt-1 px-3 pb-1">
+      )) : <div className="px-3 py-1 text-[11px] text-muted-foreground">No profiles saved</div>}
+      <div className="border-t border-border mt-1 pt-1 px-3 pb-1">
         <div className="flex items-center gap-1">
-          <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+          <Input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { onSave(newName.trim()); setNewName(""); } if (e.key === "Escape") onClose(); }}
-            placeholder="Save profile…" className="flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted outline-none" />
-          <button type="button" onClick={() => { if (newName.trim()) { onSave(newName.trim()); setNewName(""); } }} className="text-[10px] text-gx-accent hover:text-gx-accent-hover">Save</button>
+            placeholder="Save profile…" className="flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground outline-none" />
+          <button type="button" onClick={() => { if (newName.trim()) { onSave(newName.trim()); setNewName(""); } }} className="text-[10px] text-primary hover:text-primary-hover">Save</button>
         </div>
       </div>
     </div>
@@ -4361,9 +4362,9 @@ function ContextMenu({ x, y, onAction, daemonReady, breakerOpen }: {
     { label: "Kill Terminal", action: "kill", shortcut: "⌘W" },
   ];
   return (
-    <div className="fixed z-[9999] min-w-[200px] rounded border border-gx-border bg-gx-surface py-1 shadow-xl" style={{ left: x, top: y }}>
+    <div className="fixed z-[9999] min-w-[200px] rounded border border-border bg-card py-1 shadow-xl" style={{ left: x, top: y }}>
       {items.map((item, i) => item.label === "---" ? (
-        <div key={i} className="my-1 border-t border-gx-border" />
+        <div key={i} className="my-1 border-t border-border" />
       ) : (
         <button
           key={item.action}
@@ -4374,12 +4375,12 @@ function ContextMenu({ x, y, onAction, daemonReady, breakerOpen }: {
           className={clsx(
             "flex w-full items-center justify-between px-3 py-1.5 text-left text-[11px]",
             item.disabled
-              ? "cursor-not-allowed text-gx-muted/50"
-              : "text-gx-text hover:bg-gx-surface-hover",
+              ? "cursor-not-allowed text-muted-foreground/50"
+              : "text-foreground hover:bg-accent",
           )}
         >
           <span>{item.label}</span>
-          {item.shortcut && <span className="ml-4 text-gx-muted">{item.shortcut}</span>}
+          {item.shortcut && <span className="ml-4 text-muted-foreground">{item.shortcut}</span>}
         </button>
       ))}
     </div>

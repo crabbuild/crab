@@ -32,10 +32,10 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Eye size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">Monitor</span>
-        <span className="truncate text-gx-text/70 font-mono">{displayText}</span>
-        <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-gx-success">
+        <Eye size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">Monitor</span>
+        <span className="truncate text-foreground/70 font-mono">{displayText}</span>
+        <span className="shrink-0 flex items-center gap-0.5 text-[9px] text-success">
           <Radio size={8} /> live
         </span>
       </>
@@ -50,38 +50,38 @@ export function MonitorCard({ event, defaultExpanded = false, collapsed: collaps
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasOutput && "hover:bg-gx-surface-hover cursor-pointer",
+          hasOutput && "hover:bg-accent cursor-pointer",
           !hasOutput && "cursor-default",
         )}
       >
-        <Eye size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">Monitor</span>
+        <Eye size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">Monitor</span>
 
-        <span className="min-w-0 flex-1 truncate font-mono text-gx-text/80">
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">
           {displayText}
         </span>
 
         {/* Live indicator */}
-        <span className="shrink-0 flex items-center gap-1 rounded bg-gx-success/10 px-1.5 py-0.5 text-[8px] font-medium text-gx-success border border-gx-success/20">
+        <span className="shrink-0 flex items-center gap-1 rounded bg-success/10 px-1.5 py-0.5 text-[8px] font-medium text-success border border-success/20">
           <Radio size={8} className="animate-pulse" />
           live
         </span>
 
         {hasOutput && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30 max-h-[200px] overflow-auto">
+        <div className="border-t border-border/30 max-h-[200px] overflow-auto">
           <MonitorOutput output={output} />
         </div>
       )}
@@ -110,7 +110,7 @@ function MonitorOutput({ output }: { output: string }) {
   }
 
   return (
-    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+    <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
       {text}
     </pre>
   );

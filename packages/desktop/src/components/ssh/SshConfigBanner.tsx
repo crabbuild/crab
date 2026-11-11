@@ -63,18 +63,18 @@ export function SshConfigBanner({ onImport }: SshConfigBannerProps) {
 
   return (
     <div
-      className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-gx-accent/30 bg-gx-accent/5 px-4 py-2.5"
+      className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5"
       role="status"
       aria-live="polite"
     >
-      <FileDown size={14} className="shrink-0 text-gx-accent" aria-hidden="true" />
-      <p className="flex-1 text-xs text-gx-text">
+      <FileDown size={14} className="shrink-0 text-primary" aria-hidden="true" />
+      <p className="flex-1 text-xs text-foreground">
         We found <strong>{hostCount}</strong> SSH{" "}
         {hostCount === 1 ? "host" : "hosts"} in your config
       </p>
       <button
         type="button"
-        className="rounded border border-gx-accent/50 bg-gx-accent/10 px-2.5 py-1 text-[11px] font-medium text-gx-accent transition hover:bg-gx-accent/20"
+        className="rounded border border-primary/50 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary transition hover:bg-primary/20"
         onClick={handleImport}
         aria-label={`Import ${hostCount} SSH hosts from config`}
       >
@@ -82,7 +82,7 @@ export function SshConfigBanner({ onImport }: SshConfigBannerProps) {
       </button>
       <button
         type="button"
-        className="rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+        className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
         onClick={handleDismiss}
         aria-label="Dismiss SSH config import banner"
       >

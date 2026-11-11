@@ -1,3 +1,5 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import {
@@ -37,19 +39,19 @@ function inferFileType(entry: StagedFileEntry): { label: string; color: string }
     const imageExts = new Set(["png", "jpg", "jpeg", "tiff", "bmp", "psd"]);
     const dataExts = new Set(["parquet", "arrow", "csv", "db", "sqlite"]);
 
-    if (modelExts.has(ext)) return { label: "ML", color: "text-purple-400" };
-    if (mediaExts.has(ext)) return { label: "VID", color: "text-blue-400" };
-    if (imageExts.has(ext)) return { label: "IMG", color: "text-cyan-400" };
-    if (archiveExts.has(ext)) return { label: "ARC", color: "text-orange-400" };
-    if (dataExts.has(ext)) return { label: "DAT", color: "text-teal-400" };
+    if (modelExts.has(ext)) return { label: "ML", color: "text-thinking" };
+    if (mediaExts.has(ext)) return { label: "VID", color: "text-info" };
+    if (imageExts.has(ext)) return { label: "IMG", color: "text-info" };
+    if (archiveExts.has(ext)) return { label: "ARC", color: "text-warning" };
+    if (dataExts.has(ext)) return { label: "DAT", color: "text-info" };
   }
 
   // Fallback: categorize by size.
   const bytes = entry.total_bytes;
-  if (bytes > 1024 * 1024 * 1024) return { label: "XL", color: "text-gx-error" };
-  if (bytes > 100 * 1024 * 1024) return { label: "LG", color: "text-gx-warn" };
-  if (bytes > 10 * 1024 * 1024) return { label: "MD", color: "text-gx-warn" };
-  return { label: "SM", color: "text-gx-success" };
+  if (bytes > 1024 * 1024 * 1024) return { label: "XL", color: "text-destructive" };
+  if (bytes > 100 * 1024 * 1024) return { label: "LG", color: "text-warning" };
+  if (bytes > 10 * 1024 * 1024) return { label: "MD", color: "text-warning" };
+  return { label: "SM", color: "text-success" };
 }
 
 /**
@@ -142,35 +144,35 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
   }
 
   return (
-    <div className="border-b border-gx-border">
+    <div className="border-b border-border">
       {/* Header */}
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-gx-surface-hover"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-accent"
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <Database size={11} className="text-gx-accent" />
-        <span className="font-semibold text-gx-text">Staging Area</span>
-        <span className="text-gx-muted">
+        <Database size={11} className="text-primary" />
+        <span className="font-semibold text-foreground">Staging Area</span>
+        <span className="text-muted-foreground">
           {fileCount} file{fileCount !== 1 ? "s" : ""}
           {chunkCount > 0 && ` · ${chunkCount.toLocaleString()} chunks`}
           {totalBytes > 0 && ` · ${formatBytes(totalBytes)}`}
         </span>
-        {loading && <Loader2 size={10} className="animate-spin text-gx-muted" />}
+        {loading && <Loader2 size={10} className="animate-spin text-muted-foreground" />}
       </button>
 
       {expanded && (
         <div className="px-3 pb-2">
           {/* Summary stats row */}
           {hasLiveData && (
-            <div className="mb-2 flex items-center gap-3 rounded bg-gx-surface px-2 py-1 text-[10px] text-gx-muted">
+            <div className="mb-2 flex items-center gap-3 rounded bg-card px-2 py-1 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1">
                 <HardDrive size={9} />
                 {formatBytes(stats.live_bytes ?? 0)} live
               </span>
               {(stats.dead_bytes ?? 0) > 0 && (
-                <span className="flex items-center gap-1 text-gx-warn">
+                <span className="flex items-center gap-1 text-warning">
                   <Trash2 size={9} />
                   {formatBytes(stats.dead_bytes ?? 0)} dead
                   ({((stats.dead_ratio ?? 0) * 100).toFixed(0)}%)
@@ -193,7 +195,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                 return (
                   <li
                     key={f.file_hash}
-                    className="group flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-gx-surface-hover"
+                    className="group flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-accent"
                   >
                     {/* File type badge */}
                     <span
@@ -207,34 +209,34 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
 
                     {/* File name or hash (truncated) */}
                     <span
-                      className="min-w-0 flex-1 truncate font-mono text-gx-text"
+                      className="min-w-0 flex-1 truncate font-mono text-foreground"
                       title={f.file_path ?? f.file_hash}
                     >
                       {f.file_path ?? `${f.file_hash.slice(0, 16)}…`}
                     </span>
 
                     {/* Size */}
-                    <span className="shrink-0 text-gx-muted">
+                    <span className="shrink-0 text-muted-foreground">
                       {formatBytes(f.total_bytes)}
                     </span>
 
                     {/* Chunk info */}
                     {hasChunks && (
-                      <span className="shrink-0 rounded bg-gx-surface px-1 text-[10px] text-gx-muted">
+                      <span className="shrink-0 rounded bg-card px-1 text-[10px] text-muted-foreground">
                         {f.total_chunks} chunks
                       </span>
                     )}
 
                     {/* Pending indicator */}
                     {f.pending_chunks > 0 && (
-                      <span className="shrink-0 rounded bg-gx-warn/10 px-1 text-[10px] text-gx-warn">
+                      <span className="shrink-0 rounded bg-warning/10 px-1 text-[10px] text-warning">
                         {f.pending_chunks} pending
                       </span>
                     )}
 
                     {/* Segment count */}
                     {f.segments > 0 && (
-                      <span className="shrink-0 rounded bg-gx-surface px-1 text-[10px] text-gx-muted">
+                      <span className="shrink-0 rounded bg-card px-1 text-[10px] text-muted-foreground">
                         {f.segments} seg{f.segments !== 1 ? "s" : ""}
                       </span>
                     )}
@@ -242,7 +244,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                     {/* Remove from staging button */}
                     <button
                       type="button"
-                      className="shrink-0 rounded p-0.5 text-gx-muted transition hover:bg-gx-error/10 hover:text-gx-error"
+                      className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
                       onClick={() => handleRemoveFile(f.file_hash)}
                       disabled={removingFiles.has(f.file_hash)}
                       title="Remove from staging area"
@@ -261,8 +263,8 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
 
           {/* Empty state */}
           {files.length === 0 && fileCount === 0 && (
-            <p className="mb-2 text-xs text-gx-muted">
-              No files staged. Use <code className="text-gx-text">crab add</code> to stage files.
+            <p className="mb-2 text-xs text-muted-foreground">
+              No files staged. Use <code className="text-foreground">crab add</code> to stage files.
             </p>
           )}
 
@@ -271,10 +273,10 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
             {/* Remote selector — shown when multiple crab remotes exist */}
             {remotes.length > 1 && filesWithChunks.length > 0 && (
               <div className="flex items-center gap-2 text-xs">
-                <label htmlFor="staging-push-remote" className="shrink-0 text-gx-muted">Remote:</label>
-                <select
+                <label htmlFor="staging-push-remote" className="shrink-0 text-muted-foreground">Remote:</label>
+                <NativeSelect
                   id="staging-push-remote"
-                  className="flex-1 rounded border border-gx-border bg-gx-surface px-2 py-1 text-xs text-gx-text"
+                  className="flex-1 rounded border border-border bg-card px-2 py-1 text-xs text-foreground"
                   value={selectedRemote ?? ""}
                   onChange={(e) => setSelectedRemote(e.target.value || undefined)}
                 >
@@ -284,30 +286,30 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                       {r.name} — {r.url}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </div>
             )}
             <div className="flex items-center gap-2">
               {filesWithChunks.length > 0 && (
-                <button
+                <Button variant="default"
                   type="button"
-                  className="btn btn-primary text-xs"
+                  className="text-xs"
                   onClick={() => onPush?.(selectedRemote)}
                 >
                   <Upload size={11} /> Push{selectedRemote ? ` to ${selectedRemote}` : " to Remote"}
-                </button>
+                </Button>
               )}
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={onAdd}
               >
                 <Cloud size={11} /> Track Files
-              </button>
+              </Button>
               {(hasLiveData || (stats.dead_bytes ?? 0) > 0) && (
-                <button
+                <Button variant="outline"
                   type="button"
-                  className="btn text-xs"
+                  className="text-xs"
                   onClick={handleClean}
                   disabled={cleaning}
                   title="Clean staging area: remove stale data and reclaim disk space"
@@ -318,7 +320,7 @@ export function CrabStagedSection({ repo, refreshKey, onPush, onAdd }: Props) {
                     <Trash2 size={11} />
                   )}
                   Clean
-                </button>
+                </Button>
               )}
             </div>
           </div>

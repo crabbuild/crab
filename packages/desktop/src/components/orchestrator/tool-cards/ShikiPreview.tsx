@@ -87,7 +87,7 @@ export function ShikiPreview({ code, path, lang, maxLines = DEFAULT_MAX_LINES, c
         />
       ) : (
         // Plain-text placeholder shown while Shiki is loading.
-        <pre className="font-mono text-[11px] leading-[1.55] text-gx-text/70 whitespace-pre overflow-auto px-2.5 py-2">
+        <pre className="font-mono text-[11px] leading-[1.55] text-foreground/70 whitespace-pre overflow-auto px-2.5 py-2">
           {displayCode}
         </pre>
       )}
@@ -95,7 +95,7 @@ export function ShikiPreview({ code, path, lang, maxLines = DEFAULT_MAX_LINES, c
         <button
           type="button"
           onClick={() => setShowAll(true)}
-          className="mt-1 self-start text-[9px] text-gx-accent hover:text-gx-accent-hover transition px-2.5 pb-1"
+          className="mt-1 self-start text-[9px] text-primary hover:text-primary-hover transition px-2.5 pb-1"
         >
           Show {hiddenLines} more lines…
         </button>

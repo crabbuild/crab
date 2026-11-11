@@ -31,15 +31,15 @@ export function ApprovalCard({ event, collapsed, onToggleCollapse }: ToolCardRen
     return <CollapsedCardLine summary={resolvedLabel} onExpand={() => onToggleCollapse?.(false)} ariaLabel={resolvedLabel} />;
   }
   return (
-    <div className="rounded-md border border-gx-border bg-gx-surface px-3 py-2 text-xs space-y-2">
-      <div className="flex items-center gap-2 font-medium text-gx-text"><ShieldCheck size={14} />{resolved ? resolvedLabel : payload.summary}</div>
-      {payload.detail && <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-gx-muted">{payload.detail}</pre>}
-      {error && <p role="alert" className="text-gx-error">{error}</p>}
+    <div className="rounded-md border border-border bg-card px-3 py-2 text-xs space-y-2">
+      <div className="flex items-center gap-2 font-medium text-foreground"><ShieldCheck size={14} />{resolved ? resolvedLabel : payload.summary}</div>
+      {payload.detail && <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-muted-foreground">{payload.detail}</pre>}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
       {!resolved && (
         <div className="flex flex-wrap gap-2">
           {payload.options?.map(option => (
             <button key={option.id} type="button" disabled={submitting || !taskId} onClick={() => void choose(option.id, option.label)}
-              className="rounded border border-gx-border px-2 py-1 text-gx-text hover:bg-gx-surface-hover disabled:opacity-50">{option.label}</button>
+              className="rounded border border-border px-2 py-1 text-foreground hover:bg-accent disabled:opacity-50">{option.label}</button>
           ))}
         </div>
       )}

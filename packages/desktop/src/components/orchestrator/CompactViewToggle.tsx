@@ -32,7 +32,7 @@ export function CompactViewToggle({ taskId }: CompactViewToggleProps) {
     <button
       type="button"
       onClick={handleToggle}
-      className="flex items-center gap-1 px-2 py-2 text-xs text-gx-muted hover:text-gx-text transition"
+      className="flex items-center gap-1 px-2 py-2 text-xs text-muted-foreground hover:text-foreground transition"
       title={tooltip}
       aria-label={tooltip}
       aria-pressed={compactView}

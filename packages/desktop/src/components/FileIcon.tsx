@@ -224,7 +224,7 @@ const NAME_ICON: Record<string, IconDef> = {
 
 export function FileIcon({ path, kind, size = 13 }: { path: string; kind: EntryKind; size?: number }) {
   if (kind === "pointer" || kind === "lfs") {
-    return <Binary size={size} className="shrink-0 text-gx-accent" />;
+    return <Binary size={size} className="shrink-0 text-primary" />;
   }
 
   // Try matching by full filename first (e.g. Dockerfile, .gitignore).
@@ -245,5 +245,5 @@ export function FileIcon({ path, kind, size = 13 }: { path: string; kind: EntryK
   }
 
   // Default: generic file icon.
-  return <FileIconLucide size={size} className="shrink-0 text-gx-muted" />;
+  return <FileIconLucide size={size} className="shrink-0 text-muted-foreground" />;
 }

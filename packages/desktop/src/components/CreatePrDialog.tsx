@@ -1,3 +1,6 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GitPullRequest, Loader2, X } from "lucide-react";
 import { rpc } from "../ipc";
@@ -127,22 +130,22 @@ export function CreatePrDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div
-        className="mx-4 w-full max-w-lg rounded-lg border border-gx-border bg-gx-surface shadow-xl"
+        className="mx-4 w-full max-w-lg rounded-lg border border-border bg-card shadow-xl"
         role="dialog"
         aria-labelledby="create-pr-title"
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2
             id="create-pr-title"
-            className="flex items-center gap-2 text-sm font-semibold text-gx-text"
+            className="flex items-center gap-2 text-sm font-semibold text-foreground"
           >
-            <GitPullRequest size={16} className="text-gx-accent" />
+            <GitPullRequest size={16} className="text-primary" />
             Create Pull Request
           </h2>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
             onClick={onCancel}
             aria-label="Close"
           >
@@ -153,17 +156,17 @@ export function CreatePrDialog({
         {/* Body */}
         <div className="space-y-3 px-4 py-4">
           {loading ? (
-            <div className="flex items-center gap-2 py-4 text-xs text-gx-muted">
+            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
               <Loader2 size={12} className="animate-spin" /> Loading…
             </div>
           ) : (
             <>
               {/* Head branch (read-only) */}
               <div>
-                <label className="mb-1 block text-[11px] text-gx-muted">
+                <label className="mb-1 block text-[11px] text-muted-foreground">
                   Head branch
                 </label>
-                <div className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-[11px] text-gx-text">
+                <div className="rounded border border-border bg-background px-2 py-1.5 font-mono text-[11px] text-foreground">
                   {branchName}
                 </div>
               </div>
@@ -172,13 +175,13 @@ export function CreatePrDialog({
               <div>
                 <label
                   htmlFor="pr-base-branch"
-                  className="mb-1 block text-[11px] text-gx-muted"
+                  className="mb-1 block text-[11px] text-muted-foreground"
                 >
                   Base branch
                 </label>
-                <select
+                <NativeSelect
                   id="pr-base-branch"
-                  className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-[11px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                  className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-[11px] text-foreground focus-visible:outline-none focus:border-primary"
                   value={base}
                   onChange={(e) => setBase(e.target.value)}
                 >
@@ -189,21 +192,21 @@ export function CreatePrDialog({
                         {b}
                       </option>
                     ))}
-                </select>
+                </NativeSelect>
               </div>
 
               {/* Title */}
               <div>
                 <label
                   htmlFor="pr-title"
-                  className="mb-1 block text-[11px] text-gx-muted"
+                  className="mb-1 block text-[11px] text-muted-foreground"
                 >
                   Title
                 </label>
-                <input
+                <Input
                   id="pr-title"
                   type="text"
-                  className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                  className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus-visible:outline-none focus:border-primary"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder="Pull request title"
@@ -215,15 +218,15 @@ export function CreatePrDialog({
               <div>
                 <label
                   htmlFor="pr-body"
-                  className="mb-1 block text-[11px] text-gx-muted"
+                  className="mb-1 block text-[11px] text-muted-foreground"
                 >
                   Description
                 </label>
                 <div className="relative">
-                  <textarea
+                  <Textarea
                     ref={bodyRef}
                     id="pr-body"
-                    className="h-32 w-full resize-y rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 text-xs text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                    className="h-32 w-full resize-y rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground focus-visible:outline-none focus:border-primary"
                     value={body}
                     onChange={(e) => {
                       setBody(e.target.value);
@@ -243,19 +246,19 @@ export function CreatePrDialog({
               </div>
 
               {/* Draft toggle */}
-              <label className="flex items-center gap-2 text-xs text-gx-text">
+              <label className="flex items-center gap-2 text-xs text-foreground">
                 <input
                   type="checkbox"
                   checked={draft}
                   onChange={(e) => setDraft(e.target.checked)}
-                  className="rounded border-gx-border"
+                  className="rounded border-border"
                 />
                 Create as draft
               </label>
 
               {/* Error */}
               {error && (
-                <div className="rounded border border-gx-error/40 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+                <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   {error}
                 </div>
               )}
@@ -264,10 +267,10 @@ export function CreatePrDialog({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-gx-border px-4 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
           <button
             type="button"
-            className="rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-bg-sub"
+            className="rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-background"
             onClick={onCancel}
             disabled={submitting}
           >
@@ -275,7 +278,7 @@ export function CreatePrDialog({
           </button>
           <button
             type="button"
-            className="rounded bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-accent/90 disabled:opacity-50"
+            className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             onClick={handleSubmit}
             disabled={submitting || !title.trim() || loading}
           >

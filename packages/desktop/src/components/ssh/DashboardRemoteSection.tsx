@@ -81,10 +81,10 @@ function toSystemHealthData(
 }
 
 function latencyColor(ms: number | undefined): string {
-  if (ms === undefined) return "text-gx-muted";
-  if (ms < 50) return "text-green-500 dark:text-green-400";
-  if (ms < 200) return "text-yellow-500 dark:text-yellow-400";
-  return "text-red-500 dark:text-red-400";
+  if (ms === undefined) return "text-muted-foreground";
+  if (ms < 50) return "text-success text-success";
+  if (ms < 200) return "text-warning text-warning";
+  return "text-destructive text-destructive";
 }
 
 function latencyLabel(ms: number | undefined): string {
@@ -185,14 +185,14 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
 
   return (
     <div
-      className="rounded-lg border border-gx-border bg-gx-surface overflow-hidden"
+      className="rounded-lg border border-border bg-card overflow-hidden"
       aria-label={`Remote server: ${hostname}`}
     >
       {/* Header — always visible */}
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-3 p-3 text-left hover:bg-gx-surface-hover transition-colors cursor-pointer"
+        className="flex w-full items-center gap-3 p-3 text-left hover:bg-accent transition-colors cursor-pointer"
         aria-expanded={expanded}
         aria-controls={`server-detail-${profileId}`}
       >
@@ -200,7 +200,7 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
         <div
           className={clsx(
             "h-2 w-2 shrink-0 rounded-full",
-            isConnected ? "bg-green-500" : "bg-gray-400",
+            isConnected ? "bg-success" : "bg-accent",
           )}
           aria-label={isConnected ? "Connected" : "Disconnected"}
         />
@@ -208,12 +208,12 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
         {/* Server name + info */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <Monitor size={13} className="shrink-0 text-gx-muted" aria-hidden="true" />
-            <span className="truncate text-sm font-medium text-gx-text">
+            <Monitor size={13} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+            <span className="truncate text-sm font-medium text-foreground">
               {hostname}
             </span>
             {os && arch && (
-              <span className="hidden sm:inline text-[10px] text-gx-muted">
+              <span className="hidden sm:inline text-[10px] text-muted-foreground">
                 {os} {arch}
               </span>
             )}
@@ -240,9 +240,9 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
 
         {/* Expand/collapse chevron */}
         {expanded ? (
-          <ChevronDown size={14} className="shrink-0 text-gx-muted" aria-hidden="true" />
+          <ChevronDown size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
         ) : (
-          <ChevronRight size={14} className="shrink-0 text-gx-muted" aria-hidden="true" />
+          <ChevronRight size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
         )}
       </button>
 
@@ -250,13 +250,13 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
       {expanded && (
         <div
           id={`server-detail-${profileId}`}
-          className="border-t border-gx-border px-3 pb-3 pt-2 space-y-3"
+          className="border-t border-border px-3 pb-3 pt-2 space-y-3"
         >
           {/* Full system health */}
           {isConnected && healthData ? (
             <SystemHealth health={healthData} />
           ) : (
-            <div className="text-xs text-gx-muted">
+            <div className="text-xs text-muted-foreground">
               {isConnected ? "Loading health data…" : "Connect to view system health."}
             </div>
           )}
@@ -264,17 +264,17 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
           {/* Hydration stats */}
           {isConnected && connection.openRepos.length > 0 && (
             <div className="space-y-1.5">
-              <div className="flex items-center gap-1.5 text-[11px] font-medium text-gx-muted">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                 <Droplets size={11} aria-hidden="true" />
                 Hydration
               </div>
               {hydration.loading ? (
-                <div className="flex items-center gap-1.5 text-[11px] text-gx-muted">
+                <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                   <Loader2 size={11} className="animate-spin" aria-hidden="true" />
                   Loading…
                 </div>
               ) : hydration.error ? (
-                <div className="text-[11px] text-gx-muted italic">
+                <div className="text-[11px] text-muted-foreground italic">
                   Unable to fetch hydration data
                 </div>
               ) : (
@@ -286,12 +286,12 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
                   <HydrationStat
                     label="Hydrated"
                     value={hydration.hydrated}
-                    color="text-green-600 dark:text-green-400"
+                    color="text-success text-success"
                   />
                   <HydrationStat
                     label="Dehydrated"
                     value={hydration.dehydrated}
-                    color="text-yellow-600 dark:text-yellow-400"
+                    color="text-warning text-warning"
                   />
                 </div>
               )}
@@ -299,7 +299,7 @@ function ServerCard({ profileId, connection }: ServerCardProps) {
           )}
 
           {/* Connection info */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gx-muted">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
             {connection.health?.uptime != null && formatUptime(connection.health.uptime) && (
               <span className="flex items-center gap-1">
                 <Clock size={10} aria-hidden="true" />
@@ -343,10 +343,10 @@ function HydrationStat({
 }) {
   return (
     <div className="text-center">
-      <div className={clsx("font-mono text-sm", color ?? "text-gx-text")}>
+      <div className={clsx("font-mono text-sm", color ?? "text-foreground")}>
         {value.toLocaleString()}
       </div>
-      <div className="text-[10px] text-gx-muted">{label}</div>
+      <div className="text-[10px] text-muted-foreground">{label}</div>
     </div>
   );
 }
@@ -424,7 +424,7 @@ export function DashboardRemoteSection({
         aria-controls="section-remote-servers"
       >
         <span
-          className="text-[10px] text-gx-muted transition-transform duration-200"
+          className="text-[10px] text-muted-foreground transition-transform duration-200"
           style={{
             display: "inline-block",
             transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
@@ -432,14 +432,14 @@ export function DashboardRemoteSection({
         >
           ▶
         </span>
-        <Cloud size={12} className="text-gx-muted" aria-hidden="true" />
-        <span className="text-[10px] uppercase tracking-wider text-gx-muted group-hover:text-gx-text transition-colors">
+        <Cloud size={12} className="text-muted-foreground" aria-hidden="true" />
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
           Remote Servers
         </span>
-        <span className="text-[10px] text-gx-muted">
+        <span className="text-[10px] text-muted-foreground">
           ({connections.length})
         </span>
-        <div className="h-px flex-1 bg-gx-border/50" />
+        <div className="h-px flex-1 bg-border/50" />
       </button>
       <div
         id="section-remote-servers"

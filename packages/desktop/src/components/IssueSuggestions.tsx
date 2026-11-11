@@ -155,15 +155,15 @@ export function IssueSuggestions({
   return (
     <div
       ref={containerRef}
-      className="absolute z-50 mt-1 max-h-48 w-64 overflow-y-auto rounded border border-gx-border bg-gx-surface shadow-lg"
+      className="absolute z-50 mt-1 max-h-48 w-64 overflow-y-auto rounded border border-border bg-card shadow-lg"
       role="listbox"
       aria-label="Issue suggestions"
     >
       {loading && issues.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">Loading issues…</div>
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">Loading issues…</div>
       )}
       {!loading && issues.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">No matching issues</div>
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">No matching issues</div>
       )}
       {issues.map((issue, idx) => (
         <button
@@ -173,13 +173,13 @@ export function IssueSuggestions({
           aria-selected={idx === selectedIndex}
           className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition ${
             idx === selectedIndex
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-text hover:bg-gx-bg-sub"
+              ? "bg-primary/20 text-foreground"
+              : "text-foreground hover:bg-background"
           }`}
           onMouseEnter={() => setSelectedIndex(idx)}
           onClick={() => insertIssue(issue)}
         >
-          <span className="shrink-0 font-mono text-gx-accent">#{issue.number}</span>
+          <span className="shrink-0 font-mono text-primary">#{issue.number}</span>
           <span className="truncate">{issue.title}</span>
         </button>
       ))}

@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * Mount button component for the repo context menu.
  *
@@ -67,13 +68,13 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">
-      <div className="w-96 rounded-lg border border-gx-border bg-gx-surface shadow-2xl">
+      <div className="w-96 rounded-lg border border-border bg-card shadow-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-gx-text">Mount Repository</h3>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">Mount Repository</h3>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
             onClick={onClose}
             aria-label="Close"
           >
@@ -85,10 +86,10 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
         <div className="space-y-3 px-4 py-4">
           {/* Source */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted uppercase tracking-wider">
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
               Source
             </label>
-            <div className="rounded border border-gx-border bg-gx-bg px-3 py-1.5 text-xs text-gx-text truncate">
+            <div className="rounded border border-border bg-background px-3 py-1.5 text-xs text-foreground truncate">
               {repo}
             </div>
           </div>
@@ -97,14 +98,14 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
           <div>
             <label
               htmlFor="mount-mountpoint"
-              className="mb-1 block text-[11px] font-medium text-gx-muted uppercase tracking-wider"
+              className="mb-1 block text-[11px] font-medium text-muted-foreground uppercase tracking-wider"
             >
               Mountpoint
             </label>
-            <input
+            <Input
               id="mount-mountpoint"
               type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg px-3 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+              className="w-full rounded border border-border bg-background px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
               placeholder="/mnt/my-repo"
               value={mountpoint}
               onChange={(e) => setMountpoint(e.target.value)}
@@ -117,14 +118,14 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
           <div>
             <label
               htmlFor="mount-ref"
-              className="mb-1 block text-[11px] font-medium text-gx-muted uppercase tracking-wider"
+              className="mb-1 block text-[11px] font-medium text-muted-foreground uppercase tracking-wider"
             >
               Branch / Ref
             </label>
-            <input
+            <Input
               id="mount-ref"
               type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg px-3 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+              className="w-full rounded border border-border bg-background px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
               placeholder="HEAD"
               value={ref}
               onChange={(e) => setRef(e.target.value)}
@@ -136,27 +137,27 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
-              className="rounded border-gx-border"
+              className="rounded border-border"
               checked={readOnly}
               onChange={(e) => setReadOnly(e.target.checked)}
               disabled={busy}
             />
-            <span className="text-xs text-gx-text">Read-only (no overlay writes)</span>
+            <span className="text-xs text-foreground">Read-only (no overlay writes)</span>
           </label>
 
           {/* Error */}
           {error && (
-            <div className="rounded border border-gx-error/40 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+            <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-2 border-t border-gx-border px-4 py-3">
+        <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
           <button
             type="button"
-            className="rounded px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover border border-gx-border transition"
+            className="rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent border border-border transition"
             onClick={onClose}
             disabled={busy}
           >
@@ -164,7 +165,7 @@ function MountDialog({ open, repo, defaultRef, onClose, onMounted }: MountDialog
           </button>
           <button
             type="button"
-            className="rounded bg-gx-accent px-3 py-1.5 text-xs text-white hover:bg-gx-accent/90 transition disabled:opacity-50"
+            className="rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
             onClick={handleMount}
             disabled={busy || !mountpoint.trim()}
           >
@@ -187,7 +188,7 @@ export function MountButton({ repo, defaultRef, onMounted }: MountButtonProps) {
     <>
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-accent/10 transition"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-primary/10 transition"
         onClick={() => setDialogOpen(true)}
         title="Mount this repository as a virtual filesystem"
       >

@@ -26,11 +26,11 @@ interface Props {
 // ---- Status chip colours ----
 
 const STATUS_STYLES: Record<ExperimentRunStatus, { bg: string; text: string; pulse?: boolean }> = {
-  running: { bg: "bg-gx-info/20", text: "text-gx-info", pulse: true },
-  completed: { bg: "bg-gx-success/20", text: "text-gx-success" },
-  failed: { bg: "bg-gx-error/20", text: "text-gx-error" },
-  killed: { bg: "bg-gx-warn/20", text: "text-gx-warn" },
-  unknown: { bg: "bg-gray-500/20", text: "text-gray-400" },
+  running: { bg: "bg-info/20", text: "text-info", pulse: true },
+  completed: { bg: "bg-success/20", text: "text-success" },
+  failed: { bg: "bg-destructive/20", text: "text-destructive" },
+  killed: { bg: "bg-warning/20", text: "text-warning" },
+  unknown: { bg: "bg-accent/20", text: "text-muted-foreground" },
 };
 
 function StatusChip({ status }: { status: ExperimentRunStatus }) {
@@ -135,15 +135,15 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
   if (notConfigured) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <FlaskConical size={32} className="text-gx-muted" />
-        <div className="text-sm text-gx-text">No experiment provider configured</div>
-        <p className="text-xs text-gx-muted">
+        <FlaskConical size={32} className="text-muted-foreground" />
+        <div className="text-sm text-foreground">No experiment provider configured</div>
+        <p className="text-xs text-muted-foreground">
           Connect MLflow or Weights &amp; Biases to see experiment runs linked to your commits.
         </p>
         <button
           type="button"
           onClick={onNavigateToSettings}
-          className="mt-2 flex items-center gap-1.5 rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover"
+          className="mt-2 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent"
         >
           <Settings size={12} />
           Open Settings
@@ -155,14 +155,14 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Header */}
-      <div className="shrink-0 border-b border-gx-border px-3 py-2">
-        <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gx-muted">
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
           <span className="flex items-center gap-1">
             <FlaskConical size={11} /> Experiments
           </span>
           <button
             type="button"
-            className="text-gx-muted hover:text-gx-text"
+            className="text-muted-foreground hover:text-foreground"
             onClick={fetchRuns}
             title="Refresh"
             aria-label="Refresh experiment runs"
@@ -175,17 +175,17 @@ export function ExperimentsView({ repo, onNavigateToCommit, onNavigateToSettings
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-auto">
         {loading && !runs && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading runs…
           </div>
         )}
         {error && (
-          <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
         {!loading && !error && runs && runs.length === 0 && (
-          <div className="p-3 text-xs text-gx-muted">No experiment runs found.</div>
+          <div className="p-3 text-xs text-muted-foreground">No experiment runs found.</div>
         )}
         {runs && runs.length > 0 && (
           <ul className="py-1">
@@ -225,15 +225,15 @@ function RunRow({
   const metricEntries = Object.entries(run.metrics).slice(0, 3);
 
   return (
-    <li className="border-b border-gx-border/50 last:border-b-0">
+    <li className="border-b border-border/50 last:border-b-0">
       <button
         type="button"
         onClick={onToggle}
         className={clsx(
           "flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition",
           expanded
-            ? "bg-gx-accent/10"
-            : "hover:bg-gx-surface-hover",
+            ? "bg-primary/10"
+            : "hover:bg-accent",
         )}
       >
         <span className="mt-0.5 shrink-0">
@@ -241,11 +241,11 @@ function RunRow({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate font-medium text-gx-text">{run.name}</span>
+            <span className="truncate font-medium text-foreground">{run.name}</span>
             <StatusChip status={run.status} />
           </div>
           {metricEntries.length > 0 && (
-            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-gx-muted">
+            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
               {metricEntries.map(([key, val]) => (
                 <span key={key} className="font-mono">
                   {key}={formatMetricValue(val)}
@@ -253,7 +253,7 @@ function RunRow({
               ))}
             </div>
           )}
-          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gx-muted">
+          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
             <span>{formatTime(run.start_time)}</span>
             {run.commit_sha && (
               <button
@@ -262,7 +262,7 @@ function RunRow({
                   e.stopPropagation();
                   onNavigateToCommit?.(run.commit_sha!);
                 }}
-                className="font-mono text-gx-accent hover:underline"
+                className="font-mono text-primary hover:underline"
                 title={`Go to commit ${run.commit_sha}`}
               >
                 {shortSha(run.commit_sha)}
@@ -311,7 +311,7 @@ function RunDetailPanel({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 px-7 py-2 text-[11px] text-gx-muted">
+      <div className="flex items-center gap-2 px-7 py-2 text-[11px] text-muted-foreground">
         <Loader2 size={10} className="animate-spin" /> Loading detail…
       </div>
     );
@@ -319,7 +319,7 @@ function RunDetailPanel({
 
   if (error) {
     return (
-      <div className="px-7 py-2 text-[11px] text-gx-error">{error}</div>
+      <div className="px-7 py-2 text-[11px] text-destructive">{error}</div>
     );
   }
 
@@ -329,15 +329,15 @@ function RunDetailPanel({
   const paramEntries = Object.entries(detail.params);
 
   return (
-    <div className="space-y-2 bg-gx-bg-sub px-7 py-2 text-[11px]">
+    <div className="space-y-2 bg-background px-7 py-2 text-[11px]">
       {/* Metrics */}
       {metricEntries.length > 0 && (
         <DetailSection title="Metrics">
           <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
             {metricEntries.map(([key, val]) => (
               <div key={key} className="flex items-baseline justify-between gap-1">
-                <span className="truncate text-gx-muted">{key}</span>
-                <span className="shrink-0 font-mono text-gx-text">
+                <span className="truncate text-muted-foreground">{key}</span>
+                <span className="shrink-0 font-mono text-foreground">
                   {formatMetricValue(val)}
                 </span>
               </div>
@@ -352,8 +352,8 @@ function RunDetailPanel({
           <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
             {paramEntries.map(([key, val]) => (
               <div key={key} className="flex items-baseline justify-between gap-1">
-                <span className="truncate text-gx-muted">{key}</span>
-                <span className="shrink-0 font-mono text-gx-text">{val}</span>
+                <span className="truncate text-muted-foreground">{key}</span>
+                <span className="shrink-0 font-mono text-foreground">{val}</span>
               </div>
             ))}
           </div>
@@ -366,7 +366,7 @@ function RunDetailPanel({
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-[10px] text-gx-accent hover:underline"
+          className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline"
         >
           <ExternalLink size={10} /> Open in provider
         </a>
@@ -378,7 +378,7 @@ function RunDetailPanel({
 function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-gx-muted">{title}</div>
+      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
       {children}
     </div>
   );

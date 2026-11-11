@@ -97,13 +97,13 @@ export function FileMentionDropdown({ matches, loading, onSelect, visible }: Pro
       ref={listRef}
       role="listbox"
       aria-label="File mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(240px,var(--composer-popup-height))] overflow-auto rounded-lg border border-border bg-background shadow-lg z-50"
     >
       {loading && matches.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">Searching files…</div>
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">Searching files…</div>
       )}
       {!loading && matches.length === 0 && (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">No matching files</div>
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">No matching files</div>
       )}
       {matches.map((m, i) => {
         const dir = m.path.includes("/")
@@ -120,14 +120,14 @@ export function FileMentionDropdown({ matches, loading, onSelect, visible }: Pro
             onMouseEnter={() => setActiveIndex(i)}
             className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
               i === activeIndex
-                ? "bg-gx-accent/10 text-gx-text"
-                : "text-gx-text hover:bg-gx-surface-hover"
+                ? "bg-primary/10 text-foreground"
+                : "text-foreground hover:bg-accent"
             }`}
           >
-            <FileText size={11} className="shrink-0 text-gx-accent" />
+            <FileText size={11} className="shrink-0 text-primary" />
             <span className="truncate font-medium">{m.label}</span>
             {dir && (
-              <span className="truncate text-[10px] text-gx-muted">{dir}</span>
+              <span className="truncate text-[10px] text-muted-foreground">{dir}</span>
             )}
           </button>
         );

@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -256,7 +257,7 @@ export function BrowserToolbar({
   }, [activeTabId]);
 
   return (
-    <div className="flex flex-col border-b border-gx-border bg-gx-surface">
+    <div className="flex flex-col border-b border-border bg-card">
       {/* Tab bar */}
       <div className="flex items-center gap-0 overflow-x-auto px-2 pt-1">
         {tabs.map((tab) => {
@@ -267,8 +268,8 @@ export function BrowserToolbar({
               className={clsx(
                 "group flex shrink-0 items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs cursor-pointer select-none max-w-[180px] transition",
                 isActive
-                  ? "bg-gx-bg text-gx-text border border-gx-border border-b-0"
-                  : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-background text-foreground border border-border border-b-0"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
               onClick={() => onSelectTab(tab.id)}
               role="tab"
@@ -280,14 +281,14 @@ export function BrowserToolbar({
               ) : tab.faviconUrl ? (
                 <img src={tab.faviconUrl} alt="" className="h-3.5 w-3.5 shrink-0 rounded" />
               ) : (
-                <Globe size={10} className="shrink-0 text-gx-muted" />
+                <Globe size={10} className="shrink-0 text-muted-foreground" />
               )}
               <span className="truncate min-w-0 flex-1">
                 {tab.title || "New Tab"}
               </span>
               <button
                 type="button"
-                className="shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 hover:bg-gx-surface-hover text-gx-muted hover:text-gx-text transition"
+                className="shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 hover:bg-accent text-muted-foreground hover:text-foreground transition"
                 onClick={(e) => {
                   e.stopPropagation();
                   onCloseTab(tab.id);
@@ -301,7 +302,7 @@ export function BrowserToolbar({
         })}
         <button
           type="button"
-          className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={onCreateTab}
           aria-label="New tab"
           title="New Tab"
@@ -318,8 +319,8 @@ export function BrowserToolbar({
           className={clsx(
             "rounded p-1 transition",
             activeTab?.canGoBack
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed",
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed",
           )}
           onClick={() => activeTabId && onGoBack(activeTabId)}
           disabled={!activeTab?.canGoBack}
@@ -335,8 +336,8 @@ export function BrowserToolbar({
           className={clsx(
             "rounded p-1 transition",
             activeTab?.canGoForward
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed",
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed",
           )}
           onClick={() => activeTabId && onGoForward(activeTabId)}
           disabled={!activeTab?.canGoForward}
@@ -350,7 +351,7 @@ export function BrowserToolbar({
         {activeTab?.loading ? (
           <button
             type="button"
-            className="rounded p-1 text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-foreground hover:bg-accent transition"
             onClick={() => activeTabId && onStop(activeTabId)}
             aria-label="Stop loading"
             title="Stop"
@@ -360,7 +361,7 @@ export function BrowserToolbar({
         ) : (
           <button
             type="button"
-            className="rounded p-1 text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-foreground hover:bg-accent transition"
             onClick={() => activeTabId && onReload(activeTabId)}
             aria-label="Reload"
             title="Reload"
@@ -371,16 +372,16 @@ export function BrowserToolbar({
 
         {/* URL Bar */}
         <div className="relative flex min-w-0 flex-1">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-gx-border bg-gx-bg px-2.5 py-1 text-sm">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-sm">
             {/* Security indicator */}
             {isSecure ? (
-              <Lock size={12} className="shrink-0 text-gx-success" />
+              <Lock size={12} className="shrink-0 text-success" />
             ) : activeTab?.url && !activeTab.url.startsWith("about:") && !activeTab.url.startsWith("data:") ? (
-              <Unlock size={12} className="shrink-0 text-gx-muted" />
+              <Unlock size={12} className="shrink-0 text-muted-foreground" />
             ) : (
-              <Globe size={12} className="shrink-0 text-gx-muted" />
+              <Globe size={12} className="shrink-0 text-muted-foreground" />
             )}
-            <input
+            <Input
               ref={addressInputRef}
               type="text"
               defaultValue={addressBarValue}
@@ -395,7 +396,7 @@ export function BrowserToolbar({
                 setTimeout(() => setSuggestionsOpen(false), 200);
               }}
               placeholder="Search or enter URL..."
-              className="min-w-0 flex-1 bg-transparent text-gx-text placeholder-gx-muted/60 outline-none text-[13px]"
+              className="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground/60 outline-none text-[13px]"
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
@@ -407,7 +408,7 @@ export function BrowserToolbar({
 
           {/* Suggestions dropdown */}
           {suggestionsOpen && suggestions.length > 0 && (
-            <div className="absolute left-0 right-0 top-full z-50 mt-0.5 rounded-md border border-gx-border bg-gx-surface shadow-xl py-0.5">
+            <div className="absolute left-0 right-0 top-full z-50 mt-0.5 rounded-md border border-border bg-card shadow-xl py-0.5">
               {suggestions.map((s, i) => (
                 <button
                   key={`${s.url}-${i}`}
@@ -415,8 +416,8 @@ export function BrowserToolbar({
                   className={clsx(
                     "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
                     i === selectedSuggestionIndex
-                      ? "bg-gx-accent/10 text-gx-text"
-                      : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                      ? "bg-primary/10 text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
                   )}
                   onMouseDown={(e) => {
                     e.preventDefault();
@@ -431,7 +432,7 @@ export function BrowserToolbar({
                   <div className="min-w-0 flex-1">
                     <div className="truncate">{s.title}</div>
                     {s.subtitle && (
-                      <div className="truncate text-[10px] text-gx-muted/60">{s.subtitle}</div>
+                      <div className="truncate text-[10px] text-muted-foreground/60">{s.subtitle}</div>
                     )}
                   </div>
                 </button>
@@ -445,7 +446,7 @@ export function BrowserToolbar({
           <div className="relative" ref={viewportMenuRef}>
             <button
               type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={() => setViewportMenuOpen((v) => !v)}
               title="Viewport preset"
               aria-label="Viewport preset"
@@ -454,10 +455,10 @@ export function BrowserToolbar({
               <ChevronDown size={10} />
             </button>
             {viewportMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-lg">
+              <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-md border border-border bg-card py-1 shadow-lg">
                 <button
                   type="button"
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!viewportPresetId ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!viewportPresetId ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
                   onClick={() => { onSetViewportPreset(null); setViewportMenuOpen(false); }}
                 >
                   <Monitor size={12} />
@@ -467,7 +468,7 @@ export function BrowserToolbar({
                   <button
                     key={preset.id}
                     type="button"
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${viewportPresetId === preset.id ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${viewportPresetId === preset.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
                     onClick={() => { onSetViewportPreset(preset.id); setViewportMenuOpen(false); }}
                   >
                     <Smartphone size={12} />
@@ -484,7 +485,7 @@ export function BrowserToolbar({
           <div className="flex items-center gap-0.5 rounded px-1">
             <button
               type="button"
-              className="rounded px-1 py-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-1 py-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onZoomOut}
               aria-label="Zoom Out"
               title="Zoom Out (Cmd+-)"
@@ -493,7 +494,7 @@ export function BrowserToolbar({
             </button>
             <button
               type="button"
-              className="rounded px-1 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition min-w-[32px] text-center"
+              className="rounded px-1 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition min-w-[32px] text-center"
               onClick={onZoomReset}
               aria-label="Reset Zoom"
               title="Reset Zoom (Cmd+0)"
@@ -502,7 +503,7 @@ export function BrowserToolbar({
             </button>
             <button
               type="button"
-              className="rounded px-1 py-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-1 py-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onZoomIn}
               aria-label="Zoom In"
               title="Zoom In (Cmd+=)"
@@ -517,7 +518,7 @@ export function BrowserToolbar({
           <div className="relative" ref={profileMenuRef}>
             <button
               type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={() => setProfileMenuOpen((v) => !v)}
               title="Session profile"
               aria-label="Session profile"
@@ -526,11 +527,11 @@ export function BrowserToolbar({
               <ChevronDown size={10} />
             </button>
             {profileMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[200px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-lg">
+              <div className="absolute right-0 top-full z-50 mt-1 min-w-[200px] rounded-md border border-border bg-card py-1 shadow-lg">
                 {/* Default profile option */}
                 <button
                   type="button"
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!activeProfileId ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${!activeProfileId ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
                   onClick={() => { onSelectProfile(null); setProfileMenuOpen(false); }}
                 >
                   <Globe size={12} />
@@ -540,19 +541,19 @@ export function BrowserToolbar({
                   <button
                     key={profile.id}
                     type="button"
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${activeProfileId === profile.id ? 'bg-gx-accent/10 text-gx-text' : 'text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text'}`}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${activeProfileId === profile.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
                     onClick={() => { onSelectProfile(profile.id); setProfileMenuOpen(false); }}
                   >
                     <User size={12} />
                     <span className="truncate">{profile.label}</span>
-                    <span className="ml-auto text-[10px] text-gx-muted/50">{profile.scope}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground/50">{profile.scope}</span>
                   </button>
                 ))}
-                <div className="my-1 border-t border-gx-border" />
+                <div className="my-1 border-t border-border" />
                 {onCreateProfile ? (
                   <button
                     type="button"
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition"
                     onClick={() => { onCreateProfile(); setProfileMenuOpen(false); }}
                   >
                     <Plus size={12} />
@@ -562,7 +563,7 @@ export function BrowserToolbar({
                 {onManageProfiles ? (
                   <button
                     type="button"
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition"
                     onClick={() => { onManageProfiles(); setProfileMenuOpen(false); }}
                   >
                     <Settings size={12} />
@@ -579,12 +580,12 @@ export function BrowserToolbar({
           <button
             type="button"
             className="rounded px-1.5 py-1 text-[11px] transition"
-            style={{ color: isBookmarked ? '#eab308' : undefined }}
+            style={{ color: isBookmarked ? 'rgb(var(--warning))' : undefined }}
             onClick={onToggleBookmark}
             aria-label={isBookmarked ? 'Remove bookmark' : 'Add bookmark'}
             title={isBookmarked ? 'Remove bookmark' : 'Add bookmark'}
           >
-            <Star size={14} fill={isBookmarked ? '#eab308' : 'none'} />
+            <Star size={14} fill={isBookmarked ? 'rgb(var(--warning))' : 'none'} />
           </button>
         ) : null}
 
@@ -592,7 +593,7 @@ export function BrowserToolbar({
         {onScreenshot ? (
           <button
             type="button"
-            className="rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
             onClick={onScreenshot}
             aria-label="Screenshot to Clipboard"
             title="Screenshot to Clipboard"
@@ -607,8 +608,8 @@ export function BrowserToolbar({
             type="button"
             className={`rounded px-1.5 py-1 text-[11px] transition ${
               grabModeActive
-                ? 'text-gx-accent bg-gx-accent/10'
-                : 'text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover'
+                ? 'text-primary bg-primary/10'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
             onClick={onToggleGrab}
             aria-label={grabModeActive ? 'Exit Grab Mode' : 'Grab Mode'}
@@ -621,7 +622,7 @@ export function BrowserToolbar({
         {/* DevTools */}
         <button
           type="button"
-          className="rounded px-1.5 py-1 text-[11px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={() => activeTabId && onOpenDevTools(activeTabId)}
           aria-label="Open DevTools"
           title="Developer Tools"

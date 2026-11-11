@@ -157,7 +157,7 @@ export function ContextMenu({ items, position, onSelect, onClose }: ContextMenuP
       ref={menuRef}
       role="menu"
       tabIndex={-1}
-      className="fixed z-[9999] min-w-[180px] overflow-hidden rounded-md border border-gx-border bg-gx-surface p-1 shadow-2xl outline-none"
+      className="fixed z-[9999] min-w-[180px] overflow-hidden rounded-md border border-border bg-card p-1 shadow-2xl outline-none"
       style={{ left: adjustedPos.x, top: adjustedPos.y }}
       onKeyDown={handleKeyDown}
     >
@@ -165,7 +165,7 @@ export function ContextMenu({ items, position, onSelect, onClose }: ContextMenuP
         if (item.separator) {
           return (
             <div key={`${item.id}-group`}>
-              <hr className="my-1 border-t border-gx-border/60" />
+              <hr className="my-1 border-t border-border/60" />
               <MenuItemRow
                 item={item}
                 highlighted={index === highlightIndex}
@@ -210,10 +210,10 @@ function MenuItemRow({
       className={clsx(
         "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12.5px] transition-colors",
         item.disabled && "opacity-50 pointer-events-none",
-        item.danger && !item.disabled && "text-gx-error",
-        !item.danger && !item.disabled && "text-gx-text",
-        highlighted && !item.disabled && "bg-gx-accent/15",
-        !highlighted && !item.disabled && "hover:bg-gx-surface-hover",
+        item.danger && !item.disabled && "text-destructive",
+        !item.danger && !item.disabled && "text-foreground",
+        highlighted && !item.disabled && "bg-primary/15",
+        !highlighted && !item.disabled && "hover:bg-accent",
       )}
       onClick={() => {
         if (!item.disabled) onSelect(item.id);
@@ -222,13 +222,13 @@ function MenuItemRow({
       tabIndex={-1}
     >
       {Icon && (
-        <span className="shrink-0 text-gx-muted">
+        <span className="shrink-0 text-muted-foreground">
           <Icon size={14} />
         </span>
       )}
       <span className="flex-1 truncate">{item.label}</span>
       {item.shortcut && (
-        <span className="ml-4 shrink-0 text-[11px] text-gx-muted">{item.shortcut}</span>
+        <span className="ml-4 shrink-0 text-[11px] text-muted-foreground">{item.shortcut}</span>
       )}
     </button>
   );

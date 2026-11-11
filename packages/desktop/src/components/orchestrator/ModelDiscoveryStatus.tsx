@@ -4,9 +4,9 @@ export type ModelDiscoveryControls = Pick<ReturnType<typeof useAgentModels>, "st
 
 export function ModelDiscoveryStatus({ discovery }: { discovery?: ModelDiscoveryControls }) {
   if (!discovery?.status) return null;
-  return <div className="mb-2 flex items-center gap-2 text-xs text-gx-muted">
+  return <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
     <p role="status">{discovery.status}</p>
-    <button type="button" aria-label={discovery.loading ? "Cancel model discovery" : "Retry model discovery"} onClick={discovery.loading ? discovery.cancel : discovery.retry} className="underline hover:text-gx-text">
+    <button type="button" aria-label={discovery.loading ? "Cancel model discovery" : "Retry model discovery"} onClick={discovery.loading ? discovery.cancel : discovery.retry} className="underline hover:text-foreground">
       {discovery.loading ? "Cancel" : "Retry"}
     </button>
   </div>;

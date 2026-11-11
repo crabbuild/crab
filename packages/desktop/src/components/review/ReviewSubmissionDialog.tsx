@@ -1,3 +1,4 @@
+import { Textarea } from "@/components/ui/textarea";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { FileText, Loader2, Send, X } from "lucide-react";
 import type { PendingComment, Verdict } from "../../review/types";
@@ -135,15 +136,15 @@ export function ReviewSubmissionDialog({
       />
 
       {/* Dialog panel */}
-      <div className="relative z-10 flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-gx-border bg-gx-surface shadow-xl">
+      <div className="relative z-10 flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
-          <h2 id="review-dialog-title" className="text-sm font-semibold text-gx-text">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 id="review-dialog-title" className="text-sm font-semibold text-foreground">
             Submit Review
           </h2>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close dialog"
           >
@@ -155,9 +156,9 @@ export function ReviewSubmissionDialog({
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
           {/* Review body textarea */}
           <div>
-            <textarea
+            <Textarea
               ref={textareaRef}
-              className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2.5 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+              className="w-full resize-y rounded border border-border bg-background p-2.5 text-[11px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
               rows={4}
               placeholder="Leave a review summary…"
               value={body}
@@ -173,37 +174,37 @@ export function ReviewSubmissionDialog({
           {/* Pending comments grouped by file */}
           {pendingComments.length > 0 && (
             <div>
-              <h3 className="mb-2 text-[11px] font-medium text-gx-muted">
+              <h3 className="mb-2 text-[11px] font-medium text-muted-foreground">
                 Pending Comments ({pendingComments.length})
               </h3>
               <div className="space-y-2">
                 {Array.from(grouped.entries()).map(([filePath, comments]) => (
-                  <div key={filePath} className="rounded border border-gx-border/50 bg-gx-bg-sub">
+                  <div key={filePath} className="rounded border border-border/50 bg-background">
                     {/* File header */}
-                    <div className="flex items-center gap-1.5 border-b border-gx-border/30 px-2.5 py-1.5">
-                      <FileText size={10} className="text-gx-muted" />
-                      <span className="truncate font-mono text-[10px] text-gx-text/80">
+                    <div className="flex items-center gap-1.5 border-b border-border/30 px-2.5 py-1.5">
+                      <FileText size={10} className="text-muted-foreground" />
+                      <span className="truncate font-mono text-[10px] text-foreground/80">
                         {filePath}
                       </span>
                     </div>
                     {/* Comments in this file */}
-                    <div className="divide-y divide-gx-border/20">
+                    <div className="divide-y divide-border/20">
                       {comments.map((comment) => (
                         <div
                           key={comment.id}
                           className="flex items-start justify-between gap-2 px-2.5 py-1.5"
                         >
                           <div className="min-w-0 flex-1">
-                            <span className="mr-1.5 font-mono text-[10px] text-gx-muted">
+                            <span className="mr-1.5 font-mono text-[10px] text-muted-foreground">
                               L{comment.line}:
                             </span>
-                            <span className="text-[10px] text-gx-text/80">
+                            <span className="text-[10px] text-foreground/80">
                               {truncate(comment.body, 100)}
                             </span>
                           </div>
                           <button
                             type="button"
-                            className="shrink-0 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] text-gx-muted hover:bg-red-500/10 hover:text-red-400"
+                            className="shrink-0 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                             onClick={() => onRemoveComment(comment.id)}
                             disabled={submitting}
                             aria-label={`Remove comment on line ${comment.line}`}
@@ -222,7 +223,7 @@ export function ReviewSubmissionDialog({
 
           {/* Verdict radio buttons */}
           <div>
-            <h3 className="mb-2 text-[11px] font-medium text-gx-muted">Verdict</h3>
+            <h3 className="mb-2 text-[11px] font-medium text-muted-foreground">Verdict</h3>
             <div className="flex items-center gap-4">
               {VERDICT_OPTIONS.map(({ value, label }) => {
                 const disabled =
@@ -241,15 +242,15 @@ export function ReviewSubmissionDialog({
                       checked={verdict === value}
                       onChange={() => setVerdict(value)}
                       disabled={disabled}
-                      className="accent-gx-accent"
+                      className="accent-primary"
                     />
-                    <span className="text-gx-text">{label}</span>
+                    <span className="text-foreground">{label}</span>
                   </label>
                 );
               })}
             </div>
             {isAuthor && (
-              <p className="mt-1 text-[9px] text-gx-muted">
+              <p className="mt-1 text-[9px] text-muted-foreground">
                 Authors cannot approve or request changes on their own PR.
               </p>
             )}
@@ -257,29 +258,29 @@ export function ReviewSubmissionDialog({
         </div>
 
         {/* Footer */}
-        <div className="border-t border-gx-border px-4 py-3">
+        <div className="border-t border-border px-4 py-3">
           {/* Error message */}
           {error && (
-            <p className="mb-2 text-[10px] text-red-400" role="alert">
+            <p className="mb-2 text-[10px] text-destructive" role="alert">
               {error}
             </p>
           )}
 
           {/* Validation hint */}
           {!canSubmit && (
-            <p className="mb-2 text-[10px] text-orange-400" role="alert">
+            <p className="mb-2 text-[10px] text-warning" role="alert">
               A review body or at least one comment is required.
             </p>
           )}
 
           <div className="flex items-center justify-between">
-            <span className="text-[9px] text-gx-muted">
+            <span className="text-[9px] text-muted-foreground">
               {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit
             </span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="rounded px-3 py-1.5 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                className="rounded px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={onClose}
                 disabled={submitting}
               >
@@ -287,7 +288,7 @@ export function ReviewSubmissionDialog({
               </button>
               <button
                 type="button"
-                className="inline-flex items-center gap-1.5 rounded bg-gx-accent px-3 py-1.5 text-[11px] font-medium text-white hover:bg-gx-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!canSubmit || submitting}
                 onClick={handleSubmit}
                 aria-label="Submit review"

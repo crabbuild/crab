@@ -36,12 +36,12 @@ export interface ViewToolbarProps {
 export function ViewToolbar({ title, icon: Icon, actions, onAction, trailing }: ViewToolbarProps) {
   return (
     <div
-      className="flex h-8 shrink-0 items-center justify-between border-b border-gx-border bg-gx-surface px-2"
+      className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2"
       role="toolbar"
       aria-label={title}
     >
-      <div className="flex items-center gap-1.5 text-xs font-medium text-gx-primary">
-        {Icon && <Icon size={14} className="text-gx-secondary" />}
+      <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+        {Icon && <Icon size={14} className="text-muted-foreground" />}
         <span>{title}</span>
       </div>
 
@@ -74,10 +74,10 @@ function ActionButton({
       disabled={disabled || loading}
       onClick={() => onAction(id)}
       className={clsx(
-        "flex h-6 w-6 items-center justify-center rounded text-gx-secondary transition-colors",
-        "hover:bg-gx-accent/20 hover:text-gx-primary",
-        active && "bg-gx-accent/20 text-gx-primary",
-        disabled && "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-gx-secondary",
+        "flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors",
+        "hover:bg-primary/20 hover:text-foreground",
+        active && "bg-primary/20 text-foreground",
+        disabled && "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground",
         loading && "cursor-not-allowed opacity-50",
       )}
     >

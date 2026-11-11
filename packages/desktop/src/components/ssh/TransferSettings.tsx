@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * TransferSettings — bandwidth limit, compression toggle, and adaptive
  * throttling configuration panel.
@@ -143,16 +144,16 @@ export function TransferSettings({
       {/* Header with current stats */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Settings2 className="w-4 h-4 text-gray-500 dark:text-gray-400" />
-          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-200">
+          <Settings2 className="w-4 h-4 text-muted-foreground text-muted-foreground" />
+          <h3 className="text-sm font-semibold text-foreground text-foreground">
             Transfer Settings
           </h3>
         </div>
-        <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground text-muted-foreground">
           <span>
             Limit: {bandwidthLimit === 0 ? "Unlimited" : `${bandwidthLimit.toLocaleString()} KB/s`}
           </span>
-          <span className="text-gray-300 dark:text-gray-600">·</span>
+          <span className="text-muted-foreground text-muted-foreground">·</span>
           <span>Actual: {formatSpeed(actualThroughput)}</span>
         </div>
       </div>
@@ -161,13 +162,13 @@ export function TransferSettings({
       <div className="space-y-1.5">
         <label
           htmlFor="bandwidth-limit"
-          className="flex items-center gap-1.5 text-xs font-medium text-gray-600 dark:text-gray-300"
+          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground text-muted-foreground"
         >
           <Gauge size={12} />
           Bandwidth Limit (KB/s)
         </label>
         <div className="flex items-center gap-2">
-          <input
+          <Input
             id="bandwidth-limit"
             type="number"
             min={0}
@@ -179,39 +180,39 @@ export function TransferSettings({
             placeholder="0 = unlimited"
             className={clsx(
               "flex-1 px-2.5 py-1.5 rounded-md text-sm",
-              "bg-white dark:bg-gray-900",
+              "bg-background bg-background",
               "border transition-colors",
               inputError
-                ? "border-red-300 dark:border-red-700 focus:ring-red-500"
-                : "border-gray-200 dark:border-gray-600 focus:ring-blue-500",
+                ? "border-destructive border-destructive focus:ring-destructive"
+                : "border-border border-border focus:ring-info",
               "focus:outline-none focus:ring-1",
             )}
             aria-describedby={inputError ? "bandwidth-error" : undefined}
             aria-invalid={!!inputError}
           />
-          <span className="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+          <span className="text-xs text-muted-foreground text-muted-foreground whitespace-nowrap">
             KB/s
           </span>
         </div>
         {inputError && (
-          <p id="bandwidth-error" className="text-xs text-red-500 dark:text-red-400">
+          <p id="bandwidth-error" className="text-xs text-destructive text-destructive">
             {inputError}
           </p>
         )}
-        <p className="text-xs text-gray-400 dark:text-gray-500">
+        <p className="text-xs text-muted-foreground text-muted-foreground">
           Range: {MIN_BANDWIDTH}–{MAX_BANDWIDTH.toLocaleString()} KB/s. Enter 0 or leave empty for unlimited.
         </p>
       </div>
 
       {/* Compression toggle */}
-      <div className="flex items-center justify-between py-2 border-t border-gray-100 dark:border-gray-700">
+      <div className="flex items-center justify-between py-2 border-t border-border border-border">
         <div className="flex items-center gap-2">
-          <Zap size={14} className="text-gray-500 dark:text-gray-400" />
+          <Zap size={14} className="text-muted-foreground text-muted-foreground" />
           <div>
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">
+            <p className="text-sm font-medium text-foreground text-foreground">
               Compression
             </p>
-            <p className="text-xs text-gray-400 dark:text-gray-500">
+            <p className="text-xs text-muted-foreground text-muted-foreground">
               Compress files with zstd before transfer
             </p>
           </div>
@@ -223,15 +224,15 @@ export function TransferSettings({
           onClick={toggleCompression}
           className={clsx(
             "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1",
+            "focus:outline-none focus:ring-2 focus:ring-info focus:ring-offset-1",
             compressionEnabled
-              ? "bg-blue-600 dark:bg-blue-500"
-              : "bg-gray-200 dark:bg-gray-600",
+              ? "bg-info bg-info"
+              : "bg-card bg-accent",
           )}
         >
           <span
             className={clsx(
-              "inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5",
+              "inline-block h-4 w-4 rounded-full bg-background shadow transform transition-transform mt-0.5",
               compressionEnabled ? "translate-x-4 ml-0.5" : "translate-x-0.5",
             )}
           />
@@ -239,14 +240,14 @@ export function TransferSettings({
       </div>
 
       {/* Adaptive throttling toggle */}
-      <div className="flex items-center justify-between py-2 border-t border-gray-100 dark:border-gray-700">
+      <div className="flex items-center justify-between py-2 border-t border-border border-border">
         <div className="flex items-center gap-2">
-          <Activity size={14} className="text-gray-500 dark:text-gray-400" />
+          <Activity size={14} className="text-muted-foreground text-muted-foreground" />
           <div>
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">
+            <p className="text-sm font-medium text-foreground text-foreground">
               Adaptive Throttling
             </p>
-            <p className="text-xs text-gray-400 dark:text-gray-500">
+            <p className="text-xs text-muted-foreground text-muted-foreground">
               Reduce bandwidth when session latency is high
             </p>
           </div>
@@ -258,15 +259,15 @@ export function TransferSettings({
           onClick={toggleAdaptive}
           className={clsx(
             "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1",
+            "focus:outline-none focus:ring-2 focus:ring-info focus:ring-offset-1",
             adaptiveThrottling
-              ? "bg-blue-600 dark:bg-blue-500"
-              : "bg-gray-200 dark:bg-gray-600",
+              ? "bg-info bg-info"
+              : "bg-card bg-accent",
           )}
         >
           <span
             className={clsx(
-              "inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5",
+              "inline-block h-4 w-4 rounded-full bg-background shadow transform transition-transform mt-0.5",
               adaptiveThrottling ? "translate-x-4 ml-0.5" : "translate-x-0.5",
             )}
           />

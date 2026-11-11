@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { useState } from "react";
 import clsx from "clsx";
 import {
@@ -48,7 +50,7 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
       <div className="flex items-center justify-between">
         <button
           type="button"
-          className="flex items-center gap-1 text-sm font-semibold text-gx-text"
+          className="flex items-center gap-1 text-sm font-semibold text-foreground"
           onClick={() => setExpanded(!expanded)}
         >
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -56,9 +58,9 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
           Track with Crab
         </button>
         {isDone && (
-          <button type="button" className="btn text-xs" onClick={() => { reset(); onComplete?.(); }}>
+          <Button variant="outline" type="button" className="text-xs" onClick={() => { reset(); onComplete?.(); }}>
             Done
-          </button>
+          </Button>
         )}
       </div>
 
@@ -67,23 +69,23 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
           {/* Pattern input */}
           {state.phase === "idle" && (
             <div className="space-y-2">
-              <label className="block text-xs text-gx-muted">
+              <label className="block text-xs text-muted-foreground">
                 File patterns (one per line, e.g. <code className="kbd">*.safetensors</code>)
               </label>
-              <textarea
-                className="h-20 w-full rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-sm focus-visible:outline-none focus:border-gx-accent"
+              <Textarea
+                className="h-20 w-full rounded border border-border bg-background p-2 font-mono text-sm focus-visible:outline-none focus:border-primary"
                 value={patterns}
                 onChange={(e) => setPatterns(e.target.value)}
                 placeholder="*.safetensors&#10;models/**/*.bin&#10;data/*.parquet"
               />
-              <button
+              <Button variant="default"
                 type="button"
-                className="btn btn-primary text-xs"
+                className="text-xs"
                 onClick={handleStart}
                 disabled={!patterns.trim()}
               >
                 <Zap size={12} /> Track & Stage
-              </button>
+              </Button>
             </div>
           )}
 
@@ -92,11 +94,11 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
             <div className="space-y-3">
               {/* Phase indicator */}
               <div className="flex items-center gap-2 text-xs">
-                <Loader2 size={12} className="animate-spin text-gx-accent" />
-                <span className="font-medium text-gx-text capitalize">
+                <Loader2 size={12} className="animate-spin text-primary" />
+                <span className="font-medium text-foreground capitalize">
                   {state.currentPhase}
                 </span>
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   {state.bytesDone > 0 && state.bytesTotal > 0
                     ? `${formatBytes(state.bytesDone)} / ${formatBytes(state.bytesTotal)}`
                     : "Starting..."}
@@ -105,9 +107,9 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
 
               {/* Overall progress bar */}
               {state.bytesTotal > 0 && (
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gx-border">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-border">
                   <div
-                    className="h-full rounded-full bg-gx-accent transition-all duration-300"
+                    className="h-full rounded-full bg-primary transition-all duration-300"
                     style={{
                       width: `${Math.min(100, (state.bytesDone / state.bytesTotal) * 100)}%`,
                     }}
@@ -123,32 +125,32 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
               </div>
 
               {/* Cancel button */}
-              <button type="button" className="btn text-xs" onClick={cancel}>
+              <Button variant="outline" type="button" className="text-xs" onClick={cancel}>
                 Cancel
-              </button>
+              </Button>
             </div>
           )}
 
           {/* Done state */}
           {isDone && (
             <div className="space-y-3">
-              <div className="rounded border border-gx-success/30 bg-gx-success/5 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-gx-success">
+              <div className="rounded border border-success/30 bg-success/5 p-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-success">
                   <CheckCircle2 size={14} />
                   Staging complete
                 </div>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gx-muted">
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
                   <div>
-                    <span className="text-gx-text">{state.summary.files_staged}</span> files
+                    <span className="text-foreground">{state.summary.files_staged}</span> files
                   </div>
                   <div>
-                    <span className="text-gx-text">{state.summary.chunks_staged.toLocaleString()}</span> chunks
+                    <span className="text-foreground">{state.summary.chunks_staged.toLocaleString()}</span> chunks
                   </div>
                   <div>
-                    <span className="text-gx-text">{formatBytes(state.summary.bytes_processed)}</span> processed
+                    <span className="text-foreground">{formatBytes(state.summary.bytes_processed)}</span> processed
                   </div>
                   <div>
-                    <span className="text-gx-text">{formatDuration(state.summary.duration_ms)}</span>
+                    <span className="text-foreground">{formatDuration(state.summary.duration_ms)}</span>
                   </div>
                 </div>
               </div>
@@ -165,15 +167,15 @@ export function AddFlowPanel({ repo, onComplete }: Props) {
           {/* Error state */}
           {isError && (
             <div className="space-y-2">
-              <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+              <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
                 <div className="flex items-center gap-2 font-medium">
                   <XCircle size={12} />
                   {state.message}
                 </div>
               </div>
-              <button type="button" className="btn text-xs" onClick={reset}>
+              <Button variant="outline" type="button" className="text-xs" onClick={reset}>
                 Try Again
-              </button>
+              </Button>
             </div>
           )}
         </>
@@ -189,32 +191,32 @@ function FileRow({ file }: { file: import("../ipc").AddFlowFileProgress }) {
     file.size > 0 ? Math.min(100, (file.bytes_done / file.size) * 100) : 0;
 
   return (
-    <div className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-gx-surface-hover">
+    <div className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-accent">
       {/* Status icon */}
       {file.status === "chunking" && (
-        <Loader2 size={10} className="shrink-0 animate-spin text-gx-accent" />
+        <Loader2 size={10} className="shrink-0 animate-spin text-primary" />
       )}
       {file.status === "done" && (
-        <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
+        <CheckCircle2 size={10} className="shrink-0 text-success" />
       )}
       {file.status === "error" && (
-        <XCircle size={10} className="shrink-0 text-gx-error" />
+        <XCircle size={10} className="shrink-0 text-destructive" />
       )}
       {file.status === "pending" && (
-        <div className="h-[10px] w-[10px] shrink-0 rounded-full border border-gx-border" />
+        <div className="h-[10px] w-[10px] shrink-0 rounded-full border border-border" />
       )}
 
       {/* File name */}
-      <span className="min-w-0 flex-1 truncate font-mono text-gx-text">
+      <span className="min-w-0 flex-1 truncate font-mono text-foreground">
         {file.path.split("/").pop()}
       </span>
 
       {/* Size */}
-      <span className="shrink-0 text-gx-muted">{formatBytes(file.size)}</span>
+      <span className="shrink-0 text-muted-foreground">{formatBytes(file.size)}</span>
 
       {/* Chunks badge */}
       {file.chunks !== null && (
-        <span className="shrink-0 rounded bg-gx-surface px-1 text-gx-muted">
+        <span className="shrink-0 rounded bg-card px-1 text-muted-foreground">
           {file.chunks} chunks
         </span>
       )}
@@ -225,8 +227,8 @@ function FileRow({ file }: { file: import("../ipc").AddFlowFileProgress }) {
           className={clsx(
             "shrink-0 rounded px-1 font-medium",
             file.dedup_ratio >= 2
-              ? "bg-gx-success/10 text-gx-success"
-              : "bg-gx-warn/10 text-gx-warn",
+              ? "bg-success/10 text-success"
+              : "bg-warning/10 text-warning",
           )}
         >
           {file.dedup_ratio.toFixed(1)}× dedup
@@ -235,9 +237,9 @@ function FileRow({ file }: { file: import("../ipc").AddFlowFileProgress }) {
 
       {/* Progress bar (inline, only while chunking) */}
       {file.status === "chunking" && file.size > 0 && (
-        <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-gx-border">
+        <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-border">
           <div
-            className="h-full rounded-full bg-gx-accent"
+            className="h-full rounded-full bg-primary"
             style={{ width: `${pct}%` }}
           />
         </div>

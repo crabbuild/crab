@@ -2,7 +2,7 @@
  * VS Code theme import utility.
  *
  * Translates a documented subset of VS Code's workbench colors and
- * tokenColors into our `--gx-*` CSS variable format. Best-effort:
+ * tokenColors into our semantic CSS variable format. Best-effort:
  * not every VS Code theme will map perfectly, but the most impactful
  * colors (background, foreground, accent, borders, diagnostics) are
  * covered.
@@ -10,11 +10,11 @@
 
 // ---- Types -----------------------------------------------------------
 
-export interface GxTheme {
+export interface DesktopTheme {
   id: string;
   name: string;
   colorScheme: "dark" | "light";
-  colors: Record<string, string>; // key = "gx-bg", value = "15 17 21"
+  colors: Record<string, string>; // key = "background", value = "15 17 21"
 }
 
 /** Minimal shape of a VS Code theme JSON we care about. */
@@ -95,35 +95,35 @@ function slugify(name: string): string {
 // ---- Mapping ---------------------------------------------------------
 
 /**
- * Maps VS Code workbench color keys to our `gx-*` variable names.
- * Each entry is [gxKey, ...vsCodeKeys] — we try keys in order and
+ * Maps VS Code workbench color keys to our semantic token names.
+ * Each entry is [token, ...vsCodeKeys] — we try keys in order and
  * use the first one that exists in the theme.
  */
 const COLOR_MAP: Array<[string, ...string[]]> = [
-  ["gx-bg", "editor.background"],
-  ["gx-surface", "sideBar.background", "editorGroupHeader.tabsBackground"],
-  ["gx-text", "editor.foreground", "foreground"],
-  ["gx-bg-sub", "activityBar.background", "titleBar.activeBackground"],
-  ["gx-accent", "focusBorder", "button.background", "activityBarBadge.background"],
-  ["gx-error", "editorError.foreground", "errorForeground"],
-  ["gx-warning", "editorWarning.foreground"],
-  ["gx-border", "panel.border", "editorGroup.border", "sideBar.border"],
-  ["gx-muted", "descriptionForeground", "editorLineNumber.foreground"],
-  ["gx-surface-hover", "list.hoverBackground", "editorHoverWidget.background"],
-  ["gx-accent-hover", "button.hoverBackground"],
-  ["gx-success", "terminal.ansiGreen", "gitDecoration.addedResourceForeground"],
-  ["gx-info", "editorInfo.foreground", "terminal.ansiCyan"],
+  ["background", "editor.background"],
+  ["card", "sideBar.background", "editorGroupHeader.tabsBackground"],
+  ["sidebar", "activityBar.background", "titleBar.activeBackground"],
+  ["foreground", "editor.foreground", "foreground"],
+  ["primary", "focusBorder", "button.background", "activityBarBadge.background"],
+  ["destructive", "editorError.foreground", "errorForeground"],
+  ["warning", "editorWarning.foreground"],
+  ["border", "panel.border", "editorGroup.border", "sideBar.border"],
+  ["muted-foreground", "descriptionForeground", "editorLineNumber.foreground"],
+  ["accent", "list.hoverBackground", "editorHoverWidget.background"],
+  ["primary-hover", "button.hoverBackground"],
+  ["success", "terminal.ansiGreen", "gitDecoration.addedResourceForeground"],
+  ["info", "editorInfo.foreground", "terminal.ansiCyan"],
 ];
 
 // ---- Main import function --------------------------------------------
 
 /**
- * Parses a VS Code theme JSON and maps it to a `GxTheme`.
+ * Parses a VS Code theme JSON and maps it to a `DesktopTheme`.
  *
  * Returns `null` if the input is not a recognizable VS Code theme
  * (missing `colors` object or no usable color mappings).
  */
-export function importVsCodeTheme(themeJson: unknown): GxTheme | null {
+export function importVsCodeTheme(themeJson: unknown): DesktopTheme | null {
   if (!themeJson || typeof themeJson !== "object") return null;
 
   const theme = themeJson as VsCodeThemeJson;
@@ -134,13 +134,13 @@ export function importVsCodeTheme(themeJson: unknown): GxTheme | null {
   const colors: Record<string, string> = {};
   let mapped = 0;
 
-  for (const [gxKey, ...vsKeys] of COLOR_MAP) {
+  for (const [token, ...vsKeys] of COLOR_MAP) {
     for (const vsKey of vsKeys) {
       const hex = theme.colors[vsKey];
       if (hex) {
         const rgb = hexToRgbTriple(hex);
         if (rgb) {
-          colors[gxKey] = rgb;
+          colors[token] = rgb;
           mapped++;
           break;
         }
@@ -150,14 +150,6 @@ export function importVsCodeTheme(themeJson: unknown): GxTheme | null {
 
   // Require at least 3 mapped colors to consider this a valid import
   if (mapped < 3) return null;
-
-  // Derive warn from warning if not separately set
-  if (colors["gx-warning"] && !colors["gx-warn"]) {
-    colors["gx-warn"] = colors["gx-warning"];
-  }
-  if (colors["gx-warn"] && !colors["gx-warning"]) {
-    colors["gx-warning"] = colors["gx-warn"];
-  }
 
   const name = typeof theme.name === "string" && theme.name.trim()
     ? theme.name.trim()

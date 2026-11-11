@@ -104,7 +104,7 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
     <div>
       <button
         type="button"
-        className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text transition"
+        className="flex w-full items-center gap-1 px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition"
         onClick={() => setCollapsed((v) => !v)}
         aria-expanded={!collapsed}
         aria-label="Toggle Mounts section"
@@ -113,11 +113,11 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
         <HardDrive size={11} className="mr-0.5" />
         <span>Mounts</span>
         {mounts.length > 0 && (
-          <span className="ml-auto text-[10px] text-gx-muted">{mounts.length}</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">{mounts.length}</span>
         )}
         <button
           type="button"
-          className="ml-1 rounded p-0.5 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="ml-1 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-accent transition"
           onClick={(e) => { e.stopPropagation(); fetchMounts(); }}
           title="Refresh mount list"
           aria-label="Refresh mounts"
@@ -129,13 +129,13 @@ export function MountsSidebar({ onSelectMount, selectedMountpoint }: MountsSideb
       {!collapsed && (
         <div className="mt-1 pl-3 pr-2">
           {error && (
-            <div className="mb-1 rounded border border-gx-error/40 bg-gx-error/10 px-2 py-1 text-[10px] text-gx-error">
+            <div className="mb-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[10px] text-destructive">
               {error}
             </div>
           )}
 
           {mounts.length === 0 && !error && (
-            <div className="px-2 py-2 text-[11px] text-gx-muted">No active mounts</div>
+            <div className="px-2 py-2 text-[11px] text-muted-foreground">No active mounts</div>
           )}
 
           <ul className="space-y-0.5">
@@ -176,8 +176,8 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
     <li
       className={`group flex items-center gap-1.5 rounded px-2 py-1 cursor-pointer transition ${
         isSelected
-          ? "bg-gx-accent/15 text-gx-text"
-          : "text-gx-text hover:bg-gx-surface-hover"
+          ? "bg-primary/15 text-foreground"
+          : "text-foreground hover:bg-accent"
       }`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -189,7 +189,7 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
     >
       {/* Status indicator */}
       <span
-        className="inline-block h-2 w-2 shrink-0 rounded-full bg-green-500"
+        className="inline-block h-2 w-2 shrink-0 rounded-full bg-success"
         title="Running"
         aria-label="Running"
       />
@@ -197,7 +197,7 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
       {/* Mount info */}
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{displayName}</div>
-        <div className="truncate text-[10px] text-gx-muted">
+        <div className="truncate text-[10px] text-muted-foreground">
           {mount.ref !== "HEAD" ? mount.ref : ""}{mount.ref !== "HEAD" && mount.read_only ? " · " : ""}{mount.read_only ? "read-only" : ""}
         </div>
       </div>
@@ -206,7 +206,7 @@ function MountEntryRow({ mount, isSelected, onSelect, onUnmount }: MountEntryRow
       {hovered && (
         <button
           type="button"
-          className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-error hover:bg-gx-error/10 transition"
+          className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition"
           onClick={(e) => { e.stopPropagation(); onUnmount(); }}
           title="Unmount"
           aria-label={`Unmount ${displayName}`}

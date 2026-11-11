@@ -1,3 +1,6 @@
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { NativeSelect } from "@/components/ui/native-select";
 // ─── Imports ─────────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -50,7 +53,7 @@ import { StagePropertiesPanel } from "../components/workflow/StagePropertiesPane
 import { NewStageDialog } from "../components/workflow/NewStageDialog";
 import { WorkflowSidebar } from "../components/workflow/WorkflowSidebar";
 import { artifactPath, availableWorkflowOutputs, cycleStages, layoutStages, stageEdges, stageRunStatus, workflowLinks } from "../lib/workflow-graph";
-import { WorkflowTabs } from "../components/workflow/WorkflowTabs";
+import { WorkflowTabs, type WorkflowTab } from "../components/workflow/WorkflowTabs";
 import { StatusDashboard } from "../components/workflow/StatusDashboard";
 import { ExperimentPanel } from "../components/workflow/ExperimentPanel";
 import { MigrateWizard } from "../components/workflow/MigrateWizard";
@@ -231,7 +234,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
 
     setEdges(stageEdges(stages, state.workflow.executions).map(({ source, target }) => {
       const cycle = cycleNodes.has(source) && cycleNodes.has(target);
-      const color = cycle ? "rgb(var(--gx-error))" : "rgb(var(--gx-muted))";
+      const color = cycle ? "rgb(var(--destructive))" : "rgb(var(--muted-foreground))";
       return {
         id: `${source}->${target}`, source, target, type: "smoothstep",
         animated: statusMap.get(source) === "running",
@@ -512,7 +515,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
     () =>
       edges.map((edge) =>
         edge.id === selectedEdge
-          ? { ...edge, style: { ...edge.style, stroke: "#4f8cff", strokeWidth: 3 }, animated: true }
+          ? { ...edge, style: { ...edge.style, stroke: "rgb(var(--primary))", strokeWidth: 3 }, animated: true }
           : edge,
       ),
     [edges, selectedEdge],
@@ -532,7 +535,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
   // ─── Main Render ───────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full w-full bg-gx-bg">
+    <div className="flex h-full w-full bg-background">
       <ResizablePanelGroup direction="horizontal" autoSaveId="crab.workflowStudio.sidebar">
       <ResizablePanel id="workflow-list" order={1} defaultSize={22} minSize={15} maxSize={40}>
       <WorkflowSidebar files={state.availableFiles} workflows={workflows} fileErrors={fileErrors} activeFile={state.activeFile}
@@ -542,43 +545,43 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
       <ResizableHandle aria-label="Resize workflow list" />
       <ResizablePanel id="workflow-studio" order={2} minSize={60}>
       <div className="flex h-full min-w-0 flex-col">
-      {(operationError || editorError) && <div role="alert" className="border-b border-gx-error/40 bg-gx-error/10 px-4 py-2 text-xs text-gx-error">{operationError || editorError}</div>}
+      {(operationError || editorError) && <div role="alert" className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive">{operationError || editorError}</div>}
       {state.phase === "loading" ? (
-        <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={18} className="animate-spin" />Loading workflows…</div>
+        <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={18} className="animate-spin" />Loading workflows…</div>
       ) : state.phase === "error" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8">
-          <AlertTriangle size={24} className="text-gx-error" />
-          <p role="alert" aria-label="Workflow error" className="max-w-lg break-words text-sm text-gx-error">{state.error}</p>
-          <button type="button" className="btn text-xs" onClick={() => actions.load(state.activeFile ?? undefined)}>Retry workflow</button>
-          {state.activeFile && <button type="button" className="btn text-xs" onClick={openSource}>Edit YAML</button>}
+          <AlertTriangle size={24} className="text-destructive" />
+          <p role="alert" aria-label="Workflow error" className="max-w-lg break-words text-sm text-destructive">{state.error}</p>
+          <Button variant="outline" type="button" className="text-xs" onClick={() => actions.load(state.activeFile ?? undefined)}>Retry workflow</Button>
+          {state.activeFile && <Button variant="outline" type="button" className="text-xs" onClick={openSource}>Edit YAML</Button>}
         </div>
       ) : !state.workflow ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
-          <FilePlus size={28} className="text-gx-muted" />
-          <h2 className="text-base font-medium text-gx-text">Build your first workflow</h2>
-          <p className="max-w-sm text-sm text-gx-muted">Add stages, connect their outputs, and run a repeatable pipeline for this repository.</p>
-          <button type="button" className="btn btn-primary text-xs" disabled={busy} onClick={() => actions.createWorkflow("crab.yaml")}>Create Workflow</button>
+          <FilePlus size={28} className="text-muted-foreground" />
+          <h2 className="text-base font-medium text-foreground">Build your first workflow</h2>
+          <p className="max-w-sm text-sm text-muted-foreground">Add stages, connect their outputs, and run a repeatable pipeline for this repository.</p>
+          <Button variant="default" type="button" className="text-xs" disabled={busy} onClick={() => actions.createWorkflow("crab.yaml")}>Create Workflow</Button>
         </div>
-      ) : <>
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gx-border bg-gx-surface pr-3">
-        <WorkflowTabs active={activeTab} onChange={actions.setActiveTab} outdatedCount={outdatedCount} />
+      ) : <Tabs value={activeTab} onValueChange={(value) => actions.setActiveTab(value as WorkflowTab)} className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-card pr-3">
+        <WorkflowTabs outdatedCount={outdatedCount} />
         <div className="flex shrink-0 items-center gap-2 py-1">
-        <button ref={outputToggle} type="button" className={clsx("btn flex items-center gap-1 text-xs", outputOpen && "text-gx-accent")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
+        <Button variant="outline" ref={outputToggle} type="button" className={clsx(" flex items-center gap-1 text-xs", outputOpen && "text-primary")} aria-label="Toggle workflow output" aria-expanded={outputOpen} aria-controls={outputId}
           onClick={() => outputOpen ? outputPanel.current?.collapse() : outputPanel.current?.expand()}>
           <PanelBottom size={14} />Output
-        </button>
+        </Button>
         {/* Run controls */}
         {state.phase === "running" ? (
-          <button type="button" className="btn btn-danger flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
+          <Button variant="destructive" type="button" className="flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
             <Square size={14} /> {cancelling ? "Stopping…" : "Cancel"}
-          </button>
+          </Button>
         ) : (
-          <button type="button" className="btn btn-primary flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
+          <Button variant="default" type="button" className="flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
             <Play size={14} /> Run All
-          </button>
+          </Button>
         )}
         {state.phase === "done" && (
-          <button type="button" className="btn text-xs" onClick={actions.resetRun}>Reset</button>
+          <Button variant="outline" type="button" className="text-xs" onClick={actions.resetRun}>Reset</Button>
         )}
         </div>
       </div>
@@ -587,15 +590,15 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
       <ResizablePanel id="workflow-content" order={1} defaultSize={100} minSize={35}>
       <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-2">
         <div className="flex basis-full items-center gap-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-medium text-gx-text" title={state.activeFile ?? ""}>{state.activeFile}</div>
-          <div role="status" className="mt-0.5 truncate text-[11px] text-gx-muted">{state.workflow.stages.length} {state.workflow.stages.length === 1 ? "stage" : "stages"}{state.workflow.executions && state.workflow.executions.length !== state.workflow.stages.length ? ` · ${state.workflow.executions.length} executions` : ""} · {state.dirty ? "Unsaved changes" : "Saved"}</div>
+          <div className="truncate text-xs font-medium text-foreground" title={state.activeFile ?? ""}>{state.activeFile}</div>
+          <div role="status" className="mt-0.5 truncate text-[11px] text-muted-foreground">{state.workflow.stages.length} {state.workflow.stages.length === 1 ? "stage" : "stages"}{state.workflow.executions && state.workflow.executions.length !== state.workflow.stages.length ? ` · ${state.workflow.executions.length} executions` : ""} · {state.dirty ? "Unsaved changes" : "Saved"}</div>
         </div>
-        <button type="button" className="btn flex shrink-0 items-center gap-1 text-xs" disabled={locked} onClick={openSource}><Code2 size={14} />Edit YAML</button>
+        <Button variant="outline" type="button" className="flex shrink-0 items-center gap-1 text-xs" disabled={locked} onClick={openSource}><Code2 size={14} />Edit YAML</Button>
         </div>
-        <select aria-label="Find stage" className="input-field min-w-40 flex-1 text-xs" value="" onChange={event => {
+        <NativeSelect aria-label="Find stage" className="min-w-40 flex-1 text-xs" value="" onChange={event => {
           const name = event.target.value;
           if (!name) return;
           setSelectedStage(name);
@@ -603,53 +606,52 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
         }}>
           <option value="">Find stage…</option>
           {state.workflow.stages.map(stage => <option key={stage.name} value={stage.name}>{stage.name}</option>)}
-        </select>
+        </NativeSelect>
         <fieldset disabled={locked} className="flex items-center gap-2">
         {/* Add stage */}
-        <button type="button" className="btn flex items-center gap-1 text-xs" onClick={() => setShowNewDialog(true)} title="Add Stage (N)">
+        <Button variant="outline" type="button" className="flex items-center gap-1 text-xs" onClick={() => setShowNewDialog(true)} title="Add Stage (N)">
           <Plus size={14} /> Stage
-        </button>
+        </Button>
 
         {/* Undo / Redo */}
-        <button type="button" className={clsx("btn p-1.5", !history.canUndo && "opacity-40")} disabled={!history.canUndo} title="Undo (Ctrl+Z)" onClick={() => { if (state.workflow) { const prev = history.undo(state.workflow.stages); if (prev) actions.setStages(prev); } }}>
+        <Button variant="outline" type="button" className={clsx(" p-1.5", !history.canUndo && "opacity-40")} disabled={!history.canUndo} title="Undo (Ctrl+Z)" onClick={() => { if (state.workflow) { const prev = history.undo(state.workflow.stages); if (prev) actions.setStages(prev); } }}>
           <Undo2 size={14} />
-        </button>
-        <button type="button" className={clsx("btn p-1.5", !history.canRedo && "opacity-40")} disabled={!history.canRedo} title="Redo (Ctrl+Shift+Z)" onClick={() => { if (state.workflow) { const next = history.redo(state.workflow.stages); if (next) actions.setStages(next); } }}>
+        </Button>
+        <Button variant="outline" type="button" className={clsx(" p-1.5", !history.canRedo && "opacity-40")} disabled={!history.canRedo} title="Redo (Ctrl+Shift+Z)" onClick={() => { if (state.workflow) { const next = history.redo(state.workflow.stages); if (next) actions.setStages(next); } }}>
           <Redo2 size={14} />
-        </button>
+        </Button>
 
         {/* Auto-layout */}
-        <button type="button" className="btn flex items-center gap-1 text-xs" onClick={handleAutoLayout} title="Arrange stages">
+        <Button variant="outline" type="button" className="flex items-center gap-1 text-xs" onClick={handleAutoLayout} title="Arrange stages">
           <LayoutGrid size={14} /> Arrange
-        </button>
+        </Button>
 
         {/* Save */}
-        <button type="button" className={clsx("btn flex items-center gap-1 text-xs", state.dirty && "text-gx-accent")} onClick={actions.save} disabled={!state.dirty} title="Save (Ctrl+S)">
+        <Button variant="outline" type="button" className={clsx(" flex items-center gap-1 text-xs", state.dirty && "text-primary")} onClick={actions.save} disabled={!state.dirty} title="Save (Ctrl+S)">
           <Save size={14} />
-          {state.dirty && <span className="h-1.5 w-1.5 rounded-full bg-gx-accent" />}
-        </button>
+          {state.dirty && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+        </Button>
 
-        <button type="button" className="btn p-1.5" onClick={() => reactFlow.fitView({ padding: 0.2, maxZoom: 1 })} aria-label="Fit workflow to view"><Maximize2 size={14} /></button>
+        <Button variant="outline" type="button" className="p-1.5" onClick={() => reactFlow.fitView({ padding: 0.2, maxZoom: 1 })} aria-label="Fit workflow to view"><Maximize2 size={14} /></Button>
         </fieldset>
 
         {/* Legend toggle */}
-        <button type="button" className={clsx("btn p-1.5", showLegend && "text-gx-accent")} onClick={() => setShowLegend(!showLegend)} title="Legend / help">
+        <Button variant="outline" type="button" className={clsx(" p-1.5", showLegend && "text-primary")} onClick={() => setShowLegend(!showLegend)} title="Legend / help">
           <HelpCircle size={14} />
-        </button>
+        </Button>
 
         {/* Remove edge button (visible when edge selected) */}
         {selectedEdge && (
-          <button type="button" className="btn flex items-center gap-1 text-xs text-gx-error/70 hover:text-gx-error" disabled={locked} onClick={() => handleDeleteEdge(selectedEdge)} title="Remove connection (Delete)">
+          <Button variant="outline" type="button" className="flex items-center gap-1 text-xs text-destructive/70 hover:text-destructive" disabled={locked} onClick={() => handleDeleteEdge(selectedEdge)} title="Remove connection (Delete)">
             <Trash2 size={14} /> Remove Edge
-          </button>
+          </Button>
         )}
 
 
       </div>
 
       {/* Editor tab */}
-      {activeTab === "editor" && (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <TabsContent value="editor" className="mt-0 flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1">
             {/* Canvas */}
             <div ref={canvasRef} className="min-w-0 flex-1">
@@ -675,11 +677,11 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                 fitView
                 deleteKeyCode={null}
                 proOptions={{ hideAttribution: true }}
-                className="bg-gx-bg"
+                className="bg-background"
               >
-                <Background color="rgb(var(--gx-border))" gap={24} size={1} />
-                <Controls className="!border-gx-border !bg-gx-surface [&_button]:!border-gx-border [&_button]:!bg-gx-surface [&_button]:!fill-gx-muted hover:[&_button]:!bg-gx-surface-hover" />
-                {nodes.length > 8 && <MiniMap className="!border-gx-border !bg-gx-surface" nodeColor="rgb(var(--gx-accent))" />}
+                <Background color="rgb(var(--border))" gap={24} size={1} />
+                <Controls className="!border-border !bg-card [&_button]:!border-border [&_button]:!bg-card [&_button]:!fill-muted-foreground hover:[&_button]:!bg-accent" />
+                {nodes.length > 8 && <MiniMap className="!border-border !bg-card" nodeColor="rgb(var(--primary))" />}
 
                 {state.runState && (
                   <Panel position="top-right"><RunStatusBadge runState={state.runState} /></Panel>
@@ -689,9 +691,9 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
                 )}
                 {state.workflow && state.workflow.stages.length === 0 && (
                   <Panel position="top-center">
-                    <div className="rounded border border-gx-border bg-gx-surface px-4 py-3 text-center text-xs text-gx-muted shadow">
-                      <div className="mb-1 font-medium text-gx-text">Empty pipeline</div>
-                      Click &quot;+ Stage&quot; or press <kbd className="rounded border border-gx-border bg-gx-bg px-1 py-0.5 text-[10px]">N</kbd> to add your first stage.
+                    <div className="rounded border border-border bg-card px-4 py-3 text-center text-xs text-muted-foreground shadow">
+                      <div className="mb-1 font-medium text-foreground">Empty pipeline</div>
+                      Click &quot;+ Stage&quot; or press <kbd className="rounded border border-border bg-background px-1 py-0.5 text-[10px]">N</kbd> to add your first stage.
                     </div>
                   </Panel>
                 )}
@@ -716,22 +718,17 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
             )}
           </div>
 
-        </div>
-      )}
+        </TabsContent>
 
       {/* Status tab */}
-      {activeTab === "status" && (
-        <div className="min-h-0 flex-1">
+        <TabsContent value="status" className="mt-0 min-h-0 flex-1">
           <StatusDashboard repoId={repo.repo_id} workflowPath={state.activeFile} onRunOutdated={actions.runOutdated} onRunAll={() => actions.run()} />
-        </div>
-      )}
+        </TabsContent>
 
       {/* Experiments tab */}
-      {activeTab === "experiments" && (
-        <div className="min-h-0 flex-1">
+        <TabsContent value="experiments" className="mt-0 min-h-0 flex-1">
           <ExperimentPanel repoId={repo.repo_id} />
-        </div>
-      )}
+        </TabsContent>
 
       </div>
       </ResizablePanel>
@@ -741,7 +738,7 @@ function WorkflowEditorInner({ repo, onOpenSource }: Props) {
         {outputOpen && <WorkflowOutputPane id={outputId} runState={state.runState} onClear={actions.clearOutput} onClose={() => { outputPanel.current?.collapse(); outputToggle.current?.focus(); }} />}
       </ResizablePanel>
       </ResizablePanelGroup>
-      </>}
+      </Tabs>}
       </div>
       </ResizablePanel>
       </ResizablePanelGroup>
@@ -838,7 +835,7 @@ function ContextMenuPopup({
   return (
     <div
       ref={ref}
-      className="fixed z-[100] min-w-[160px] rounded border border-gx-border bg-gx-surface py-1 shadow-xl"
+      className="fixed z-[100] min-w-[160px] rounded border border-border bg-card py-1 shadow-xl"
       style={{ left: menu.x, top: menu.y }}
     >
       {items.map((item, i) => (
@@ -846,8 +843,8 @@ function ContextMenuPopup({
           key={i}
           type="button"
           className={clsx(
-            "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-gx-surface-hover",
-            item.danger ? "text-gx-error" : "text-gx-text",
+            "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent",
+            item.danger ? "text-destructive" : "text-foreground",
           )}
           onClick={item.action}
         >
@@ -863,27 +860,27 @@ function ContextMenuPopup({
 
 function LegendPanel() {
   return (
-    <div className="rounded border border-gx-border bg-gx-surface p-3 text-[10px] shadow-lg">
-      <div className="mb-2 text-xs font-medium text-gx-text">Legend &amp; Shortcuts</div>
-      <div className="space-y-1.5 text-gx-muted">
-        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-gx-muted" /> Pending</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 animate-pulse rounded-full bg-gx-info" /> Running</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-gx-success" /> Done</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-gx-error" /> Failed</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-gx-thinking" /> Cached</div>
-        <hr className="border-gx-border" />
-        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-gray-500" /> Dependency</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-blue-500" /> Selected</div>
-        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-red-500" /> Cycle</div>
-        <hr className="border-gx-border" />
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">N</kbd> Add stage</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Del</kbd> Delete selection</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Ctrl+Z</kbd> Undo</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Ctrl+Shift+Z</kbd> Redo</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Ctrl+D</kbd> Duplicate</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Ctrl+S</kbd> Save</div>
-        <div><kbd className="rounded border border-gx-border bg-gx-bg px-1">Esc</kbd> Deselect</div>
-        <hr className="border-gx-border" />
+    <div className="rounded border border-border bg-card p-3 text-[10px] shadow-lg">
+      <div className="mb-2 text-xs font-medium text-foreground">Legend &amp; Shortcuts</div>
+      <div className="space-y-1.5 text-muted-foreground">
+        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-muted-foreground" /> Pending</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 animate-pulse rounded-full bg-info" /> Running</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-success" /> Done</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-destructive" /> Failed</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-thinking" /> Cached</div>
+        <hr className="border-border" />
+        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-accent" /> Dependency</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-info" /> Selected</div>
+        <div className="flex items-center gap-2"><span className="inline-block h-0.5 w-4 bg-destructive" /> Cycle</div>
+        <hr className="border-border" />
+        <div><kbd className="rounded border border-border bg-background px-1">N</kbd> Add stage</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Del</kbd> Delete selection</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Ctrl+Z</kbd> Undo</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Ctrl+Shift+Z</kbd> Redo</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Ctrl+D</kbd> Duplicate</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Ctrl+S</kbd> Save</div>
+        <div><kbd className="rounded border border-border bg-background px-1">Esc</kbd> Deselect</div>
+        <hr className="border-border" />
         <div>Right-click nodes/edges for actions</div>
         <div>Click edge to select, then Del to remove</div>
         <div>Drag bottom handle to top handle to connect</div>
@@ -901,23 +898,23 @@ function RunStatusBadge({ runState }: { runState: import("../lib/workflow-types"
   const skipped = runState.stages.filter(stage => stage.status === "skipped").length;
 
   return (
-    <div className="rounded border border-gx-border bg-gx-surface px-3 py-2 text-xs shadow-lg">
-      <div className="mb-1 font-medium text-gx-text">
+    <div className="rounded border border-border bg-card px-3 py-2 text-xs shadow-lg">
+      <div className="mb-1 font-medium text-foreground">
         {runState.status === "running" && "Running..."}
         {runState.status === "done" && "Completed"}
         {runState.status === "failed" && "Failed"}
         {runState.status === "cancelled" && "Cancelled"}
       </div>
-      <div className="flex gap-3 text-gx-muted">
-        <span className="text-gx-success">{done} done</span>
-        {failed > 0 && <span className="text-gx-error">{failed} failed</span>}
+      <div className="flex gap-3 text-muted-foreground">
+        <span className="text-success">{done} done</span>
+        {failed > 0 && <span className="text-destructive">{failed} failed</span>}
         {skipped > 0 && <span>{skipped} skipped</span>}
         <span>{total} total</span>
       </div>
       {runState.status === "running" && (
-        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-gx-bg">
+        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-background">
           <div
-            className="h-full rounded-full bg-gx-accent transition-all"
+            className="h-full rounded-full bg-primary transition-all"
             style={{ width: `${((done + failed + skipped) / Math.max(1, total)) * 100}%` }}
           />
         </div>

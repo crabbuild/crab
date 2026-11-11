@@ -57,14 +57,14 @@ function codeBadge(code: string): string {
 
 function statusColor(code: string): string {
   const t = code.trim();
-  if (t === "??") return "text-gx-success";
+  if (t === "??") return "text-success";
   const c = t[0] !== " " ? t[0] : t[1];
   switch (c) {
-    case "M": return "text-gx-warn";
-    case "A": return "text-gx-success";
-    case "D": return "text-gx-error";
-    case "R": return "text-gx-accent";
-    default: return "text-gx-muted";
+    case "M": return "text-warning";
+    case "A": return "text-success";
+    case "D": return "text-destructive";
+    case "R": return "text-primary";
+    default: return "text-muted-foreground";
   }
 }
 
@@ -170,7 +170,7 @@ export function StagingZones({
           count={stagedEntries.length}
           collapsed={stagedCollapsed}
           onToggleCollapse={() => setStagedCollapsed((v) => !v)}
-          accentColor="text-gx-success"
+          accentColor="text-success"
           zone="staged"
           isDragOver={dragOverZone === "staged"}
           onDragOver={handleDragOver}
@@ -196,7 +196,7 @@ export function StagingZones({
             />
           ))}
           {stagedEntries.length === 0 && (
-            <div className="px-3 py-4 text-center text-[11px] text-gx-muted italic">
+            <div className="px-3 py-4 text-center text-[11px] text-muted-foreground italic">
               No files staged yet. Drag files here or click + to stage.
             </div>
           )}
@@ -204,13 +204,13 @@ export function StagingZones({
       </Panel>
 
       {/* Resize handle between zones */}
-      <PanelResizeHandle className="group flex h-5 items-center justify-center border-y border-gx-border/50 bg-gx-bg-sub/50">
+      <PanelResizeHandle className="group flex h-5 items-center justify-center border-y border-border/50 bg-background/50">
         <div className="flex items-center gap-2">
-          <ArrowDown size={10} className="text-gx-warn" />
-          <span className="text-[10px] text-gx-muted">Unstage</span>
-          <GripHorizontal size={10} className="text-gx-muted/50 group-hover:text-gx-muted transition" />
-          <span className="text-[10px] text-gx-muted">Stage</span>
-          <ArrowUp size={10} className="text-gx-success" />
+          <ArrowDown size={10} className="text-warning" />
+          <span className="text-[10px] text-muted-foreground">Unstage</span>
+          <GripHorizontal size={10} className="text-muted-foreground/50 group-hover:text-muted-foreground transition" />
+          <span className="text-[10px] text-muted-foreground">Stage</span>
+          <ArrowUp size={10} className="text-success" />
         </div>
       </PanelResizeHandle>
 
@@ -222,7 +222,7 @@ export function StagingZones({
           count={workingEntries.length}
           collapsed={workingCollapsed}
           onToggleCollapse={() => setWorkingCollapsed((v) => !v)}
-          accentColor="text-gx-warn"
+          accentColor="text-warning"
           zone="working"
           isDragOver={dragOverZone === "working"}
           onDragOver={handleDragOver}
@@ -248,7 +248,7 @@ export function StagingZones({
             />
           ))}
           {workingEntries.length === 0 && (
-            <div className="px-3 py-4 text-center text-[11px] text-gx-muted italic">
+            <div className="px-3 py-4 text-center text-[11px] text-muted-foreground italic">
               All changes are staged — ready to commit!
             </div>
           )}
@@ -291,7 +291,7 @@ function ZoneSection({
     <div
       className={clsx(
         "flex min-h-0 flex-1 flex-col transition-colors",
-        isDragOver && "bg-gx-accent/5 ring-1 ring-inset ring-gx-accent/30",
+        isDragOver && "bg-primary/5 ring-1 ring-inset ring-primary/30",
       )}
       onDragOver={(e) => onDragOver(e, zone)}
       onDragLeave={onDragLeave}
@@ -301,20 +301,20 @@ function ZoneSection({
         type="button"
         onClick={onToggleCollapse}
         aria-expanded={!collapsed}
-        className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left hover:bg-gx-surface-hover transition"
+        className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left hover:bg-accent transition"
       >
         {collapsed ? (
-          <ChevronRight size={12} className="text-gx-muted" />
+          <ChevronRight size={12} className="text-muted-foreground" />
         ) : (
-          <ChevronDown size={12} className="text-gx-muted" />
+          <ChevronDown size={12} className="text-muted-foreground" />
         )}
         <span className={clsx("min-w-0 text-[11px] font-semibold leading-4", accentColor)}>
           {title}
         </span>
-        <span className="rounded-full bg-gx-surface-hover px-1.5 text-[10px] tabular-nums text-gx-muted">
+        <span className="rounded-full bg-accent px-1.5 text-[10px] tabular-nums text-muted-foreground">
           {count}
         </span>
-        <span className="col-span-2 col-start-2 text-[10px] leading-snug text-gx-muted">{subtitle}</span>
+        <span className="col-span-2 col-start-2 text-[10px] leading-snug text-muted-foreground">{subtitle}</span>
       </button>
       {!collapsed && <div className="min-h-0 flex-1 overflow-auto">{children}</div>}
     </div>
@@ -393,9 +393,9 @@ function FileRow({
       className={clsx(
         "group/row flex h-7 items-center gap-2 px-3 pl-7 text-[12px] cursor-grab transition",
         isDragging && "opacity-40",
-        isSelected && "bg-gx-accent/20 text-gx-text",
-        isMultiSelected && !isSelected && "bg-gx-accent/10 text-gx-text",
-        !isSelected && !isMultiSelected && "text-gx-text hover:bg-gx-surface-hover",
+        isSelected && "bg-primary/20 text-foreground",
+        isMultiSelected && !isSelected && "bg-primary/10 text-foreground",
+        !isSelected && !isMultiSelected && "text-foreground hover:bg-accent",
       )}
       title={statusTooltip(entry.code)}
     >
@@ -416,7 +416,7 @@ function FileRow({
       </span>
 
       {/* Directory path (hidden on hover to make room for actions) */}
-      <span className="shrink-0 text-[10px] text-gx-muted group-hover/row:hidden">
+      <span className="shrink-0 text-[10px] text-muted-foreground group-hover/row:hidden">
         {dirPath}
       </span>
 
@@ -429,7 +429,7 @@ function FileRow({
             aria-label={`Stage ${entry.path}`}
             disabled={toggling}
             onClick={(ev) => { ev.stopPropagation(); onStage(); }}
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-success/20 hover:text-gx-success disabled:opacity-50 transition"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-success/20 hover:text-success disabled:opacity-50 transition"
           >
             <Plus size={12} />
           </button>
@@ -441,7 +441,7 @@ function FileRow({
             aria-label={`Unstage ${entry.path}`}
             disabled={toggling}
             onClick={(ev) => { ev.stopPropagation(); onUnstage(); }}
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-warn/20 hover:text-gx-warn disabled:opacity-50 transition"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-warning/20 hover:text-warning disabled:opacity-50 transition"
           >
             <Minus size={12} />
           </button>
@@ -453,7 +453,7 @@ function FileRow({
             aria-label={`Discard changes in ${entry.path}`}
             disabled={toggling || !onDiscard}
             onClick={(ev) => { ev.stopPropagation(); onDiscard?.(); }}
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-error/20 hover:text-gx-error disabled:opacity-50 transition"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive disabled:opacity-50 transition"
           >
             <Undo2 size={12} />
           </button>
@@ -464,7 +464,7 @@ function FileRow({
             title={`Open file ${entry.path}`}
             aria-label={`Open file ${entry.path}`}
             onClick={(ev) => { ev.stopPropagation(); onOpenFile(); }}
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-accent/20 hover:text-gx-accent transition"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition"
           >
             <FileText size={12} />
           </button>

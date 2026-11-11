@@ -77,16 +77,16 @@ function formatBytes(bytes: number): string {
 
 /** Returns Tailwind classes for the progress bar fill based on usage percent. */
 function barColorClass(percent: number): string {
-  if (percent >= 90) return "bg-red-500 dark:bg-red-400";
-  if (percent >= 80) return "bg-yellow-500 dark:bg-yellow-400";
-  return "bg-green-500 dark:bg-green-400";
+  if (percent >= 90) return "bg-destructive bg-destructive";
+  if (percent >= 80) return "bg-warning bg-warning";
+  return "bg-success bg-success";
 }
 
 /** Returns Tailwind text color classes for temperature. */
 function tempColorClass(temp: number): string {
-  if (temp > 85) return "text-red-500 dark:text-red-400";
-  if (temp >= 70) return "text-yellow-500 dark:text-yellow-400";
-  return "text-green-600 dark:text-green-400";
+  if (temp > 85) return "text-destructive text-destructive";
+  if (temp >= 70) return "text-warning text-warning";
+  return "text-success text-success";
 }
 
 /** Returns a severity label for screen readers. */
@@ -114,14 +114,14 @@ function UsageBar({
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs">
-        <span className="flex items-center gap-1.5 font-medium text-gx-text">
-          {Icon && <Icon size={12} className="text-gx-muted" aria-hidden="true" />}
+        <span className="flex items-center gap-1.5 font-medium text-foreground">
+          {Icon && <Icon size={12} className="text-muted-foreground" aria-hidden="true" />}
           {label}
         </span>
-        <span className="text-gx-muted">{detail}</span>
+        <span className="text-muted-foreground">{detail}</span>
       </div>
       <div
-        className="h-2 w-full overflow-hidden rounded-full bg-gx-bg-sub dark:bg-gray-700"
+        className="h-2 w-full overflow-hidden rounded-full bg-background bg-card"
         role="progressbar"
         aria-valuenow={clampedPercent}
         aria-valuemin={0}
@@ -157,12 +157,12 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
 
   return (
     <div
-      className="rounded-md border border-gx-border bg-gx-bg-sub/50 dark:bg-gray-800/50 p-2.5 space-y-2"
+      className="rounded-md border border-border bg-background/50 bg-card/50 p-2.5 space-y-2"
       aria-label={`GPU ${gpu.index}: ${gpu.name}`}
     >
       {/* GPU header: name + temperature */}
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-gx-text truncate">
+        <span className="text-xs font-medium text-foreground truncate">
           {shortName}
         </span>
         <span
@@ -175,12 +175,12 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
 
       {/* Utilization bar */}
       <div className="space-y-0.5">
-        <div className="flex items-center justify-between text-[11px] text-gx-muted">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
           <span>Utilization</span>
           <span>{gpu.utilization}%</span>
         </div>
         <div
-          className="h-1.5 w-full overflow-hidden rounded-full bg-gx-bg-sub dark:bg-gray-700"
+          className="h-1.5 w-full overflow-hidden rounded-full bg-background bg-card"
           role="progressbar"
           aria-valuenow={gpu.utilization}
           aria-valuemin={0}
@@ -198,7 +198,7 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
       </div>
 
       {/* Memory usage */}
-      <div className="flex items-center justify-between text-[11px] text-gx-muted">
+      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span>Memory</span>
         <span>
           {formatBytes(gpu.memoryUsed)} / {formatBytes(gpu.memoryTotal)}{" "}
@@ -208,15 +208,15 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
 
       {/* Running processes */}
       {gpu.processes && gpu.processes.length > 0 && (
-        <div className="border-t border-gx-border pt-1.5">
-          <span className="text-[10px] font-medium text-gx-muted uppercase tracking-wide">
+        <div className="border-t border-border pt-1.5">
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
             Processes
           </span>
           <ul className="mt-0.5 space-y-0.5" aria-label={`GPU ${gpu.index} processes`}>
             {gpu.processes.slice(0, 5).map((proc) => (
               <li
                 key={proc.pid}
-                className="flex items-center justify-between text-[11px] text-gx-muted"
+                className="flex items-center justify-between text-[11px] text-muted-foreground"
               >
                 <span className="truncate max-w-[60%]" title={proc.name}>
                   {proc.name}
@@ -225,7 +225,7 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
               </li>
             ))}
             {gpu.processes.length > 5 && (
-              <li className="text-[10px] text-gx-muted italic">
+              <li className="text-[10px] text-muted-foreground italic">
                 +{gpu.processes.length - 5} more
               </li>
             )}
@@ -241,7 +241,7 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
 function LoadingState() {
   return (
     <div
-      className="flex items-center gap-2 py-3 text-xs text-gx-muted"
+      className="flex items-center gap-2 py-3 text-xs text-muted-foreground"
       role="status"
       aria-label="Loading system health data"
     >
@@ -277,7 +277,7 @@ export function SystemHealth({ health, compact = false }: SystemHealthProps) {
     parts.push(`${formatBytes(memUsed)}/${formatBytes(health.memory.total)} RAM`);
 
     return (
-      <div className="text-xs text-gx-muted" aria-label="System health summary">
+      <div className="text-xs text-muted-foreground" aria-label="System health summary">
         {parts.join(" · ")}
       </div>
     );
@@ -312,8 +312,8 @@ export function SystemHealth({ health, compact = false }: SystemHealthProps) {
       {/* GPU section */}
       {health.gpus && health.gpus.length > 0 ? (
         <div className="space-y-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-gx-text">
-            <Cpu size={12} className="text-gx-muted" aria-hidden="true" />
+          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <Cpu size={12} className="text-muted-foreground" aria-hidden="true" />
             <span>GPUs ({health.gpus.length})</span>
           </div>
           <div className="grid gap-2 sm:grid-cols-2" aria-label="GPU status">
@@ -323,7 +323,7 @@ export function SystemHealth({ health, compact = false }: SystemHealthProps) {
           </div>
         </div>
       ) : (
-        <div className="flex items-center gap-1.5 text-xs text-gx-muted py-1">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground py-1">
           <Cpu size={12} aria-hidden="true" />
           <span>No GPU detected</span>
         </div>
@@ -331,7 +331,7 @@ export function SystemHealth({ health, compact = false }: SystemHealthProps) {
 
       {/* Load average (if available) */}
       {health.loadAvg && (
-        <div className="flex items-center gap-2 text-[11px] text-gx-muted" aria-label="Load average">
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground" aria-label="Load average">
           <span className="font-medium">Load:</span>
           <span>{health.loadAvg.map((v) => v.toFixed(2)).join(" / ")}</span>
         </div>

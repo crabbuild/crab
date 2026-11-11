@@ -64,34 +64,34 @@ export function BrowserContextMenu({
       <div
         role="menu"
         style={{ left: adjustedX, top: adjustedY }}
-        className="fixed z-50 min-w-[14rem] overflow-hidden rounded-lg border border-gx-border bg-gx-surface py-1 shadow-xl"
+        className="fixed z-50 min-w-[14rem] overflow-hidden rounded-lg border border-border bg-card py-1 shadow-xl"
       >
         {/* Link-specific items */}
         {linkUrl ? (
           <>
             <button
               role="menuitem"
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
               onClick={() => {
                 onOpenExternally(linkUrl);
                 onClose();
               }}
             >
-              <ExternalLink size={13} className="shrink-0 text-gx-muted" />
+              <ExternalLink size={13} className="shrink-0 text-muted-foreground" />
               Open Link in System Browser
             </button>
             <button
               role="menuitem"
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
               onClick={() => {
                 onCopyUrl(linkUrl);
                 onClose();
               }}
             >
-              <Copy size={13} className="shrink-0 text-gx-muted" />
+              <Copy size={13} className="shrink-0 text-muted-foreground" />
               Copy Link Address
             </button>
-            <div className="my-1 h-px bg-gx-border" />
+            <div className="my-1 h-px bg-border" />
           </>
         ) : null}
 
@@ -100,8 +100,8 @@ export function BrowserContextMenu({
           role="menuitem"
           className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs transition ${
             canGoBack
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed"
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed"
           }`}
           onClick={() => {
             if (canGoBack) onGoBack(tabId);
@@ -116,8 +116,8 @@ export function BrowserContextMenu({
           role="menuitem"
           className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs transition ${
             canGoForward
-              ? "text-gx-text hover:bg-gx-surface-hover"
-              : "text-gx-muted/40 cursor-not-allowed"
+              ? "text-foreground hover:bg-accent"
+              : "text-muted-foreground/40 cursor-not-allowed"
           }`}
           onClick={() => {
             if (canGoForward) onGoForward(tabId);
@@ -130,39 +130,39 @@ export function BrowserContextMenu({
         </button>
         <button
           role="menuitem"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           onClick={() => {
             onReload(tabId);
             onClose();
           }}
         >
-          <RefreshCw size={13} className="shrink-0 text-gx-muted" />
+          <RefreshCw size={13} className="shrink-0 text-muted-foreground" />
           Reload
         </button>
 
-        <div className="my-1 h-px bg-gx-border" />
+        <div className="my-1 h-px bg-border" />
 
         {/* Page-level items */}
         <button
           role="menuitem"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           onClick={() => {
             onOpenExternally(pageUrl);
             onClose();
           }}
         >
-          <ExternalLink size={13} className="shrink-0 text-gx-muted" />
+          <ExternalLink size={13} className="shrink-0 text-muted-foreground" />
           Open Page in System Browser
         </button>
         <button
           role="menuitem"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           onClick={() => {
             onCopyUrl(pageUrl);
             onClose();
           }}
         >
-          <Copy size={13} className="shrink-0 text-gx-muted" />
+          <Copy size={13} className="shrink-0 text-muted-foreground" />
           Copy Page URL
         </button>
 
@@ -170,13 +170,13 @@ export function BrowserContextMenu({
         {onScreenshotToClipboard ? (
           <button
             role="menuitem"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
             onClick={() => {
               onScreenshotToClipboard(tabId);
               onClose();
             }}
           >
-            <Camera size={13} className="shrink-0 text-gx-muted" />
+            <Camera size={13} className="shrink-0 text-muted-foreground" />
             Screenshot to Clipboard
           </button>
         ) : null}
@@ -185,28 +185,28 @@ export function BrowserContextMenu({
         {onGrabModeToggle ? (
           <button
             role="menuitem"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
             onClick={() => {
               onGrabModeToggle(tabId);
               onClose();
             }}
           >
-            <Crosshair size={13} className="shrink-0 text-gx-muted" />
+            <Crosshair size={13} className="shrink-0 text-muted-foreground" />
             Grab Element
           </button>
         ) : null}
 
-        <div className="my-1 h-px bg-gx-border" />
+        <div className="my-1 h-px bg-border" />
 
         <button
           role="menuitem"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
           onClick={() => {
             onOpenDevTools(tabId);
             onClose();
           }}
         >
-          <Bug size={13} className="shrink-0 text-gx-muted" />
+          <Bug size={13} className="shrink-0 text-muted-foreground" />
           Developer Tools
         </button>
       </div>

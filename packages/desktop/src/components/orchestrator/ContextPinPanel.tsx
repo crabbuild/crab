@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 /**
  * Context Pin Panel — Persistent context that survives across agent iterations.
  *
@@ -333,18 +335,18 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
       <ResizeHandle direction="horizontal" onResize={handleResize} />
 
       <div
-        className="flex h-full shrink-0 flex-col overflow-hidden border-l border-gx-border bg-gx-surface"
+        className="flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-card"
         style={{ width }}
       >
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2">
-          <Pin size={12} className="text-gx-accent" />
-          <span className="flex-1 text-xs font-medium text-gx-text">Pinned Context</span>
-          <span className="text-[10px] text-gx-muted">{files.length}</span>
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+          <Pin size={12} className="text-primary" />
+          <span className="flex-1 text-xs font-medium text-foreground">Pinned Context</span>
+          <span className="text-[10px] text-muted-foreground">{files.length}</span>
           <button
             type="button"
             onClick={onClose}
-            className="rounded p-0.5 text-gx-muted hover:text-gx-text"
+            className="rounded p-0.5 text-muted-foreground hover:text-foreground"
             aria-label="Close context panel"
           >
             <X size={12} />
@@ -352,7 +354,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
         </div>
 
         {/* Description */}
-        <div className="border-b border-gx-border/50 px-3 py-2 text-[10px] text-gx-muted">
+        <div className="border-b border-border/50 px-3 py-2 text-[10px] text-muted-foreground">
           Pinned items are included in every agent prompt. Use them for specs,
           conventions, or reference snippets the agent shouldn't forget.
         </div>
@@ -360,31 +362,31 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
         {/* File list */}
         <div className="min-h-0 flex-1 overflow-auto">
           {loading ? (
-            <div className="flex items-center justify-center py-8 text-[11px] text-gx-muted">
+            <div className="flex items-center justify-center py-8 text-[11px] text-muted-foreground">
               Loading…
             </div>
           ) : files.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
-              <Pin size={18} className="text-gx-muted/50" />
-              <span className="text-[11px] text-gx-muted">No pinned context yet</span>
-              <span className="text-[10px] text-gx-muted/70">
+              <Pin size={18} className="text-muted-foreground/50" />
+              <span className="text-[11px] text-muted-foreground">No pinned context yet</span>
+              <span className="text-[10px] text-muted-foreground/70">
                 Search for a file below or paste content to pin.
               </span>
             </div>
           ) : (
-            <ul className="divide-y divide-gx-border/30">
+            <ul className="divide-y divide-border/30">
               {files.map((file) => (
                 <li key={file.name} className="group px-3 py-2">
                   <div className="flex items-center gap-2">
-                    <FileText size={11} className="shrink-0 text-gx-accent" />
-                    <span className="flex-1 truncate text-[11px] font-medium text-gx-text">
+                    <FileText size={11} className="shrink-0 text-primary" />
+                    <span className="flex-1 truncate text-[11px] font-medium text-foreground">
                       {file.name}
                     </span>
-                    <span className="shrink-0 text-[10px] text-gx-muted/70">{formatSize(file.size)}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground/70">{formatSize(file.size)}</span>
                     <button
                       type="button"
                       onClick={() => handleRemove(file.name)}
-                      className="rounded p-0.5 text-gx-muted opacity-0 transition hover:text-gx-error group-hover:opacity-100 focus:opacity-100"
+                      className="rounded p-0.5 text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100 focus:opacity-100"
                       aria-label={`Unpin ${file.name}`}
                       title="Unpin"
                     >
@@ -392,7 +394,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
                     </button>
                   </div>
                   {file.content.trim().length > 0 && (
-                    <div className="mt-1 line-clamp-2 break-all font-mono text-[10px] text-gx-muted">
+                    <div className="mt-1 line-clamp-2 break-all font-mono text-[10px] text-muted-foreground">
                       {file.content.slice(0, 160)}
                       {file.content.length > 160 && "…"}
                     </div>
@@ -404,12 +406,12 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
         </div>
 
         {/* Composer — the single entry point for adding context. */}
-        <div className="shrink-0 border-t border-gx-border bg-gx-bg-sub/40 px-3 py-2">
+        <div className="shrink-0 border-t border-border bg-background/40 px-3 py-2">
           {/* File search input with autocomplete */}
           <div className="relative">
-            <div className="flex items-center gap-1.5 rounded border border-gx-border bg-gx-bg-sub px-2 py-1">
-              <Search size={10} className="shrink-0 text-gx-muted" />
-              <input
+            <div className="flex items-center gap-1.5 rounded border border-border bg-background px-2 py-1">
+              <Search size={10} className="shrink-0 text-muted-foreground" />
+              <Input
                 ref={inputRef}
                 type="text"
                 value={composerName}
@@ -427,7 +429,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
                 placeholder={composerContent.trim() ? effectiveName : "Search files or type a name…"}
                 autoComplete="off"
                 spellCheck={false}
-                className="min-w-0 flex-1 bg-transparent text-[10px] text-gx-text placeholder:text-gx-muted/60 outline-none"
+                className="min-w-0 flex-1 bg-transparent text-[10px] text-foreground placeholder:text-muted-foreground/60 outline-none"
                 aria-autocomplete="list"
                 aria-expanded={showSuggestions && suggestions.length > 0}
                 role="combobox"
@@ -438,7 +440,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
             {showSuggestions && suggestions.length > 0 && (
               <div
                 ref={suggestionsRef}
-                className="absolute bottom-full left-0 right-0 z-10 mb-1 max-h-48 overflow-y-auto rounded border border-gx-border bg-gx-bg shadow-lg"
+                className="absolute bottom-full left-0 right-0 z-10 mb-1 max-h-48 overflow-y-auto rounded border border-border bg-background shadow-lg"
                 role="listbox"
               >
                 {suggestions.map((entry, i) => (
@@ -450,19 +452,19 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
                     className={clsx(
                       "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[10px] transition",
                       i === selectedSuggestion
-                        ? "bg-gx-accent/10 text-gx-text"
-                        : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                        ? "bg-primary/10 text-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
                     )}
                     role="option"
                     aria-selected={i === selectedSuggestion}
                   >
-                    <FileText size={10} className="shrink-0 text-gx-accent/70" />
+                    <FileText size={10} className="shrink-0 text-primary/70" />
                     <span className="flex-1 truncate">
-                      <span className="font-medium text-gx-text">
+                      <span className="font-medium text-foreground">
                         {entry.path.split("/").pop()}
                       </span>
                       {entry.path.includes("/") && (
-                        <span className="ml-1 text-gx-muted/70">
+                        <span className="ml-1 text-muted-foreground/70">
                           {entry.path.slice(0, entry.path.lastIndexOf("/"))}
                         </span>
                       )}
@@ -474,14 +476,14 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
           </div>
 
           {/* Content textarea */}
-          <textarea
+          <Textarea
             ref={textareaRef}
             value={composerContent}
             onChange={(e) => setComposerContent(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
             placeholder="Paste or type context to pin…"
             rows={3}
-            className="mt-2 w-full resize-none rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-[10px] text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+            className="mt-2 w-full resize-none rounded border border-border bg-background px-2 py-1.5 font-mono text-[10px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
 
           {/* Actions row */}
@@ -490,7 +492,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
             <button
               type="button"
               onClick={handlePasteFromClipboard}
-              className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
               title="Paste from clipboard"
               aria-label="Paste from clipboard"
             >
@@ -500,7 +502,7 @@ export function ContextPinPanel({ task, repoId, onClose }: Props) {
               type="button"
               onClick={handlePin}
               disabled={!canPin}
-              className="shrink-0 rounded bg-gx-accent px-2.5 py-1 text-[10px] font-medium text-white transition hover:bg-gx-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
+              className="shrink-0 rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
               title="Pin (⌘⏎)"
             >
               {pinning ? "Pinning…" : "Pin"}

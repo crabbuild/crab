@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * IssueSelector — browse and select GitHub/Linear issues for task creation.
  *
@@ -118,7 +119,7 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
 
   if (fetchState === "loading") {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-gx-border bg-gx-bg-sub px-3 py-4 text-xs text-gx-muted">
+      <div className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-4 text-xs text-muted-foreground">
         <Loader2 size={14} className="animate-spin" />
         <span>Fetching {provider === "linear" ? "Linear" : "GitHub"} issues…</span>
       </div>
@@ -127,8 +128,8 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
 
   if (fetchState === "auth-required") {
     return (
-      <div className="rounded-md border border-gx-border bg-gx-bg-sub px-3 py-4 text-xs">
-        <p className="text-gx-muted">
+      <div className="rounded-md border border-border bg-background px-3 py-4 text-xs">
+        <p className="text-muted-foreground">
           {provider === "linear"
             ? "Linear API token required. Add it in Settings → Integrations."
             : "GitHub authentication required. Connect via Settings → Forge."}
@@ -136,7 +137,7 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
         <button
           type="button"
           onClick={fetchIssues}
-          className="mt-2 text-[11px] text-gx-accent hover:underline"
+          className="mt-2 text-[11px] text-primary hover:underline"
         >
           Retry
         </button>
@@ -146,12 +147,12 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
 
   if (fetchState === "error") {
     return (
-      <div className="rounded-md border border-gx-border bg-gx-bg-sub px-3 py-4 text-xs">
-        <p className="text-gx-error">{errorMessage || "Failed to fetch issues"}</p>
+      <div className="rounded-md border border-border bg-background px-3 py-4 text-xs">
+        <p className="text-destructive">{errorMessage || "Failed to fetch issues"}</p>
         <button
           type="button"
           onClick={fetchIssues}
-          className="mt-2 text-[11px] text-gx-accent hover:underline"
+          className="mt-2 text-[11px] text-primary hover:underline"
         >
           Retry
         </button>
@@ -163,13 +164,13 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
     <div className="space-y-2">
       {/* Search bar */}
       <div className="relative">
-        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gx-muted" />
-        <input
+        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <Input
           type="text"
           placeholder="Search issues by title or number…"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full rounded-md border border-gx-border bg-gx-bg-sub pl-7 pr-3 py-1.5 text-xs text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+          className="w-full rounded-md border border-border bg-background pl-7 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
         />
       </div>
 
@@ -178,13 +179,13 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
         <button
           type="button"
           onClick={() => setShowFilters(!showFilters)}
-          className="flex items-center gap-1 text-[10px] text-gx-muted hover:text-gx-text"
+          className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
         >
           <Tag size={10} />
           Filters {showFilters ? "▾" : "▸"}
         </button>
         {issues.length > 0 && (
-          <span className="text-[10px] text-gx-muted">
+          <span className="text-[10px] text-muted-foreground">
             {filteredIssues.length} of {issues.length} issues
           </span>
         )}
@@ -195,72 +196,72 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
         <div className="flex gap-2">
           <div className="flex-1">
             <div className="flex items-center gap-1 mb-0.5">
-              <Tag size={9} className="text-gx-muted" />
-              <span className="text-[10px] text-gx-muted">Label</span>
+              <Tag size={9} className="text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground">Label</span>
             </div>
-            <input
+            <Input
               type="text"
               placeholder="e.g. bug, enhancement"
               value={labelFilter}
               onChange={(e) => setLabelFilter(e.target.value)}
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+              className="w-full rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
             />
           </div>
           <div className="flex-1">
             <div className="flex items-center gap-1 mb-0.5">
-              <User size={9} className="text-gx-muted" />
-              <span className="text-[10px] text-gx-muted">Assignee</span>
+              <User size={9} className="text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground">Assignee</span>
             </div>
-            <input
+            <Input
               type="text"
               placeholder="e.g. octocat"
               value={assigneeFilter}
               onChange={(e) => setAssigneeFilter(e.target.value)}
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+              className="w-full rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
             />
           </div>
         </div>
       )}
 
       {/* Issue list */}
-      <div className="max-h-48 overflow-y-auto rounded-md border border-gx-border bg-gx-bg-sub">
+      <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background">
         {filteredIssues.length === 0 ? (
-          <div className="px-3 py-4 text-center text-[11px] text-gx-muted">
+          <div className="px-3 py-4 text-center text-[11px] text-muted-foreground">
             {issues.length === 0 ? "No open issues found" : "No issues match your filters"}
           </div>
         ) : (
-          <ul className="divide-y divide-gx-border">
+          <ul className="divide-y divide-border">
             {filteredIssues.map((issue) => (
               <li key={issue.number}>
                 <button
                   type="button"
                   onClick={() => onSelect(issue)}
-                  className={`w-full px-3 py-2 text-left transition hover:bg-gx-accent/10 ${
-                    selectedIssueNumber === issue.number ? "bg-gx-accent/15" : ""
+                  className={`w-full px-3 py-2 text-left transition hover:bg-primary/10 ${
+                    selectedIssueNumber === issue.number ? "bg-primary/15" : ""
                   }`}
                 >
                   <div className="flex items-start gap-2">
-                    <span className="shrink-0 text-[10px] font-mono text-gx-muted">
+                    <span className="shrink-0 text-[10px] font-mono text-muted-foreground">
                       #{issue.number}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs text-gx-text">{issue.title}</p>
+                      <p className="truncate text-xs text-foreground">{issue.title}</p>
                       <div className="mt-0.5 flex items-center gap-2">
                         {issue.author && (
-                          <span className="text-[10px] text-gx-muted">{issue.author}</span>
+                          <span className="text-[10px] text-muted-foreground">{issue.author}</span>
                         )}
                         {issue.labels.length > 0 && (
                           <div className="flex gap-1">
                             {issue.labels.slice(0, 3).map((label) => (
                               <span
                                 key={label}
-                                className="rounded-full bg-gx-accent/20 px-1.5 py-0.5 text-[9px] text-gx-accent"
+                                className="rounded-full bg-primary/20 px-1.5 py-0.5 text-[9px] text-primary"
                               >
                                 {label}
                               </span>
                             ))}
                             {issue.labels.length > 3 && (
-                              <span className="text-[9px] text-gx-muted">
+                              <span className="text-[9px] text-muted-foreground">
                                 +{issue.labels.length - 3}
                               </span>
                             )}
@@ -273,7 +274,7 @@ export function IssueSelector({ provider, onSelect, selectedIssueNumber }: Props
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
-                      className="shrink-0 text-gx-muted hover:text-gx-accent"
+                      className="shrink-0 text-muted-foreground hover:text-primary"
                       aria-label="Open issue in browser"
                     >
                       <ExternalLink size={10} />

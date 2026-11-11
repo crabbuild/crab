@@ -340,25 +340,25 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
       ref={listRef}
       role="listbox"
       aria-label="Context mentions"
-      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(280px,var(--composer-popup-height))] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg z-50"
+      className="absolute bottom-full left-0 right-0 mb-1 max-h-[min(280px,var(--composer-popup-height))] overflow-auto rounded-lg border border-border bg-background shadow-lg z-50"
     >
       {/* Kind filter header — shows when narrowed to a specific type */}
       {kindFilter && (
-        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gx-border/50 bg-gx-bg/95 backdrop-blur-sm px-3 py-1.5">
-          <span className="text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border/50 bg-background/95 backdrop-blur-sm px-3 py-1.5">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             {CATEGORIES.find((c) => c.kind === kindFilter)?.label ?? kindFilter}
           </span>
           <button
             type="button"
             onClick={() => setKindFilter(null)}
-            className="text-[10px] text-gx-accent hover:underline"
+            className="text-[10px] text-primary hover:underline"
           >
             ← All types
           </button>
         </div>
       )}
       {items.length === 0 ? (
-        <div className="px-3 py-2 text-[11px] text-gx-muted">
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">
           {kindFilter
             ? `No ${kindFilter}s matching "${filter}". Keep typing or press Esc to go back.`
             : `No matches for "@${filter}". Keep typing or press Esc.`}
@@ -386,16 +386,16 @@ export function AtContextDropdown({ filter, visible, repoId, workflows = [], onS
               onMouseEnter={() => setActiveIndex(i)}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
                 i === activeIndex
-                  ? "bg-gx-accent/10 text-gx-text"
-                  : "text-gx-text hover:bg-gx-surface-hover"
+                  ? "bg-primary/10 text-foreground"
+                  : "text-foreground hover:bg-accent"
               } ${isCategory ? "cursor-pointer" : ""}`}
             >
-              <Icon size={12} className="shrink-0 text-gx-accent" />
-              <span className={`truncate ${isCategory ? "font-semibold text-gx-muted" : "font-medium"}`}>
+              <Icon size={12} className="shrink-0 text-primary" />
+              <span className={`truncate ${isCategory ? "font-semibold text-muted-foreground" : "font-medium"}`}>
                 {item.label}
               </span>
               {item.hint && (
-                <span className="ml-auto shrink-0 truncate text-[10px] text-gx-muted max-w-[40%]">
+                <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">
                   {item.hint}
                 </span>
               )}

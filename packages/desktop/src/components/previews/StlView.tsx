@@ -21,13 +21,13 @@ export function StlView({ repoId, path, rev }: Props) {
     return () => { cancelled = true; };
   }, [repoId, path, rev]);
 
-  if (err) return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;
-  if (!data) return <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Parsing STL model…</div>;
+  if (err) return <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{err}</div>;
+  if (!data) return <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Parsing STL model…</div>;
 
   return (
-    <div className="flex h-full flex-col bg-gx-bg-sub">
-      <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <Box size={12} className="text-gx-accent" />
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <Box size={12} className="text-primary" />
         <span>{path.split("/").pop()}</span>
         <span>{formatBytes(data.file_size)}</span>
         <span>{data.triangle_count.toLocaleString()} triangles</span>
@@ -37,7 +37,7 @@ export function StlView({ repoId, path, rev }: Props) {
         {data.preview_vertices.length > 0 ? (
           <WireframeSvg vertices={data.preview_vertices} bounds={data.bounds} />
         ) : (
-          <div className="text-sm text-gx-muted">No vertex data available for preview.</div>
+          <div className="text-sm text-muted-foreground">No vertex data available for preview.</div>
         )}
       </div>
     </div>
@@ -76,9 +76,9 @@ function WireframeSvg({ vertices, bounds }: {
   }, [vertices, bounds]);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="max-h-full max-w-full rounded border border-gx-border bg-gx-surface" style={{ maxHeight: 450 }}>
+    <svg viewBox={`0 0 ${W} ${H}`} className="max-h-full max-w-full rounded border border-border bg-card" style={{ maxHeight: 450 }}>
       {lines.map((d, i) => (
-        <path key={i} d={d} fill="none" stroke="rgb(var(--gx-accent))" strokeWidth={0.5} opacity={0.6} />
+        <path key={i} d={d} fill="none" stroke="rgb(var(--primary))" strokeWidth={0.5} opacity={0.6} />
       ))}
     </svg>
   );

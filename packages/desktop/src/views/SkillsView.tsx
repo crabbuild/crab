@@ -27,7 +27,7 @@ function AgentStatusDots() {
       {agents.map((a) => (
         <span
           key={a.id}
-          className={`inline-block h-2 w-2 rounded-full ${a.installed ? "bg-green-500" : "bg-yellow-600"}`}
+          className={`inline-block h-2 w-2 rounded-full ${a.installed ? "bg-success" : "bg-warning"}`}
         />
       ))}
     </div>
@@ -65,13 +65,13 @@ function SkillsViewInner() {
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-gx-border shrink-0">
-        <Puzzle size={18} className="text-gx-accent" />
-        <h2 className="text-sm font-semibold text-gx-text">Skills</h2>
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
+        <Puzzle size={18} className="text-primary" />
+        <h2 className="text-sm font-semibold text-foreground">Skills</h2>
         <div className="flex-1" />
         <AgentStatusDots />
         <button
-          className="p-1.5 rounded hover:bg-gx-surface-hover text-gx-muted hover:text-gx-text transition-colors"
+          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
           onClick={handleResync}
           disabled={syncing}
           title="Resync skills to all agents"
@@ -79,14 +79,14 @@ function SkillsViewInner() {
           <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
         </button>
         <button
-          className="flex items-center gap-1 rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-opacity"
+          className="flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity"
           onClick={() => setShowCreate(true)}
         >
           <Plus size={14} />
           New Skill
         </button>
         <button
-          className="flex items-center gap-1 rounded-md border border-gx-border px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition-colors"
+          className="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
           onClick={() => setShowInstall(true)}
         >
           <Download size={14} />
@@ -96,14 +96,14 @@ function SkillsViewInner() {
 
       {/* Content */}
       {state.loading ? (
-        <div className="flex-1 flex items-center justify-center text-gx-muted text-sm">
+        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
           Loading skills...
         </div>
       ) : state.error ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3">
-          <p className="text-gx-error text-sm">{state.error}</p>
+          <p className="text-destructive text-sm">{state.error}</p>
           <button
-            className="rounded-md border border-gx-border px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition-colors"
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
             onClick={handleRetry}
           >
             Retry

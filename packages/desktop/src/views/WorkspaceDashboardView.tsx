@@ -237,16 +237,16 @@ export function WorkspaceDashboardView({ workspace }: Props) {
   ).length;
 
   return (
-    <div className="h-full overflow-auto bg-gx-bg-sub p-6">
+    <div className="h-full overflow-auto bg-background p-6">
       <div className="mx-auto max-w-5xl space-y-5">
         {/* Header */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-gx-muted">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Workspace
           </div>
           <h1 className="mt-1 text-xl font-semibold">{workspace.name}</h1>
           <div className="mt-0.5 flex items-center gap-3">
-            <span className="truncate font-mono text-[11px] text-gx-muted">
+            <span className="truncate font-mono text-[11px] text-muted-foreground">
               {workspace.rootPath}
             </span>
             {hasRemoteRepos && (
@@ -294,7 +294,7 @@ export function WorkspaceDashboardView({ workspace }: Props) {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md border border-gx-border bg-gx-surface px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50 disabled:pointer-events-none"
+            className="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition disabled:opacity-50 disabled:pointer-events-none"
             onClick={handleFetchAll}
             disabled={fetchingAll || pullingAll}
           >
@@ -307,7 +307,7 @@ export function WorkspaceDashboardView({ workspace }: Props) {
           </button>
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md border border-gx-border bg-gx-surface px-3 py-1.5 text-xs font-medium text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50 disabled:pointer-events-none"
+            className="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition disabled:opacity-50 disabled:pointer-events-none"
             onClick={handlePullAll}
             disabled={pullingAll || fetchingAll || pullableCount === 0}
             title={
@@ -323,7 +323,7 @@ export function WorkspaceDashboardView({ workspace }: Props) {
             )}
             Pull All
             {pullableCount > 0 && (
-              <span className="rounded bg-gx-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-gx-accent">
+              <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                 {pullableCount}
               </span>
             )}
@@ -332,17 +332,17 @@ export function WorkspaceDashboardView({ workspace }: Props) {
 
         {/* Global error */}
         {bulkErrors.has("__global__") && (
-          <div className="flex items-center gap-2 rounded border border-gx-error/30 bg-gx-error/5 px-3 py-2 text-[11px] text-gx-error">
+          <div className="flex items-center gap-2 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
             <AlertCircle size={13} />
             <span className="min-w-0 flex-1">{bulkErrors.get("__global__")}</span>
           </div>
         )}
 
         {/* Table */}
-        <div className="overflow-hidden rounded-lg border border-gx-border bg-gx-surface">
+        <div className="overflow-hidden rounded-lg border border-border bg-card">
           <table className="w-full text-xs" role="grid">
             <thead>
-              <tr className="border-b border-gx-border bg-gx-bg-sub/50">
+              <tr className="border-b border-border bg-background/50">
                 <SortableHeader
                   label="Repository"
                   column="name"
@@ -397,7 +397,7 @@ export function WorkspaceDashboardView({ workspace }: Props) {
             </tbody>
           </table>
           {rows.length === 0 && (
-            <div className="px-4 py-8 text-center text-xs text-gx-muted">
+            <div className="px-4 py-8 text-center text-xs text-muted-foreground">
               No repositories in this workspace.
             </div>
           )}
@@ -419,15 +419,15 @@ function StatCard({
   color?: "green" | "red" | "yellow";
 }) {
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-3">
-      <div className="text-[10px] text-gx-muted">{label}</div>
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="text-[10px] text-muted-foreground">{label}</div>
       <div
         className={clsx(
           "mt-1 font-mono text-lg font-semibold",
-          color === "green" && "text-gx-success",
-          color === "red" && "text-gx-error",
-          color === "yellow" && "text-gx-warn",
-          !color && "text-gx-text",
+          color === "green" && "text-success",
+          color === "red" && "text-destructive",
+          color === "yellow" && "text-warning",
+          !color && "text-foreground",
         )}
       >
         {value}
@@ -457,7 +457,7 @@ function SortableHeader({
   return (
     <th
       className={clsx(
-        "cursor-pointer select-none px-2 py-2 font-medium text-gx-muted hover:text-gx-text transition",
+        "cursor-pointer select-none px-2 py-2 font-medium text-muted-foreground hover:text-foreground transition",
         align === "right" && "text-right",
         className,
       )}
@@ -495,7 +495,7 @@ function DashboardTableRow({
     <>
       <tr
         className={clsx(
-          "cursor-pointer border-b border-gx-border/50 last:border-b-0 transition hover:bg-gx-surface-hover",
+          "cursor-pointer border-b border-border/50 last:border-b-0 transition hover:bg-accent",
           row.level === 0 && "opacity-50",
         )}
         onClick={() => onClick(row.relativePath)}
@@ -512,9 +512,9 @@ function DashboardTableRow({
         <td className="px-3 py-2.5">
           <div className="flex items-center gap-2">
             <StatusDot status={status} />
-            <span className="font-medium text-gx-text">{row.name}</span>
+            <span className="font-medium text-foreground">{row.name}</span>
             {row.level === 0 && (
-              <span className="rounded bg-gx-border/50 px-1 py-0.5 text-[9px] text-gx-muted">
+              <span className="rounded bg-border/50 px-1 py-0.5 text-[9px] text-muted-foreground">
                 L0
               </span>
             )}
@@ -527,12 +527,12 @@ function DashboardTableRow({
         {/* Branch */}
         <td className="px-2 py-2.5">
           {row.branch ? (
-            <span className="inline-flex items-center gap-1 text-gx-muted">
+            <span className="inline-flex items-center gap-1 text-muted-foreground">
               <GitBranch size={11} />
               <span className="max-w-[120px] truncate">{row.branch}</span>
             </span>
           ) : (
-            <span className="text-gx-muted/50">—</span>
+            <span className="text-muted-foreground/50">—</span>
           )}
         </td>
 
@@ -542,13 +542,13 @@ function DashboardTableRow({
             <span
               className={clsx(
                 "font-mono",
-                row.dirtyCount > 0 ? "text-gx-error font-medium" : "text-gx-muted",
+                row.dirtyCount > 0 ? "text-destructive font-medium" : "text-muted-foreground",
               )}
             >
               {row.dirtyCount}
             </span>
           ) : (
-            <span className="text-gx-muted/50">—</span>
+            <span className="text-muted-foreground/50">—</span>
           )}
         </td>
 
@@ -558,13 +558,13 @@ function DashboardTableRow({
             <span
               className={clsx(
                 "font-mono",
-                row.ahead > 0 ? "text-gx-accent font-medium" : "text-gx-muted",
+                row.ahead > 0 ? "text-primary font-medium" : "text-muted-foreground",
               )}
             >
               {row.ahead}
             </span>
           ) : (
-            <span className="text-gx-muted/50">—</span>
+            <span className="text-muted-foreground/50">—</span>
           )}
         </td>
 
@@ -574,31 +574,31 @@ function DashboardTableRow({
             <span
               className={clsx(
                 "font-mono",
-                row.behind > 0 ? "text-gx-warn font-medium" : "text-gx-muted",
+                row.behind > 0 ? "text-warning font-medium" : "text-muted-foreground",
               )}
             >
               {row.behind}
             </span>
           ) : (
-            <span className="text-gx-muted/50">—</span>
+            <span className="text-muted-foreground/50">—</span>
           )}
         </td>
 
         {/* Status icon */}
         <td className="px-2 py-2.5 text-center">
           {row.error ? (
-            <span title={row.error}><AlertCircle size={13} className="text-gx-error" /></span>
+            <span title={row.error}><AlertCircle size={13} className="text-destructive" /></span>
           ) : status === "clean" ? (
-            <CheckCircle2 size={13} className="text-gx-success/60" />
+            <CheckCircle2 size={13} className="text-success/60" />
           ) : null}
         </td>
       </tr>
 
       {/* Per-repo bulk operation error */}
       {bulkError && (
-        <tr className="border-b border-gx-border/50">
+        <tr className="border-b border-border/50">
           <td colSpan={6} className="px-3 py-1.5">
-            <div className="flex items-center gap-1.5 text-[10px] text-gx-error">
+            <div className="flex items-center gap-1.5 text-[10px] text-destructive">
               <AlertCircle size={11} />
               {bulkError}
             </div>
@@ -614,10 +614,10 @@ function StatusDot({ status }: { status: "clean" | "dirty" | "behind" | "unknown
     <span
       className={clsx(
         "inline-block h-2 w-2 shrink-0 rounded-full",
-        status === "clean" && "bg-gx-success",
-        status === "dirty" && "bg-gx-error",
-        status === "behind" && "bg-gx-warn",
-        status === "unknown" && "bg-gx-border",
+        status === "clean" && "bg-success",
+        status === "dirty" && "bg-destructive",
+        status === "behind" && "bg-warning",
+        status === "unknown" && "bg-border",
       )}
       aria-label={status}
     />
@@ -634,7 +634,7 @@ function TransportBadge({
   if (disconnected) {
     return (
       <span
-        className="inline-flex items-center gap-1 rounded bg-gx-error/10 px-1.5 py-0.5 text-[9px] font-medium text-gx-error"
+        className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 text-[9px] font-medium text-destructive"
         title="Remote connection lost"
       >
         <WifiOff size={10} />
@@ -645,7 +645,7 @@ function TransportBadge({
 
   return (
     <span
-      className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-1.5 py-0.5 text-[9px] text-gx-muted"
+      className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[9px] text-muted-foreground"
       title={sshHost ? `Remote: ${sshHost}` : "Remote repository"}
     >
       <Cloud size={10} />

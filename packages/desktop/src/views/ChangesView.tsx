@@ -1,3 +1,4 @@
+import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionScroll } from "../hooks/useSessionScroll";
 import clsx from "clsx";
@@ -25,7 +26,7 @@ import {
   useFileTreeSelection,
 } from "@pierre/trees/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
-import { themeToTreeStyles } from "@pierre/trees";
+
 import { OpenRepo } from "../state";
 import { HunkAnchor, isStaleHunkError, rpc } from "../ipc";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
@@ -71,17 +72,17 @@ interface StatusEntry {
 // Porcelain code → human label. We show the user-friendly label
 // and colour; code stays available as a tooltip.
 const CODE_STYLE: Record<string, { label: string; cls: string }> = {
-  M: { label: "modified", cls: "text-gx-warn" },
-  A: { label: "added", cls: "text-gx-success" },
-  D: { label: "deleted", cls: "text-gx-error" },
-  R: { label: "renamed", cls: "text-gx-accent" },
-  C: { label: "copied", cls: "text-gx-accent" },
-  "??": { label: "untracked", cls: "text-gx-muted" },
+  M: { label: "modified", cls: "text-warning" },
+  A: { label: "added", cls: "text-success" },
+  D: { label: "deleted", cls: "text-destructive" },
+  R: { label: "renamed", cls: "text-primary" },
+  C: { label: "copied", cls: "text-primary" },
+  "??": { label: "untracked", cls: "text-muted-foreground" },
 };
 
 function labelFor(code: string): { label: string; cls: string } {
   const trimmed = code.trim();
-  return CODE_STYLE[trimmed[0]] ?? CODE_STYLE[trimmed] ?? { label: trimmed, cls: "text-gx-muted" };
+  return CODE_STYLE[trimmed[0]] ?? CODE_STYLE[trimmed] ?? { label: trimmed, cls: "text-muted-foreground" };
 }
 
 function codeBadge(code: string): string {
@@ -883,9 +884,9 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
-          <div className="mb-2 text-2xl text-gx-success">✓</div>
-          <div className="text-sm text-gx-text">Working tree is clean</div>
-          <div className="mt-1 text-[11px] text-gx-muted">No uncommitted changes</div>
+          <div className="mb-2 text-2xl text-success">✓</div>
+          <div className="text-sm text-foreground">Working tree is clean</div>
+          <div className="mt-1 text-[11px] text-muted-foreground">No uncommitted changes</div>
         </div>
       </div>
     );
@@ -899,12 +900,12 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         actions={toolbarActions}
         onAction={handleToolbarAction}
       />
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-2 text-[11px] text-gx-muted">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2 text-[11px] text-muted-foreground">
         <div className="flex items-center gap-3">
           <GitPullRequestArrow size={12} />
           {entries ? (
             <span>
-              <strong className="text-gx-text">{entries.length}</strong> change
+              <strong className="text-foreground">{entries.length}</strong> change
               {entries.length === 1 ? "" : "s"}
             </span>
           ) : (
@@ -913,19 +914,19 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           {entries && entries.length > 0 && (
             <span className="flex items-center gap-2">
               {summary.modified > 0 && (
-                <span className="text-gx-warn">{summary.modified} modified</span>
+                <span className="text-warning">{summary.modified} modified</span>
               )}
               {summary.added > 0 && (
-                <span className="text-gx-success">{summary.added} added</span>
+                <span className="text-success">{summary.added} added</span>
               )}
               {summary.untracked > 0 && (
-                <span className="text-gx-muted">{summary.untracked} untracked</span>
+                <span className="text-muted-foreground">{summary.untracked} untracked</span>
               )}
               {summary.deleted > 0 && (
-                <span className="text-gx-error">{summary.deleted} deleted</span>
+                <span className="text-destructive">{summary.deleted} deleted</span>
               )}
               {summary.renamed > 0 && (
-                <span className="text-gx-accent">{summary.renamed} renamed</span>
+                <span className="text-primary">{summary.renamed} renamed</span>
               )}
             </span>
           )}
@@ -934,7 +935,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           <div
             role="radiogroup"
             aria-label="View mode"
-            className="flex overflow-hidden rounded border border-gx-border"
+            className="flex overflow-hidden rounded border border-border"
           >
             <ModeButton
               active={mode === "zones"}
@@ -957,7 +958,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
           </div>
           <button
             type="button"
-            className="text-gx-muted hover:text-gx-text"
+            className="text-muted-foreground hover:text-foreground"
             onClick={refreshStatus}
             title="Refresh"
           >
@@ -986,17 +987,17 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
             />
             <div ref={mergedFileListRef} className="min-h-0 flex-1 overflow-auto">
               {loading && (
-                <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+                <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
                   <Loader2 size={12} className="animate-spin" /> Running git status…
                 </div>
               )}
               {error && (
-                <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+                <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
                   {error}
                 </div>
               )}
               {!loading && entries && entries.length === 0 && (
-                <div className="p-4 text-center text-xs text-gx-muted">
+                <div className="p-4 text-center text-xs text-muted-foreground">
                   Working tree is clean.
                 </div>
               )}
@@ -1055,7 +1056,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
               onCommitSuccess={onCommitSuccess}
             />
           </Panel>
-          <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-gx-accent/50" />
+          <PanelResizeHandle className="w-[3px] cursor-col-resize bg-transparent transition-colors hover:bg-primary/50" />
           <Panel minSize={20} className="min-h-0 min-w-0">
             {openFilePath ? (
               <FileContentPane
@@ -1129,8 +1130,8 @@ function ModeButton({
       className={clsx(
         "flex items-center gap-1 px-2 py-0.5 text-[11px] transition",
         active
-          ? "bg-gx-accent/20 text-gx-text"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "bg-primary/20 text-foreground"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
       title={`${label} view`}
     >
@@ -1206,10 +1207,10 @@ function FlatList({
               className={clsx(
                 "group/row flex h-full w-full items-center gap-2 px-3 text-left text-[12.5px] transition cursor-pointer",
                 isSelected
-                  ? "bg-gx-accent/20 text-gx-text"
+                  ? "bg-primary/20 text-foreground"
                   : isActiveDiff
-                    ? "bg-gx-surface-hover text-gx-text"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-accent text-foreground"
+                    : "text-foreground hover:bg-accent",
               )}
               title={`${e.code} ${e.path}`}
             >
@@ -1218,8 +1219,8 @@ function FlatList({
                 className={clsx(
                   "inline-flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-[2px] border",
                   state === "empty"
-                    ? "border-gx-border bg-transparent"
-                    : "border-gx-accent bg-gx-accent",
+                    ? "border-border bg-transparent"
+                    : "border-primary bg-primary",
                 )}
                 aria-label={
                   state === "full"
@@ -1230,12 +1231,12 @@ function FlatList({
                 }
               >
                 {state === "full" && (
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="text-white">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="text-foreground">
                     <path d="M1.5 5.2 L4 7.7 L8.5 2.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
                 {state === "partial" && (
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="text-white">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" className="text-foreground">
                     <path d="M2 5 L8 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                   </svg>
                 )}
@@ -1246,7 +1247,7 @@ function FlatList({
               <span className="min-w-0 flex-1 truncate font-mono">
                 {e.path.split("/").pop()}
               </span>
-              <span className="shrink-0 text-[10px] text-gx-muted group-hover/row:hidden">
+              <span className="shrink-0 text-[10px] text-muted-foreground group-hover/row:hidden">
                 {e.path.includes("/") && e.path.slice(0, e.path.lastIndexOf("/"))}
               </span>
               {/* Per-file action buttons — visible on hover */}
@@ -1258,7 +1259,7 @@ function FlatList({
                     aria-label={`Stage ${e.path}`}
                     disabled={toggling}
                     onClick={(ev) => { ev.stopPropagation(); onToggleFile(e.path, "stage"); }}
-                    className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-accent/20 hover:text-gx-success disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-success disabled:opacity-50 disabled:cursor-not-allowed transition"
                   >
                     <Plus size={13} />
                   </button>
@@ -1270,7 +1271,7 @@ function FlatList({
                     aria-label={`Unstage ${e.path}`}
                     disabled={toggling}
                     onClick={(ev) => { ev.stopPropagation(); onToggleFile(e.path, "unstage"); }}
-                    className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-accent/20 hover:text-gx-warn disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-warning disabled:opacity-50 disabled:cursor-not-allowed transition"
                   >
                     <Minus size={13} />
                   </button>
@@ -1281,7 +1282,7 @@ function FlatList({
                   aria-label={`Discard changes in ${e.path}`}
                   disabled={toggling || !onDiscardFileByPath}
                   onClick={(ev) => { ev.stopPropagation(); onDiscardFileByPath?.(e.path); }}
-                  className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-error/20 hover:text-gx-error disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive disabled:opacity-50 disabled:cursor-not-allowed transition"
                 >
                   <Undo2 size={13} />
                 </button>
@@ -1291,7 +1292,7 @@ function FlatList({
                     title={`Open file ${e.path}`}
                     aria-label={`Open file ${e.path}`}
                     onClick={(ev) => { ev.stopPropagation(); onOpenFile(e.path); }}
-                    className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-accent/20 hover:text-gx-accent transition"
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition"
                   >
                     <FileText size={13} />
                   </button>
@@ -1403,7 +1404,7 @@ function ChangesTree({
   }, [model, selectedPath]);
 
   const effective = useEffectiveTheme();
-  const themeStyles = useMemo(() => buildTreeTheme(effective), [effective]);
+  const themeStyles = useMemo(() => repositoryTreeTheme(effective), [effective]);
 
   // Double-click on the tree opens the full editor diff for the
   // currently selected file (VS Code SCM behaviour).
@@ -1478,32 +1479,32 @@ function FileContentPane({
   const lines = useMemo(() => content?.split("\n") ?? [], [content]);
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-gx-bg-sub">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <FileText size={12} className="text-gx-accent" />
-        <span className="font-mono text-gx-text truncate">{path}</span>
-        <span className="ml-auto text-[10px] text-gx-muted">
+    <div className="relative flex h-full min-h-0 flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <FileText size={12} className="text-primary" />
+        <span className="font-mono text-foreground truncate">{path}</span>
+        <span className="ml-auto text-[10px] text-muted-foreground">
           {content != null && `${lines.length} lines`}
         </span>
         <button
           type="button"
           onClick={onClose}
-          className="ml-2 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+          className="ml-2 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
           title="Close file view and return to diff"
         >
           ✕
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {waiting && <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>}
+        {waiting && <p role="status" className="p-4 text-xs text-muted-foreground">Waiting for repository recovery…</p>}
         {!waiting && loading && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 size={14} className="animate-spin" /> Loading file…
           </div>
         )}
-        {!waiting && !loading && error && <p role="alert" className="m-4 text-xs text-gx-error">{error}</p>}
+        {!waiting && !loading && error && <p role="alert" className="m-4 text-xs text-destructive">{error}</p>}
         {!waiting && !loading && !error && content == null && (
-          <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             Unable to read file content (binary or missing).
           </div>
         )}
@@ -1512,11 +1513,11 @@ function FileContentPane({
             <table className="w-full border-collapse">
               <tbody>
                 {lines.map((line, i) => (
-                  <tr key={i} className="hover:bg-gx-surface-hover/50">
-                    <td className="select-none px-3 py-0 text-right text-[11px] text-gx-muted/60 w-[1%] whitespace-nowrap align-top">
+                  <tr key={i} className="hover:bg-accent/50">
+                    <td className="select-none px-3 py-0 text-right text-[11px] text-muted-foreground/60 w-[1%] whitespace-nowrap align-top">
                       {i + 1}
                     </td>
-                    <td className="px-3 py-0 whitespace-pre-wrap break-all text-gx-text">
+                    <td className="px-3 py-0 whitespace-pre-wrap break-all text-foreground">
                       {line || "\u00A0"}
                     </td>
                   </tr>
@@ -1548,32 +1549,32 @@ function PatchPane({
   onDismissToast,
 }: PatchPaneProps) {
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-gx-bg-sub">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <span className="font-mono text-gx-text">
+    <div className="relative flex h-full min-h-0 flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <span className="font-mono text-foreground">
           {selectedPath ?? "No file selected"}
         </span>
         <span className="ml-auto">{stagedOnly ? "Index vs HEAD" : "Working tree vs Index"}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {!selectedPath && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <FileText size={18} />
             <div>Select a file to review its changes.</div>
           </div>
         )}
         {selectedPath && loading && (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 size={14} className="animate-spin" /> Loading diff…
           </div>
         )}
         {selectedPath && error && (
-          <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
         {selectedPath && !loading && !error && patch != null && patch.trim().length === 0 && (
-          <div className="flex h-full items-center justify-center text-sm text-gx-muted">
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             No changes for this file.
           </div>
         )}
@@ -1599,15 +1600,15 @@ function PatchPane({
           className={clsx(
             "absolute bottom-3 left-1/2 -translate-x-1/2 rounded border px-3 py-1.5 text-xs shadow-lg transition",
             toast.kind === "error"
-              ? "border-gx-error/40 bg-gx-error/10 text-gx-error"
-              : "border-gx-border bg-gx-surface text-gx-text",
+              ? "border-destructive/40 bg-destructive/10 text-destructive"
+              : "border-border bg-card text-foreground",
           )}
         >
           <span className="mr-2 inline-flex items-center gap-1">
             {toast.kind === "error" && <AlertTriangle size={11} />}
             {toast.text}
           </span>
-          <span className="text-gx-muted">dismiss</span>
+          <span className="text-muted-foreground">dismiss</span>
         </button>
       )}
     </div>
@@ -1617,55 +1618,6 @@ function PatchPane({
 // Mirrors the helper in `components/FileTree.tsx`. We duplicate a
 // minimal version here to avoid a cross-component import cycle;
 // eventually this should graduate into a `lib/treeTheme.ts`.
-function buildTreeTheme(mode: "dark" | "light"): React.CSSProperties {
-  const cs =
-    typeof window !== "undefined" ? getComputedStyle(document.documentElement) : null;
-  const rgb = (name: string, fallback: string): string => {
-    const raw = cs?.getPropertyValue(name).trim();
-    if (!raw) return fallback;
-    return `rgb(${raw})`;
-  };
-  const colors: Record<string, string> = {
-    "sideBar.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "editor.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "sideBar.foreground": rgb("--gx-text", mode === "dark" ? "#e7eaf1" : "#171b23"),
-    "sideBarSectionHeader.foreground": rgb("--gx-muted", "#8a93a5"),
-    "sideBar.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "list.hoverBackground": rgb(
-      "--gx-surface-hover",
-      mode === "dark" ? "#1e222b" : "#e9ecf3",
-    ),
-    "list.activeSelectionBackground": mode === "dark" ? "#4f8cff33" : "#2c6def22",
-    "list.activeSelectionForeground": rgb("--gx-text", mode === "dark" ? "#e7eaf1" : "#171b23"),
-    focusBorder: rgb("--gx-accent", mode === "dark" ? "#4f8cff" : "#2c6def"),
-    "input.background": rgb("--gx-bg-sub", mode === "dark" ? "#0b0d12" : "#ffffff"),
-    "input.border": rgb("--gx-border", mode === "dark" ? "#242832" : "#dde0e8"),
-    "scrollbarSlider.background": rgb(
-      "--gx-border",
-      mode === "dark" ? "#242832" : "#dde0e8",
-    ),
-    "gitDecoration.addedResourceForeground": rgb(
-      "--gx-success",
-      mode === "dark" ? "#4ade80" : "#16a34a",
-    ),
-    "gitDecoration.modifiedResourceForeground": rgb(
-      "--gx-warn",
-      mode === "dark" ? "#facc15" : "#b48700",
-    ),
-    "gitDecoration.deletedResourceForeground": rgb(
-      "--gx-error",
-      mode === "dark" ? "#f87171" : "#dc2626",
-    ),
-  };
-  const styles = themeToTreeStyles({
-    type: mode,
-    bg: colors["sideBar.background"],
-    fg: colors["sideBar.foreground"],
-    colors,
-  });
-  return styles as unknown as React.CSSProperties;
-}
-
 // Consumers of this view need the underlying status entries to
 // decorate the tree with git signals. Expose a parallel hook so we
 // only pay for one `git_status_porcelain` round-trip per repo.

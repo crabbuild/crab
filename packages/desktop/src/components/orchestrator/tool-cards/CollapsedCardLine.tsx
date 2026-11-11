@@ -31,8 +31,8 @@ export function CollapsedCardLine({ summary, onExpand, ariaLabel }: CollapsedCar
       className={
         "flex w-full items-center gap-2 px-2.5 py-1.5 "
         + "text-[10px] text-left rounded-md "
-        + "bg-gx-surface/40 "
-        + "hover:bg-gx-surface-hover/40 "
+        + "bg-card/40 "
+        + "hover:bg-accent/40 "
         + "cursor-pointer transition-colors "
         + "chat-collapsible"
       }
@@ -40,7 +40,7 @@ export function CollapsedCardLine({ summary, onExpand, ariaLabel }: CollapsedCar
       <span className="min-w-0 flex-1 flex items-center gap-2 truncate">
         {summary}
       </span>
-      <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+      <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
     </button>
   );
 }

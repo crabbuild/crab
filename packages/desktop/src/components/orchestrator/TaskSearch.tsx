@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 /**
  * Task Search — Filter/search across all tasks by title, status, or agent type.
  */
@@ -50,7 +52,7 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
         onClick={() => {
           // In compact mode, just show a search icon that could expand
         }}
-        className="flex h-7 w-7 items-center justify-center rounded text-gx-muted hover:text-gx-text transition"
+        className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:text-foreground transition"
         aria-label="Search tasks"
       >
         <Search size={12} />
@@ -62,21 +64,21 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
     <div className="space-y-1.5 px-2 pb-2">
       {/* Search input */}
       <div className="relative">
-        <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-gx-muted" />
-        <input
+        <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <Input
           ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => handleQueryChange(e.target.value)}
           placeholder="Search tasks…"
-          className="w-full rounded border border-gx-border bg-gx-bg pl-6 pr-6 py-1 text-[11px] text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+          className="w-full rounded border border-border bg-background pl-6 pr-6 py-1 text-[11px] text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
           aria-label="Search tasks by title"
         />
         {(query || status !== "all") && (
           <button
             type="button"
             onClick={handleClear}
-            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gx-muted hover:text-gx-text"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
             aria-label="Clear search"
           >
             <X size={11} />
@@ -85,10 +87,10 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
       </div>
 
       {/* Status filter */}
-      <select
+      <NativeSelect
         value={status}
         onChange={(e) => handleStatusChange(e.target.value as TaskStatus | "all")}
-        className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1 text-[10px] text-gx-text focus:border-gx-accent focus:outline-none"
+        className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] text-foreground focus:border-primary focus:outline-none"
         aria-label="Filter by status"
       >
         <option value="all">All statuses</option>
@@ -100,7 +102,7 @@ export function TaskSearch({ onFilterChange, compact, inputRef }: Props) {
         <option value="applied">Applied</option>
         <option value="archived">Archived</option>
         <option value="failed">Failed</option>
-      </select>
+      </NativeSelect>
     </div>
   );
 }

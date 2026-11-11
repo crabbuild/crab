@@ -236,10 +236,10 @@ export function Model3dView({ repoId, path, rev }: Props) {
   }, [repoId, path, rev]);
 
   return (
-    <div className="flex h-full flex-col bg-gx-bg-sub">
-      <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-        <Box size={12} className="text-gx-accent" />
-        <span className="font-medium text-gx-text">{path.split("/").pop()}</span>
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground">
+        <Box size={12} className="text-primary" />
+        <span className="font-medium text-foreground">{path.split("/").pop()}</span>
         {info && <span>{info}</span>}
         <span className="ml-auto flex items-center gap-1">
           <RotateCcw size={10} /> Drag to rotate · Scroll to zoom
@@ -247,15 +247,15 @@ export function Model3dView({ repoId, path, rev }: Props) {
       </div>
       <div ref={containerRef} className="relative min-h-0 flex-1">
         {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-gx-bg-sub/80">
-            <div className="flex items-center gap-2 text-sm text-gx-muted">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" /> Loading 3D model…
             </div>
           </div>
         )}
         {err && (
           <div className="absolute inset-0 z-10 flex items-center justify-center">
-            <div className="rounded border border-gx-error/40 bg-gx-error/10 p-4 text-xs text-gx-error">
+            <div className="rounded border border-destructive/40 bg-destructive/10 p-4 text-xs text-destructive">
               {err}
             </div>
           </div>

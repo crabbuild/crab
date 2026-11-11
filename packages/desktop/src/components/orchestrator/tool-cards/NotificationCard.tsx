@@ -47,9 +47,9 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <span className="truncate text-gx-text/70">{summary}</span>
+        <Icon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <span className="truncate text-foreground/70">{summary}</span>
       </>
     );
     return (
@@ -62,30 +62,30 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => hasDetail && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasDetail && "hover:bg-gx-surface-hover cursor-pointer",
+          hasDetail && "hover:bg-accent cursor-pointer",
           !hasDetail && "cursor-default",
         )}
       >
-        <Icon size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-gx-text/80">
+        <Icon size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">
           {summary}
         </span>
 
         {isRemoteTrigger && action && (
-          <span className="shrink-0 rounded bg-gx-info/10 px-1.5 py-0.5 text-[8px] font-medium text-gx-info border border-gx-info/20">
+          <span className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[8px] font-medium text-info border border-info/20">
             {action}
           </span>
         )}
 
         {!isRemoteTrigger && (
-          <span className="shrink-0 rounded bg-gx-warning/10 px-1.5 py-0.5 text-[8px] font-medium text-gx-warning border border-gx-warning/20">
+          <span className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[8px] font-medium text-warning border border-warning/20">
             <Bell size={8} className="inline mr-0.5" />
             sent
           </span>
@@ -93,20 +93,20 @@ export function NotificationCard({ event, defaultExpanded = false, collapsed: co
 
         {hasDetail && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {expanded && hasDetail && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2 space-y-1.5">
+        <div className="border-t border-border/30 px-2.5 py-2 space-y-1.5">
           {body && (
-            <p className="text-[10px] text-gx-text/70 leading-relaxed whitespace-pre-wrap">
+            <p className="text-[10px] text-foreground/70 leading-relaxed whitespace-pre-wrap">
               {body.length > 500 ? body.slice(0, 500) + "…" : body}
             </p>
           )}
           {schedule && (
-            <div className="flex items-center gap-1.5 text-[9px] text-gx-muted">
+            <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
               <CalendarClock size={9} />
               <span className="font-mono">{schedule}</span>
             </div>

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Editor, Monaco, OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
@@ -305,7 +306,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 size={14} className="animate-spin" /> Loading conflict sides…
       </div>
     );
@@ -313,7 +314,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
 
   if (error && !sides) {
     return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
         Failed to load conflict data for <code className="font-mono">{path}</code>: {error}
       </div>
     );
@@ -322,15 +323,15 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
   const language = languageForPath(path);
 
   return (
-    <div className="flex h-full flex-col bg-gx-bg-sub">
+    <div className="flex h-full flex-col bg-background">
       {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border bg-gx-surface px-3 py-1.5">
-        <div className="flex items-center gap-2 text-xs text-gx-text">
+      <div className="flex shrink-0 items-center justify-between border-b border-border bg-card px-3 py-1.5">
+        <div className="flex items-center gap-2 text-xs text-foreground">
           <span className="font-medium">Merge Editor</span>
-          <span className="text-gx-muted">—</span>
-          <span className="font-mono text-gx-muted">{path}</span>
+          <span className="text-muted-foreground">—</span>
+          <span className="font-mono text-muted-foreground">{path}</span>
           {filePositionLabel && (
-            <span className="rounded bg-gx-bg-sub px-1.5 py-0.5 text-[10px] text-gx-muted">
+            <span className="rounded bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
               {filePositionLabel}
             </span>
           )}
@@ -341,7 +342,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
             <div className="flex items-center gap-0.5">
               <button
                 type="button"
-                className="flex h-6 w-6 items-center justify-center rounded text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gx-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 onClick={onPrevFile}
                 disabled={!onPrevFile}
                 aria-label="Previous conflict file"
@@ -351,7 +352,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
               </button>
               <button
                 type="button"
-                className="flex h-6 w-6 items-center justify-center rounded text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gx-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 onClick={onNextFile}
                 disabled={!onNextFile}
                 aria-label="Next conflict file"
@@ -361,19 +362,19 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
               </button>
             </div>
           )}
-          <button
+          <Button variant="default"
             type="button"
-            className="btn btn-primary flex items-center gap-1.5 text-xs"
+            className="flex items-center gap-1.5 text-xs"
             onClick={handleSave}
             disabled={saving}
             aria-label="Save resolution"
           >
             {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
             Save Resolution
-          </button>
+          </Button>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onCancel}
             aria-label="Close merge editor"
             title="Close"
@@ -384,18 +385,18 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
       </div>
 
       {error && (
-        <div className="shrink-0 border-b border-gx-error/40 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+        <div className="shrink-0 border-b border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
 
       {/* Top row: 3 read-only panes (hidden for pointer conflicts) */}
       {pointerKind ? (
-        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto border-b border-gx-border">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto border-b border-border">
           <PointerConflictCard path={path} kind={pointerKind} />
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 border-b border-gx-border">
+        <div className="flex min-h-0 flex-1 border-b border-border">
           <SidePane
             title="Base"
             content={sides?.base ?? ""}
@@ -404,7 +405,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
             options={editorOptions}
             onMount={handleMonacoMount}
           />
-          <div className="w-px shrink-0 bg-gx-border" />
+          <div className="w-px shrink-0 bg-border" />
           <SidePane
             title="Current (Ours)"
             content={sides?.current ?? ""}
@@ -413,7 +414,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
             options={editorOptions}
             baseContent={sides?.base ?? undefined}
           />
-          <div className="w-px shrink-0 bg-gx-border" />
+          <div className="w-px shrink-0 bg-border" />
           <SidePane
             title="Incoming (Theirs)"
             content={sides?.incoming ?? ""}
@@ -427,7 +428,7 @@ export function MergeEditor({ repoId, path, onResolved, onCancel, onNextFile, on
 
       {/* Bottom row: editable result pane */}
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-1 text-[10px] uppercase tracking-wider text-gx-muted">
+        <div className="shrink-0 border-b border-border bg-card px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
           Result (editable)
         </div>
         {conflicts.length > 0 && (
@@ -527,7 +528,7 @@ function SidePane({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
-      <div className="shrink-0 border-b border-gx-border bg-gx-surface px-3 py-1 text-[10px] uppercase tracking-wider text-gx-muted">
+      <div className="shrink-0 border-b border-border bg-card px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
       <div className="min-h-0 flex-1">
@@ -559,13 +560,13 @@ function ConflictToolbar({
   onNavigate: (direction: "next" | "prev") => void;
 }) {
   return (
-    <div className="shrink-0 overflow-x-auto border-b border-gx-border bg-gx-surface px-3 py-1.5">
+    <div className="shrink-0 overflow-x-auto border-b border-border bg-card px-3 py-1.5">
       <div className="flex items-center gap-3 text-xs">
         {/* Navigation buttons */}
         <div className="flex items-center gap-0.5">
           <button
             type="button"
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onNavigate("prev")}
             title="Previous conflict (Alt+↑)"
             aria-label="Previous conflict"
@@ -574,7 +575,7 @@ function ConflictToolbar({
           </button>
           <button
             type="button"
-            className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onNavigate("next")}
             title="Next conflict (Alt+↓)"
             aria-label="Next conflict"
@@ -583,20 +584,20 @@ function ConflictToolbar({
           </button>
         </div>
 
-        <span className="font-medium text-gx-text">
+        <span className="font-medium text-foreground">
           {conflicts.length} conflict{conflicts.length !== 1 ? "s" : ""}
         </span>
         {conflicts.map((region, i) => (
           <div
             key={`${region.startLine}-${region.endLine}`}
-            className="flex items-center gap-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5"
+            className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5"
           >
-            <span className="text-gx-muted">
+            <span className="text-muted-foreground">
               L{region.startLine + 1}–{region.endLine + 1}
             </span>
             <button
               type="button"
-              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-gx-info hover:bg-gx-info/10"
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-info hover:bg-info/10"
               onClick={() => onResolve(i, "current")}
               title="Accept Current (Ctrl+Shift+1)"
               aria-label={`Accept current for conflict at line ${region.startLine + 1}`}
@@ -605,7 +606,7 @@ function ConflictToolbar({
             </button>
             <button
               type="button"
-              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-gx-success hover:bg-gx-success/10"
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-success hover:bg-success/10"
               onClick={() => onResolve(i, "incoming")}
               title="Accept Incoming (Ctrl+Shift+2)"
               aria-label={`Accept incoming for conflict at line ${region.startLine + 1}`}
@@ -614,7 +615,7 @@ function ConflictToolbar({
             </button>
             <button
               type="button"
-              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-gx-warn hover:bg-gx-warn/10"
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-warning hover:bg-warning/10"
               onClick={() => onResolve(i, "both")}
               title="Accept Both (Ctrl+Shift+3)"
               aria-label={`Accept both for conflict at line ${region.startLine + 1}`}

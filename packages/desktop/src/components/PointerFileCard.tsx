@@ -56,27 +56,27 @@ export function PointerFileCard({
   return (
     <div
       className={clsx(
-        "flex flex-col gap-3 border-b border-gx-border bg-gx-surface p-4",
+        "flex flex-col gap-3 border-b border-border bg-card p-4",
         className,
       )}
       role="region"
       aria-label={`${label} staging for ${path}`}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 shrink-0 rounded bg-gx-accent/15 p-2 text-gx-accent">
+        <div className="mt-0.5 shrink-0 rounded bg-primary/15 p-2 text-primary">
           <FileCode2 size={16} aria-hidden="true" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-[12.5px]">
-            <span className="font-medium text-gx-text">{label}</span>
+            <span className="font-medium text-foreground">{label}</span>
             <span
-              className="rounded border border-gx-border px-1.5 py-[1px] font-mono text-[10px] text-gx-muted"
+              className="rounded border border-border px-1.5 py-[1px] font-mono text-[10px] text-muted-foreground"
               title={path}
             >
               {basename}
             </span>
           </div>
-          <p className="mt-1 text-[11px] leading-relaxed text-gx-muted">
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
             This change has whole-file actions. Discard restores the index version after confirmation.
           </p>
         </div>
@@ -84,7 +84,7 @@ export function PointerFileCard({
       <div
         role="toolbar"
         aria-label="Whole-file actions"
-        className="flex items-center gap-1 border-t border-gx-border/60 pt-3"
+        className="flex items-center gap-1 border-t border-border/60 pt-3"
       >
         <CardButton
           icon={<Plus size={12} />}
@@ -129,10 +129,10 @@ function CardButton({
 }) {
   const toneCls =
     tone === "success"
-      ? "hover:bg-gx-success/15 hover:text-gx-success"
+      ? "hover:bg-success/15 hover:text-success"
       : tone === "warn"
-        ? "hover:bg-gx-warn/15 hover:text-gx-warn"
-        : "hover:bg-gx-error/15 hover:text-gx-error";
+        ? "hover:bg-warning/15 hover:text-warning"
+        : "hover:bg-destructive/15 hover:text-destructive";
   return (
     <button
       type="button"
@@ -141,9 +141,9 @@ function CardButton({
       aria-label={label}
       title={label}
       className={clsx(
-        "flex items-center gap-1.5 rounded border border-transparent px-2 py-1 text-[11px] text-gx-muted transition",
+        "flex items-center gap-1.5 rounded border border-transparent px-2 py-1 text-[11px] text-muted-foreground transition",
         toneCls,
-        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-gx-muted",
+        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground",
         className,
       )}
     >

@@ -91,8 +91,8 @@ export function TransferProgressBar({ transfer }: TransferProgressBarProps) {
   return (
     <div
       className={clsx(
-        "flex flex-col gap-1.5 rounded-md border border-gx-border bg-gx-surface px-3 py-2",
-        isResuming && "border-gx-warning/40",
+        "flex flex-col gap-1.5 rounded-md border border-border bg-card px-3 py-2",
+        isResuming && "border-warning/40",
       )}
       role="group"
       aria-label={`Transfer progress: ${transfer.fileName}`}
@@ -101,23 +101,23 @@ export function TransferProgressBar({ transfer }: TransferProgressBarProps) {
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           {direction === "upload" ? (
-            <ArrowUp size={14} className="shrink-0 text-gx-accent" aria-label="Upload" />
+            <ArrowUp size={14} className="shrink-0 text-primary" aria-label="Upload" />
           ) : (
-            <ArrowDown size={14} className="shrink-0 text-gx-info" aria-label="Download" />
+            <ArrowDown size={14} className="shrink-0 text-info" aria-label="Download" />
           )}
-          <span className="truncate text-[12px] font-medium text-gx-text" title={transfer.fileName}>
+          <span className="truncate text-[12px] font-medium text-foreground" title={transfer.fileName}>
             {transfer.fileName}
           </span>
         </div>
 
-        <span className="shrink-0 text-[11px] font-medium text-gx-muted">
+        <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
           {percent}%
         </span>
       </div>
 
       {/* Progress bar */}
       <div
-        className="h-1.5 w-full overflow-hidden rounded-full bg-gx-bg-sub"
+        className="h-1.5 w-full overflow-hidden rounded-full bg-background"
         role="progressbar"
         aria-valuenow={percent}
         aria-valuemin={0}
@@ -127,25 +127,25 @@ export function TransferProgressBar({ transfer }: TransferProgressBarProps) {
         <div
           className={clsx(
             "h-full rounded-full transition-all duration-300 ease-out",
-            isResuming ? "bg-gx-warning" : direction === "upload" ? "bg-gx-accent" : "bg-gx-info",
+            isResuming ? "bg-warning" : direction === "upload" ? "bg-primary" : "bg-info",
           )}
           style={{ width: `${percent}%` }}
         />
       </div>
 
       {/* Bottom row: stats */}
-      <div className="flex items-center justify-between text-[11px] text-gx-muted">
+      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         {/* Left: resuming indicator or speed + ETA */}
         <div className="flex items-center gap-2">
           {isResuming ? (
-            <span className="flex items-center gap-1 text-gx-warning font-medium">
+            <span className="flex items-center gap-1 text-warning font-medium">
               <Loader2 size={12} className="animate-spin" aria-hidden="true" />
               Resuming…
             </span>
           ) : isActive ? (
             <>
               <span>{formatSpeed(speed)}</span>
-              <span className="text-gx-border">·</span>
+              <span className="text-border">·</span>
               <span>{formatEta(eta)}</span>
             </>
           ) : null}

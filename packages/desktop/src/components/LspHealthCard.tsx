@@ -86,22 +86,22 @@ export function LspHealthCard({ className }: Props) {
 
   if (servers.length === 0) {
     return (
-      <div className={`rounded border border-gx-border bg-gx-surface p-4 ${className ?? ""}`}>
-        <h3 className="text-sm font-medium text-gx-text mb-2">Language Servers</h3>
-        <p className="text-xs text-gx-muted">No language servers discovered.</p>
+      <div className={`rounded border border-border bg-card p-4 ${className ?? ""}`}>
+        <h3 className="text-sm font-medium text-foreground mb-2">Language Servers</h3>
+        <p className="text-xs text-muted-foreground">No language servers discovered.</p>
       </div>
     );
   }
 
   return (
-    <div className={`rounded border border-gx-border bg-gx-surface p-4 ${className ?? ""}`}>
-      <h3 className="text-sm font-medium text-gx-text mb-3">Language Servers</h3>
+    <div className={`rounded border border-border bg-card p-4 ${className ?? ""}`}>
+      <h3 className="text-sm font-medium text-foreground mb-3">Language Servers</h3>
 
       <div className="space-y-2">
         {servers.map((server) => (
           <div
             key={server.language}
-            className="flex items-center gap-3 rounded bg-gx-bg-sub px-3 py-2"
+            className="flex items-center gap-3 rounded bg-background px-3 py-2"
           >
             {/* Status icon */}
             <StatusIcon state={server.state} />
@@ -109,14 +109,14 @@ export function LspHealthCard({ className }: Props) {
             {/* Server info */}
             <div className="flex-1 min-w-0">
               <div className="flex items-baseline gap-2">
-                <span className="text-xs font-medium text-gx-text capitalize">
+                <span className="text-xs font-medium text-foreground capitalize">
                   {server.language}
                 </span>
-                <span className="text-[10px] text-gx-muted truncate">
+                <span className="text-[10px] text-muted-foreground truncate">
                   {server.command ?? "—"}
                 </span>
               </div>
-              <div className="flex items-center gap-3 text-[10px] text-gx-muted mt-0.5">
+              <div className="flex items-center gap-3 text-[10px] text-muted-foreground mt-0.5">
                 <span>Status: {stateLabel(server.state)}</span>
                 {server.pid && <span>PID: {server.pid}</span>}
                 {server.memoryBytes != null && (
@@ -127,7 +127,7 @@ export function LspHealthCard({ className }: Props) {
                 )}
               </div>
               {server.error && (
-                <p className="text-[10px] text-gx-error mt-0.5 truncate">
+                <p className="text-[10px] text-destructive mt-0.5 truncate">
                   {server.error}
                 </p>
               )}
@@ -139,7 +139,7 @@ export function LspHealthCard({ className }: Props) {
                 <button
                   type="button"
                   onClick={() => handleRestart(server.language)}
-                  className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
                   title="Restart"
                   aria-label={`Restart ${server.language} server`}
                 >
@@ -150,7 +150,7 @@ export function LspHealthCard({ className }: Props) {
                 <button
                   type="button"
                   onClick={() => handleStop(server.language)}
-                  className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-error transition"
+                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive transition"
                   title="Stop"
                   aria-label={`Stop ${server.language} server`}
                 >
@@ -192,13 +192,13 @@ export async function getLspDiagnosticsBundle(): Promise<string> {
 function StatusIcon({ state }: { state: LspServerStatusInfo["state"] }) {
   switch (state) {
     case "running":
-      return <Check size={12} className="text-gx-success shrink-0" />;
+      return <Check size={12} className="text-success shrink-0" />;
     case "restarting":
-      return <Loader2 size={12} className="animate-spin text-gx-warn shrink-0" />;
+      return <Loader2 size={12} className="animate-spin text-warning shrink-0" />;
     case "error":
-      return <X size={12} className="text-gx-error shrink-0" />;
+      return <X size={12} className="text-destructive shrink-0" />;
     default:
-      return <Minus size={12} className="text-gx-muted shrink-0" />;
+      return <Minus size={12} className="text-muted-foreground shrink-0" />;
   }
 }
 

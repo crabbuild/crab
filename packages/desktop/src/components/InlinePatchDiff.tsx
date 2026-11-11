@@ -96,7 +96,7 @@ export function InlinePatchDiff({
 
   if (parsed.files.length === 0) {
     return (
-      <div className="p-6 text-center text-sm text-gx-muted">
+      <div className="p-6 text-center text-sm text-muted-foreground">
         {emptyState ?? "No hunks in this patch."}
       </div>
     );
@@ -112,14 +112,14 @@ export function InlinePatchDiff({
         const pointer = isPointerPatch(fileSubPatch);
         return (
           <Fragment key={f.path}>
-            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px]">
-              <span className="font-mono text-gx-text">{f.path}</span>
+            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[11px]">
+              <span className="font-mono text-foreground">{f.path}</span>
               {f.oldPath !== f.path && (
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   (renamed from {f.oldPath})
                 </span>
               )}
-              <span className="ml-auto text-gx-muted">
+              <span className="ml-auto text-muted-foreground">
                 {pointer.isPointer
                   ? "pointer file"
                   : `${f.hunks.length} hunk${f.hunks.length === 1 ? "" : "s"}`}
@@ -210,7 +210,7 @@ function PointerFileBlock({
   onDiscardFile,
 }: PointerFileBlockProps) {
   return (
-    <div className="border-b border-gx-border">
+    <div className="border-b border-border">
       <PointerFileCard
         path={file.path}
         kind={kind}
@@ -219,7 +219,7 @@ function PointerFileBlock({
         onUnstageFile={onUnstageFile}
         onDiscardFile={onDiscardFile}
       />
-      <div className="bg-gx-bg-sub">
+      <div className="bg-background">
         {file.hunks.map((hunk) => (
           <PatchDiff
             key={`${hunk.oldStart}-${hunk.newStart}-${hunk.indexInFile}`}
@@ -299,7 +299,7 @@ function HunkBlock({
   const header = hunkHeader(hunk);
 
   return (
-    <div className="border-b border-gx-border">
+    <div className="border-b border-border">
       <HunkToolbar
         hunkNumber={hunkNumber}
         hunkCount={hunkCount}
@@ -309,7 +309,7 @@ function HunkBlock({
         onUnstage={onUnstage}
         onDiscard={onDiscard}
       />
-      <div className="bg-gx-bg-sub">
+      <div className="bg-background">
         <PatchDiff
           patch={subPatch}
           options={options}
@@ -367,26 +367,26 @@ function LineDiscardStrip({
   if (lines.length === 0) return null;
 
   return (
-    <details className="group border-t border-gx-border/50 bg-gx-bg text-[11px]">
-      <summary className="cursor-pointer px-3 py-1 text-gx-muted hover:text-gx-text">
+    <details className="group border-t border-border/50 bg-background text-[11px]">
+      <summary className="cursor-pointer px-3 py-1 text-muted-foreground hover:text-foreground">
         Discard individual line{lines.length === 1 ? "" : "s"} ({lines.length})
       </summary>
-      <ul className="divide-y divide-gx-border/30">
+      <ul className="divide-y divide-border/30">
         {lines.map((l, i) => (
           <li
             key={`${l.side}-${l.absoluteLine}-${i}`}
-            className="group/row flex items-center gap-2 px-3 py-0.5 font-mono text-[11px] hover:bg-gx-surface-hover"
+            className="group/row flex items-center gap-2 px-3 py-0.5 font-mono text-[11px] hover:bg-accent"
           >
             <span
               className={
                 l.side === "add"
-                  ? "w-10 shrink-0 text-right text-gx-success"
-                  : "w-10 shrink-0 text-right text-gx-error"
+                  ? "w-10 shrink-0 text-right text-success"
+                  : "w-10 shrink-0 text-right text-destructive"
               }
             >
               {l.side === "add" ? `+${l.absoluteLine}` : `-${l.absoluteLine}`}
             </span>
-            <span className="min-w-0 flex-1 truncate text-gx-text">
+            <span className="min-w-0 flex-1 truncate text-foreground">
               {l.raw}
             </span>
             <button
@@ -401,7 +401,7 @@ function LineDiscardStrip({
                   rawLine: l.raw,
                 })
               }
-              className="opacity-0 transition group-hover/row:opacity-100 hover:text-gx-error"
+              className="opacity-0 transition group-hover/row:opacity-100 hover:text-destructive"
             >
               <Trash2 size={11} />
             </button>

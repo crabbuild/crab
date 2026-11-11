@@ -111,10 +111,10 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
   if (step === "detecting") {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-        <Loader2 size={32} className="animate-spin text-gx-accent" />
+        <Loader2 size={32} className="animate-spin text-primary" />
         <div className="text-center">
-          <h2 className="text-sm font-semibold text-gx-text">Detecting AI Agents</h2>
-          <p className="mt-1 text-xs text-gx-muted">
+          <h2 className="text-sm font-semibold text-foreground">Detecting AI Agents</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
             Scanning your PATH for Claude Code and Codex…
           </p>
         </div>
@@ -139,21 +139,21 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
             <button
               type="button"
               onClick={() => setStep("results")}
-              className="rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
               aria-label="Back"
             >
               <ChevronRight size={14} className="rotate-180" />
             </button>
-            <Bot size={18} className="text-gx-accent" />
-            <h2 className="text-sm font-semibold text-gx-text">Install {guide.name}</h2>
+            <Bot size={18} className="text-primary" />
+            <h2 className="text-sm font-semibold text-foreground">Install {guide.name}</h2>
           </div>
 
           {/* Steps */}
-          <div className="space-y-3 rounded-lg border border-gx-border bg-gx-surface p-4">
+          <div className="space-y-3 rounded-lg border border-border bg-card p-4">
             <ol className="space-y-2.5">
               {guide.steps.map((s, i) => (
-                <li key={i} className="flex gap-2 text-xs text-gx-text">
-                  <span className="shrink-0 font-mono text-gx-accent">{i + 1}.</span>
+                <li key={i} className="flex gap-2 text-xs text-foreground">
+                  <span className="shrink-0 font-mono text-primary">{i + 1}.</span>
                   <span>{s}</span>
                 </li>
               ))}
@@ -161,17 +161,17 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
 
             {/* Quick install command */}
             {guide.command && (
-              <div className="mt-3 rounded-md border border-gx-border bg-gx-bg p-2.5">
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] text-gx-muted">
+              <div className="mt-3 rounded-md border border-border bg-background p-2.5">
+                <div className="mb-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                   <Terminal size={10} />
                   Quick install
                 </div>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 font-mono text-xs text-gx-text">{guide.command}</code>
+                  <code className="flex-1 font-mono text-xs text-foreground">{guide.command}</code>
                   <button
                     type="button"
                     onClick={() => handleCopyCommand(guide.command!)}
-                    className="shrink-0 rounded px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/10 transition"
+                    className="shrink-0 rounded px-2 py-0.5 text-[10px] text-primary hover:bg-primary/10 transition"
                   >
                     {copied ? "Copied!" : "Copy"}
                   </button>
@@ -186,7 +186,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
                 e.preventDefault();
                 (window as any).crab?.openUrl(guide.url);
               }}
-              className="mt-2 flex items-center gap-1.5 text-xs text-gx-accent hover:underline"
+              className="mt-2 flex items-center gap-1.5 text-xs text-primary hover:underline"
             >
               <ExternalLink size={11} />
               View documentation
@@ -197,7 +197,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
           <button
             type="button"
             onClick={() => detectAgents({ force: true })}
-            className="mt-4 flex w-full items-center justify-center gap-2 rounded-md bg-gx-accent px-4 py-2 text-xs font-medium text-white hover:bg-gx-accent/80 transition"
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/80 transition"
           >
             <RefreshCw size={12} />
             Re-detect agents
@@ -211,11 +211,11 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 p-8">
-      <Bot size={36} className="text-gx-muted/60" />
+      <Bot size={36} className="text-muted-foreground/60" />
 
       <div className="text-center">
-        <h2 className="text-base font-semibold text-gx-text">Agent Setup</h2>
-        <p className="mt-1 max-w-[360px] text-xs text-gx-muted">
+        <h2 className="text-base font-semibold text-foreground">Agent Setup</h2>
+        <p className="mt-1 max-w-[360px] text-xs text-muted-foreground">
           {availableAgents.length > 0
             ? "The following AI agents are ready to use."
             : "No AI agents detected on your system. Install at least one to get started."}
@@ -223,7 +223,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
       </div>
 
       {error && (
-        <div className="rounded-md border border-gx-error/30 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
@@ -233,27 +233,27 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
         {agents.map((agent) => (
           <div
             key={agent.binary}
-            className="flex items-center gap-3 rounded-lg border border-gx-border bg-gx-surface px-4 py-3"
+            className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
           >
             <div
               className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                agent.available ? "bg-gx-success/15" : "bg-gx-bg"
+                agent.available ? "bg-success/15" : "bg-background"
               }`}
             >
               {agent.available ? (
-                <Check size={14} className="text-gx-success" />
+                <Check size={14} className="text-success" />
               ) : (
-                <X size={14} className="text-gx-muted" />
+                <X size={14} className="text-muted-foreground" />
               )}
             </div>
             <div className="flex-1">
-              <div className="text-xs font-medium text-gx-text">{agent.name}</div>
+              <div className="text-xs font-medium text-foreground">{agent.name}</div>
               {agent.available ? (
-                <div className="text-[10px] text-gx-muted">
+                <div className="text-[10px] text-muted-foreground">
                   v{agent.version} — {agent.path}
                 </div>
               ) : (
-                <div className="text-[10px] text-gx-error/80">Not installed</div>
+                <div className="text-[10px] text-destructive/80">Not installed</div>
               )}
             </div>
             {!agent.available && (
@@ -263,7 +263,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
                   setSelectedGuide(agent.binary);
                   setStep("install-guide");
                 }}
-                className="rounded px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/10 transition"
+                className="rounded px-2 py-1 text-[10px] text-primary hover:bg-primary/10 transition"
               >
                 Install →
               </button>
@@ -299,7 +299,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
         <button
           type="button"
           onClick={() => detectAgents({ force: true })}
-          className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-2 text-xs text-gx-muted hover:text-gx-text transition"
+          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition"
         >
           <RefreshCw size={12} />
           Re-detect
@@ -308,7 +308,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
           <button
             type="button"
             onClick={() => onReady(agents)}
-            className="flex items-center gap-1.5 rounded-md bg-gx-accent px-4 py-2 text-xs font-medium text-white hover:bg-gx-accent/80 transition"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/80 transition"
           >
             Continue
             <ChevronRight size={12} />
@@ -318,7 +318,7 @@ export function AgentSetupWizard({ onReady, onSkip }: Props) {
           <button
             type="button"
             onClick={onSkip}
-            className="text-xs text-gx-muted hover:text-gx-text transition"
+            className="text-xs text-muted-foreground hover:text-foreground transition"
           >
             Skip for now
           </button>
@@ -340,18 +340,18 @@ function AgentPlaceholder({
   onInstall: () => void;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-dashed border-gx-border bg-gx-bg px-4 py-3">
-      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gx-surface">
-        <X size={14} className="text-gx-muted" />
+    <div className="flex items-center gap-3 rounded-lg border border-dashed border-border bg-background px-4 py-3">
+      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-card">
+        <X size={14} className="text-muted-foreground" />
       </div>
       <div className="flex-1">
-        <div className="text-xs font-medium text-gx-text">{name}</div>
-        <div className="text-[10px] text-gx-error/80">Not installed</div>
+        <div className="text-xs font-medium text-foreground">{name}</div>
+        <div className="text-[10px] text-destructive/80">Not installed</div>
       </div>
       <button
         type="button"
         onClick={onInstall}
-        className="rounded px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/10 transition"
+        className="rounded px-2 py-1 text-[10px] text-primary hover:bg-primary/10 transition"
       >
         Install →
       </button>

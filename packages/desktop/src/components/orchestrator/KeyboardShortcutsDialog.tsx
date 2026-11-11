@@ -58,7 +58,7 @@ export function KeyboardShortcutsButton() {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 px-2 py-2 text-xs text-gx-muted hover:text-gx-text transition"
+        className="flex items-center gap-1 px-2 py-2 text-xs text-muted-foreground hover:text-foreground transition"
         title="Keyboard shortcuts"
         aria-label="Keyboard shortcuts"
         aria-haspopup="dialog"
@@ -69,17 +69,17 @@ export function KeyboardShortcutsButton() {
 
       {open && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-gx-border bg-gx-surface shadow-xl"
+          className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-border bg-card shadow-xl"
           role="dialog"
           aria-label="Chat keyboard shortcuts"
         >
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-gx-border px-3 py-2">
-            <span className="text-xs font-medium text-gx-text">Chat Keyboard Shortcuts</span>
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-xs font-medium text-foreground">Chat Keyboard Shortcuts</span>
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition"
               aria-label="Close"
             >
               <X size={11} />
@@ -93,8 +93,8 @@ export function KeyboardShortcutsButton() {
                 key={shortcut.keys}
                 className="flex items-center justify-between gap-3 py-1"
               >
-                <span className="text-[11px] text-gx-muted">{shortcut.description}</span>
-                <kbd className="shrink-0 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 font-mono text-[10px] text-gx-text">
+                <span className="text-[11px] text-muted-foreground">{shortcut.description}</span>
+                <kbd className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] text-foreground">
                   {shortcut.keys}
                 </kbd>
               </div>
@@ -102,8 +102,8 @@ export function KeyboardShortcutsButton() {
           </div>
 
           {/* Footer hint */}
-          <div className="border-t border-gx-border/60 px-3 py-2">
-            <p className="text-[10px] text-gx-muted">
+          <div className="border-t border-border/60 px-3 py-2">
+            <p className="text-[10px] text-muted-foreground">
               Vim shortcuts (j/k) require Vim navigation to be enabled.
             </p>
           </div>

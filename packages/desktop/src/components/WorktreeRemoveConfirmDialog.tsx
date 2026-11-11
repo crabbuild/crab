@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import clsx from "clsx";
 import { AlertTriangle, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
@@ -79,16 +80,16 @@ export function WorktreeRemoveConfirmDialog({
         aria-modal="true"
         aria-labelledby={headingId}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
-        <div className="flex items-start gap-3 border-b border-gx-border p-4">
+        <div className="flex items-start gap-3 border-b border-border p-4">
           <div
             className={clsx(
               "mt-0.5 shrink-0 rounded p-2",
               isDirty
-                ? "bg-gx-error/15 text-gx-error"
-                : "bg-gx-warn/15 text-gx-warn",
+                ? "bg-destructive/15 text-destructive"
+                : "bg-warning/15 text-warning",
             )}
           >
             {isDirty ? (
@@ -100,19 +101,19 @@ export function WorktreeRemoveConfirmDialog({
           <div className="min-w-0 flex-1">
             <h2
               id={headingId}
-              className="text-[14px] font-semibold text-gx-text"
+              className="text-[14px] font-semibold text-foreground"
             >
               {isDirty ? "Force remove worktree with uncommitted changes?" : "Remove worktree?"}
             </h2>
-            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-gx-muted">
+            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               {isDirty ? (
                 <>
                   Worktree{" "}
-                  <code className="rounded bg-gx-bg-sub px-1 font-mono text-gx-text">
+                  <code className="rounded bg-background px-1 font-mono text-foreground">
                     {worktreeName}
                   </code>{" "}
                   has{" "}
-                  <span className="font-semibold text-gx-warn">
+                  <span className="font-semibold text-warning">
                     {dirtyCount} uncommitted change{dirtyCount !== 1 ? "s" : ""}
                   </span>
                   . Force removing will permanently discard these changes.
@@ -120,7 +121,7 @@ export function WorktreeRemoveConfirmDialog({
               ) : (
                 <>
                   Remove worktree{" "}
-                  <code className="rounded bg-gx-bg-sub px-1 font-mono text-gx-text">
+                  <code className="rounded bg-background px-1 font-mono text-foreground">
                     {worktreeName}
                   </code>
                   ? This cannot be undone.
@@ -131,25 +132,25 @@ export function WorktreeRemoveConfirmDialog({
         </div>
 
         {/* Path display */}
-        <div className="border-b border-gx-border px-4 py-2">
-          <span className="text-[11px] text-gx-muted">Path: </span>
-          <code className="font-mono text-[11px] text-gx-text">{worktreePath}</code>
+        <div className="border-b border-border px-4 py-2">
+          <span className="text-[11px] text-muted-foreground">Path: </span>
+          <code className="font-mono text-[11px] text-foreground">{worktreePath}</code>
         </div>
 
         {/* Typed confirmation for dirty worktrees */}
         {isDirty && (
-          <div className="border-b border-gx-border px-4 py-3">
-            <label className="block text-[12px] text-gx-muted">
-              Type <code className="rounded bg-gx-bg-sub px-1 font-mono font-semibold text-gx-error">REMOVE</code> to confirm force removal:
+          <div className="border-b border-border px-4 py-3">
+            <label className="block text-[12px] text-muted-foreground">
+              Type <code className="rounded bg-background px-1 font-mono font-semibold text-destructive">REMOVE</code> to confirm force removal:
             </label>
-            <input
+            <Input
               ref={inputRef}
               type="text"
               className={clsx(
-                "mt-1.5 w-full rounded border bg-gx-bg-sub px-2 py-1.5 font-mono text-[12px] text-gx-text focus-visible:outline-none transition",
+                "mt-1.5 w-full rounded border bg-background px-2 py-1.5 font-mono text-[12px] text-foreground focus-visible:outline-none transition",
                 matches
-                  ? "border-gx-accent focus:ring-1 focus:ring-gx-accent"
-                  : "border-gx-border focus:ring-1 focus:ring-gx-border",
+                  ? "border-primary focus:ring-1 focus:ring-primary"
+                  : "border-border focus:ring-1 focus:ring-border",
               )}
               value={typedValue}
               onChange={(e) => setTypedValue(e.target.value)}
@@ -170,8 +171,8 @@ export function WorktreeRemoveConfirmDialog({
             type="button"
             onClick={onCancel}
             className={clsx(
-              "rounded border border-gx-border bg-gx-surface px-3 py-1.5 text-[12px] text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border bg-card px-3 py-1.5 text-[12px] text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
           >
             Cancel
@@ -183,10 +184,10 @@ export function WorktreeRemoveConfirmDialog({
               disabled={!matches}
               className={clsx(
                 "rounded border px-3 py-1.5 text-[12px] font-medium transition",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-error",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive",
                 matches
-                  ? "border-gx-error/60 bg-gx-error/15 text-gx-error hover:bg-gx-error/25"
-                  : "cursor-not-allowed border-gx-border bg-gx-surface text-gx-muted opacity-50",
+                  ? "border-destructive/60 bg-destructive/15 text-destructive hover:bg-destructive/25"
+                  : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50",
               )}
               aria-label="Force Remove"
             >
@@ -197,8 +198,8 @@ export function WorktreeRemoveConfirmDialog({
               type="button"
               onClick={() => onConfirm(false)}
               className={clsx(
-                "rounded border border-gx-error/60 bg-gx-error/15 px-3 py-1.5 text-[12px] font-medium text-gx-error transition",
-                "hover:bg-gx-error/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-error",
+                "rounded border border-destructive/60 bg-destructive/15 px-3 py-1.5 text-[12px] font-medium text-destructive transition",
+                "hover:bg-destructive/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive",
               )}
               aria-label="Remove"
             >

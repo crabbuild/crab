@@ -1,3 +1,4 @@
+import { NativeSelect } from "@/components/ui/native-select";
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Shield, Zap } from "lucide-react";
 
@@ -95,24 +96,24 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
   };
 
   return (
-    <div className="border-b border-gx-border/60">
+    <div className="border-b border-border/60">
       {/* Collapse toggle */}
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] text-gx-muted transition hover:text-gx-text"
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] text-muted-foreground transition hover:text-foreground"
         aria-expanded={expanded}
         aria-controls="steering-controls-panel"
       >
         {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         <span>Steering</span>
         {controls.fastMode && (
-          <span className="ml-1 rounded-full bg-gx-accent/15 px-1.5 py-0.5 text-[9px] text-gx-accent">
+          <span className="ml-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-[9px] text-primary">
             Fast
           </span>
         )}
         {controls.model && (
-          <span className="ml-1 text-[9px] text-gx-muted/70">
+          <span className="ml-1 text-[9px] text-muted-foreground/70">
             {models.find((m) => m.value === controls.model)?.label ?? controls.model}
           </span>
         )}
@@ -131,13 +132,13 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
             <div className="flex items-center gap-1.5">
               <label
                 htmlFor="steering-model"
-                className="text-[10px] text-gx-muted"
+                className="text-[10px] text-muted-foreground"
               >
                 Model
               </label>
-              <select
+              <NativeSelect
                 id="steering-model"
-                className="rounded border border-gx-border bg-gx-bg px-1.5 py-0.5 text-[10px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
                 value={controls.model ?? ""}
                 onChange={(e) => handleModelChange(e.target.value)}
                 aria-label="Select model"
@@ -148,7 +149,7 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
                     {m.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
           )}
 
@@ -156,13 +157,13 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
           <div className="flex items-center gap-1.5">
             <label
               htmlFor="steering-reasoning"
-              className="text-[10px] text-gx-muted"
+              className="text-[10px] text-muted-foreground"
             >
               Reasoning
             </label>
-            <select
+            <NativeSelect
               id="steering-reasoning"
-              className="rounded border border-gx-border bg-gx-bg px-1.5 py-0.5 text-[10px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+              className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus:border-primary"
               value={controls.reasoningLevel ?? "medium"}
               onChange={(e) => handleReasoningChange(e.target.value as ReasoningLevel)}
               aria-label="Reasoning level"
@@ -172,7 +173,7 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
                   {l.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
 
           {/* Fast mode toggle */}
@@ -181,8 +182,8 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
             onClick={handleFastModeToggle}
             className={`flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] transition ${
               controls.fastMode
-                ? "border-gx-accent/60 bg-gx-accent/10 text-gx-accent"
-                : "border-gx-border bg-gx-bg text-gx-muted hover:text-gx-text"
+                ? "border-primary/60 bg-primary/10 text-primary"
+                : "border-border bg-background text-muted-foreground hover:text-foreground"
             }`}
             role="switch"
             aria-checked={controls.fastMode ?? false}
@@ -197,7 +198,7 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
             <button
               type="button"
               onClick={() => setPermissionsOpen(!permissionsOpen)}
-              className="flex items-center gap-1 rounded border border-gx-border bg-gx-bg px-2 py-0.5 text-[10px] text-gx-muted transition hover:text-gx-text"
+              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[10px] text-muted-foreground transition hover:text-foreground"
               aria-expanded={permissionsOpen}
               aria-haspopup="dialog"
               aria-label="Tool permissions"
@@ -209,11 +210,11 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
             {/* Permissions dropdown */}
             {permissionsOpen && (
               <div
-                className="absolute left-0 top-full z-10 mt-1 w-56 rounded border border-gx-border bg-gx-bg p-3 shadow-lg"
+                className="absolute left-0 top-full z-10 mt-1 w-56 rounded border border-border bg-background p-3 shadow-lg"
                 role="dialog"
                 aria-label="Tool permissions"
               >
-                <div className="mb-2 text-[10px] font-medium text-gx-text">
+                <div className="mb-2 text-[10px] font-medium text-foreground">
                   Tool Permissions
                 </div>
                 <ul className="space-y-1.5" role="list">
@@ -226,11 +227,11 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
                           id={`perm-${key}`}
                           checked={checked}
                           onChange={(e) => handlePermissionChange(key, e.target.checked)}
-                          className="h-3 w-3 rounded border-gx-border accent-gx-accent"
+                          className="h-3 w-3 rounded border-border accent-primary"
                         />
                         <label
                           htmlFor={`perm-${key}`}
-                          className="flex-1 text-[10px] text-gx-text"
+                          className="flex-1 text-[10px] text-foreground"
                           title={hint}
                         >
                           {label}
@@ -242,7 +243,7 @@ export function SteeringControls({ controls, agentType, onChange }: Props) {
                 <button
                   type="button"
                   onClick={() => setPermissionsOpen(false)}
-                  className="mt-2 w-full rounded border border-gx-border px-2 py-1 text-[10px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+                  className="mt-2 w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
                 >
                   Done
                 </button>

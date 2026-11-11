@@ -1,3 +1,5 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Input } from "@/components/ui/input";
 import { useCallback } from "react";
 import type { ConditionSpec } from "../../lib/workflow-types";
 
@@ -31,8 +33,8 @@ export function ConditionBuilder({ condition, onChange }: Props) {
 
   return (
     <div className="space-y-2">
-      <select
-        className="input-field w-full text-xs"
+      <NativeSelect
+        className="w-full text-xs"
         value={condition?.kind ?? "none"}
         onChange={(e) => handleKindChange(e.target.value)}
       >
@@ -40,11 +42,11 @@ export function ConditionBuilder({ condition, onChange }: Props) {
         <option value="env">Environment variable</option>
         <option value="file_exists">File exists</option>
         <option value="expr">Expression</option>
-      </select>
+      </NativeSelect>
 
       {condition && (
-        <input
-          className="input-field w-full font-mono text-xs"
+        <Input
+          className="w-full font-mono text-xs"
           placeholder={
             condition.kind === "env"
               ? "CI"
@@ -58,7 +60,7 @@ export function ConditionBuilder({ condition, onChange }: Props) {
       )}
 
       {condition && (
-        <div className="text-[10px] text-gx-muted">
+        <div className="text-[10px] text-muted-foreground">
           {condition.kind === "env" && "Stage runs only if this env var is set and non-empty."}
           {condition.kind === "file_exists" && "Stage runs only if this file exists."}
           {condition.kind === "expr" && "Stage runs only if this expression evaluates to true."}

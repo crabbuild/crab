@@ -218,17 +218,17 @@ export function BatchNotificationBanner({ notification, onDismiss }: BatchNotifi
 
   return (
     <div
-      className="flex items-center gap-2 px-3 py-2 bg-yellow-50 dark:bg-yellow-900/20 border-b border-yellow-200 dark:border-yellow-800"
+      className="flex items-center gap-2 px-3 py-2 bg-warning/10 bg-warning/20 border-b border-warning border-warning"
       role="alert"
     >
-      <span className="text-sm text-yellow-700 dark:text-yellow-300">
+      <span className="text-sm text-warning text-warning">
         Batch {actionLabel}: {result.succeeded} succeeded, {result.failed} failed
       </span>
       <div className="flex-1" />
       <button
         type="button"
         onClick={onDismiss}
-        className="text-xs text-yellow-600 dark:text-yellow-400 hover:text-yellow-800 dark:hover:text-yellow-200 font-medium"
+        className="text-xs text-warning text-warning hover:text-warning hover:text-warning font-medium"
         aria-label="Dismiss notification"
       >
         Dismiss

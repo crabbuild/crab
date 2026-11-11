@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * Environment Panel — manages remote environment variables and PATH entries
  * with add/modify/delete, persist toggle, and inline validation.
@@ -78,13 +79,13 @@ function VariableForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2"
+      className="border border-border border-border rounded-md p-3 space-y-2"
     >
       <div>
-        <label htmlFor="env-name" className="text-xs text-gray-500 dark:text-gray-400">
+        <label htmlFor="env-name" className="text-xs text-muted-foreground text-muted-foreground">
           Variable Name
         </label>
-        <input
+        <Input
           id="env-name"
           type="text"
           value={name}
@@ -92,45 +93,45 @@ function VariableForm({
           placeholder="MY_VARIABLE"
           disabled={!!initial}
           className={clsx(
-            "w-full px-2 py-1 text-sm border rounded bg-white dark:bg-gray-800",
+            "w-full px-2 py-1 text-sm border rounded bg-background bg-card",
             nameError
-              ? "border-red-400 dark:border-red-600"
-              : "border-gray-300 dark:border-gray-600",
+              ? "border-destructive border-destructive"
+              : "border-border border-border",
             initial && "opacity-60 cursor-not-allowed",
           )}
           required
         />
         {nameError && (
-          <p className="flex items-center gap-1 mt-0.5 text-[10px] text-red-500" role="alert">
+          <p className="flex items-center gap-1 mt-0.5 text-[10px] text-destructive" role="alert">
             <AlertCircle className="w-3 h-3" />
             {nameError}
           </p>
         )}
       </div>
       <div>
-        <label htmlFor="env-value" className="text-xs text-gray-500 dark:text-gray-400">
+        <label htmlFor="env-value" className="text-xs text-muted-foreground text-muted-foreground">
           Value
         </label>
-        <input
+        <Input
           id="env-value"
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="value"
-          className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+          className="w-full px-2 py-1 text-sm border border-border border-border rounded bg-background bg-card"
         />
       </div>
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => setPersist(!persist)}
-          className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-400"
+          className="flex items-center gap-1 text-xs text-muted-foreground text-muted-foreground"
           aria-label={persist ? "Disable persistence" : "Enable persistence"}
         >
           {persist ? (
-            <ToggleRight className="w-4 h-4 text-blue-500" />
+            <ToggleRight className="w-4 h-4 text-info" />
           ) : (
-            <ToggleLeft className="w-4 h-4 text-gray-400" />
+            <ToggleLeft className="w-4 h-4 text-muted-foreground" />
           )}
           Persist to shell config
         </button>
@@ -139,13 +140,13 @@ function VariableForm({
         <button
           type="button"
           onClick={onCancel}
-          className="px-3 py-1 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+          className="px-3 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
         >
           Cancel
         </button>
         <button
           type="submit"
-          className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+          className="px-3 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
         >
           <span className="flex items-center gap-1">
             <Save className="w-3 h-3" />
@@ -175,15 +176,15 @@ function PathEntry({
   onRemove: () => void;
 }) {
   return (
-    <li className="flex items-center justify-between px-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-800 group">
-      <span className="text-xs text-gray-700 dark:text-gray-300 truncate flex-1" title={entry}>
+    <li className="flex items-center justify-between px-2 py-1 rounded hover:bg-background hover:bg-card group">
+      <span className="text-xs text-foreground text-muted-foreground truncate flex-1" title={entry}>
         {entry}
       </span>
       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
           onClick={onMoveUp}
           disabled={index === 0}
-          className="p-0.5 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+          className="p-0.5 text-muted-foreground hover:text-info hover:text-info rounded disabled:opacity-30 disabled:cursor-not-allowed"
           aria-label="Move up"
           title="Move up"
         >
@@ -192,7 +193,7 @@ function PathEntry({
         <button
           onClick={onMoveDown}
           disabled={index === total - 1}
-          className="p-0.5 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+          className="p-0.5 text-muted-foreground hover:text-info hover:text-info rounded disabled:opacity-30 disabled:cursor-not-allowed"
           aria-label="Move down"
           title="Move down"
         >
@@ -200,7 +201,7 @@ function PathEntry({
         </button>
         <button
           onClick={onRemove}
-          className="p-0.5 text-gray-500 hover:text-red-600 dark:hover:text-red-400 rounded"
+          className="p-0.5 text-muted-foreground hover:text-destructive hover:text-destructive rounded"
           aria-label="Remove path entry"
           title="Remove"
         >
@@ -276,8 +277,8 @@ export function EnvironmentPanel({
   return (
     <div className="flex flex-col h-full overflow-hidden" role="region" aria-label="Environment">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-700">
-        <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-300 flex items-center gap-1.5">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border border-border">
+        <h3 className="text-xs font-semibold text-muted-foreground text-muted-foreground flex items-center gap-1.5">
           <Variable className="w-4 h-4" />
           Environment
         </h3>
@@ -287,13 +288,13 @@ export function EnvironmentPanel({
         {/* Environment Variables Section */}
         <section>
           <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-300">
+            <h4 className="text-xs font-medium text-muted-foreground text-muted-foreground">
               Variables ({variables.length})
             </h4>
             {!showAddForm && !editingVar && (
               <button
                 onClick={() => setShowAddForm(true)}
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+                className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                 aria-label="Add variable"
               >
                 <Plus className="w-3 h-3" />
@@ -318,7 +319,7 @@ export function EnvironmentPanel({
           )}
 
           {variables.length === 0 && !showAddForm ? (
-            <p className="text-xs text-gray-500 dark:text-gray-400 italic">
+            <p className="text-xs text-muted-foreground text-muted-foreground italic">
               No environment variables loaded.
             </p>
           ) : (
@@ -326,28 +327,28 @@ export function EnvironmentPanel({
               {variables.map((v) => (
                 <li
                   key={v.name}
-                  className="flex items-center justify-between px-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-800 group"
+                  className="flex items-center justify-between px-2 py-1 rounded hover:bg-background hover:bg-card group"
                 >
                   <div className="min-w-0 flex-1">
-                    <span className="text-xs font-mono font-medium text-gray-700 dark:text-gray-300">
+                    <span className="text-xs font-mono font-medium text-foreground text-muted-foreground">
                       {v.name}
                     </span>
-                    <span className="text-xs text-gray-400 dark:text-gray-500 mx-1">=</span>
-                    <span className="text-xs text-gray-600 dark:text-gray-400 truncate">
+                    <span className="text-xs text-muted-foreground text-muted-foreground mx-1">=</span>
+                    <span className="text-xs text-muted-foreground text-muted-foreground truncate">
                       {v.value}
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={() => setEditingVar(v)}
-                      className="px-1.5 py-0.5 text-[10px] text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+                      className="px-1.5 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                       aria-label={`Edit ${v.name}`}
                     >
                       Edit
                     </button>
                     <button
                       onClick={() => onDeleteVariable(v.name)}
-                      className="p-0.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
+                      className="p-0.5 text-destructive hover:bg-destructive/10 hover:bg-destructive/20 rounded"
                       aria-label={`Delete ${v.name}`}
                     >
                       <Trash2 className="w-3 h-3" />
@@ -362,13 +363,13 @@ export function EnvironmentPanel({
         {/* PATH Section */}
         <section>
           <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-medium text-gray-600 dark:text-gray-300">
+            <h4 className="text-xs font-medium text-muted-foreground text-muted-foreground">
               PATH ({pathEntries.length})
             </h4>
             {!showAddPath && (
               <button
                 onClick={() => setShowAddPath(true)}
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+                className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-info text-info hover:bg-info/10 hover:bg-info/20 rounded"
                 aria-label="Add PATH entry"
               >
                 <Plus className="w-3 h-3" />
@@ -379,24 +380,24 @@ export function EnvironmentPanel({
 
           {showAddPath && (
             <form onSubmit={handleAddPath} className="flex items-center gap-2 mb-2">
-              <input
+              <Input
                 type="text"
                 value={newPathEntry}
                 onChange={(e) => setNewPathEntry(e.target.value)}
                 placeholder="/usr/local/bin"
-                className="flex-1 px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+                className="flex-1 px-2 py-1 text-xs border border-border border-border rounded bg-background bg-card"
                 autoFocus
               />
               <button
                 type="submit"
-                className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                className="px-2 py-1 text-xs bg-info text-info-foreground rounded hover:bg-info"
               >
                 Add
               </button>
               <button
                 type="button"
                 onClick={() => { setShowAddPath(false); setNewPathEntry(""); }}
-                className="px-2 py-1 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                className="px-2 py-1 text-xs text-muted-foreground text-muted-foreground hover:bg-card hover:bg-card rounded"
               >
                 Cancel
               </button>
@@ -404,7 +405,7 @@ export function EnvironmentPanel({
           )}
 
           {pathEntries.length === 0 ? (
-            <p className="text-xs text-gray-500 dark:text-gray-400 italic">
+            <p className="text-xs text-muted-foreground text-muted-foreground italic">
               No PATH entries loaded.
             </p>
           ) : (

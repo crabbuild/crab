@@ -102,10 +102,10 @@ export function TriStateCheckbox({
       className={clsx(
         "group/cb inline-flex h-[14px] w-[14px] shrink-0 items-center justify-center",
         "rounded-[2px] border transition focus-visible:outline-none",
-        "focus-visible:ring-1 focus-visible:ring-gx-accent focus-visible:ring-offset-1 focus-visible:ring-offset-gx-surface",
+        "focus-visible:ring-1 focus-visible:ring-primary focus-visible:ring-offset-1 focus-visible:ring-offset-card",
         state === "empty"
-          ? "border-gx-border bg-transparent hover:border-gx-text"
-          : "border-gx-accent bg-gx-accent",
+          ? "border-border bg-transparent hover:border-foreground"
+          : "border-primary bg-primary",
         disabled && "cursor-not-allowed opacity-50",
         !disabled && "cursor-pointer",
         className,
@@ -132,7 +132,7 @@ function Check() {
       fill="none"
       aria-hidden="true"
       focusable="false"
-      className="text-white"
+      className="text-foreground"
     >
       <path
         d="M1.5 5.2 L4 7.7 L8.5 2.8"
@@ -154,7 +154,7 @@ function Dash() {
       fill="none"
       aria-hidden="true"
       focusable="false"
-      className="text-white"
+      className="text-foreground"
     >
       <path
         d="M2 5 L8 5"

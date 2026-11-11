@@ -68,7 +68,7 @@ export function HydrateScopePicker({
   return (
     <div className="space-y-3">
       <div
-        className="inline-flex flex-wrap items-center gap-px rounded-md border border-gx-border bg-gx-surface p-0.5"
+        className="inline-flex flex-wrap items-center gap-px rounded-md border border-border bg-card p-0.5"
         role="tablist"
         aria-label="Hydrate scope"
       >
@@ -84,8 +84,8 @@ export function HydrateScopePicker({
               className={
                 "inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition " +
                 (active
-                  ? "bg-gx-bg-sub text-gx-text"
-                  : "text-gx-muted hover:text-gx-text")
+                  ? "bg-background text-foreground"
+                  : "text-muted-foreground hover:text-foreground")
               }
               onClick={() => onChange(defaultScopeFor(t.id, trackedPatterns, profiles))}
             >
@@ -96,9 +96,9 @@ export function HydrateScopePicker({
         })}
       </div>
 
-      <div className="rounded border border-gx-border bg-gx-bg-sub p-3">
+      <div className="rounded border border-border bg-background p-3">
         {scope.kind === "all" && (
-          <p className="text-xs text-gx-muted">
+          <p className="text-xs text-muted-foreground">
             All Crab and Git LFS files in the repository.
           </p>
         )}
@@ -207,7 +207,7 @@ function PatternList({
 
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-gx-muted">
+      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-muted-foreground">
         <span>Tracked patterns from .gitattributes</span>
         <SelectAllToggle
           allSelected={selSet.size === buckets.length && buckets.length > 0}
@@ -224,17 +224,17 @@ function PatternList({
                 className={
                   "flex cursor-pointer items-center justify-between rounded px-2 py-1.5 text-xs transition " +
                   (checked
-                    ? "bg-gx-accent/10 text-gx-text"
+                    ? "bg-primary/10 text-foreground"
                     : empty
-                      ? "text-gx-muted/60 hover:bg-gx-bg/50"
-                      : "hover:bg-gx-bg")
+                      ? "text-muted-foreground/60 hover:bg-background/50"
+                      : "hover:bg-background")
                 }
                 title={empty ? "No tracked files match this pattern yet" : undefined}
               >
                 <span className="flex items-center gap-2">
                   <input
                     type="checkbox"
-                    className="accent-gx-accent"
+                    className="accent-primary"
                     checked={checked}
                     onChange={(e) => {
                       const next = new Set(selSet);
@@ -245,7 +245,7 @@ function PatternList({
                   />
                   <code className="font-mono">{b.pattern}</code>
                 </span>
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"} ·{" "}
                   {formatBytes(b.bytes)}
                 </span>
@@ -274,7 +274,7 @@ function ExtensionList({
 
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-gx-muted">
+      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-muted-foreground">
         <span>Tracked file types</span>
         <SelectAllToggle
           allSelected={selSet.size === buckets.length && buckets.length > 0}
@@ -292,8 +292,8 @@ function ExtensionList({
               className={
                 "rounded-full border px-2.5 py-1 text-[11px] transition " +
                 (checked
-                  ? "border-gx-accent bg-gx-accent/15 text-gx-text"
-                  : "border-gx-border text-gx-muted hover:text-gx-text")
+                  ? "border-primary bg-primary/15 text-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground")
               }
               onClick={() => {
                 const next = new Set(selSet);
@@ -303,7 +303,7 @@ function ExtensionList({
               }}
             >
               <code className="font-mono">{label}</code>
-              <span className="ml-1.5 text-gx-muted">
+              <span className="ml-1.5 text-muted-foreground">
                 {b.count} · {formatBytes(b.bytes)}
               </span>
             </button>
@@ -330,7 +330,7 @@ function FolderList({
 
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-gx-muted">
+      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-muted-foreground">
         <span>Top-level folders containing tracked files</span>
         <SelectAllToggle
           allSelected={selSet.size === buckets.length && buckets.length > 0}
@@ -346,13 +346,13 @@ function FolderList({
               <label
                 className={
                   "flex cursor-pointer items-center justify-between rounded px-2 py-1.5 text-xs transition " +
-                  (checked ? "bg-gx-accent/10 text-gx-text" : "hover:bg-gx-bg")
+                  (checked ? "bg-primary/10 text-foreground" : "hover:bg-background")
                 }
               >
                 <span className="flex items-center gap-2">
                   <input
                     type="checkbox"
-                    className="accent-gx-accent"
+                    className="accent-primary"
                     checked={checked}
                     onChange={(e) => {
                       const next = new Set(selSet);
@@ -363,7 +363,7 @@ function FolderList({
                   />
                   <code className="font-mono">{label}</code>
                 </span>
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   {b.count.toLocaleString()} {b.count === 1 ? "file" : "files"} ·{" "}
                   {formatBytes(b.bytes)}
                 </span>
@@ -413,7 +413,7 @@ function ProfileList({
 
   return (
     <div>
-      <div className="mb-2 text-[11px] uppercase tracking-wider text-gx-muted">
+      <div className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
         Saved profiles from .crab/prefetch.toml
       </div>
       <ul className="space-y-px">
@@ -426,23 +426,23 @@ function ProfileList({
                 type="button"
                 className={
                   "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition " +
-                  (active ? "bg-gx-accent/10 text-gx-text" : "hover:bg-gx-bg")
+                  (active ? "bg-primary/10 text-foreground" : "hover:bg-background")
                 }
                 onClick={() => onChange(p)}
               >
                 <span className="flex items-center gap-2">
                   <input
                     type="radio"
-                    className="accent-gx-accent"
+                    className="accent-primary"
                     checked={active}
                     readOnly
                   />
                   <code className="font-mono">{p.name}</code>
-                  <span className="text-gx-muted">
+                  <span className="text-muted-foreground">
                     {p.patterns.length} pattern{p.patterns.length === 1 ? "" : "s"}
                   </span>
                 </span>
-                <span className="text-gx-muted">
+                <span className="text-muted-foreground">
                   {s ? `${s.count.toLocaleString()} files · ${formatBytes(s.bytes)}` : ""}
                 </span>
               </button>
@@ -466,7 +466,7 @@ function SelectAllToggle({
   return (
     <button
       type="button"
-      className="text-[11px] text-gx-accent hover:underline"
+      className="text-[11px] text-primary hover:underline"
       onClick={() => onToggle(!allSelected)}
     >
       {allSelected ? "Clear" : "Select all"}

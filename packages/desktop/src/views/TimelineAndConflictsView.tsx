@@ -76,7 +76,7 @@ export function TimelineAndConflictsView({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center border-b border-gx-border bg-gx-surface">
+      <div className="flex shrink-0 items-center border-b border-border bg-card">
         <TabButton
           active={activeTab === "timeline"}
           onClick={() => setActiveTab("timeline")}
@@ -136,8 +136,8 @@ function TabButton({
       className={clsx(
         "relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition",
         active
-          ? "text-gx-text"
-          : "text-gx-muted hover:text-gx-text",
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
       )}
       onClick={onClick}
       role="tab"
@@ -150,8 +150,8 @@ function TabButton({
           className={clsx(
             "ml-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium",
             active
-              ? "bg-gx-accent/20 text-gx-accent"
-              : "bg-gx-border text-gx-muted",
+              ? "bg-primary/20 text-primary"
+              : "bg-border text-muted-foreground",
           )}
         >
           {badge > 99 ? "99+" : badge}
@@ -159,7 +159,7 @@ function TabButton({
       )}
       {/* Active indicator */}
       {active && (
-        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-gx-accent" />
+        <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-primary" />
       )}
     </button>
   );

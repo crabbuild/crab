@@ -58,18 +58,18 @@ export function HunkToolbar({
   return (
     <div
       className={clsx(
-        "flex items-center gap-2 border-b border-gx-border bg-gx-surface px-2 py-1 text-[11px]",
+        "flex items-center gap-2 border-b border-border bg-card px-2 py-1 text-[11px]",
         className,
       )}
       role="toolbar"
       aria-label={title}
     >
       {!compact && (
-        <div className="flex min-w-0 items-center gap-2 text-gx-muted">
-          <span className="font-medium text-gx-text">{title}</span>
+        <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+          <span className="font-medium text-foreground">{title}</span>
           {header && (
             <span
-              className="truncate font-mono text-[10px] text-gx-muted"
+              className="truncate font-mono text-[10px] text-muted-foreground"
               title={header}
             >
               {header}
@@ -122,10 +122,10 @@ function ToolbarButton({
 }) {
   const toneCls =
     tone === "success"
-      ? "hover:bg-gx-success/15 hover:text-gx-success"
+      ? "hover:bg-success/15 hover:text-success"
       : tone === "warn"
-        ? "hover:bg-gx-warn/15 hover:text-gx-warn"
-        : "hover:bg-gx-error/15 hover:text-gx-error";
+        ? "hover:bg-warning/15 hover:text-warning"
+        : "hover:bg-destructive/15 hover:text-destructive";
   return (
     <button
       type="button"
@@ -134,9 +134,9 @@ function ToolbarButton({
       aria-label={label}
       title={label}
       className={clsx(
-        "flex items-center gap-1 rounded border border-transparent px-1.5 py-0.5 text-[10px] text-gx-muted transition",
+        "flex items-center gap-1 rounded border border-transparent px-1.5 py-0.5 text-[10px] text-muted-foreground transition",
         toneCls,
-        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-gx-muted",
+        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground",
       )}
     >
       {icon}

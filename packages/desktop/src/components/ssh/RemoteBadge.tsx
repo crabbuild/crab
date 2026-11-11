@@ -36,8 +36,8 @@ export function RemoteBadge({
         "inline-flex items-center gap-1 rounded text-[10px] font-medium leading-none",
         compact ? "px-1 py-0.5" : "px-1.5 py-0.5",
         connected
-          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
-          : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400",
+          ? "bg-info/10 text-info bg-info/30 text-info"
+          : "bg-card text-muted-foreground bg-card text-muted-foreground",
         className,
       )}
       style={colour ? { borderLeft: `2px solid ${colour}` } : undefined}

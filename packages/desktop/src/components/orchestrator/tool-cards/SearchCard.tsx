@@ -101,16 +101,16 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
   // Collapsed one-liner branch.
   const collapsed = collapsedProp ?? false;
   if (collapsed) {
-    const icon = <Icon size={11} className="shrink-0 text-gx-muted" />;
+    const icon = <Icon size={11} className="shrink-0 text-muted-foreground" />;
     const defaultSummary = (
       <>
         {icon}
-        <span className="font-medium text-gx-text/80 truncate">{label}</span>
-        <code className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] text-gx-accent font-mono truncate">
+        <span className="font-medium text-foreground/80 truncate">{label}</span>
+        <code className="rounded bg-primary/10 px-1 py-0.5 text-[9px] text-primary font-mono truncate">
           {pattern || searchPath}
         </code>
         {matchCount > 0 && (
-          <span className="shrink-0 text-[9px] text-gx-accent">{matchCount} {matchCount === 1 ? "match" : "matches"}</span>
+          <span className="shrink-0 text-[9px] text-primary">{matchCount} {matchCount === 1 ? "match" : "matches"}</span>
         )}
       </>
     );
@@ -124,51 +124,51 @@ export function SearchCard({ event, defaultExpanded = false, collapsed: collapse
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
       <button
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasOutput && "hover:bg-gx-surface-hover cursor-pointer",
+          hasOutput && "hover:bg-accent cursor-pointer",
           !hasOutput && "cursor-default",
         )}
       >
-        <Icon size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
+        <Icon size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
 
         {/* Pattern */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
-          <code className="rounded bg-gx-accent/10 px-1 py-0.5 text-[9px] text-gx-accent font-mono truncate">
+          <code className="rounded bg-primary/10 px-1 py-0.5 text-[9px] text-primary font-mono truncate">
             {pattern || searchPath}
           </code>
           {searchPath && pattern && (
-            <span className="text-[9px] text-gx-muted/60 truncate">in {searchPath}</span>
+            <span className="text-[9px] text-muted-foreground/60 truncate">in {searchPath}</span>
           )}
         </span>
 
         {/* Match count */}
         {matchCount > 0 && (
-          <span className="shrink-0 rounded bg-gx-accent/10 px-1 py-0.5 text-[8px] font-medium text-gx-accent border border-gx-accent/20">
+          <span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-[8px] font-medium text-primary border border-primary/20">
             {matchCount} {matchCount === 1 ? "match" : "matches"}
           </span>
         )}
 
         {hasOutput && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {/* Expanded: search results */}
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30 max-h-[250px] overflow-auto">
+        <div className="border-t border-border/30 max-h-[250px] overflow-auto">
           {fileGroups.size > 0 ? (
             <SearchResults fileGroups={fileGroups} />
           ) : (
-            <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+            <pre className="px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
               {output.length > 5000 ? output.slice(0, 5000) + "\n… (truncated)" : output}
             </pre>
           )}
@@ -200,9 +200,9 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
           <div key={file} className="px-2.5 py-0.5">
             {/* File header */}
             <div className="flex items-center gap-1.5 text-[9px]">
-              <span className="text-gx-text/80 font-medium truncate">{file}</span>
+              <span className="text-foreground/80 font-medium truncate">{file}</span>
               {matches.length > 1 && (
-                <span className="text-gx-muted/60">({matches.length})</span>
+                <span className="text-muted-foreground/60">({matches.length})</span>
               )}
             </div>
             {/* Match lines — syntax highlighted when possible */}
@@ -215,17 +215,17 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
                 m.content ? (
                   <div key={idx} className="flex items-baseline gap-1.5 pl-2 text-[9px]">
                     {m.line && (
-                      <span className="shrink-0 text-gx-muted/50 tabular-nums font-mono w-5 text-right">
+                      <span className="shrink-0 text-muted-foreground/50 tabular-nums font-mono w-5 text-right">
                         {m.line}
                       </span>
                     )}
-                    <span className="font-mono text-gx-text/60 truncate">{m.content.trim()}</span>
+                    <span className="font-mono text-foreground/60 truncate">{m.content.trim()}</span>
                   </div>
                 ) : null
               ))
             )}
             {matches.length > 5 && (
-              <div className="pl-2 text-[8px] text-gx-muted/50 italic">
+              <div className="pl-2 text-[8px] text-muted-foreground/50 italic">
                 +{matches.length - 5} more
               </div>
             )}
@@ -233,7 +233,7 @@ function SearchResults({ fileGroups }: { fileGroups: Map<string, SearchMatch[]> 
         );
       })}
       {hasMore && (
-        <div className="px-2.5 py-1 text-[9px] text-gx-muted italic">
+        <div className="px-2.5 py-1 text-[9px] text-muted-foreground italic">
           +{entries.length - MAX_FILES} more files…
         </div>
       )}

@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useCallback,useEffect,useMemo,useRef,useState } from "react";
 import { useSessionScroll } from "../hooks/useSessionScroll";
 import { localPathName } from "../lib/local-path-name";
@@ -684,15 +686,15 @@ function WorktreeViewInner({
       )}
 
       {/* Header with actions */}
-      <div className="shrink-0 border-b border-gx-border px-3 py-2">
-        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-gx-muted">
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
           <span className="flex items-center gap-1">
             <FolderTree size={11} /> Worktrees
           </span>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               onClick={handlePrune}
               title="Prune stale worktrees"
               aria-label="Prune stale worktrees"
@@ -702,7 +704,7 @@ function WorktreeViewInner({
             </button>
             <button
               type="button"
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               onClick={refresh}
               title="Refresh"
               aria-label="Refresh worktrees"
@@ -714,10 +716,10 @@ function WorktreeViewInner({
 
         {/* Unified status row */}
         {worktrees && worktrees.length > 0 && (
-          <div className="mb-2 rounded bg-gx-surface px-2 py-1 text-[11px] text-gx-muted">
+          <div className="mb-2 rounded bg-card px-2 py-1 text-[11px] text-muted-foreground">
             {worktrees.length} worktree{worktrees.length !== 1 ? "s" : ""}
             {dirtyWorktreeCount > 0 && (
-              <span className="text-gx-warn">
+              <span className="text-warning">
                 , {dirtyWorktreeCount} with uncommitted changes
               </span>
             )}
@@ -727,14 +729,14 @@ function WorktreeViewInner({
         {/* Add worktree button group */}
         {!dialogMode && (
           <div className="flex gap-1">
-            <button
+            <Button variant="default"
               type="button"
-              className="btn btn-primary flex-1 justify-center text-xs"
+              className="flex-1 justify-center text-xs"
               onClick={() => setDialogMode("add-branch")}
               disabled={busy}
             >
               <Plus size={12} /> Add Worktree
-            </button>
+            </Button>
           </div>
         )}
 
@@ -763,17 +765,17 @@ function WorktreeViewInner({
       {/* Worktree cards */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-2">
         {loading && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading worktrees…
           </div>
         )}
         {error && (
-          <div className="m-1 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-1 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
         {!loading && worktrees && worktrees.length === 0 && (
-          <div className="p-4 text-center text-xs text-gx-muted">No worktrees found.</div>
+          <div className="p-4 text-center text-xs text-muted-foreground">No worktrees found.</div>
         )}
         {worktrees && worktrees.length > 0 && (
           <div className="flex flex-col gap-2">
@@ -895,13 +897,13 @@ function SearchableSelectPopup({
   return (
     <div
       ref={panelRef}
-      className="absolute left-0 right-0 top-full z-30 mt-1 rounded-lg border border-gx-border bg-gx-surface shadow-xl"
+      className="absolute left-0 right-0 top-full z-30 mt-1 rounded-lg border border-border bg-card shadow-xl"
     >
-      <div className="flex items-center gap-1.5 border-b border-gx-border px-2 py-1.5">
-        <Search size={11} className="shrink-0 text-gx-muted" />
-        <input
+      <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
+        <Search size={11} className="shrink-0 text-muted-foreground" />
+        <Input
           ref={inputRef}
-          className="flex-1 bg-transparent text-xs text-gx-text placeholder:text-gx-muted/60 focus-visible:outline-none"
+          className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 focus-visible:outline-none"
           placeholder={placeholder}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -909,12 +911,12 @@ function SearchableSelectPopup({
       </div>
       <div className="max-h-[200px] overflow-auto py-1">
         {loading && (
-          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-gx-muted">
+          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
             <Loader2 size={11} className="animate-spin" /> Loading…
           </div>
         )}
         {!loading && filtered.length === 0 && (
-          <div className="px-3 py-2 text-[11px] text-gx-muted">{emptyMessage}</div>
+          <div className="px-3 py-2 text-[11px] text-muted-foreground">{emptyMessage}</div>
         )}
         {!loading &&
           filtered.map((opt) => (
@@ -925,8 +927,8 @@ function SearchableSelectPopup({
                 opt.disabled
                   ? "cursor-not-allowed opacity-50"
                   : opt.value === value
-                    ? "bg-gx-accent/5 hover:bg-gx-accent/10"
-                    : "hover:bg-gx-accent/10"
+                    ? "bg-primary/5 hover:bg-primary/10"
+                    : "hover:bg-primary/10"
               }`}
               onClick={() => {
                 if (opt.disabled) return;
@@ -936,17 +938,17 @@ function SearchableSelectPopup({
               disabled={opt.disabled}
             >
               <div className="min-w-0 flex-1">
-                <div className={`truncate text-[11px] font-medium ${opt.disabled ? "text-gx-muted" : "text-gx-text"}`}>
+                <div className={`truncate text-[11px] font-medium ${opt.disabled ? "text-muted-foreground" : "text-foreground"}`}>
                   {opt.label}
                 </div>
                 {opt.detail && (
-                  <div className={`truncate font-mono text-[10px] ${opt.disabled ? "text-gx-muted/60" : "text-gx-muted"}`}>
+                  <div className={`truncate font-mono text-[10px] ${opt.disabled ? "text-muted-foreground/60" : "text-muted-foreground"}`}>
                     {opt.detail}
                   </div>
                 )}
               </div>
               {opt.value === value && !opt.disabled && (
-                <span className="shrink-0 text-[9px] text-gx-accent">✓</span>
+                <span className="shrink-0 text-[9px] text-primary">✓</span>
               )}
             </button>
           ))}
@@ -975,14 +977,14 @@ function SelectTrigger({
   return (
     <button
       type="button"
-      className="mb-1.5 flex w-full items-center justify-between rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-left text-xs transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent disabled:opacity-50"
+      className="mb-1.5 flex w-full items-center justify-between rounded border border-border bg-background px-2 py-1 text-left text-xs transition hover:border-muted-foreground/60 focus-visible:outline-none focus:border-primary disabled:opacity-50"
       onClick={onClick}
       disabled={disabled}
     >
-      <span className={value ? "text-gx-text" : "text-gx-muted/60"}>
+      <span className={value ? "text-foreground" : "text-muted-foreground/60"}>
         {displayLabel || value || placeholder}
       </span>
-      <ChevronDown size={12} className="shrink-0 text-gx-muted" />
+      <ChevronDown size={12} className="shrink-0 text-muted-foreground" />
     </button>
   );
 }
@@ -1136,9 +1138,9 @@ function WorktreeAddDialog({
   }
 
   return (
-    <div className="mt-2 rounded border border-gx-border bg-gx-bg-sub p-2">
+    <div className="mt-2 rounded border border-border bg-background p-2">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-gx-text">
+        <span className="text-[11px] font-medium text-foreground">
           {dialogMode === "add-new-branch"
             ? "New Branch Worktree"
             : dialogMode === "add-detached"
@@ -1147,7 +1149,7 @@ function WorktreeAddDialog({
         </span>
         <button
           type="button"
-          className="text-gx-muted hover:text-gx-text"
+          className="text-muted-foreground hover:text-foreground"
           onClick={onCancel}
           aria-label="Cancel"
         >
@@ -1161,8 +1163,8 @@ function WorktreeAddDialog({
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-branch"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-branch")}
         >
@@ -1172,8 +1174,8 @@ function WorktreeAddDialog({
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-new-branch"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-new-branch")}
         >
@@ -1183,8 +1185,8 @@ function WorktreeAddDialog({
           type="button"
           className={`rounded px-2 py-0.5 transition ${
             dialogMode === "add-detached"
-              ? "bg-gx-accent/20 text-gx-text"
-              : "text-gx-muted hover:text-gx-text"
+              ? "bg-primary/20 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
           }`}
           onClick={() => setDialogMode("add-detached")}
         >
@@ -1195,13 +1197,13 @@ function WorktreeAddDialog({
       {/* Path selector — text input for remote repos, folder picker for local */}
       {repo.is_remote ? (
         <div className="mb-1.5">
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="Relative path (e.g. ../my-worktree)"
             value={addPath}
             onChange={(e) => setAddPath(e.target.value)}
           />
-          <p className="mt-0.5 text-[9px] leading-tight text-gx-muted/70">
+          <p className="mt-0.5 text-[9px] leading-tight text-muted-foreground/70">
             Path is resolved relative to the remote project directory.
           </p>
         </div>
@@ -1209,19 +1211,19 @@ function WorktreeAddDialog({
         <div className="mb-1.5 flex items-center gap-1">
           <button
             type="button"
-            className="flex flex-1 items-center justify-between rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-left text-xs transition hover:border-gx-muted/60 focus-visible:outline-none focus:border-gx-accent"
+            className="flex flex-1 items-center justify-between rounded border border-border bg-background px-2 py-1 text-left text-xs transition hover:border-muted-foreground/60 focus-visible:outline-none focus:border-primary"
             onClick={handlePickPath}
             title="Select worktree folder"
           >
-            <span className={addPath ? "truncate text-gx-text" : "text-gx-muted/60"}>
+            <span className={addPath ? "truncate text-foreground" : "text-muted-foreground/60"}>
               {addPath || "Select worktree location…"}
             </span>
-            <FolderOpen size={12} className="shrink-0 text-gx-muted" />
+            <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
           </button>
           {addPath && (
             <button
               type="button"
-              className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+              className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
               onClick={() => setAddPath("")}
               title="Clear path"
               aria-label="Clear path"
@@ -1257,8 +1259,8 @@ function WorktreeAddDialog({
       {dialogMode === "add-new-branch" && (
         <>
           {/* New branch name — still a text input since user types a new name */}
-          <input
-            className="mb-1.5 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="mb-1.5 w-full rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="New branch name"
             value={addBranch}
             onChange={(e) => setAddBranch(e.target.value)}
@@ -1311,15 +1313,15 @@ function WorktreeAddDialog({
 
       {/* Hydration choice */}
       <fieldset className="mb-1.5">
-        <legend className="mb-1 text-[10px] font-medium text-gx-muted">
+        <legend className="mb-1 text-[10px] font-medium text-muted-foreground">
           Pointer file hydration
         </legend>
         <div className="flex gap-1">
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "pointers_only"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
             <input
@@ -1335,8 +1337,8 @@ function WorktreeAddDialog({
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "on_access"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
             <input
@@ -1352,8 +1354,8 @@ function WorktreeAddDialog({
           <label
             className={`flex-1 cursor-pointer rounded px-2 py-1 text-center text-[10px] transition ${
               addHydration === "all"
-                ? "bg-gx-accent/20 text-gx-text font-medium"
-                : "bg-gx-surface text-gx-muted hover:text-gx-text"
+                ? "bg-primary/20 text-foreground font-medium"
+                : "bg-card text-muted-foreground hover:text-foreground"
             }`}
           >
             <input
@@ -1367,7 +1369,7 @@ function WorktreeAddDialog({
             Hydrate all
           </label>
         </div>
-        <p className="mt-1 text-[9px] leading-tight text-gx-muted/70">
+        <p className="mt-1 text-[9px] leading-tight text-muted-foreground/70">
           {addHydration === "pointers_only" &&
             "Files stay as lightweight pointers. Fastest checkout, no extra downloads."}
           {addHydration === "on_access" &&
@@ -1377,15 +1379,15 @@ function WorktreeAddDialog({
         </p>
       </fieldset>
 
-      <button
+      <Button variant="default"
         type="button"
-        className="btn btn-primary mt-1 w-full justify-center text-xs"
+        className="mt-1 w-full justify-center text-xs"
         onClick={onSubmit}
         disabled={busy || !addPath.trim()}
       >
         {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
         Create Worktree
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1455,10 +1457,10 @@ function WorktreeCard({
     <div
       className={`group/card relative cursor-pointer rounded-lg border p-3 transition ${
         isSelected
-          ? "border-gx-accent bg-gx-accent/8 ring-1 ring-gx-accent/40"
+          ? "border-primary bg-primary/8 ring-1 ring-primary/40"
           : isActive
-            ? "border-gx-accent/50 bg-gx-accent/5"
-            : "border-gx-border bg-gx-surface hover:border-gx-muted/60"
+            ? "border-primary/50 bg-primary/5"
+            : "border-border bg-card hover:border-muted-foreground/60"
       }`}
       style={colourAccent ? { borderLeftColor: colourAccent, borderLeftWidth: "3px" } : undefined}
       onClick={() => onSelect(wt)}
@@ -1470,40 +1472,40 @@ function WorktreeCard({
     >
       {/* Top row: display name + badges */}
       <div className="flex items-center gap-1.5">
-        <FolderOpen size={13} className="shrink-0 text-gx-muted" />
-        <span className="truncate text-[12.5px] font-medium text-gx-text" title={wt.path}>
+        <FolderOpen size={13} className="shrink-0 text-muted-foreground" />
+        <span className="truncate text-[12.5px] font-medium text-foreground" title={wt.path}>
           {displayName}
         </span>
         {wt.is_main && (
-          <span className="shrink-0 rounded bg-gx-accent/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-accent">
+          <span className="shrink-0 rounded bg-primary/20 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
             MAIN
           </span>
         )}
         {isActive && (
-          <span className="shrink-0 rounded bg-gx-success/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-success">
+          <span className="shrink-0 rounded bg-success/20 px-1.5 py-0.5 text-[9px] font-semibold text-success">
             ACTIVE
           </span>
         )}
         {wt.locked && (
           <span title={wt.lock_reason ? `Locked: ${wt.lock_reason}` : "Locked"}>
-            <Lock size={10} className="shrink-0 text-gx-warn" />
+            <Lock size={10} className="shrink-0 text-warning" />
           </span>
         )}
         {wt.prunable && (
-          <span className="shrink-0 rounded bg-gx-error/20 px-1.5 py-0.5 text-[9px] font-semibold text-gx-error">
+          <span className="shrink-0 rounded bg-destructive/20 px-1.5 py-0.5 text-[9px] font-semibold text-destructive">
             STALE
           </span>
         )}
         {wt.meta?.pinned && (
           <span title="Pinned">
-            <Pin size={10} className="shrink-0 text-gx-accent" />
+            <Pin size={10} className="shrink-0 text-primary" />
           </span>
         )}
 
         {/* Open button — opens worktree as full workspace (secondary action) */}
         <button
           type="button"
-          className="ml-auto shrink-0 rounded bg-gx-surface px-2 py-0.5 text-[10px] font-medium text-gx-muted hover:bg-gx-accent/15 hover:text-gx-accent transition"
+          className="ml-auto shrink-0 rounded bg-card px-2 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-primary/15 hover:text-primary transition"
           onClick={(e) => { e.stopPropagation(); onOpen(wt.path); }}
           disabled={busy}
           title="Open worktree as full workspace"
@@ -1518,7 +1520,7 @@ function WorktreeCard({
           <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/card:opacity-100" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-success"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-success"
               onClick={() => onPush(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Push"
@@ -1528,7 +1530,7 @@ function WorktreeCard({
             </button>
             <button
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-info"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-info"
               onClick={() => onPull(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Pull"
@@ -1539,7 +1541,7 @@ function WorktreeCard({
             {wt.locked ? (
               <button
                 type="button"
-                className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-warn"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-warning"
                 onClick={() => onUnlock(wt.path)}
                 disabled={busy}
                 title="Unlock worktree"
@@ -1550,7 +1552,7 @@ function WorktreeCard({
             ) : (
               <button
                 type="button"
-                className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-warn"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-warning"
                 onClick={() => onLock(wt.path)}
                 disabled={busy}
                 title="Lock worktree"
@@ -1561,7 +1563,7 @@ function WorktreeCard({
             )}
             <button
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-error"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
               onClick={() => onRemove(wt.path)}
               disabled={busy}
               title="Remove worktree"
@@ -1577,7 +1579,7 @@ function WorktreeCard({
           <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/card:opacity-100" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-success"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-success"
               onClick={() => onPush(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Push"
@@ -1587,7 +1589,7 @@ function WorktreeCard({
             </button>
             <button
               type="button"
-              className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-info"
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-info"
               onClick={() => onPull(wt.path, shortBranch(wt.branch))}
               disabled={busy}
               title="Pull"
@@ -1600,7 +1602,7 @@ function WorktreeCard({
       </div>
 
       {/* Branch row */}
-      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-gx-muted">
+      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
         <span className="truncate font-mono">{shortBranch(wt.branch)}</span>
         {wt.head && (
           <span className="font-mono opacity-60">({wt.head.slice(0, 7)})</span>
@@ -1612,25 +1614,25 @@ function WorktreeCard({
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {/* Ahead/behind chips */}
           {status && (status.ahead !== null && status.ahead > 0) && (
-            <span className="inline-flex items-center rounded bg-gx-success/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-success">
+            <span className="inline-flex items-center rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success">
               ↑{status.ahead}
             </span>
           )}
           {status && (status.behind !== null && status.behind > 0) && (
-            <span className="inline-flex items-center rounded bg-gx-info/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-info">
+            <span className="inline-flex items-center rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info">
               ↓{status.behind}
             </span>
           )}
           {/* Dirty count badge */}
           {status && status.dirty_count > 0 && (
-            <span className="inline-flex items-center rounded bg-gx-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-warn">
+            <span className="inline-flex items-center rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">
               {status.dirty_count} change{status.dirty_count !== 1 ? "s" : ""}
             </span>
           )}
           {/* Disk usage chip */}
           {estimate && estimate.total_bytes > 0 && (
             <span
-              className="inline-flex items-center gap-0.5 rounded bg-gx-muted/10 px-1.5 py-0.5 text-[10px] font-medium text-gx-muted"
+              className="inline-flex items-center gap-0.5 rounded bg-muted-foreground/10 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
               title={`${formatBytes(estimate.total_bytes)} estimated disk usage${estimate.pointer_count > 0 ? ` (${estimate.pointer_count} pointer${estimate.pointer_count !== 1 ? "s" : ""})` : ""}`}
             >
               <HardDrive size={9} />
@@ -1647,14 +1649,14 @@ function WorktreeCard({
 
       {/* Lock reason */}
       {wt.lock_reason && (
-        <div className="mt-1.5 text-[10px] italic text-gx-warn/80">
+        <div className="mt-1.5 text-[10px] italic text-warning/80">
           Lock reason: {wt.lock_reason}
         </div>
       )}
 
       {/* Full path (subtle) */}
       <div
-        className="mt-1.5 truncate font-mono text-[10px] text-gx-muted/60"
+        className="mt-1.5 truncate font-mono text-[10px] text-muted-foreground/60"
         title={wt.path}
       >
         {wt.path}
@@ -1663,8 +1665,8 @@ function WorktreeCard({
       {/* Inline rename input */}
       {renaming && (
         <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="Display name (empty to clear)"
             value={renaming.value}
             onChange={(e) => onRenameChange(e.target.value)}
@@ -1676,7 +1678,7 @@ function WorktreeCard({
           />
           <button
             type="button"
-            className="rounded bg-gx-accent/15 px-2 py-1 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/25"
+            className="rounded bg-primary/15 px-2 py-1 text-[10px] font-medium text-primary hover:bg-primary/25"
             onClick={onRenameSubmit}
             disabled={busy}
           >
@@ -1684,7 +1686,7 @@ function WorktreeCard({
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-1 text-gx-muted hover:text-gx-text"
+            className="rounded px-1.5 py-1 text-muted-foreground hover:text-foreground"
             onClick={onRenameCancel}
           >
             <X size={12} />
@@ -1695,7 +1697,7 @@ function WorktreeCard({
       {/* Inline colour picker */}
       {colourPicking && (
         <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-          <div className="mb-1 text-[10px] text-gx-muted">Pick a colour:</div>
+          <div className="mb-1 text-[10px] text-muted-foreground">Pick a colour:</div>
           <div className="flex items-center gap-1.5">
             {COLOUR_PRESETS.map((preset) => (
               <button
@@ -1703,19 +1705,19 @@ function WorktreeCard({
                 type="button"
                 className={`h-5 w-5 rounded-full border transition hover:scale-110 ${
                   preset.value === null
-                    ? "border-gx-border bg-gx-surface flex items-center justify-center"
+                    ? "border-border bg-card flex items-center justify-center"
                     : "border-transparent"
                 }`}
                 style={preset.value ? { backgroundColor: preset.value } : undefined}
                 title={preset.label}
                 onClick={() => onColourSelect(preset.value)}
               >
-                {preset.value === null && <X size={10} className="text-gx-muted" />}
+                {preset.value === null && <X size={10} className="text-muted-foreground" />}
               </button>
             ))}
             <button
               type="button"
-              className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:text-gx-text"
+              className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
               onClick={onColourCancel}
             >
               Cancel
@@ -1727,8 +1729,8 @@ function WorktreeCard({
       {/* Inline move input */}
       {moving && (
         <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs focus-visible:outline-none focus:border-primary"
             placeholder="New path (e.g. ../new-location)"
             value={moving.value}
             onChange={(e) => onMoveChange(e.target.value)}
@@ -1740,7 +1742,7 @@ function WorktreeCard({
           />
           <button
             type="button"
-            className="rounded bg-gx-accent/15 px-2 py-1 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/25"
+            className="rounded bg-primary/15 px-2 py-1 text-[10px] font-medium text-primary hover:bg-primary/25"
             onClick={onMoveSubmit}
             disabled={busy || !moving.value.trim()}
           >
@@ -1748,7 +1750,7 @@ function WorktreeCard({
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-1 text-gx-muted hover:text-gx-text"
+            className="rounded px-1.5 py-1 text-muted-foreground hover:text-foreground"
             onClick={onMoveCancel}
           >
             <X size={12} />
@@ -1792,16 +1794,16 @@ function WorktreeComparePicker({
 
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/40">
-      <div className="w-[320px] rounded-lg border border-gx-border bg-gx-surface p-4 shadow-xl">
+      <div className="w-[320px] rounded-lg border border-border bg-card p-4 shadow-xl">
         <div className="mb-3 flex items-center gap-2">
-          <GitCompareArrows size={14} className="text-gx-accent" />
-          <span className="text-[12px] font-medium text-gx-text">
+          <GitCompareArrows size={14} className="text-primary" />
+          <span className="text-[12px] font-medium text-foreground">
             Compare "{sourceLabel}" with…
           </span>
         </div>
 
         {targets.length === 0 ? (
-          <div className="py-4 text-center text-[11px] text-gx-muted">
+          <div className="py-4 text-center text-[11px] text-muted-foreground">
             No other worktrees to compare with.
           </div>
         ) : (
@@ -1812,15 +1814,15 @@ function WorktreeComparePicker({
                 <button
                   key={wt.path}
                   type="button"
-                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left transition hover:bg-gx-accent/10"
+                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left transition hover:bg-primary/10"
                   onClick={() => onSelect(wt)}
                 >
-                  <FolderOpen size={12} className="shrink-0 text-gx-muted" />
+                  <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-medium text-gx-text">
+                    <div className="truncate text-[12px] font-medium text-foreground">
                       {label}
                     </div>
-                    <div className="truncate font-mono text-[10px] text-gx-muted">
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">
                       {shortBranch(wt.branch)}
                     </div>
                   </div>
@@ -1833,7 +1835,7 @@ function WorktreeComparePicker({
         <div className="mt-3 flex justify-end">
           <button
             type="button"
-            className="rounded px-3 py-1 text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onDismiss}
           >
             Cancel

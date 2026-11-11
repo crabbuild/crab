@@ -94,22 +94,22 @@ export function DeployProgressIndicator({ profileId }: DeployProgressIndicatorPr
       {/* Agent unavailable warning banner */}
       {currentUnavailable && !warningDismissed && (
         <div
-          className="flex items-start gap-2 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2"
+          className="flex items-start gap-2 rounded-md border border-warning border-warning bg-warning/10 bg-warning/20 px-3 py-2"
           role="alert"
           aria-label="Agent deployment failed"
         >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden="true" />
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+            <p className="text-xs font-medium text-warning text-warning">
               Agent unavailable
             </p>
-            <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+            <p className="mt-0.5 text-[11px] text-warning text-warning">
               {currentUnavailable.message}
             </p>
           </div>
           <button
             onClick={handleDismissWarning}
-            className="shrink-0 rounded p-0.5 text-amber-400 hover:text-amber-600 dark:hover:text-amber-300"
+            className="shrink-0 rounded p-0.5 text-warning hover:text-warning hover:text-warning"
             aria-label="Dismiss warning"
           >
             <X className="h-3.5 w-3.5" />

@@ -35,16 +35,16 @@ export function BrowserMobileDriverOverlay({
       className="pointer-events-none absolute top-1 left-1/2 z-40 -translate-x-1/2"
     >
       <div
-        className="flex items-center gap-1.5 rounded-full border border-gx-border/60 bg-gx-surface/90 px-2.5 py-0.5 text-[10px] text-gx-muted shadow-sm backdrop-blur-sm"
+        className="flex items-center gap-1.5 rounded-full border border-border/60 bg-card/90 px-2.5 py-0.5 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm"
         style={{ pointerEvents: "auto" }}
       >
         {getPresetIcon(preset.id)}
         <span className="font-medium">{preset.label}</span>
-        <span className="text-gx-muted/60">
+        <span className="text-muted-foreground/60">
           {preset.width} × {preset.height}
         </span>
         {preset.mobile && preset.deviceScaleFactor > 1 ? (
-          <span className="rounded-sm bg-gx-accent/10 px-1 text-[8px] text-gx-accent">
+          <span className="rounded-sm bg-primary/10 px-1 text-[8px] text-primary">
             @{preset.deviceScaleFactor}x
           </span>
         ) : null}

@@ -13,7 +13,7 @@ const SafePatchDiff = lazy(() =>
 function DiffSkeleton() {
   return (
     <div
-      className="animate-pulse rounded bg-gx-surface/40"
+      className="animate-pulse rounded bg-card/40"
       style={{ height: 120 }}
       aria-busy="true"
       aria-label="Loading diff…"

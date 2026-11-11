@@ -35,10 +35,10 @@ export function ActivityBar({
   badges = {},
 }: Props) {
   const buttonClass =
-    "relative mb-1 flex h-10 w-10 items-center justify-center rounded text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent";
+    "relative mb-1 flex h-10 w-10 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary";
   return (
     <nav
-      className="flex h-full w-[var(--activity-bar-width)] shrink-0 flex-col items-center border-r border-gx-border bg-gx-surface py-2"
+      className="flex h-full w-[var(--activity-bar-width)] shrink-0 flex-col items-center border-r border-border bg-card py-2"
       aria-label="Primary"
     >
       {PRIMARY.filter((item) => !hiddenViews.includes(item.id)).map((item) => {
@@ -55,17 +55,17 @@ export function ActivityBar({
             key={item.id}
             type="button"
             onClick={() => onSelect(item.id)}
-            className={clsx(buttonClass, selected && "text-gx-text")}
+            className={clsx(buttonClass, selected && "text-foreground")}
             aria-label={item.label}
             aria-pressed={selected}
             title={item.label}
           >
             <item.icon size={20} />
             {selected && (
-              <span className="absolute left-0 top-1 h-8 w-px bg-gx-accent" />
+              <span className="absolute left-0 top-1 h-8 w-px bg-primary" />
             )}
             {count > 0 && (
-              <span className="absolute right-0 top-0 rounded-full bg-gx-error px-1 text-[9px] text-white">
+              <span className="absolute right-0 top-0 rounded-full bg-destructive px-1 text-[9px] text-destructive-foreground">
                 {count > 99 ? "99+" : count}
               </span>
             )}
@@ -77,7 +77,7 @@ export function ActivityBar({
         type="button"
         className={clsx(
           buttonClass,
-          active === "settings" && "text-gx-text bg-gx-surface-hover",
+          active === "settings" && "text-foreground bg-accent",
         )}
         aria-label="Settings"
         title="Settings (⌘,)"

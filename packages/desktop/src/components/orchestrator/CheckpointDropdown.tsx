@@ -86,8 +86,8 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
         className={clsx(
           "flex items-center gap-1 px-3 py-2 text-xs transition",
           open || selectedTurn != null
-            ? "text-gx-accent"
-            : "text-gx-muted hover:text-gx-text",
+            ? "text-primary"
+            : "text-muted-foreground hover:text-foreground",
         )}
         aria-label="Saved file states"
         title="Saved file states"
@@ -104,10 +104,10 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
 
       {/* Dropdown panel */}
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-gx-border bg-gx-surface shadow-xl">
+        <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-border bg-card shadow-xl">
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-gx-border px-3 py-2">
-            <span className="text-xs font-medium text-gx-text">Checkpoints</span>
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-xs font-medium text-foreground">Checkpoints</span>
             <button
               type="button"
               onClick={() => {
@@ -116,8 +116,8 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
               className={clsx(
                 "text-[10px] transition",
                 selectedTurn == null
-                  ? "text-gx-accent font-medium"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "text-primary font-medium"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               Show all changes
@@ -135,8 +135,8 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
                   className={clsx(
                     "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition",
                     isActive
-                      ? "bg-gx-accent/10 text-gx-accent"
-                      : "text-gx-text hover:bg-gx-hover",
+                      ? "bg-primary/10 text-primary"
+                      : "text-foreground hover:bg-accent",
                     !turn.hasSha && "opacity-40 cursor-not-allowed",
                   )}
                 >
@@ -146,10 +146,10 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
                     className={clsx(
                       "h-2 w-2 shrink-0 rounded-full",
                       isActive
-                        ? "bg-gx-accent"
+                        ? "bg-primary"
                         : turn.isLatest
-                          ? "bg-gx-success"
-                          : "bg-gx-muted/50",
+                          ? "bg-success"
+                          : "bg-muted-foreground/50",
                     )}
                   />
 
@@ -158,10 +158,10 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
                     <span className="text-xs font-medium">
                       Turn {turn.turnNumber}
                       {turn.isLatest && (
-                        <span className="ml-1.5 text-[9px] text-gx-success font-normal">live</span>
+                        <span className="ml-1.5 text-[9px] text-success font-normal">live</span>
                       )}
                     </span>
-                    <span className="text-[10px] font-mono text-gx-muted truncate">
+                    <span className="text-[10px] font-mono text-muted-foreground truncate">
                       {turn.fromSha.slice(0, 7)}
                       {turn.toSha ? ` → ${turn.toSha.slice(0, 7)}` : " → HEAD"}
                     </span>
@@ -178,7 +178,7 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
                         e.stopPropagation();
                         void handleRestore(turn.ref);
                       }}
-                      className="flex shrink-0 items-center gap-0.5 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[9px] text-gx-error opacity-0 group-hover:opacity-100 hover:bg-gx-error/10 disabled:opacity-50 transition"
+                      className="flex shrink-0 items-center gap-0.5 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[9px] text-destructive opacity-0 group-hover:opacity-100 hover:bg-destructive/10 disabled:opacity-50 transition"
                       title={`Restore files before turn ${turn.turnNumber}`}
                       aria-label={`Restore files before turn ${turn.turnNumber}`}
                     >
@@ -190,17 +190,17 @@ export function CheckpointDropdown({ task, selectedTurn, onRestore, onSelectTurn
             })}
           </div>
 
-          {error && <div className="px-3 py-2 text-xs text-gx-error"><p role="alert">{error}</p><button type="button" onClick={reload}>Reload saved file states</button></div>}
-          {backups.length > 0 && <div className="max-h-48 overflow-y-auto border-t border-gx-border p-2">
-            <p className="mb-1 text-xs text-gx-muted">Backups</p>
+          {error && <div className="px-3 py-2 text-xs text-destructive"><p role="alert">{error}</p><button type="button" onClick={reload}>Reload saved file states</button></div>}
+          {backups.length > 0 && <div className="max-h-48 overflow-y-auto border-t border-border p-2">
+            <p className="mb-1 text-xs text-muted-foreground">Backups</p>
             {backups.map((backup, index) => <button key={backup.ref} type="button" disabled={restoring} onClick={() => void handleRestore(backup.ref)}
-              className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-gx-hover disabled:opacity-50">
+              className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-accent disabled:opacity-50">
               Restore files saved {new Date(backup.createdAt).toLocaleString()} · backup {backups.length - index}
             </button>)}
           </div>}
           {/* Footer */}
-          <div className="border-t border-gx-border px-3 py-1.5">
-            <span className="text-[10px] text-gx-muted">
+          <div className="border-t border-border px-3 py-1.5">
+            <span className="text-[10px] text-muted-foreground">
               {turns.length} checkpoint{turns.length !== 1 ? "s" : ""} · restore files, keep conversation
             </span>
           </div>

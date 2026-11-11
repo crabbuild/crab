@@ -324,7 +324,7 @@ export function QuickAttachBar({
       role="toolbar"
       aria-label="Quick attachments"
     >
-      <span className="shrink-0 text-gx-muted">Attach:</span>
+      <span className="shrink-0 text-muted-foreground">Attach:</span>
 
       {chips.map((chip) => (
         <Chip
@@ -338,7 +338,7 @@ export function QuickAttachBar({
       ))}
 
       {overflowCount > 0 && (
-        <span className="shrink-0 text-[9px] text-gx-muted/70">
+        <span className="shrink-0 text-[9px] text-muted-foreground/70">
           +{overflowCount} more
         </span>
       )}
@@ -391,7 +391,7 @@ function Chip({
       title={title}
       className={clsx(
         "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition",
-        "border-gx-border bg-gx-surface text-gx-text hover:border-gx-accent/50 hover:bg-gx-accent/10",
+        "border-border bg-card text-foreground hover:border-primary/50 hover:bg-primary/10",
         "disabled:opacity-50 disabled:cursor-not-allowed",
         "max-w-[160px]",
       )}

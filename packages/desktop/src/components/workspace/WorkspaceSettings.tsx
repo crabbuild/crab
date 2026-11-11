@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
 import type { Workspace, WorkspaceConfig } from "../../state";
@@ -113,15 +114,15 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
 
       {/* Modal */}
       <div
-        className="relative w-full max-w-lg rounded-lg border border-gx-border bg-gx-bg shadow-2xl"
+        className="relative w-full max-w-lg rounded-lg border border-border bg-background shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-gx-text">Workspace Settings</h2>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold text-foreground">Workspace Settings</h2>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+            className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
             onClick={onClose}
             aria-label="Close settings"
           >
@@ -133,10 +134,10 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
         <div className="max-h-[60vh] overflow-y-auto px-4 py-4 space-y-5">
           {/* Workspace root path (read-only) */}
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
               Workspace Root
             </label>
-            <div className="rounded border border-gx-border bg-gx-bg-sub px-3 py-2 text-xs text-gx-text/70 select-all">
+            <div className="rounded border border-border bg-background px-3 py-2 text-xs text-foreground/70 select-all">
               {workspace.rootPath}
             </div>
           </div>
@@ -145,11 +146,11 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
           <div>
             <label
               htmlFor="ws-depth"
-              className="block text-xs font-medium text-gx-muted mb-1"
+              className="block text-xs font-medium text-muted-foreground mb-1"
             >
               Discovery Depth
             </label>
-            <input
+            <Input
               ref={inputRef}
               id="ws-depth"
               type="number"
@@ -157,28 +158,28 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
               max={10}
               value={depth}
               onChange={(e) => setDepth(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
-              className="w-20 rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text outline-none focus:border-gx-accent transition"
+              className="w-20 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary transition"
             />
-            <p className="mt-1 text-[10px] text-gx-muted">
+            <p className="mt-1 text-[10px] text-muted-foreground">
               Maximum folder depth to scan for git repositories (1–10).
             </p>
           </div>
 
           {/* Exclude patterns */}
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
               Exclude Patterns
             </label>
             <div className="space-y-1">
               {excludePatterns.map((pattern) => (
                 <div
                   key={pattern}
-                  className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5"
+                  className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5"
                 >
-                  <code className="flex-1 text-xs text-gx-text">{pattern}</code>
+                  <code className="flex-1 text-xs text-foreground">{pattern}</code>
                   <button
                     type="button"
-                    className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-error transition"
+                    className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive transition"
                     onClick={() => removePattern(pattern)}
                     aria-label={`Remove pattern ${pattern}`}
                   >
@@ -188,7 +189,7 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
               ))}
             </div>
             <div className="mt-2 flex items-center gap-2">
-              <input
+              <Input
                 type="text"
                 value={newPattern}
                 onChange={(e) => setNewPattern(e.target.value)}
@@ -199,12 +200,12 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
                   }
                 }}
                 placeholder="e.g. node_modules"
-                className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted outline-none focus:border-gx-accent transition"
+                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-primary transition"
                 aria-label="New exclude pattern"
               />
               <button
                 type="button"
-                className="flex items-center gap-1 rounded border border-gx-border px-2 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+                className="flex items-center gap-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-accent transition"
                 onClick={addPattern}
                 disabled={!newPattern.trim()}
               >
@@ -216,24 +217,24 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
           {/* Manually removed repos */}
           {removedRepos.length > 0 && (
             <div>
-              <label className="block text-xs font-medium text-gx-muted mb-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-1">
                 Excluded Repositories
               </label>
-              <p className="text-[10px] text-gx-muted mb-2">
+              <p className="text-[10px] text-muted-foreground mb-2">
                 These repos were manually removed from the workspace. Click to re-include.
               </p>
               <div className="space-y-1">
                 {removedRepos.map((repoPath) => (
                   <div
                     key={repoPath}
-                    className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5"
+                    className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5"
                   >
-                    <code className="flex-1 text-xs text-gx-text truncate">
+                    <code className="flex-1 text-xs text-foreground truncate">
                       {repoPath}
                     </code>
                     <button
                       type="button"
-                      className="shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-gx-accent hover:bg-gx-accent/10 transition"
+                      className="shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 transition"
                       onClick={() => reIncludeRepo(repoPath)}
                       aria-label={`Re-include ${repoPath}`}
                     >
@@ -247,10 +248,10 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-gx-border px-4 py-3">
+        <div className="flex items-center justify-between border-t border-border px-4 py-3">
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition"
+            className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent transition"
             onClick={handleRescan}
             disabled={saving}
           >
@@ -259,14 +260,14 @@ export function WorkspaceSettings({ workspace, onClose }: WorkspaceSettingsProps
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="rounded px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="rounded px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition"
               onClick={onClose}
             >
               Cancel
             </button>
             <button
               type="button"
-              className="rounded bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-accent/90 transition disabled:opacity-50"
+              className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
               onClick={handleSave}
               disabled={saving}
             >

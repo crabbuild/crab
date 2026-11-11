@@ -24,11 +24,11 @@ function formatRelativeTime(timestamp: number): string {
 function StatusIcon({ status }: { status: OperationRecord["status"] }) {
   switch (status) {
     case "success":
-      return <CheckCircle2 size={14} className="shrink-0 text-gx-success" />;
+      return <CheckCircle2 size={14} className="shrink-0 text-success" />;
     case "error":
-      return <XCircle size={14} className="shrink-0 text-gx-error" />;
+      return <XCircle size={14} className="shrink-0 text-destructive" />;
     case "conflict":
-      return <AlertTriangle size={14} className="shrink-0 text-gx-warn" />;
+      return <AlertTriangle size={14} className="shrink-0 text-warning" />;
   }
 }
 
@@ -77,18 +77,18 @@ export function OperationHistoryPanel() {
   const sorted = [...history].reverse();
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gx-bg-sub">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       {/* Header */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-gx-border bg-gx-surface px-2">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-gx-primary">
-          <Clock size={14} className="text-gx-secondary" />
+      <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+          <Clock size={14} className="text-muted-foreground" />
           <span>Operation History</span>
         </div>
         {history.length > 0 && (
           <button
             type="button"
             onClick={() => clearHistory()}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-gx-muted transition-colors hover:bg-gx-accent/20 hover:text-gx-primary"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-primary/20 hover:text-foreground"
             title="Clear history"
             aria-label="Clear operation history"
           >
@@ -101,11 +101,11 @@ export function OperationHistoryPanel() {
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {sorted.length === 0 ? (
-          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-gx-muted">
+          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-muted-foreground">
             No operations yet
           </div>
         ) : (
-          <ul className="divide-y divide-gx-border/50" role="list" aria-label="Operation history">
+          <ul className="divide-y divide-border/50" role="list" aria-label="Operation history">
             {sorted.map((op) => (
               <OperationRow
                 key={op.id}
@@ -154,19 +154,19 @@ function OperationRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="truncate text-xs text-gx-text">{operation.label}</span>
+          <span className="truncate text-xs text-foreground">{operation.label}</span>
           <span
             className={clsx(
               "shrink-0 rounded px-1 py-px text-[10px] font-medium",
-              operation.status === "success" && "bg-gx-success/10 text-gx-success",
-              operation.status === "error" && "bg-gx-error/10 text-gx-error",
-              operation.status === "conflict" && "bg-gx-warn/10 text-gx-warn",
+              operation.status === "success" && "bg-success/10 text-success",
+              operation.status === "error" && "bg-destructive/10 text-destructive",
+              operation.status === "conflict" && "bg-warning/10 text-warning",
             )}
           >
             {operation.status}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[11px] text-gx-muted">
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <span>{formatRelativeTime(operation.timestamp)}</span>
           <span>·</span>
           <span>{operation.durationMs}ms</span>
@@ -179,8 +179,8 @@ function OperationRow({
           onClick={handleUndo}
           disabled={undoing}
           className={clsx(
-            "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-gx-accent transition-colors",
-            "hover:bg-gx-accent/20",
+            "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-primary transition-colors",
+            "hover:bg-primary/20",
             undoing && "cursor-not-allowed opacity-50",
           )}
           title="Undo this operation"

@@ -25,7 +25,7 @@ export function CommitReadiness({ stagedCount, hasMessage, ready }: CommitReadin
         label={hasMessage ? "Message added" : "Add message"}
       />
       {ready && (
-        <span className="ml-auto text-gx-success font-medium">Ready to commit</span>
+        <span className="ml-auto text-success font-medium">Ready to commit</span>
       )}
     </div>
   );
@@ -36,7 +36,7 @@ function ReadinessItem({ done, label }: { done: boolean; label: string }) {
     <span
       className={clsx(
         "inline-flex items-center gap-1",
-        done ? "text-gx-success" : "text-gx-muted",
+        done ? "text-success" : "text-muted-foreground",
       )}
     >
       {done ? <Check size={10} /> : <Circle size={10} />}

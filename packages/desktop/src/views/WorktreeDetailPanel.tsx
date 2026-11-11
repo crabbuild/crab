@@ -1,3 +1,6 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FileDiff,
@@ -288,23 +291,23 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
   const activeDiffPath = isActiveDiff ? activeTabKey!.slice("diff::".length) : null;
 
   return (
-    <div className="flex h-full flex-col bg-gx-bg">
+    <div className="flex h-full flex-col bg-background">
       {/* Header */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border px-3 py-2">
-        <GitBranch size={13} className="text-gx-accent" />
-        <span className="truncate text-[12px] font-medium text-gx-text">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+        <GitBranch size={13} className="text-primary" />
+        <span className="truncate text-[12px] font-medium text-foreground">
           {worktree.meta?.display_name || dirName(worktree.path)}
         </span>
-        <span className="font-mono text-[11px] text-gx-muted">{branch}</span>
+        <span className="font-mono text-[11px] text-muted-foreground">{branch}</span>
         {status && status.dirty_count > 0 && (
-          <span className="rounded bg-gx-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-gx-warn">
+          <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">
             {status.dirty_count} uncommitted
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={fetchChanges}
             title="Refresh"
             aria-label="Refresh changes"
@@ -313,7 +316,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
           </button>
           <button
             type="button"
-            className="rounded bg-gx-accent/15 px-2.5 py-1 text-[11px] font-medium text-gx-accent hover:bg-gx-accent/25 transition"
+            className="rounded bg-primary/15 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 transition"
             onClick={() => setShowMergePanel(true)}
             title="Merge changes back to another branch"
           >
@@ -322,7 +325,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
           </button>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             title="Close detail panel"
             aria-label="Close"
@@ -351,21 +354,21 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
         <PanelGroup direction="horizontal" className="min-h-0 flex-1">
           {/* Left: File tree with filter toggle */}
           <Panel defaultSize={25} minSize={15} maxSize={45}>
-            <div className="flex h-full flex-col border-r border-gx-border">
+            <div className="flex h-full flex-col border-r border-border">
               {/* Tree header with filter button */}
-              <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-1.5">
-                <span className="text-[10px] uppercase tracking-wider text-gx-muted">
+              <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                   {filterChanged ? "Changed Files" : "Files"}
                   {filterChanged && changedFiles && (
-                    <span className="ml-1 text-gx-text">({changedFiles.length})</span>
+                    <span className="ml-1 text-foreground">({changedFiles.length})</span>
                   )}
                 </span>
                 <button
                   type="button"
                   className={`rounded p-1 transition ${
                     filterChanged
-                      ? "bg-gx-accent/15 text-gx-accent"
-                      : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                      ? "bg-primary/15 text-primary"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
                   }`}
                   onClick={() => setFilterChanged(!filterChanged)}
                   title={filterChanged ? "Show all files" : "Show only changed files"}
@@ -378,17 +381,17 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
               {/* Tree content */}
               <div className="min-h-0 flex-1 overflow-hidden flex flex-col">
                 {(loading || (!filterChanged && !allEntries && !changedFiles)) && (
-                  <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+                  <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
                     <Loader2 size={12} className="animate-spin" /> Loading…
                   </div>
                 )}
                 {worktreeError && (
-                  <div role="alert" className="m-2 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-[11px] text-gx-error">
+                  <div role="alert" className="m-2 rounded border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive">
                     {worktreeError}
                   </div>
                 )}
                 {!loading && filterChanged && changedFiles && changedFiles.length === 0 && (
-                  <div className="p-4 text-center text-[11px] text-gx-muted">
+                  <div className="p-4 text-center text-[11px] text-muted-foreground">
                     No changes detected.
                   </div>
                 )}
@@ -410,7 +413,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-px cursor-col-resize bg-gx-border hover:bg-gx-accent/50 transition-colors" />
+          <PanelResizeHandle className="w-px cursor-col-resize bg-border hover:bg-primary/50 transition-colors" />
 
           {/* Right: Multi-tab editor / diff view */}
           <Panel minSize={40}>
@@ -434,7 +437,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                   }
                 />
               ) : (
-                <div className="flex h-full flex-col items-center justify-center gap-2 text-gx-muted">
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
                   <FileDiff size={32} className="opacity-30" />
                   <span className="text-[12px]">Click a file to open it</span>
                   {changedFiles && changedFiles.length > 0 && (
@@ -534,49 +537,49 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="shrink-0 border-b border-gx-border bg-gx-surface px-4 py-3">
+      <div className="shrink-0 border-b border-border bg-card px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <GitMerge size={15} className="text-gx-accent" />
-            <span className="text-[13px] font-medium text-gx-text">Merge Back</span>
+            <GitMerge size={15} className="text-primary" />
+            <span className="text-[13px] font-medium text-foreground">Merge Back</span>
           </div>
           <button
             type="button"
-            className="rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             aria-label="Close merge panel"
           >
             <X size={14} />
           </button>
         </div>
-        <p className="mt-1 text-[11px] text-gx-muted">
-          Integrate changes from <span className="font-mono text-gx-text">{worktreeBranch}</span> into another branch.
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Integrate changes from <span className="font-mono text-foreground">{worktreeBranch}</span> into another branch.
         </p>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {loading ? (
-          <div className="flex items-center gap-2 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading branches…
           </div>
         ) : (
           <div className="max-w-md space-y-4">
             {/* Visual merge flow */}
-            <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
+            <div className="rounded-lg border border-border bg-card p-4">
               <div className="flex items-center gap-3">
                 <div className="flex-1">
-                  <div className="text-[10px] uppercase tracking-wider text-gx-muted mb-1">From</div>
-                  <div className="flex items-center gap-1.5 rounded bg-gx-accent/10 px-2.5 py-1.5">
-                    <GitBranch size={12} className="text-gx-accent" />
-                    <span className="font-mono text-[11.5px] text-gx-text">{worktreeBranch}</span>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">From</div>
+                  <div className="flex items-center gap-1.5 rounded bg-primary/10 px-2.5 py-1.5">
+                    <GitBranch size={12} className="text-primary" />
+                    <span className="font-mono text-[11.5px] text-foreground">{worktreeBranch}</span>
                   </div>
-                  <div className="mt-1 text-[10px] text-gx-muted">{worktreeLabel}</div>
+                  <div className="mt-1 text-[10px] text-muted-foreground">{worktreeLabel}</div>
                 </div>
-                <GitPullRequest size={18} className="shrink-0 text-gx-muted" />
+                <GitPullRequest size={18} className="shrink-0 text-muted-foreground" />
                 <div className="flex-1">
-                  <div className="text-[10px] uppercase tracking-wider text-gx-muted mb-1">Into</div>
-                  <select
-                    className="w-full rounded border border-gx-border bg-gx-bg-sub px-2.5 py-1.5 font-mono text-[11.5px] text-gx-text focus-visible:outline-none focus:border-gx-accent"
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Into</div>
+                  <NativeSelect
+                    className="w-full rounded border border-border bg-background px-2.5 py-1.5 font-mono text-[11.5px] text-foreground focus-visible:outline-none focus:border-primary"
                     value={selectedTarget}
                     onChange={(e) => setSelectedTarget(e.target.value)}
                     disabled={busy}
@@ -586,14 +589,14 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
                         {t.name}{t.isCurrent ? " (current)" : ""}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </div>
               </div>
             </div>
 
             {/* Strategy selection */}
             <div>
-              <label className="mb-1.5 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1.5 block text-[11px] font-medium text-muted-foreground">
                 Merge Strategy
               </label>
               <div className="flex gap-1">
@@ -623,11 +626,11 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
 
             {/* Commit message */}
             <div>
-              <label className="mb-1.5 block text-[11px] font-medium text-gx-muted">
-                Commit Message <span className="text-gx-muted/60">(optional)</span>
+              <label className="mb-1.5 block text-[11px] font-medium text-muted-foreground">
+                Commit Message <span className="text-muted-foreground/60">(optional)</span>
               </label>
-              <textarea
-                className="w-full rounded border border-gx-border bg-gx-bg-sub px-3 py-2 text-xs text-gx-text placeholder:text-gx-muted/50 focus-visible:outline-none focus:border-gx-accent resize-none"
+              <Textarea
+                className="w-full rounded border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/50 focus-visible:outline-none focus:border-primary resize-none"
                 rows={3}
                 placeholder={`Merge ${worktreeBranch} into ${selectedTarget || "..."}`}
                 value={commitMessage}
@@ -640,17 +643,17 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
               <div
                 className={`rounded border p-3 text-xs ${
                   result.success
-                    ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-                    : "border-gx-error/40 bg-gx-error/10 text-gx-error"
+                    ? "border-success/40 bg-success/10 text-success"
+                    : "border-destructive/40 bg-destructive/10 text-destructive"
                 }`}
               >
                 {result.message}
               </div>
             )}
 
-            <button
+            <Button variant="default"
               type="button"
-              className="btn btn-primary w-full justify-center text-xs"
+              className="w-full justify-center text-xs"
               onClick={handleMerge}
               disabled={busy || !selectedTarget}
             >
@@ -660,7 +663,7 @@ function MergeBackPanel({ repo, worktreeBranch, worktreeLabel, onClose, onSucces
                 <GitMerge size={13} />
               )}
               {busy ? "Merging…" : `Merge into ${selectedTarget || "…"}`}
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -686,8 +689,8 @@ function StrategyButton({
       type="button"
       className={`flex-1 rounded border px-2 py-2 text-left transition ${
         active
-          ? "border-gx-accent bg-gx-accent/10 text-gx-text"
-          : "border-gx-border bg-gx-surface text-gx-muted hover:border-gx-muted/60 hover:text-gx-text"
+          ? "border-primary bg-primary/10 text-foreground"
+          : "border-border bg-card text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground"
       }`}
       onClick={onClick}
       disabled={disabled}

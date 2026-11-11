@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search, Terminal, Zap, FolderGit2 } from "lucide-react";
 import clsx from "clsx";
@@ -313,7 +314,7 @@ export function OrchestratorPalette({
 
       {/* Palette container */}
       <div
-        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
         role="dialog"
@@ -321,12 +322,12 @@ export function OrchestratorPalette({
         aria-modal="true"
       >
         {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2">
-          <Search size={16} className="shrink-0 text-gx-muted" aria-hidden="true" />
-          <input
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+          <Search size={16} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+          <Input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent text-sm text-gx-text placeholder:text-gx-muted focus-visible:outline-none"
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
             placeholder={
               mode === "search"
                 ? "Search workspaces…"
@@ -352,8 +353,8 @@ export function OrchestratorPalette({
             className={clsx(
               "shrink-0 rounded px-2 py-0.5 text-[10px] font-medium transition",
               mode === "search"
-                ? "bg-gx-accent/20 text-gx-accent"
-                : "bg-gx-bg text-gx-muted hover:text-gx-text",
+                ? "bg-primary/20 text-primary"
+                : "bg-background text-muted-foreground hover:text-foreground",
             )}
             onClick={() => setMode((m) => (m === "command" ? "search" : "command"))}
             aria-label={`Switch to ${mode === "command" ? "search" : "command"} mode`}
@@ -371,7 +372,7 @@ export function OrchestratorPalette({
           role="listbox"
         >
           {items.length === 0 ? (
-            <div className="px-3 py-4 text-center text-sm text-gx-muted">
+            <div className="px-3 py-4 text-center text-sm text-muted-foreground">
               {query ? "No results found" : "No workspaces yet"}
             </div>
           ) : (
@@ -379,7 +380,7 @@ export function OrchestratorPalette({
               {mode === "command" && sections
                 ? sections.map((section) => (
                     <div key={section.label}>
-                      <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-gx-muted">
+                      <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                         {section.label}
                       </div>
                       {items.slice(section.startIdx, section.endIdx).map((item, i) => {
@@ -412,7 +413,7 @@ export function OrchestratorPalette({
         </div>
 
         {/* Footer hint */}
-        <div className="flex items-center justify-between border-t border-gx-border px-3 py-1.5 text-[10px] text-gx-muted">
+        <div className="flex items-center justify-between border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
           <span>↑↓ navigate · ↵ select · esc dismiss · tab switch mode</span>
           <span>{mode === "search" ? "⌘⇧F" : "⌘K"}</span>
         </div>
@@ -441,29 +442,29 @@ function PaletteRow({ item, idx, isActive, onActivate, onHover }: PaletteRowProp
       className={clsx(
         "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm transition",
         isActive
-          ? "bg-gx-accent/15 text-gx-text"
-          : "text-gx-text/80 hover:bg-gx-surface-hover",
+          ? "bg-primary/15 text-foreground"
+          : "text-foreground/80 hover:bg-accent",
       )}
       onClick={onActivate}
       onMouseEnter={onHover}
     >
       {item.kind === "workspace" && (
         <>
-          <FolderGit2 size={13} className="shrink-0 text-gx-muted" />
+          <FolderGit2 size={13} className="shrink-0 text-muted-foreground" />
           <span className="shrink-0 text-xs">
             {STATUS_INDICATOR[item.task.status] ?? "⚪"}
           </span>
           <span className="min-w-0 flex-1 truncate text-xs">{item.task.title}</span>
-          <span className="shrink-0 text-[10px] text-gx-muted">{item.task.agentName}</span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">{item.task.agentName}</span>
         </>
       )}
 
       {item.kind === "action" && (
         <>
-          <Zap size={13} className="shrink-0 text-gx-accent" />
+          <Zap size={13} className="shrink-0 text-primary" />
           <span className="min-w-0 flex-1 truncate text-xs">{item.action.label}</span>
           {item.action.shortcut && (
-            <span className="shrink-0 rounded bg-gx-bg px-1.5 py-0.5 text-[10px] text-gx-muted font-mono">
+            <span className="shrink-0 rounded bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground font-mono">
               {item.action.shortcut}
             </span>
           )}
@@ -472,12 +473,12 @@ function PaletteRow({ item, idx, isActive, onActivate, onHover }: PaletteRowProp
 
       {item.kind === "command" && (
         <>
-          <Terminal size={13} className="shrink-0 text-gx-accent" />
+          <Terminal size={13} className="shrink-0 text-primary" />
           <span className="shrink-0 text-xs font-medium">/{item.command.name}</span>
-          <span className="min-w-0 flex-1 truncate text-[10px] text-gx-muted">
+          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
             {item.command.description}
           </span>
-          <span className="shrink-0 rounded-full bg-gx-surface px-1.5 py-0.5 text-[9px] text-gx-muted">
+          <span className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[9px] text-muted-foreground">
             {item.command.source}
           </span>
         </>
@@ -485,9 +486,9 @@ function PaletteRow({ item, idx, isActive, onActivate, onHover }: PaletteRowProp
 
       {item.kind === "search-result" && (
         <>
-          <Search size={13} className="shrink-0 text-gx-muted" />
+          <Search size={13} className="shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate text-xs">{item.result.snippet}</span>
-          <span className="shrink-0 rounded bg-gx-bg px-1.5 py-0.5 text-[9px] text-gx-muted">
+          <span className="shrink-0 rounded bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground">
             {item.result.matchField}
           </span>
         </>

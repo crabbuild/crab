@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Fuse from "fuse.js";
 import clsx from "clsx";
@@ -30,7 +31,7 @@ function HighlightedText({
       parts.push(<span key={`t-${lastEnd}`}>{text.slice(lastEnd, start)}</span>);
     }
     parts.push(
-      <span key={`m-${start}`} className="font-bold text-gx-accent">
+      <span key={`m-${start}`} className="font-bold text-primary">
         {text.slice(start, end + 1)}
       </span>,
     );
@@ -168,17 +169,17 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
 
       {/* Modal */}
       <div
-        className="relative w-full max-w-md rounded-lg border border-gx-border bg-gx-bg shadow-2xl"
+        className="relative w-full max-w-md rounded-lg border border-border bg-background shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
         {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2.5">
-          <Search size={14} className="shrink-0 text-gx-muted" />
-          <input
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
+          <Search size={14} className="shrink-0 text-muted-foreground" />
+          <Input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent text-sm text-gx-text placeholder:text-gx-muted outline-none"
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
             placeholder="Search repositories…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -186,7 +187,7 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
             autoComplete="off"
             spellCheck={false}
           />
-          <kbd className="shrink-0 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-0.5 text-[10px] text-gx-muted">
+          <kbd className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
             esc
           </kbd>
         </div>
@@ -199,7 +200,7 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
           aria-label="Repository results"
         >
           {results.length === 0 ? (
-            <div className="px-3 py-4 text-center text-xs text-gx-muted">
+            <div className="px-3 py-4 text-center text-xs text-muted-foreground">
               No matching repositories
             </div>
           ) : (
@@ -211,8 +212,8 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
                 className={clsx(
                   "flex cursor-pointer items-center gap-2 px-3 py-2 mx-1 rounded transition",
                   index === selectedIndex
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-foreground hover:bg-accent",
                 )}
                 onClick={() => handleSelect(result.entry.relativePath)}
                 onMouseEnter={() => setSelectedIndex(index)}
@@ -225,7 +226,7 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
                       indices={result.nameIndices}
                     />
                   </div>
-                  <div className="truncate text-xs text-gx-muted">
+                  <div className="truncate text-xs text-muted-foreground">
                     <HighlightedText
                       text={result.entry.relativePath}
                       indices={result.pathIndices}
@@ -235,11 +236,11 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
 
                 {/* Status badge: branch + dirty count (Level ≥ 1) */}
                 {result.entry.level >= 1 && result.entry.branch && (
-                  <div className="flex shrink-0 items-center gap-1 text-[10px] text-gx-muted">
+                  <div className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
                     <GitBranch size={10} />
                     <span className="max-w-[80px] truncate">{result.entry.branch}</span>
                     {result.entry.dirtyCount !== null && result.entry.dirtyCount > 0 && (
-                      <span className="rounded bg-gx-warn/20 px-1 py-0.5 text-[9px] font-medium text-gx-warn">
+                      <span className="rounded bg-warning/20 px-1 py-0.5 text-[9px] font-medium text-warning">
                         {result.entry.dirtyCount}
                       </span>
                     )}
@@ -251,7 +252,7 @@ export function FuzzySwitcher({ repos, onSelect, onClose }: FuzzySwitcherProps) 
         </div>
 
         {/* Footer hint */}
-        <div className="flex items-center justify-between border-t border-gx-border px-3 py-1.5 text-[10px] text-gx-muted">
+        <div className="flex items-center justify-between border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
           <span>↑↓ navigate · ↵ select · esc close</span>
           <span>⌘K</span>
         </div>

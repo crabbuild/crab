@@ -63,12 +63,12 @@ export function TerminalStatusBar({
     : "—";
 
   return (
-    <div className="flex shrink-0 items-center gap-3 border-t border-gx-border bg-gx-surface px-2 py-0.5 text-[10px] text-gx-muted">
+    <div className="flex shrink-0 items-center gap-3 border-t border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">
       {/* Shell name */}
       <button
         type="button"
         onClick={onShellClick}
-        className="flex items-center gap-1 hover:text-gx-text transition-colors"
+        className="flex items-center gap-1 hover:text-foreground transition-colors"
         title="Shell type (click to change)"
       >
         <TerminalIcon size={9} />
@@ -77,7 +77,7 @@ export function TerminalStatusBar({
 
       {/* Agent indicator */}
       {agentType && (
-        <span className="flex items-center gap-1 text-gx-accent" title={`Agent: ${agentType}`}>
+        <span className="flex items-center gap-1 text-primary" title={`Agent: ${agentType}`}>
           <span>{agentIcon(agentType)}</span>
           {agentDuration !== null && (
             <span className="font-mono">{formatDuration(agentDuration)}</span>
@@ -89,7 +89,7 @@ export function TerminalStatusBar({
       <button
         type="button"
         onClick={() => cwd && onCwdClick?.(cwd)}
-        className="flex items-center gap-1 hover:text-gx-text transition-colors truncate max-w-[200px]"
+        className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[200px]"
         title={cwd || "Unknown directory"}
       >
         <Folder size={9} />
@@ -98,7 +98,7 @@ export function TerminalStatusBar({
 
       {/* Running command duration */}
       {runningDuration !== null && (
-        <span className="flex items-center gap-1 text-gx-warn" title="Command running">
+        <span className="flex items-center gap-1 text-warning" title="Command running">
           <Clock size={9} />
           <span className="font-mono">{formatDuration(runningDuration)}</span>
         </span>
@@ -117,7 +117,7 @@ export function TerminalStatusBar({
 
       {/* Connection status */}
       <span
-        className={`flex items-center gap-1 ${connected ? "text-green-500" : "text-gx-error"}`}
+        className={`flex items-center gap-1 ${connected ? "text-success" : "text-destructive"}`}
         title={connected ? "Connected" : "Disconnected"}
       >
         <Wifi size={9} />

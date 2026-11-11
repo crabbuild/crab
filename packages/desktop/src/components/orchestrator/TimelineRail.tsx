@@ -162,10 +162,10 @@ function deriveDots(events: AgentEvent[], feedback: string[]): DotEntry[] {
 // ─── Colour mapping ──────────────────────────────────────────────────────────
 
 const colorClasses: Record<DotEntry["color"], string> = {
-  info: "bg-gx-info",
-  success: "bg-gx-success",
-  error: "bg-gx-error",
-  warning: "bg-gx-warn",
+  info: "bg-info",
+  success: "bg-success",
+  error: "bg-destructive",
+  warning: "bg-warning",
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -295,14 +295,14 @@ function DotItem({
       />
       {isHovered && (
         <div
-          className="absolute left-5 z-50 whitespace-nowrap rounded border border-gx-border bg-gx-surface px-2 py-1 text-[10px] text-gx-text shadow-lg"
+          className="absolute left-5 z-50 whitespace-nowrap rounded border border-border bg-card px-2 py-1 text-[10px] text-foreground shadow-lg"
           role="tooltip"
         >
           <div className="font-medium">{dot.label}</div>
           {dot.summary && (
-            <div className="max-w-[200px] truncate text-gx-muted">{dot.summary}</div>
+            <div className="max-w-[200px] truncate text-muted-foreground">{dot.summary}</div>
           )}
-          <div className="text-gx-muted">{dot.time}</div>
+          <div className="text-muted-foreground">{dot.time}</div>
         </div>
       )}
     </div>

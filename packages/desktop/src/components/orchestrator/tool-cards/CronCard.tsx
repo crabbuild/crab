@@ -59,9 +59,9 @@ export function CronCard({ event, defaultExpanded = false, collapsed: collapsedP
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <span className="truncate text-gx-text/70">{summary}</span>
+        <Icon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <span className="truncate text-foreground/70">{summary}</span>
       </>
     );
     return (
@@ -74,30 +74,30 @@ export function CronCard({ event, defaultExpanded = false, collapsed: collapsedP
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => hasOutput && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasOutput && "hover:bg-gx-surface-hover cursor-pointer",
+          hasOutput && "hover:bg-accent cursor-pointer",
           !hasOutput && "cursor-default",
         )}
       >
-        <Icon size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
-        <span className="min-w-0 flex-1 truncate text-gx-text/80">{summary}</span>
+        <Icon size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-foreground/80">{summary}</span>
 
         {hasOutput && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {expanded && hasOutput && (
-        <div className="border-t border-gx-border/30 max-h-[200px] overflow-auto px-2.5 py-2">
-          <pre className="font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap">
+        <div className="border-t border-border/30 max-h-[200px] overflow-auto px-2.5 py-2">
+          <pre className="font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap">
             {output.length > 2000 ? output.slice(0, 2000) + "\n… (truncated)" : output}
           </pre>
         </div>

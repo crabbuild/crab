@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useMemo, useState } from "react";
 import { Download, Upload } from "lucide-react";
 import { OpenRepo, useStore } from "../state";
@@ -83,7 +84,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
 
   if (!enabled) {
     return (
-      <div className="p-4 text-sm text-gx-muted">
+      <div className="p-4 text-sm text-muted-foreground">
         Hydration requires a repository with a working tree.
       </div>
     );
@@ -97,21 +98,21 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="space-y-3 border-b border-gx-border bg-gx-bg p-4">
+      <div className="space-y-3 border-b border-border bg-background p-4">
         {summary && (
-          <div className="rounded border border-gx-border bg-gx-bg-sub p-3 text-xs text-gx-muted">
-            <span className="text-gx-text">{summary.hydrated.toLocaleString()}</span> hydrated ·{" "}
-            <span className="text-gx-text">{summary.pointer.toLocaleString()}</span> pointer-only ·{" "}
-            <span className="text-gx-warn">{summary.partial}</span> partial ·{" "}
-            <span className="text-gx-error">{summary.missing}</span> missing
+          <div className="rounded border border-border bg-background p-3 text-xs text-muted-foreground">
+            <span className="text-foreground">{summary.hydrated.toLocaleString()}</span> hydrated ·{" "}
+            <span className="text-foreground">{summary.pointer.toLocaleString()}</span> pointer-only ·{" "}
+            <span className="text-warning">{summary.partial}</span> partial ·{" "}
+            <span className="text-destructive">{summary.missing}</span> missing
           </div>
         )}
 
         {noTrackedFilesYet ? (
-          <div className="rounded border border-gx-border bg-gx-bg-sub p-4 text-xs text-gx-muted">
-            <p className="mb-1 text-gx-text">No Crab or Git LFS files in this repository yet.</p>
+          <div className="rounded border border-border bg-background p-4 text-xs text-muted-foreground">
+            <p className="mb-1 text-foreground">No Crab or Git LFS files in this repository yet.</p>
             <p>
-              Track large files via the <strong className="text-gx-text">Track &amp; Stage</strong>{" "}
+              Track large files via the <strong className="text-foreground">Track &amp; Stage</strong>{" "}
               tab or by running <code className="kbd">crab track '*.bin'</code>. They'll show up
               here once tracked.
             </p>
@@ -132,9 +133,9 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
             />
 
             <div className="flex flex-wrap items-center gap-2">
-              <button
+              <Button variant="default"
                 type="button"
-                className="btn btn-primary text-xs"
+                className="text-xs"
                 disabled={busy || !canHydrate || resolvedHydrate.matched.length === 0}
                 onClick={() => requestRun("hydrate")}
                 title={
@@ -145,10 +146,10 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               >
                 <Download size={12} />
                 Hydrate {formatActionLabel(resolvedHydrate.matched.length, resolvedHydrate.bytes)}
-              </button>
-              <button
+              </Button>
+              <Button variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 disabled={busy || !canDehydrate || resolvedDehydrate.matched.length === 0}
                 onClick={() => requestRun("dehydrate")}
                 title={
@@ -159,24 +160,24 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               >
                 <Upload size={12} />
                 Dehydrate {formatActionLabel(resolvedDehydrate.matched.length, resolvedDehydrate.bytes)}
-              </button>
+              </Button>
             </div>
           </>
         )}
 
         {(error || statusError) && (
-          <div role="alert" className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+          <div role="alert" className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
             {error || statusError}
           </div>
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto bg-gx-bg-sub p-3 font-mono text-[12px]">
+      <div className="min-h-0 flex-1 overflow-auto bg-background p-3 font-mono text-[12px]">
         {lines.length === 0 ? (
-          <div className="text-gx-muted">Progress will stream here once the job starts.</div>
+          <div className="text-muted-foreground">Progress will stream here once the job starts.</div>
         ) : (
           lines.map((l, i) => (
-            <div key={i} className={l.stream === "stderr" ? "text-gx-warn" : ""}>
+            <div key={i} className={l.stream === "stderr" ? "text-warning" : ""}>
               {l.line}
             </div>
           ))

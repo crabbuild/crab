@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OpenRepo, repositoryKey } from "../state";
 import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, isStorageRepositoryUrl, rpc } from "../ipc";
@@ -765,17 +766,17 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
       />
     ),
     workflows: (
-      <div className="p-3 text-xs text-gx-muted">
+      <div className="p-3 text-xs text-muted-foreground">
         Workflows open in the main area.
       </div>
     ),
     dashboard: (
-      <div className="p-3 text-xs text-gx-muted">
+      <div className="p-3 text-xs text-muted-foreground">
         Dashboard opens in the main area.
       </div>
     ),
     settings: (
-      <div className="p-3 text-xs text-gx-muted">
+      <div className="p-3 text-xs text-muted-foreground">
         Settings open in the main area. Press{" "}
         <span className="kbd">⌘,</span> anytime to jump back.
       </div>
@@ -804,9 +805,9 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
 
   return (
     <div className="flex h-full min-w-0 flex-col">
-      {repo.native_session_id === null && <div role={reopenError || repo.native_error ? "alert" : "status"} className="flex shrink-0 items-center justify-between gap-3 border-b border-gx-border bg-gx-surface px-3 py-2 text-xs">
-        <span className="min-w-0 break-words text-gx-muted">{reopenError ?? repo.native_error ?? "Restoring repository services…"}</span>
-        {(reopenError || repo.native_error) && <button type="button" className="btn shrink-0 text-xs" disabled={reopening} onClick={() => void reopenRepository()}>{reopening ? "Reopening…" : "Retry reopening repository"}</button>}
+      {repo.native_session_id === null && <div role={reopenError || repo.native_error ? "alert" : "status"} className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-3 py-2 text-xs">
+        <span className="min-w-0 break-words text-muted-foreground">{reopenError ?? repo.native_error ?? "Restoring repository services…"}</span>
+        {(reopenError || repo.native_error) && <Button variant="outline" type="button" className="shrink-0 text-xs" disabled={reopening} onClick={() => void reopenRepository()}>{reopening ? "Reopening…" : "Retry reopening repository"}</Button>}
       </div>}
       <div className="flex min-h-0 flex-1">
         <WorkspaceShell
@@ -978,7 +979,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
                     renderDiff={activeDiff ? <DiffView repo={repo} path={activeDiff.path} /> : null}
                   />
                 </Panel>
-                <PanelResizeHandle className="w-1 bg-gx-border hover:bg-gx-accent transition-colors" />
+                <PanelResizeHandle className="w-1 bg-border hover:bg-primary transition-colors" />
                 <Panel minSize={20}>
                   <EditorPane
                     repo={repo}
@@ -1045,9 +1046,9 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
 
 function PullRequestsEmpty() {
   return (
-    <div className="flex h-full items-center justify-center bg-gx-bg-sub">
-      <div className="text-center text-sm text-gx-muted">
-        <div className="mb-1 text-base text-gx-text">Select a pull request</div>
+    <div className="flex h-full items-center justify-center bg-background">
+      <div className="text-center text-sm text-muted-foreground">
+        <div className="mb-1 text-base text-foreground">Select a pull request</div>
         <div>Click a pull request on the left to see its timeline, reviews, and changes.</div>
       </div>
     </div>

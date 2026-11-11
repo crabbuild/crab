@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 /**
  * SyncPairDialog — modal dialog for configuring a local↔remote directory
  * sync pair. Pre-fills the remote path from the file browser context menu
@@ -139,28 +141,28 @@ export function SyncPairDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="sync-pair-dialog-title"
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
         {/* Header */}
-        <div className="flex items-start gap-3 border-b border-gx-border p-4">
-          <div className="mt-0.5 shrink-0 rounded p-2 bg-gx-accent/15 text-gx-accent">
+        <div className="flex items-start gap-3 border-b border-border p-4">
+          <div className="mt-0.5 shrink-0 rounded p-2 bg-primary/15 text-primary">
             <FolderSync size={20} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
             <h2
               id="sync-pair-dialog-title"
-              className="text-[14px] font-semibold text-gx-text"
+              className="text-[14px] font-semibold text-foreground"
             >
               Set Up Folder Sync
             </h2>
-            <p className="mt-0.5 text-[12px] text-gx-muted">
+            <p className="mt-0.5 text-[12px] text-muted-foreground">
               Configure a local↔remote directory sync pair
             </p>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="shrink-0 rounded p-1 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition"
             aria-label="Close"
           >
             <X size={16} />
@@ -171,10 +173,10 @@ export function SyncPairDialog({
         <div className="space-y-4 p-4">
           {/* Remote path (read-only) */}
           <div>
-            <label className="text-[11px] font-medium uppercase tracking-wide text-gx-muted">
+            <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               Remote Directory
             </label>
-            <div className="mt-1 rounded border border-gx-border bg-gx-bg-sub px-3 py-2 font-mono text-[12px] text-gx-muted select-all">
+            <div className="mt-1 rounded border border-border bg-background px-3 py-2 font-mono text-[12px] text-muted-foreground select-all">
               {remotePath}
             </div>
           </div>
@@ -183,32 +185,32 @@ export function SyncPairDialog({
           <div>
             <label
               htmlFor="sync-local-dir"
-              className="text-[11px] font-medium uppercase tracking-wide text-gx-muted"
+              className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
             >
               Local Directory
             </label>
             <div className="mt-1 flex gap-2">
               <div className="relative flex-1">
-                <input
+                <Input
                   id="sync-local-dir"
                   type="text"
                   value={localDir}
                   onChange={(e) => setLocalDir(e.target.value)}
                   placeholder="/path/to/local/folder"
                   className={clsx(
-                    "w-full rounded border px-3 py-2 text-[12px] text-gx-text bg-gx-bg-sub placeholder:text-gx-muted/60",
-                    "focus:outline-none focus:ring-2 focus:ring-gx-accent",
+                    "w-full rounded border px-3 py-2 text-[12px] text-foreground bg-background placeholder:text-muted-foreground/60",
+                    "focus:outline-none focus:ring-2 focus:ring-primary",
                     validationError
-                      ? "border-red-500/60"
+                      ? "border-destructive/60"
                       : isValid
-                        ? "border-green-500/60"
-                        : "border-gx-border",
+                        ? "border-success/60"
+                        : "border-border",
                   )}
                 />
                 {validating && (
                   <Loader2
                     size={14}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 animate-spin text-gx-muted"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 animate-spin text-muted-foreground"
                     aria-label="Validating directory"
                   />
                 )}
@@ -217,9 +219,9 @@ export function SyncPairDialog({
                 type="button"
                 onClick={handleBrowse}
                 className={clsx(
-                  "shrink-0 rounded border border-gx-border px-3 py-2 text-[12px] font-medium transition",
-                  "text-gx-text bg-gx-surface hover:bg-gx-surface-hover",
-                  "focus:outline-none focus:ring-2 focus:ring-gx-accent",
+                  "shrink-0 rounded border border-border px-3 py-2 text-[12px] font-medium transition",
+                  "text-foreground bg-card hover:bg-accent",
+                  "focus:outline-none focus:ring-2 focus:ring-primary",
                 )}
                 aria-label="Browse for local directory"
               >
@@ -228,7 +230,7 @@ export function SyncPairDialog({
             </div>
             {/* Validation error */}
             {validationError && (
-              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-red-400">
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-destructive">
                 <AlertCircle size={12} className="shrink-0" />
                 <span>{validationError}</span>
               </div>
@@ -239,22 +241,22 @@ export function SyncPairDialog({
           <div>
             <label
               htmlFor="sync-ignore-patterns"
-              className="text-[11px] font-medium uppercase tracking-wide text-gx-muted"
+              className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
             >
               Ignore Patterns
             </label>
-            <p className="mt-0.5 text-[11px] text-gx-muted/80">
+            <p className="mt-0.5 text-[11px] text-muted-foreground/80">
               One glob pattern per line. Matching files will be excluded from sync.
             </p>
-            <textarea
+            <Textarea
               id="sync-ignore-patterns"
               value={ignoreText}
               onChange={(e) => setIgnoreText(e.target.value)}
               rows={4}
               className={clsx(
-                "mt-1 w-full rounded border border-gx-border bg-gx-bg-sub px-3 py-2",
-                "font-mono text-[12px] text-gx-text placeholder:text-gx-muted/60",
-                "resize-y focus:outline-none focus:ring-2 focus:ring-gx-accent",
+                "mt-1 w-full rounded border border-border bg-background px-3 py-2",
+                "font-mono text-[12px] text-foreground placeholder:text-muted-foreground/60",
+                "resize-y focus:outline-none focus:ring-2 focus:ring-primary",
               )}
               placeholder="node_modules&#10;.git&#10;.DS_Store"
             />
@@ -262,15 +264,15 @@ export function SyncPairDialog({
         </div>
 
         {/* Footer buttons */}
-        <div className="flex items-center justify-end gap-2 border-t border-gx-border p-3">
+        <div className="flex items-center justify-end gap-2 border-t border-border p-3">
           <button
             ref={cancelRef}
             type="button"
             onClick={onCancel}
             className={clsx(
-              "rounded border border-gx-border px-3 py-1.5 text-[12px] transition",
-              "bg-gx-surface text-gx-text hover:bg-gx-surface-hover",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border px-3 py-1.5 text-[12px] transition",
+              "bg-card text-foreground hover:bg-accent",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
           >
             Cancel
@@ -281,10 +283,10 @@ export function SyncPairDialog({
             disabled={!isValid || validating}
             className={clsx(
               "rounded border px-3 py-1.5 text-[12px] font-medium transition",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
               isValid && !validating
-                ? "border-gx-accent/60 bg-gx-accent/15 text-gx-accent hover:bg-gx-accent/25"
-                : "cursor-not-allowed border-gx-border bg-gx-bg-sub text-gx-muted opacity-50",
+                ? "border-primary/60 bg-primary/15 text-primary hover:bg-primary/25"
+                : "cursor-not-allowed border-border bg-background text-muted-foreground opacity-50",
             )}
           >
             Confirm Sync

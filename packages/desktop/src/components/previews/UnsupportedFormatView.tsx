@@ -68,16 +68,16 @@ export function UnsupportedFormatView({ kind, path, size }: Props) {
   };
 
   return (
-    <div className="flex h-full items-center justify-center bg-gx-bg-sub p-8">
-      <div className="max-w-md rounded-lg border border-gx-border bg-gx-surface p-6 text-center">
-        <div className="mb-3 flex justify-center text-gx-accent/60">{info.icon}</div>
-        <h2 className="mb-1 text-base font-semibold text-gx-text">{info.title}</h2>
-        <div className="mb-3 font-mono text-[11px] text-gx-muted">{path.split("/").pop()}</div>
-        <p className="mb-4 text-[12px] leading-relaxed text-gx-muted">{info.description}</p>
+    <div className="flex h-full items-center justify-center bg-background p-8">
+      <div className="max-w-md rounded-lg border border-border bg-card p-6 text-center">
+        <div className="mb-3 flex justify-center text-primary/60">{info.icon}</div>
+        <h2 className="mb-1 text-base font-semibold text-foreground">{info.title}</h2>
+        <div className="mb-3 font-mono text-[11px] text-muted-foreground">{path.split("/").pop()}</div>
+        <p className="mb-4 text-[12px] leading-relaxed text-muted-foreground">{info.description}</p>
         {size != null && size > 0 && (
-          <div className="text-[11px] text-gx-muted">Size: {formatBytes(size)}</div>
+          <div className="text-[11px] text-muted-foreground">Size: {formatBytes(size)}</div>
         )}
-        <div className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-gx-border bg-gx-bg-sub px-2.5 py-1 text-[10px] text-gx-muted">
+        <div className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-[10px] text-muted-foreground">
           <AlertCircle size={10} />
           {info.status === "planned" ? "Coming soon" : "Not supported"}
         </div>

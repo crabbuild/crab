@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
@@ -457,7 +458,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
           <span className="flex items-center gap-[4px]">
             <button
               type="button"
-              className="flex h-6 w-6 items-center justify-center rounded text-gx-secondary hover:bg-gx-accent/20 hover:text-gx-primary disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleFetchAll}
               disabled={fetchingAll}
               title="Fetch all remotes"
@@ -467,7 +468,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
             </button>
             <button
               type="button"
-              className="flex h-6 w-6 items-center justify-center rounded text-gx-secondary hover:bg-gx-accent/20 hover:text-gx-primary"
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-foreground"
               onClick={refresh}
               title="Refresh"
               aria-label="Refresh branches"
@@ -480,12 +481,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
 
       {/* Create branch inline input */}
       {creatingBranch && (
-        <div className="shrink-0 border-b border-gx-border px-3 py-2">
+        <div className="shrink-0 border-b border-border px-3 py-2">
           <div className="flex items-center gap-2">
-            <GitBranch size={12} className="shrink-0 text-gx-accent" />
-            <input
+            <GitBranch size={12} className="shrink-0 text-primary" />
+            <Input
               ref={createBranchInputRef}
-              className="min-w-0 flex-1 rounded border border-gx-accent bg-gx-bg px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none focus:ring-1 focus:ring-gx-accent"
+              className="min-w-0 flex-1 rounded border border-primary bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
               placeholder="New branch name…"
               value={createBranchName}
               onChange={(e) => setCreateBranchName(e.target.value)}
@@ -509,12 +510,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
         </div>
       )}
       {fetchedRemotes && fetchedRemotes.length > 0 && (
-        <div className="shrink-0 border-b border-gx-border px-3 py-1">
+        <div className="shrink-0 border-b border-border px-3 py-1">
           <div className="flex flex-wrap gap-1">
             {fetchedRemotes.map((remote) => (
               <span
                 key={remote}
-                className="rounded bg-gx-accent/15 px-1.5 py-0.5 text-[10px] text-gx-accent"
+                className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] text-primary"
               >
                 {remote}
               </span>
@@ -526,12 +527,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
       {/* Body */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {loading && !refs && (
-          <div className="flex items-center gap-2 p-3 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" /> Loading branches…
           </div>
         )}
         {error && (
-          <div className="m-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <div className="m-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
             {error}
           </div>
         )}
@@ -662,12 +663,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
             onClick={() => setToast(null)}
             className={`pointer-events-auto rounded border px-3 py-1.5 text-xs shadow-lg transition ${
               toast.kind === "error"
-                ? "border-gx-error/40 bg-gx-error/10 text-gx-error"
-                : "border-gx-border bg-gx-surface text-gx-text"
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : "border-border bg-card text-foreground"
             }`}
           >
             {toast.text}
-            <span className="ml-2 text-gx-muted">dismiss</span>
+            <span className="ml-2 text-muted-foreground">dismiss</span>
           </button>
         </div>
       )}
@@ -675,12 +676,12 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
       {/* Post-push "Create PR?" prompt */}
       {postPushBranch && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex justify-center">
-          <div className="pointer-events-auto flex items-center gap-2 rounded border border-gx-accent/40 bg-gx-surface px-3 py-1.5 text-xs shadow-lg">
-            <GitPullRequest size={12} className="text-gx-accent" />
-            <span className="text-gx-text">Branch pushed. Create a pull request?</span>
+          <div className="pointer-events-auto flex items-center gap-2 rounded border border-primary/40 bg-card px-3 py-1.5 text-xs shadow-lg">
+            <GitPullRequest size={12} className="text-primary" />
+            <span className="text-foreground">Branch pushed. Create a pull request?</span>
             <button
               type="button"
-              className="rounded bg-gx-accent px-2 py-0.5 text-[11px] font-medium text-white hover:bg-gx-accent/90"
+              className="rounded bg-primary px-2 py-0.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
               onClick={() => {
                 setCreatePrBranch(postPushBranch);
                 setPostPushBranch(null);
@@ -690,7 +691,7 @@ export function BranchesView({ repo, selectedBranch, onSelectBranch }: Props) {
             </button>
             <button
               type="button"
-              className="text-gx-muted hover:text-gx-text"
+              className="text-muted-foreground hover:text-foreground"
               onClick={() => setPostPushBranch(null)}
             >
               dismiss
@@ -763,7 +764,7 @@ function TreeSection({
     <div className="mb-1">
       <button
         type="button"
-        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text"
+        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
@@ -936,7 +937,7 @@ function FolderNode({
     <div>
       <button
         type="button"
-        className="flex w-full items-center gap-1 py-0.5 text-[12px] text-gx-muted hover:bg-gx-bg-sub hover:text-gx-text"
+        className="flex w-full items-center gap-1 py-0.5 text-[12px] text-muted-foreground hover:bg-background hover:text-foreground"
         style={{ paddingLeft }}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
@@ -1075,9 +1076,9 @@ function BranchRow({
         className="flex items-center gap-1 py-0.5"
         style={{ paddingLeft }}
       >
-        <input
+        <Input
           ref={renameInputRef}
-          className="min-w-0 flex-1 rounded border border-gx-accent bg-gx-bg-sub px-1 py-0.5 font-mono text-[11px] focus-visible:outline-none"
+          className="min-w-0 flex-1 rounded border border-primary bg-background px-1 py-0.5 font-mono text-[11px] focus-visible:outline-none"
           value={renameValue}
           onChange={(e) => onRenameChange(e.target.value)}
           onKeyDown={(e) => {
@@ -1095,7 +1096,7 @@ function BranchRow({
     <div
       className={clsx(
         "group flex items-center gap-1 py-0.5 text-[12px]",
-        isSelected ? "bg-gx-accent/15" : "hover:bg-gx-bg-sub",
+        isSelected ? "bg-primary/15" : "hover:bg-background",
       )}
       style={{ paddingLeft }}
       onClick={onSelect}
@@ -1105,11 +1106,11 @@ function BranchRow({
       aria-selected={isSelected}
     >
       {branch.is_head && (
-        <span className="shrink-0 text-gx-accent" title="HEAD">*</span>
+        <span className="shrink-0 text-primary" title="HEAD">*</span>
       )}
       <span
         className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
-          branch.is_head ? "font-bold text-gx-text" : "text-gx-text"
+          branch.is_head ? "font-bold text-foreground" : "text-foreground"
         }`}
         title={branch.name}
       >
@@ -1122,7 +1123,7 @@ function BranchRow({
           {ahead > 0 && (
             <button
               type="button"
-              className="rounded p-0.5 text-gx-accent hover:bg-gx-accent/20 disabled:opacity-50"
+              className="rounded p-0.5 text-primary hover:bg-primary/20 disabled:opacity-50"
               onClick={handlePush}
               disabled={actionBusy !== null}
               title={`Push ${branch.name}`}
@@ -1134,7 +1135,7 @@ function BranchRow({
           {behind > 0 && (
             <button
               type="button"
-              className="rounded p-0.5 text-gx-warning hover:bg-gx-warning/20 disabled:opacity-50"
+              className="rounded p-0.5 text-warning hover:bg-warning/20 disabled:opacity-50"
               onClick={handlePull}
               disabled={actionBusy !== null}
               title={`Pull ${branch.name}`}
@@ -1153,7 +1154,7 @@ function BranchRow({
           )}
           <button
             type="button"
-            className="rounded p-0.5 text-gx-muted hover:bg-gx-surface hover:text-gx-text disabled:opacity-50"
+            className="rounded p-0.5 text-muted-foreground hover:bg-card hover:text-foreground disabled:opacity-50"
             onClick={handleFetch}
             disabled={actionBusy !== null}
             title={`Fetch ${branch.name}`}
@@ -1163,7 +1164,7 @@ function BranchRow({
           </button>
           <button
             type="button"
-            className="rounded p-0.5 text-gx-muted hover:bg-gx-accent/80 hover:text-gx-accent disabled:opacity-50"
+            className="rounded p-0.5 text-muted-foreground hover:bg-primary/80 hover:text-primary disabled:opacity-50"
             onClick={(e) => { e.stopPropagation(); onCreatePr(branch.name); }}
             disabled={actionBusy !== null}
             title={`Create PR for ${branch.name}`}
@@ -1217,24 +1218,24 @@ function PullModeDropdown({ repoId, branchName, onSelect, onClose }: PullModeDro
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg"
+      className="absolute right-0 top-full z-50 mt-1 min-w-[140px] rounded border border-border bg-card py-1 shadow-lg"
       role="menu"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gx-muted">
+      <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
         Pull mode
       </div>
       {modes.map((m) => (
         <button
           key={m.value}
           type="button"
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-gx-accent/10 ${
-            currentMode === m.value ? "text-gx-accent font-medium" : "text-gx-text"
+          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-primary/10 ${
+            currentMode === m.value ? "text-primary font-medium" : "text-foreground"
           }`}
           onClick={() => onSelect(m.value)}
           role="menuitem"
         >
-          {currentMode === m.value && <span className="text-gx-accent">•</span>}
+          {currentMode === m.value && <span className="text-primary">•</span>}
           {currentMode !== m.value && <span className="invisible">•</span>}
           {m.label}
         </button>
@@ -1254,12 +1255,12 @@ function AheadBehindChips({ branch }: { branch: RefEntry }) {
   return (
     <span className="flex shrink-0 items-center gap-0.5 text-[10px]">
       {ahead > 0 && (
-        <span className="rounded bg-gx-accent/20 px-1 text-gx-accent" title={`${ahead} ahead`}>
+        <span className="rounded bg-primary/20 px-1 text-primary" title={`${ahead} ahead`}>
           ↑{ahead}
         </span>
       )}
       {behind > 0 && (
-        <span className="rounded bg-gx-warning/20 px-1 text-gx-warning" title={`${behind} behind`}>
+        <span className="rounded bg-warning/20 px-1 text-warning" title={`${behind} behind`}>
           ↓{behind}
         </span>
       )}
@@ -1273,7 +1274,7 @@ function KindBadge({ kind }: { kind: RefKind }) {
   if (kind === "branch") return null; // default, no badge needed in local section
   const label = kind === "remote" ? "R" : kind === "tag" ? "T" : kind;
   return (
-    <span className="shrink-0 rounded bg-gx-surface px-1 text-[9px] uppercase text-gx-muted">
+    <span className="shrink-0 rounded bg-card px-1 text-[9px] uppercase text-muted-foreground">
       {label}
     </span>
   );
@@ -1287,7 +1288,7 @@ function TagSection({ tags }: { tags: RefEntry[] }) {
     <div className="mb-1">
       <button
         type="button"
-        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-gx-muted hover:text-gx-text"
+        className="flex w-full items-center gap-1 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
@@ -1300,12 +1301,12 @@ function TagSection({ tags }: { tags: RefEntry[] }) {
           {tags.map((t) => (
             <div
               key={t.name}
-              className="flex items-center gap-1 py-0.5 pl-6 text-[12px] hover:bg-gx-bg-sub"
+              className="flex items-center gap-1 py-0.5 pl-6 text-[12px] hover:bg-background"
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-gx-text">
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
                 {t.name}
               </span>
-              <span className="shrink-0 font-mono text-[10px] text-gx-muted">
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                 {t.target.slice(0, 8)}
               </span>
             </div>

@@ -94,14 +94,14 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
     if (this.state.error) {
       const stale = isStaleChunkError(this.state.error);
       return (
-        <div style={{ padding: 40, fontFamily: "system-ui", color: "#e7eaf1", background: "#0f1115", height: "100vh" }}>
+        <div style={{ padding: 40, fontFamily: "system-ui", color: "rgb(var(--foreground))", background: "rgb(var(--background))", height: "100vh" }}>
           <h1 style={{ fontSize: 20, marginBottom: 12 }}>Crab Desktop crashed</h1>
           {stale && (
-            <p style={{ fontSize: 13, color: "#fbbf24", marginBottom: 16 }}>
+            <p style={{ fontSize: 13, color: "rgb(var(--warning))", marginBottom: 16 }}>
               This looks like a stale build. Reloading usually fixes it.
             </p>
           )}
-          <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", color: "#f87171", marginBottom: 20 }}>
+          <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", color: "rgb(var(--destructive))", marginBottom: 20 }}>
             {this.state.error.message}
             {"\n\n"}
             {this.state.error.stack}
@@ -111,7 +111,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
               try { sessionStorage.removeItem(RELOAD_FLAG); } catch {}
               window.location.reload();
             }}
-            style={{ padding: "8px 16px", background: "#4f8cff", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}
+            style={{ padding: "8px 16px", background: "rgb(var(--primary))", color: "rgb(var(--primary-foreground))", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}
           >
             Reload
           </button>
@@ -122,13 +122,13 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
               try { sessionStorage.clear(); } catch {}
               window.location.reload();
             }}
-            style={{ padding: "8px 16px", background: "#242832", color: "#e7eaf1", border: "1px solid #363a46", borderRadius: 6, cursor: "pointer", fontSize: 13, marginLeft: 8 }}
+            style={{ padding: "8px 16px", background: "rgb(var(--secondary))", color: "rgb(var(--foreground))", border: "1px solid rgb(var(--input))", borderRadius: 6, cursor: "pointer", fontSize: 13, marginLeft: 8 }}
           >
             Clear state &amp; reload
           </button>
           <button
             onClick={() => this.setState({ error: null })}
-            style={{ padding: "8px 16px", background: "#242832", color: "#e7eaf1", border: "1px solid #363a46", borderRadius: 6, cursor: "pointer", fontSize: 13, marginLeft: 8 }}
+            style={{ padding: "8px 16px", background: "rgb(var(--secondary))", color: "rgb(var(--foreground))", border: "1px solid rgb(var(--input))", borderRadius: 6, cursor: "pointer", fontSize: 13, marginLeft: 8 }}
           >
             Try again
           </button>

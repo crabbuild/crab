@@ -527,7 +527,7 @@ export function ChatTab({
       {/* Pin context menu */}
       {pinMenu && (
         <div
-          className="fixed z-[9999] min-w-[180px] rounded-md border border-gx-border bg-gx-surface py-1 shadow-xl"
+          className="fixed z-[9999] min-w-[180px] rounded-md border border-border bg-card py-1 shadow-xl"
           style={{ left: pinMenu.x, top: pinMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -537,9 +537,9 @@ export function ChatTab({
               void pinMessageToContext(pinMenu.message);
               setPinMenu(null);
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
           >
-            <Pin size={11} className="text-gx-accent" />
+            <Pin size={11} className="text-primary" />
             Pin to context for future turns
           </button>
         </div>
@@ -564,21 +564,21 @@ export function ChatTab({
       <div className="mx-auto max-w-4xl space-y-3">
         {/* Collapsible todo section */}
         {todos.length > 0 && onToggleTodo && onAddTodo && onRemoveTodo && (
-          <div className="rounded-lg border border-gx-border bg-gx-surface">
+          <div className="rounded-lg border border-border bg-card">
             <button
               type="button"
               onClick={() => setTodosExpanded(!todosExpanded)}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-gx-text hover:bg-gx-surface-hover transition rounded-lg"
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent transition rounded-lg"
             >
               {todosExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-              <ListTodo size={11} className="text-gx-accent" />
+              <ListTodo size={11} className="text-primary" />
               <span className="font-medium">Todos</span>
-              <span className="text-gx-muted">
+              <span className="text-muted-foreground">
                 ({todos.filter((t) => !t.done).length}/{todos.length} remaining)
               </span>
             </button>
             {todosExpanded && (
-              <div className="border-t border-gx-border px-2 py-2">
+              <div className="border-t border-border px-2 py-2">
                 <TodoList
                   taskId={task.id}
                   todos={todos}
@@ -594,8 +594,8 @@ export function ChatTab({
 
         {messages.length === 0 && !isStreaming && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <Bot size={28} className="text-gx-muted/50" />
-            <p className="text-xs text-gx-muted max-w-[280px]">
+            <Bot size={28} className="text-muted-foreground/50" />
+            <p className="text-xs text-muted-foreground max-w-[280px]">
               The agent will show its progress here as it works on your task.
             </p>
           </div>
@@ -657,7 +657,7 @@ export function ChatTab({
 
         {isStreaming && (
           <div className="flex items-start gap-2">
-            <div className="rounded-lg bg-gx-surface px-3 py-2 text-xs text-gx-muted">
+            <div className="rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground">
               <Loader2 size={12} className="animate-spin" />
             </div>
           </div>
@@ -683,7 +683,7 @@ export function ChatTab({
               setAutoScroll(true);
               scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
             }}
-            className="flex items-center gap-1 rounded-full bg-gx-surface border border-gx-border px-2 py-0.5 text-[10px] text-gx-muted hover:text-gx-text transition"
+            className="flex items-center gap-1 rounded-full bg-card border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground transition"
           >
             <ChevronDown size={10} /> Jump to bottom
           </button>
@@ -692,7 +692,7 @@ export function ChatTab({
 
       {/* Max iterations warning */}
       {iterationCount >= 5 && (
-        <div className="shrink-0 mx-3 mb-1 rounded-md border border-gx-warn/40 bg-gx-warn/10 px-3 py-2 text-xs text-gx-warn">
+        <div className="shrink-0 mx-3 mb-1 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
           {iterationCount} iterations — consider breaking this into smaller tasks.
         </div>
       )}
@@ -717,7 +717,7 @@ export function ChatTab({
 
       {/* Input area */}
       <div className="shrink-0 p-3">
-        {(task.status === "archived" || task.status === "applied" || task.status === "discarded") && <p role="status" className="mx-auto mb-2 max-w-4xl text-xs text-gx-muted">
+        {(task.status === "archived" || task.status === "applied" || task.status === "discarded") && <p role="status" className="mx-auto mb-2 max-w-4xl text-xs text-muted-foreground">
           {task.status === "discarded" ? "This conversation was discarded. Start a new chat to continue." : "Reopen this conversation to send messages."}
         </p>}
         <fieldset disabled={task.status === "archived" || task.status === "applied" || task.status === "discarded"} className="mx-auto min-w-0 max-w-4xl border-0 p-0">
@@ -791,7 +791,7 @@ function AwaitingResponseIndicator({ agentName: _agentName, startTime }: { agent
 
   return (
     <div className="flex items-start gap-2">
-      <div className="rounded-lg bg-gx-surface px-3 py-2 text-xs text-gx-muted flex items-center gap-2">
+      <div className="rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
         <span className="inline-flex gap-[3px]">
           <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce [animation-delay:0ms]" />
           <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce [animation-delay:150ms]" />
@@ -815,11 +815,11 @@ function ThinkingBubble({ message, durationSec: _durationSec, isLive, agentName:
 
   return (
     <div className="flex items-start gap-2">
-      <div className="max-w-[85%] rounded-lg bg-gx-thinking/5 border border-gx-thinking/20 px-3 py-2 text-xs leading-relaxed text-gx-muted">
+      <div className="max-w-[85%] rounded-lg bg-thinking/5 border border-thinking/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 text-[10px] font-medium text-gx-thinking cursor-pointer hover:text-gx-accent transition w-full text-left"
+          className="flex items-center gap-1.5 text-[10px] font-medium text-thinking cursor-pointer hover:text-primary transition w-full text-left"
         >
           {isLive ? (
             <Loader2 size={10} className="animate-spin" />
@@ -831,7 +831,7 @@ function ThinkingBubble({ message, durationSec: _durationSec, isLive, agentName:
           {durationLabel}
         </button>
         {expanded && message.content && (
-          <div className="mt-1.5 pt-1.5 border-t border-gx-thinking/15 italic">
+          <div className="mt-1.5 pt-1.5 border-t border-thinking/15 italic">
             <MarkdownContent content={message.content} />
           </div>
         )}
@@ -867,16 +867,16 @@ function MessageBubble({
     if (isShort) {
       return (
         <div className="flex items-center gap-2 px-1 py-1">
-          <CheckCircle2 size={8} className="text-gx-success shrink-0 agent-status-icon" />
-          <span className="text-xs text-gx-success font-medium">{message.content || "Task completed"}</span>
+          <CheckCircle2 size={8} className="text-success shrink-0 agent-status-icon" />
+          <span className="text-xs text-success font-medium">{message.content || "Task completed"}</span>
         </div>
       );
     }
     // Longer done messages → render with markdown like normal agent messages.
     return (
       <div className="flex items-start gap-2">
-        <CheckCircle2 size={8} className="text-gx-success shrink-0 agent-status-icon mt-1" />
-        <div className="max-w-[85%] rounded-lg bg-gx-surface px-3 py-2 text-xs leading-relaxed text-gx-text">
+        <CheckCircle2 size={8} className="text-success shrink-0 agent-status-icon mt-1" />
+        <div className="max-w-[85%] rounded-lg bg-card px-3 py-2 text-xs leading-relaxed text-foreground">
           <MarkdownContent content={message.content} />
         </div>
       </div>
@@ -887,8 +887,8 @@ function MessageBubble({
   if (isError) {
     return (
       <div className="flex items-start gap-2">
-        <AlertCircle size={8} className="text-gx-error shrink-0 agent-status-icon mt-1" />
-        <div className="max-w-[85%] rounded-lg border border-gx-error/30 bg-gx-error/10 px-3 py-2 text-xs leading-relaxed text-gx-error">
+        <AlertCircle size={8} className="text-destructive shrink-0 agent-status-icon mt-1" />
+        <div className="max-w-[85%] rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
           <MarkdownContent content={message.content} />
         </div>
       </div>
@@ -903,16 +903,16 @@ function MessageBubble({
     >
       {/* User messages keep their avatar; agent messages use left-border accent instead */}
       {isUser && (
-        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gx-info/15">
-          <User size={12} className="text-gx-info" />
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-info/15">
+          <User size={12} className="text-info" />
         </div>
       )}
       <div
         className={clsx(
           "max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed relative",
           isUser
-            ? "bg-gx-info/15 text-gx-text"
-            : "bg-gx-surface text-gx-text",
+            ? "bg-info/15 text-foreground"
+            : "bg-card text-foreground",
         )}
       >
         {/* Cost chip — only shown on agent messages with known cost. */}
@@ -1019,15 +1019,15 @@ function isPlanMessage(message: ChatMessage, task: OrchestratorTask, messages: C
 function PlanCard({ message, agentName: _agentName }: { message: ChatMessage; agentName: string }) {
   return (
     <div className="flex items-start gap-2">
-      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gx-warn/15">
-        <ClipboardList size={12} className="text-gx-warn" />
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-warning/15">
+        <ClipboardList size={12} className="text-warning" />
       </div>
-      <div className="max-w-[90%] rounded-lg border border-gx-warn/30 bg-gx-warn/5 px-4 py-3">
-        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-gx-warn">
+      <div className="max-w-[90%] rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-warning">
           <ClipboardList size={11} />
           Implementation Plan
         </div>
-        <pre className="whitespace-pre-wrap font-sans text-xs leading-relaxed text-gx-text">
+        <pre className="whitespace-pre-wrap font-sans text-xs leading-relaxed text-foreground">
           {message.content}
         </pre>
 

@@ -15,6 +15,7 @@
  * `ITheme`. Missing keys fall back to xterm defaults.
  */
 
+import palettes from "../../theme-tokens.json";
 import type { ITheme } from "@xterm/xterm";
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -36,13 +37,23 @@ export interface TerminalScheme {
 
 // ── Schemes ─────────────────────────────────────────────────────────
 
+function terminalChrome(palette: typeof palettes.dark): ITheme {
+  // xterm's color parser requires comma-separated RGB channels.
+  const rgb = (value: string) => `rgb(${value.replaceAll(" ", ", ")})`;
+  return {
+    background: rgb(palette.background),
+    foreground: rgb(palette.foreground),
+    cursor: rgb(palette.foreground),
+    selectionBackground: rgb(palette.accent),
+  };
+}
+
 const CRAB_DEFAULT: TerminalScheme = {
   id: "crab",
   name: "Crab",
   description: "Ships with the app; balanced contrast for both modes.",
   dark: {
-    background: "#0b0d12", foreground: "#e7eaf1", cursor: "#4f8cff",
-    selectionBackground: "#2a3757",
+    ...terminalChrome(palettes.dark),
     black: "#1b1f27", red: "#ff6b6b", green: "#69db7c", yellow: "#ffd43b",
     blue: "#4f8cff", magenta: "#da77f2", cyan: "#66d9e8", white: "#e7eaf1",
     brightBlack: "#495057", brightRed: "#ff8787", brightGreen: "#8ce99a",
@@ -50,8 +61,7 @@ const CRAB_DEFAULT: TerminalScheme = {
     brightCyan: "#99e9f2", brightWhite: "#f8f9fa",
   },
   light: {
-    background: "#ffffff", foreground: "#0f1419", cursor: "#1e4fd1",
-    selectionBackground: "#b3ceff",
+    ...terminalChrome(palettes.light),
     black: "#0f1419", red: "#a81b1c", green: "#1f7a3a", yellow: "#8a5a00",
     blue: "#1e4fd1", magenta: "#7a2fa8", cyan: "#0b5c82", white: "#5c6773",
     brightBlack: "#3c4148", brightRed: "#c23032", brightGreen: "#2e8f48",

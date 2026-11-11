@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useState, useRef, useEffect } from "react";
 import { X } from "lucide-react";
 import { useSkills } from "../../state/skills-store";
@@ -73,12 +74,12 @@ export function SkillInstallModal({ open, onClose }: Props) {
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       onKeyDown={handleKeyDown}
     >
-      <div className="w-full max-w-lg rounded-xl border border-gx-border bg-gx-bg shadow-2xl">
+      <div className="w-full max-w-lg rounded-xl border border-border bg-background shadow-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gx-border">
-          <h3 className="text-sm font-semibold text-gx-text">Install Skill from URL</h3>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-semibold text-foreground">Install Skill from URL</h3>
           <button
-            className="p-1 rounded hover:bg-gx-surface-hover text-gx-muted hover:text-gx-text transition-colors"
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             <X size={16} />
@@ -88,31 +89,31 @@ export function SkillInstallModal({ open, onClose }: Props) {
         {/* Body */}
         <div className="px-4 py-3 space-y-3">
           <div>
-            <label className="block text-xs font-medium text-gx-muted mb-1">GitHub URL</label>
-            <input
+            <label className="block text-xs font-medium text-muted-foreground mb-1">GitHub URL</label>
+            <Input
               ref={urlRef}
               type="text"
               placeholder="https://github.com/owner/repo/blob/main/path/SKILL.md"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1.5 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-accent px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
-            <p className="text-[10px] text-gx-muted mt-0.5">
+            <p className="text-[10px] text-muted-foreground mt-0.5">
               Supports GitHub blob/tree URLs, raw URLs, or <code>owner/repo/path</code> shorthand.
             </p>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gx-border">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
           <button
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-gx-muted hover:text-gx-text transition-colors"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             onClick={onClose}
           >
             Cancel
           </button>
           <button
-            className="rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick={handleInstall}
             disabled={installing}
           >

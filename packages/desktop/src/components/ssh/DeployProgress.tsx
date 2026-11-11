@@ -41,7 +41,7 @@ export function DeployProgress({
 
   return (
     <div
-      className="rounded-lg border border-gx-border bg-gx-surface p-4"
+      className="rounded-lg border border-border bg-card p-4"
       role="status"
       aria-label={`Deploying agent: ${STAGE_META[stage].label}`}
       aria-live="polite"
@@ -60,16 +60,16 @@ export function DeployProgress({
                 <div
                   className={clsx(
                     "h-px w-4",
-                    isComplete ? "bg-gx-accent" : "bg-gx-border",
+                    isComplete ? "bg-primary" : "bg-border",
                   )}
                 />
               )}
               <div
                 className={clsx(
                   "flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-medium transition-colors",
-                  isActive && "bg-gx-accent/15 text-gx-accent",
-                  isComplete && "text-gx-accent",
-                  !isActive && !isComplete && "text-gx-muted",
+                  isActive && "bg-primary/15 text-primary",
+                  isComplete && "text-primary",
+                  !isActive && !isComplete && "text-muted-foreground",
                 )}
               >
                 {isComplete ? (
@@ -94,7 +94,7 @@ export function DeployProgress({
       {stage === "uploading" && (
         <div className="space-y-2">
           <div
-            className="h-2 w-full overflow-hidden rounded-full bg-gx-bg-sub"
+            className="h-2 w-full overflow-hidden rounded-full bg-background"
             role="progressbar"
             aria-valuenow={percent}
             aria-valuemin={0}
@@ -102,13 +102,13 @@ export function DeployProgress({
             aria-label="Upload progress"
           >
             <div
-              className="h-full rounded-full bg-gx-accent transition-all duration-300 ease-out"
+              className="h-full rounded-full bg-primary transition-all duration-300 ease-out"
               style={{ width: `${Math.min(percent, 100)}%` }}
             />
           </div>
 
           {/* Speed and ETA */}
-          <div className="flex items-center justify-between text-[11px] text-gx-muted">
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
             <span>{percent}%</span>
             <div className="flex items-center gap-3">
               {speed != null && speed > 0 && (
@@ -124,7 +124,7 @@ export function DeployProgress({
 
       {/* Non-upload stages show a simple status line */}
       {stage !== "uploading" && (
-        <p className="text-[12px] text-gx-muted">
+        <p className="text-[12px] text-muted-foreground">
           {STAGE_META[stage].label}…
         </p>
       )}

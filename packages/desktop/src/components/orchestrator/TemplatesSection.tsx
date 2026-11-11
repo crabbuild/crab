@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Pencil, Trash2 } from "lucide-react";
 import type { WorkspaceTemplate } from "./TemplatePicker";
@@ -70,7 +71,7 @@ export function TemplatesSection() {
 
   if (!loaded) {
     return (
-      <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 size={11} className="animate-spin" /> Loading templates…
       </div>
     );
@@ -78,9 +79,9 @@ export function TemplatesSection() {
 
   if (templates.length === 0) {
     return (
-      <div className="text-xs text-gx-muted">
+      <div className="text-xs text-muted-foreground">
         No templates configured. Use "Save as template" from a workspace to create one, or add
-        templates to <code className="font-mono text-gx-text/80">crab-orchestrator.json</code>.
+        templates to <code className="font-mono text-foreground/80">crab-orchestrator.json</code>.
       </div>
     );
   }
@@ -94,7 +95,7 @@ export function TemplatesSection() {
         return (
           <div
             key={template.name}
-            className="flex items-center gap-2 rounded border border-gx-border/60 bg-gx-bg px-3 py-2"
+            className="flex items-center gap-2 rounded border border-border/60 bg-background px-3 py-2"
           >
             {/* Icon */}
             {template.icon && (
@@ -106,14 +107,14 @@ export function TemplatesSection() {
             {/* Name + description */}
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-gx-text">{template.name}</span>
-                <span className="shrink-0 rounded-full bg-gx-bg-sub px-1.5 py-0.5 text-[9px] text-gx-muted">
+                <span className="text-xs font-medium text-foreground">{template.name}</span>
+                <span className="shrink-0 rounded-full bg-background px-1.5 py-0.5 text-[9px] text-muted-foreground">
                   {template.source}
                 </span>
               </div>
               {isEditing ? (
-                <input
-                  className="mt-1 w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5 text-[11px] text-gx-text focus:border-gx-accent focus:outline-none"
+                <Input
+                  className="mt-1 w-full rounded border border-border bg-background px-2 py-0.5 text-[11px] text-foreground focus:border-primary focus:outline-none"
                   value={editDesc}
                   onChange={(e) => setEditDesc(e.target.value)}
                   onBlur={handleEditSave}
@@ -124,7 +125,7 @@ export function TemplatesSection() {
                   autoFocus
                 />
               ) : (
-                <div className="text-[10px] text-gx-muted truncate">
+                <div className="text-[10px] text-muted-foreground truncate">
                   {template.description || "No description"}
                 </div>
               )}
@@ -136,7 +137,7 @@ export function TemplatesSection() {
                 <button
                   type="button"
                   onClick={() => handleEditStart(template)}
-                  className="rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+                  className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
                   aria-label={`Edit ${template.name}`}
                 >
                   <Pencil size={12} />
@@ -144,7 +145,7 @@ export function TemplatesSection() {
                 <button
                   type="button"
                   onClick={() => handleDelete(template.name)}
-                  className="rounded p-1 text-gx-muted transition hover:bg-gx-error/10 hover:text-gx-error"
+                  className="rounded p-1 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
                   aria-label={`Delete ${template.name}`}
                 >
                   <Trash2 size={12} />
@@ -154,7 +155,7 @@ export function TemplatesSection() {
 
             {/* Read-only badge for non-user templates */}
             {!isUserLevel && (
-              <span className="shrink-0 text-[9px] text-gx-muted">read-only</span>
+              <span className="shrink-0 text-[9px] text-muted-foreground">read-only</span>
             )}
           </div>
         );

@@ -99,40 +99,40 @@ export function ConfirmDiscardDialog({
         aria-modal="true"
         aria-labelledby={headingId}
         aria-describedby={bodyId}
-        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card shadow-2xl"
       >
-        <div className="flex items-start gap-3 border-b border-gx-border p-4">
-          <div className="mt-0.5 shrink-0 rounded bg-gx-error/15 p-2 text-gx-error">
+        <div className="flex items-start gap-3 border-b border-border p-4">
+          <div className="mt-0.5 shrink-0 rounded bg-destructive/15 p-2 text-destructive">
             <AlertTriangle size={18} aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
             <h2
               id={headingId}
-              className="text-[14px] font-semibold text-gx-text"
+              className="text-[14px] font-semibold text-foreground"
             >
               Discard {lineCount.toLocaleString()} line
               {lineCount === 1 ? "" : "s"}?
             </h2>
-            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-gx-muted">
+            <p id={bodyId} className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
               This change crosses your confirm threshold of {threshold.toLocaleString()}
               {" "}line{threshold === 1 ? "" : "s"}. Discarding rewrites the {filesLabel}
               {" "}on disk and cannot be undone from inside Crab Desktop.
             </p>
           </div>
         </div>
-        <div className="max-h-40 overflow-auto border-b border-gx-border bg-gx-bg-sub px-4 py-2">
+        <div className="max-h-40 overflow-auto border-b border-border bg-background px-4 py-2">
           <ul className="space-y-0.5">
             {shownFiles.map((f) => (
               <li
                 key={f}
-                className="truncate font-mono text-[11px] text-gx-text"
+                className="truncate font-mono text-[11px] text-foreground"
                 title={f}
               >
                 {f}
               </li>
             ))}
             {hiddenCount > 0 && (
-              <li className="text-[11px] text-gx-muted">
+              <li className="text-[11px] text-muted-foreground">
                 … and {hiddenCount.toLocaleString()} more
               </li>
             )}
@@ -144,8 +144,8 @@ export function ConfirmDiscardDialog({
             type="button"
             onClick={onCancel}
             className={clsx(
-              "rounded border border-gx-border bg-gx-surface px-3 py-1.5 text-[12px] text-gx-text transition",
-              "hover:bg-gx-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+              "rounded border border-border bg-card px-3 py-1.5 text-[12px] text-foreground transition",
+              "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             )}
           >
             Cancel
@@ -154,8 +154,8 @@ export function ConfirmDiscardDialog({
             type="button"
             onClick={onConfirm}
             className={clsx(
-              "rounded border border-gx-error/60 bg-gx-error/15 px-3 py-1.5 text-[12px] font-medium text-gx-error transition",
-              "hover:bg-gx-error/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gx-error",
+              "rounded border border-destructive/60 bg-destructive/15 px-3 py-1.5 text-[12px] font-medium text-destructive transition",
+              "hover:bg-destructive/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive",
             )}
           >
             Discard

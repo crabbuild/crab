@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from "react";
 import clsx from "clsx";
 import {
@@ -227,19 +229,19 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-gx-border bg-gx-bg p-6 shadow-2xl"
+        className="relative max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-border bg-background p-6 shadow-2xl"
       >
         {/* Close button */}
         <button
           type="button"
-          className="absolute right-4 top-4 text-gx-muted hover:text-gx-text"
+          className="absolute right-4 top-4 text-muted-foreground hover:text-foreground"
           onClick={onCancel}
           aria-label="Close dialog"
         >
           <X size={16} />
         </button>
 
-        <h2 id={titleId} className="mb-4 text-base font-semibold text-gx-text">
+        <h2 id={titleId} className="mb-4 text-base font-semibold text-foreground">
           {profile ? "Edit SSH Connection" : "Add SSH Connection"}
         </h2>
 
@@ -247,9 +249,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           {/* Basic fields */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <FormField label="Label" required>
-              <input
+              <Input
                 type="text"
-                className="input-field"
+
                 placeholder="GPU Training Server"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
@@ -258,9 +260,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               />
             </FormField>
             <FormField label="Host" required>
-              <input
+              <Input
                 type="text"
-                className="input-field"
+
                 placeholder="gpu-01.internal.example.com"
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
@@ -269,9 +271,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               />
             </FormField>
             <FormField label="Port">
-              <input
+              <Input
                 type="number"
-                className="input-field"
+
                 min={1}
                 max={65535}
                 value={port}
@@ -279,9 +281,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               />
             </FormField>
             <FormField label="Username" required>
-              <input
+              <Input
                 type="text"
-                className="input-field"
+
                 placeholder="haipingf"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -294,55 +296,55 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           {/* Auth method */}
           <FormField label="Authentication">
             <div className="space-y-2">
-              <label className="flex items-center gap-2 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="auth"
                   value="agent"
                   checked={authType === "agent"}
                   onChange={() => setAuthType("agent")}
-                  className="accent-gx-accent"
+                  className="accent-primary"
                 />
                 SSH Agent (recommended)
               </label>
-              <label className="flex items-center gap-2 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="auth"
                   value="key"
                   checked={authType === "key"}
                   onChange={() => setAuthType("key")}
-                  className="accent-gx-accent"
+                  className="accent-primary"
                 />
                 Key File
               </label>
-              <label className="flex items-center gap-2 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="auth"
                   value="key_passphrase"
                   checked={authType === "key_passphrase"}
                   onChange={() => setAuthType("key_passphrase")}
-                  className="accent-gx-accent"
+                  className="accent-primary"
                 />
                 Key File (with passphrase)
               </label>
-              <label className="flex items-center gap-2 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="auth"
                   value="password"
                   checked={authType === "password"}
                   onChange={() => setAuthType("password")}
-                  className="accent-gx-accent"
+                  className="accent-primary"
                 />
                 Password
               </label>
             </div>
             {(authType === "key" || authType === "key_passphrase") && (
-              <input
+              <Input
                 type="text"
-                className="input-field mt-2"
+                className="mt-2"
                 placeholder="~/.ssh/id_ed25519"
                 value={keyPath}
                 onChange={(e) => setKeyPath(e.target.value)}
@@ -350,9 +352,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               />
             )}
             {authType === "password" && (
-              <input
+              <Input
                 type="password"
-                className="input-field mt-2"
+                className="mt-2"
                 placeholder="Enter password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -364,7 +366,7 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           {/* Advanced section */}
           <button
             type="button"
-            className="flex w-full items-center gap-1 text-xs font-medium text-gx-muted hover:text-gx-text"
+            className="flex w-full items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
             onClick={() => setShowAdvanced(!showAdvanced)}
             aria-expanded={showAdvanced}
           >
@@ -373,21 +375,21 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
           </button>
 
           {showAdvanced && (
-            <div className="space-y-3 rounded border border-gx-border bg-gx-surface p-3">
+            <div className="space-y-3 rounded border border-border bg-card p-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <FormField label="Remote path">
-                  <input
+                  <Input
                     type="text"
-                    className="input-field"
+
                     placeholder="/home/user/repos"
                     value={remotePath}
                     onChange={(e) => setRemotePath(e.target.value)}
                   />
                 </FormField>
                 <FormField label="Jump host">
-                  <input
+                  <Input
                     type="text"
-                    className="input-field"
+
                     placeholder="bastion.example.com"
                     value={jumpHost}
                     onChange={(e) => setJumpHost(e.target.value)}
@@ -404,9 +406,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                       type="button"
                       className={clsx(
                         "h-5 w-5 rounded-full border-2 transition",
-                        colour === c ? "border-gx-text scale-110" : "border-transparent",
+                        colour === c ? "border-foreground scale-110" : "border-transparent",
                       )}
-                      style={{ backgroundColor: `var(--color-${c}, ${c})` }}
+                      style={{ backgroundColor: c }}
                       onClick={() => setColour(c)}
                       aria-label={`Select ${c} colour`}
                       aria-pressed={colour === c}
@@ -417,9 +419,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
 
               {/* Tags */}
               <FormField label="Tags" hint="Comma-separated">
-                <input
+                <Input
                   type="text"
-                  className="input-field"
+
                   placeholder="gpu, training"
                   value={tagsInput}
                   onChange={(e) => setTagsInput(e.target.value)}
@@ -436,9 +438,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
 
               {/* Keep alive */}
               <FormField label="Keep-alive interval (seconds)">
-                <input
+                <Input
                   type="number"
-                  className="input-field w-24"
+                  className="w-24"
                   min={5}
                   max={300}
                   value={keepAliveInterval}
@@ -449,9 +451,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               {/* Timeouts */}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <FormField label="Connection timeout (ms)" hint="Initial handshake timeout">
-                  <input
+                  <Input
                     type="number"
-                    className="input-field w-28"
+                    className="w-28"
                     min={1000}
                     max={120000}
                     placeholder="10000"
@@ -462,9 +464,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                   />
                 </FormField>
                 <FormField label="Operation timeout (ms)" hint="Leave blank to let large-file reads finish. Cancellation waits for cleanup.">
-                  <input
+                  <Input
                     type="number"
-                    className="input-field w-28"
+                    className="w-28"
                     min={1000}
                     max={300000}
                     placeholder="Automatic"
@@ -479,56 +481,56 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               {/* Port forwards */}
               <div>
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-medium text-gx-text">Port Forwards</span>
-                  <button
+                  <span className="text-xs font-medium text-foreground">Port Forwards</span>
+                  <Button variant="outline"
                     type="button"
-                    className="btn flex items-center gap-1 text-[10px]"
+                    className="flex items-center gap-1 text-[10px]"
                     onClick={addPortForward}
                   >
                     <Plus size={10} /> Add Forward
-                  </button>
+                  </Button>
                 </div>
                 {portForwards.length > 0 && (
                   <div className="space-y-2">
                     {portForwards.map((fwd) => (
-                      <div key={fwd.id} className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub p-2">
-                        <input
+                      <div key={fwd.id} className="flex items-center gap-2 rounded border border-border bg-background p-2">
+                        <Input
                           type="number"
-                          className="input-field w-16 text-xs"
+                          className="w-16 text-xs"
                           placeholder="8888"
                           value={fwd.localPort}
                           onChange={(e) => updatePortForward(fwd.id, "localPort", Number(e.target.value))}
                           aria-label="Local port"
                         />
-                        <span className="text-[10px] text-gx-muted">→</span>
-                        <input
+                        <span className="text-[10px] text-muted-foreground">→</span>
+                        <Input
                           type="number"
-                          className="input-field w-16 text-xs"
+                          className="w-16 text-xs"
                           placeholder="8888"
                           value={fwd.remotePort}
                           onChange={(e) => updatePortForward(fwd.id, "remotePort", Number(e.target.value))}
                           aria-label="Remote port"
                         />
-                        <input
+                        <Input
                           type="text"
-                          className="input-field flex-1 text-xs"
+                          className="flex-1 text-xs"
                           placeholder="Label (e.g. Jupyter)"
                           value={fwd.label}
                           onChange={(e) => updatePortForward(fwd.id, "label", e.target.value)}
                           aria-label="Forward label"
                         />
-                        <label className="flex items-center gap-1 text-[10px] text-gx-muted whitespace-nowrap cursor-pointer">
+                        <label className="flex items-center gap-1 text-[10px] text-muted-foreground whitespace-nowrap cursor-pointer">
                           <input
                             type="checkbox"
                             checked={fwd.autoStart}
                             onChange={(e) => updatePortForward(fwd.id, "autoStart", e.target.checked)}
-                            className="accent-gx-accent"
+                            className="accent-primary"
                           />
                           Auto
                         </label>
                         <button
                           type="button"
-                          className="text-red-500 hover:text-red-600"
+                          className="text-destructive hover:text-destructive"
                           onClick={() => removePortForward(fwd.id)}
                           aria-label="Remove forward"
                         >
@@ -548,8 +550,8 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
               className={clsx(
                 "rounded border p-2 text-xs",
                 testResult.success
-                  ? "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-300"
-                  : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300",
+                  ? "border-success/40 bg-success/10 text-success text-success"
+                  : "border-destructive/40 bg-destructive/10 text-destructive text-destructive",
               )}
               role="alert"
             >
@@ -567,9 +569,9 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
 
           {/* Footer buttons */}
           <div className="flex items-center gap-2 pt-2">
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn flex items-center gap-1.5 text-xs"
+              className="flex items-center gap-1.5 text-xs"
               onClick={handleTestConnection}
               disabled={testing || !isValid}
               aria-label="Test SSH connection"
@@ -580,22 +582,22 @@ export function ConnectionForm({ profile, onSave, onCancel }: ConnectionFormProp
                 <Zap size={12} />
               )}
               Test Connection
-            </button>
+            </Button>
             <div className="flex-1" />
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={onCancel}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button variant="default"
               type="submit"
-              className="btn btn-primary text-xs"
+              className="text-xs"
               disabled={!isValid}
             >
               {profile ? "Save" : "Save & Connect"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
@@ -621,12 +623,12 @@ function FormField({
   const controlId = control?.props.id ?? fieldId;
   return (
     <div role={control ? undefined : "group"} aria-labelledby={control ? undefined : `${fieldId}-label`}>
-      <label id={`${fieldId}-label`} htmlFor={control ? controlId : undefined} className="mb-1 block text-xs font-medium text-gx-text">
+      <label id={`${fieldId}-label`} htmlFor={control ? controlId : undefined} className="mb-1 block text-xs font-medium text-foreground">
         {label}
-        {required && <span className="ml-0.5 text-red-500">*</span>}
+        {required && <span className="ml-0.5 text-destructive">*</span>}
       </label>
       {control ? cloneElement(control, { id: controlId }) : children}
-      {hint && <p className="mt-0.5 text-[10px] text-gx-muted">{hint}</p>}
+      {hint && <p className="mt-0.5 text-[10px] text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -641,12 +643,12 @@ function ToggleField({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <label className="flex items-center gap-2 text-xs text-gx-text cursor-pointer">
+    <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="accent-gx-accent"
+        className="accent-primary"
       />
       {label}
     </label>

@@ -1,0 +1,33 @@
+name: Desktop theme
+on:
+  pull_request:
+    paths: ['packages/desktop/**', '.github/workflows/desktop-theme.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  theme:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build:renderer
+      - run: npm run build:electron
+      - run: npx vitest run tests/theme-tokens.spec.ts
+      - run: npx vite-node src/lib/vscode-theme-import.test.ts
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --project=theme-system --workers=1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-theme-proof
+          path: packages/desktop/test-results/

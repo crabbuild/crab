@@ -89,23 +89,22 @@ cascade re-renders.
 
 ### Color System
 
-The app uses a semantic color palette via CSS custom properties:
+The canonical palette lives in `theme-tokens.json`, with shadcn semantic
+roles and Geist-inspired neutral surfaces. Primary actions use black and
+white. Color communicates status, diagnostics, file types, and data.
 
 | Token | Purpose |
 |-------|---------|
-| `--gx-bg` | Background |
-| `--gx-surface` | Elevated surfaces (cards, panels) |
-| `--gx-border` | Borders and dividers |
-| `--gx-text` | Primary text |
-| `--gx-muted` | Secondary/disabled text |
-| `--gx-accent` | Interactive elements |
-| `--gx-success` | Added/positive states |
-| `--gx-warn` | Modified/warning states |
-| `--gx-error` | Deleted/error states |
-| `--gx-info` | Informational highlights |
+| `--background`, `--card`, `--popover` | Workspace and elevated surfaces |
+| `--foreground`, `--muted-foreground` | Primary and secondary text |
+| `--border`, `--input`, `--ring` | Dividers, fields and keyboard focus |
+| `--primary`, `--primary-foreground` | Primary actions |
+| `--accent`, `--accent-foreground` | Neutral hover and selection |
+| `--success`, `--warning`, `--destructive`, `--info` | Semantic states |
 
-Themes (dark, light, high-contrast dark, high-contrast light) swap
-these tokens. Workspace-level theme overrides are supported.
+Light, dark, and high-contrast modes swap these tokens; workspace overrides
+remain supported. Shared shadcn controls own appearance, and callers own
+layout. See [Theming and Accessibility](theming-and-accessibility.md).
 
 ### Layout
 

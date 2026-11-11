@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { HydrationEntry } from "../../ipc";
@@ -76,18 +77,18 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
         <div className="relative flex-1 min-w-[12rem]">
           <Search
             size={12}
-            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gx-muted"
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
           />
-          <input
+          <Input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter by path…"
-            className="w-full rounded border border-gx-border bg-gx-bg py-1 pl-7 pr-2 text-xs focus-visible:outline-none focus:border-gx-accent"
+            className="w-full rounded border border-border bg-background py-1 pl-7 pr-2 text-xs focus-visible:outline-none focus:border-primary"
           />
         </div>
         <div
-          className="inline-flex items-center gap-px rounded border border-gx-border bg-gx-surface p-0.5 text-[11px]"
+          className="inline-flex items-center gap-px rounded border border-border bg-card p-0.5 text-[11px]"
           role="tablist"
           aria-label="State filter"
         >
@@ -107,8 +108,8 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
               className={
                 "rounded px-1.5 py-0.5 transition " +
                 (stateFilter === id
-                  ? "bg-gx-bg-sub text-gx-text"
-                  : "text-gx-muted hover:text-gx-text")
+                  ? "bg-background text-foreground"
+                  : "text-muted-foreground hover:text-foreground")
               }
             >
               {label}
@@ -117,7 +118,7 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
         </div>
       </div>
 
-      <div className="flex items-center justify-between text-[11px] text-gx-muted">
+      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span>
           {selection.count.toLocaleString()} selected · {formatBytes(selection.bytes)} ·{" "}
           {filtered.length.toLocaleString()} match{filtered.length === 1 ? "" : "es"}
@@ -125,7 +126,7 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            className="text-gx-accent hover:underline"
+            className="text-primary hover:underline"
             onClick={toggleAllVisible}
             disabled={visiblePaths.length === 0}
           >
@@ -134,7 +135,7 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
           {selSet.size > 0 && (
             <button
               type="button"
-              className="text-gx-muted hover:text-gx-text hover:underline"
+              className="text-muted-foreground hover:text-foreground hover:underline"
               onClick={() => onChange([])}
             >
               Clear all
@@ -143,13 +144,13 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
         </div>
       </div>
 
-      <div className="max-h-64 overflow-auto rounded border border-gx-border bg-gx-bg">
+      <div className="max-h-64 overflow-auto rounded border border-border bg-background">
         {visible.length === 0 ? (
-          <div className="px-3 py-4 text-center text-xs text-gx-muted">
+          <div className="px-3 py-4 text-center text-xs text-muted-foreground">
             No tracked files match the current filter.
           </div>
         ) : (
-          <ul className="divide-y divide-gx-border/50 text-[11px]">
+          <ul className="divide-y divide-border/50 text-[11px]">
             {visible.map((e) => {
               const checked = selSet.has(e.path);
               return (
@@ -157,18 +158,18 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
                   <label
                     className={
                       "flex cursor-pointer items-center gap-2 px-2 py-1 transition " +
-                      (checked ? "bg-gx-accent/10" : "hover:bg-gx-bg-sub")
+                      (checked ? "bg-primary/10" : "hover:bg-background")
                     }
                   >
                     <input
                       type="checkbox"
-                      className="accent-gx-accent"
+                      className="accent-primary"
                       checked={checked}
                       onChange={(ev) => togglePath(e.path, ev.target.checked)}
                     />
-                    <span className="flex-1 truncate font-mono text-gx-text">{e.path}</span>
+                    <span className="flex-1 truncate font-mono text-foreground">{e.path}</span>
                     <StateBadge state={e.state} />
-                    <span className="shrink-0 text-gx-muted">{formatBytes(e.logical)}</span>
+                    <span className="shrink-0 text-muted-foreground">{formatBytes(e.logical)}</span>
                   </label>
                 </li>
               );
@@ -176,7 +177,7 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
           </ul>
         )}
         {truncated && (
-          <div className="border-t border-gx-border px-3 py-1.5 text-[11px] text-gx-muted">
+          <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
             Showing first {MAX_ROWS.toLocaleString()} of{" "}
             {filtered.length.toLocaleString()} matches. Refine the filter to narrow down.
           </div>
@@ -188,10 +189,10 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
 
 function StateBadge({ state }: { state: HydrationEntry["state"] }) {
   const cls = {
-    hydrated: "border-gx-success/40 bg-gx-success/10 text-gx-success",
-    pointer: "border-gx-border bg-gx-bg-sub text-gx-muted",
-    partial: "border-gx-warn/40 bg-gx-warn/10 text-gx-warn",
-    missing: "border-gx-error/40 bg-gx-error/10 text-gx-error",
+    hydrated: "border-success/40 bg-success/10 text-success",
+    pointer: "border-border bg-background text-muted-foreground",
+    partial: "border-warning/40 bg-warning/10 text-warning",
+    missing: "border-destructive/40 bg-destructive/10 text-destructive",
   }[state];
   return (
     <span

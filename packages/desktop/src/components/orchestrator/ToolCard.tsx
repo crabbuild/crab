@@ -37,26 +37,26 @@ type IconConfig = { icon: React.ReactNode; label: string };
 function getToolIcon(tool: string): IconConfig {
   switch (tool) {
     case "Read":
-      return { icon: <FileText size={11} className="text-gx-muted" />, label: "Read" };
+      return { icon: <FileText size={11} className="text-muted-foreground" />, label: "Read" };
     case "Write":
     case "Edit":
     case "NotebookEdit":
-      return { icon: <FilePen size={11} className="text-gx-muted" />, label: tool };
+      return { icon: <FilePen size={11} className="text-muted-foreground" />, label: tool };
     case "Bash":
     case "Terminal":
-      return { icon: <Terminal size={11} className="text-gx-muted" />, label: tool };
+      return { icon: <Terminal size={11} className="text-muted-foreground" />, label: tool };
     case "Grep":
     case "Glob":
-      return { icon: <Search size={11} className="text-gx-muted" />, label: tool };
+      return { icon: <Search size={11} className="text-muted-foreground" />, label: tool };
     case "WebFetch":
-      return { icon: <Globe size={11} className="text-gx-muted" />, label: "WebFetch" };
+      return { icon: <Globe size={11} className="text-muted-foreground" />, label: "WebFetch" };
     case "TodoWrite":
     case "Task":
     case "TaskOutput":
     case "TaskStop":
-      return { icon: <ListTodo size={11} className="text-gx-muted" />, label: tool };
+      return { icon: <ListTodo size={11} className="text-muted-foreground" />, label: tool };
     default:
-      return { icon: <Wrench size={11} className="text-gx-muted" />, label: tool };
+      return { icon: <Wrench size={11} className="text-muted-foreground" />, label: tool };
   }
 }
 
@@ -74,28 +74,28 @@ export function ToolCard({ tool, summary, input, detail, defaultExpanded = false
   const hasExpandableContent = input != null || !!detail;
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => hasExpandableContent && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasExpandableContent && "hover:bg-gx-surface-hover cursor-pointer",
+          hasExpandableContent && "hover:bg-accent cursor-pointer",
           !hasExpandableContent && "cursor-default",
         )}
         aria-expanded={hasExpandableContent ? expanded : undefined}
       >
         {icon}
-        <span className="shrink-0 font-medium text-gx-muted">{label}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-gx-text/80">{summary}</span>
+        <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">{summary}</span>
         {hasExpandableContent && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
       {expanded && hasExpandableContent && (
-        <div className="border-t border-gx-border/30 space-y-0">
+        <div className="border-t border-border/30 space-y-0">
           {input != null && (
             <div className="max-h-[200px] overflow-auto">
               <ShikiPreview
@@ -106,7 +106,7 @@ export function ToolCard({ tool, summary, input, detail, defaultExpanded = false
             </div>
           )}
           {detail && (
-            <div className={clsx(input != null && "border-t border-gx-border/20", "max-h-[200px] overflow-auto")}>
+            <div className={clsx(input != null && "border-t border-border/20", "max-h-[200px] overflow-auto")}>
               <GenericDetailRenderer detail={detail} />
             </div>
           )}
@@ -143,7 +143,7 @@ function GenericDetailRenderer({ detail }: { detail: string }) {
   }
 
   return (
-    <pre className="whitespace-pre-wrap font-mono text-[10px] text-gx-text/70 px-2.5 py-2">
+    <pre className="whitespace-pre-wrap font-mono text-[10px] text-foreground/70 px-2.5 py-2">
       {text}
     </pre>
   );

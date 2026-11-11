@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Puzzle, X, ChevronDown } from "lucide-react";
 import type { SkillListItem } from "../../ipc";
@@ -76,50 +77,50 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
     <div ref={containerRef} className="relative">
       {/* Selected chips + open button */}
       <div
-        className="flex flex-wrap items-center gap-1 min-h-[32px] rounded border border-gx-border bg-gx-surface-hover px-2 py-1 cursor-pointer"
+        className="flex flex-wrap items-center gap-1 min-h-[32px] rounded border border-border bg-accent px-2 py-1 cursor-pointer"
         onClick={() => { setOpen(!open); setTimeout(() => inputRef.current?.focus(), 50); }}
       >
         {selectedSkills.length === 0 && (
-          <span className="text-xs text-gx-muted">Select skills...</span>
+          <span className="text-xs text-muted-foreground">Select skills...</span>
         )}
         {selectedSkills.map((s) => (
           <span
             key={s.record.id}
-            className="inline-flex items-center gap-1 rounded-full bg-gx-accent/10 px-2 py-0.5 text-[10px] text-gx-accent"
+            className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary"
           >
             <Puzzle size={10} />
             {s.frontmatter.name || s.record.name}
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); remove(s.record.id); }}
-              className="hover:text-gx-error"
+              className="hover:text-destructive"
             >
               <X size={10} />
             </button>
           </span>
         ))}
-        <ChevronDown size={14} className="ml-auto text-gx-muted shrink-0" />
+        <ChevronDown size={14} className="ml-auto text-muted-foreground shrink-0" />
       </div>
 
       {/* Dropdown */}
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 z-50 rounded-lg border border-gx-border bg-gx-bg shadow-xl max-h-48 overflow-hidden flex flex-col">
-          <div className="p-1.5 border-b border-gx-border">
-            <input
+        <div className="absolute top-full left-0 right-0 mt-1 z-50 rounded-lg border border-border bg-background shadow-xl max-h-48 overflow-hidden flex flex-col">
+          <div className="p-1.5 border-b border-border">
+            <Input
               ref={inputRef}
               type="text"
               placeholder="Search skills..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onClick={(e) => e.stopPropagation()}
-              className="w-full rounded border border-gx-border bg-gx-surface-hover px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-accent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
           </div>
           <div className="overflow-y-auto flex-1">
             {loading ? (
-              <div className="p-3 text-xs text-gx-muted text-center">Loading...</div>
+              <div className="p-3 text-xs text-muted-foreground text-center">Loading...</div>
             ) : filtered.length === 0 ? (
-              <div className="p-3 text-xs text-gx-muted text-center">
+              <div className="p-3 text-xs text-muted-foreground text-center">
                 {skills.length === 0 ? "No skills available" : "No matches"}
               </div>
             ) : (
@@ -129,8 +130,8 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
                   <button
                     key={s.record.id}
                     type="button"
-                    className={`w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-gx-surface-hover transition-colors ${
-                      isSelected ? "bg-gx-accent/5" : ""
+                    className={`w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-accent transition-colors ${
+                      isSelected ? "bg-primary/5" : ""
                     }`}
                     onClick={(e) => { e.stopPropagation(); toggle(s.record.id); }}
                   >
@@ -140,10 +141,10 @@ export function SkillPicker({ selected, onChange, repoPath }: Props) {
                       onChange={() => {}}
                       className="rounded"
                     />
-                    <span className="text-gx-text truncate">
+                    <span className="text-foreground truncate">
                       {s.frontmatter.name || s.record.name}
                     </span>
-                    <span className="text-gx-muted truncate ml-auto text-[10px]">
+                    <span className="text-muted-foreground truncate ml-auto text-[10px]">
                       {s.record.description.slice(0, 40)}
                     </span>
                   </button>

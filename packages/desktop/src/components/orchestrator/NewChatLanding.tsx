@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
@@ -248,9 +250,9 @@ export function NewChatLanding({
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-[640px] space-y-5">
         {/* Heading */}
-        <h1 className="text-center text-lg font-semibold text-gx-text">
+        <h1 className="text-center text-lg font-semibold text-foreground">
           What should we build in{" "}
-          <span className="text-gx-accent">{repoName}</span>?
+          <span className="text-primary">{repoName}</span>?
         </h1>
 
         {/* Main input area */}
@@ -326,7 +328,7 @@ export function NewChatLanding({
 
         {/* Worktree warning */}
         {(worktreeConflict || primaryWorkspaceNotice) && (
-          <div className="flex items-start gap-2 rounded-lg border border-gx-warn/40 bg-gx-warn/5 px-3 py-2 text-[11px] text-gx-warn">
+          <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
             <span>{worktreeConflict || primaryWorkspaceNotice}</span>
           </div>
@@ -340,13 +342,13 @@ export function NewChatLanding({
                 key={chat.id}
                 type="button"
                 onClick={() => onSelectRecentChat?.(chat.id)}
-                className="flex w-full items-center gap-3 rounded-lg border border-gx-border bg-gx-bg-sub px-4 py-3 text-left transition hover:border-gx-accent/40 hover:bg-gx-surface-hover"
+                className="flex w-full items-center gap-3 rounded-lg border border-border bg-background px-4 py-3 text-left transition hover:border-primary/40 hover:bg-accent"
               >
                 <AgentIcon agentName={chat.agentType} size={14} />
-                <span className="min-w-0 flex-1 truncate text-xs text-gx-text">
+                <span className="min-w-0 flex-1 truncate text-xs text-foreground">
                   {chat.title}
                 </span>
-                <span className="shrink-0 text-[10px] text-gx-muted">
+                <span className="shrink-0 text-[10px] text-muted-foreground">
                   {formatRelativeTime(chat.timestamp)}
                 </span>
               </button>
@@ -362,12 +364,12 @@ export function NewChatLanding({
                 key={t.name}
                 type="button"
                 onClick={() => onSelectTemplate?.(t.name)}
-                className="flex flex-col items-start gap-1 rounded-lg border border-gx-border bg-gx-bg-sub p-3 text-left transition hover:border-gx-accent/40 hover:bg-gx-surface-hover"
+                className="flex flex-col items-start gap-1 rounded-lg border border-border bg-background p-3 text-left transition hover:border-primary/40 hover:bg-accent"
               >
                 {t.icon && <span className="text-base">{t.icon}</span>}
-                <span className="text-[11px] font-medium text-gx-text">{t.name}</span>
+                <span className="text-[11px] font-medium text-foreground">{t.name}</span>
                 {t.description && (
-                  <span className="text-[10px] text-gx-muted line-clamp-2">{t.description}</span>
+                  <span className="text-[10px] text-muted-foreground line-clamp-2">{t.description}</span>
                 )}
               </button>
             ))}
@@ -471,10 +473,10 @@ function CreateWorktreeDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-full max-w-sm rounded-lg border border-gx-border bg-gx-bg p-4 shadow-xl"
+        className="w-full max-w-sm rounded-lg border border-border bg-background p-4 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-3 text-sm font-semibold text-gx-text">Create Worktree</h3>
+        <h3 className="mb-3 text-sm font-semibold text-foreground">Create Worktree</h3>
 
         <form onSubmit={handleSubmit} className="space-y-3">
           {/* Mode tabs */}
@@ -484,8 +486,8 @@ function CreateWorktreeDialog({
               className={clsx(
                 "rounded px-2.5 py-1 transition",
                 mode === "new-branch"
-                  ? "bg-gx-accent/20 text-gx-text font-medium"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/20 text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setMode("new-branch")}
             >
@@ -496,8 +498,8 @@ function CreateWorktreeDialog({
               className={clsx(
                 "rounded px-2.5 py-1 transition",
                 mode === "existing-branch"
-                  ? "bg-gx-accent/20 text-gx-text font-medium"
-                  : "text-gx-muted hover:text-gx-text",
+                  ? "bg-primary/20 text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setMode("existing-branch")}
             >
@@ -508,75 +510,75 @@ function CreateWorktreeDialog({
           {/* Branch name / selector */}
           {mode === "new-branch" ? (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Branch name
               </label>
-              <input
+              <Input
                 ref={inputRef}
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="feature/my-task"
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
               />
             </div>
           ) : (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Branch to check out
               </label>
-              <select
+              <NativeSelect
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none"
               >
                 <option value="">Select a branch…</option>
                 {branches.map((b) => (
                   <option key={b} value={b}>{b}</option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
           )}
 
           {/* Start point (for new branch mode) */}
           {mode === "new-branch" && (
             <div>
-              <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
                 Start from
               </label>
-              <select
+              <NativeSelect
                 value={startPoint}
                 onChange={(e) => setStartPoint(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none"
               >
                 {branches.map((b) => (
                   <option key={b} value={b}>{b}</option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
           )}
 
           {/* Folder path (optional) */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">
-              Location <span className="font-normal text-gx-muted/60">(optional — uses default if empty)</span>
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
+              Location <span className="font-normal text-muted-foreground/60">(optional — uses default if empty)</span>
             </label>
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={handlePickPath}
-                className="flex flex-1 items-center justify-between rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-left text-xs transition hover:border-gx-muted/60 focus:border-gx-accent focus:outline-none"
+                className="flex flex-1 items-center justify-between rounded-md border border-border bg-background px-3 py-1.5 text-left text-xs transition hover:border-muted-foreground/60 focus:border-primary focus:outline-none"
               >
-                <span className={path ? "truncate text-gx-text" : "text-gx-muted/60"}>
+                <span className={path ? "truncate text-foreground" : "text-muted-foreground/60"}>
                   {path || "Default location (sibling to repo)"}
                 </span>
-                <FolderTree size={11} className="shrink-0 text-gx-muted ml-2" />
+                <FolderTree size={11} className="shrink-0 text-muted-foreground ml-2" />
               </button>
               {path && (
                 <button
                   type="button"
                   onClick={() => setPath("")}
-                  className="shrink-0 rounded p-1 text-gx-muted hover:text-gx-text"
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
                   aria-label="Clear path"
                 >
                   ×
@@ -587,7 +589,7 @@ function CreateWorktreeDialog({
 
           {/* Error */}
           {error && (
-            <div className="rounded-md border border-gx-error/30 bg-gx-error/5 px-3 py-1.5 text-[11px] text-gx-error">
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-[11px] text-destructive">
               {error}
             </div>
           )}
@@ -598,14 +600,14 @@ function CreateWorktreeDialog({
               type="button"
               onClick={onClose}
               disabled={busy}
-              className="rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text transition disabled:opacity-50"
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!name.trim() || busy}
-              className="rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gx-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {busy ? "Creating…" : "Create"}
             </button>
@@ -661,8 +663,8 @@ function WorktreeSelector({
         className={clsx(
           "flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] transition border",
           open
-            ? "border-gx-accent/50 bg-gx-surface-hover text-gx-text"
-            : "border-gx-border text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "border-primary/50 bg-accent text-foreground"
+            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
       >
         <FolderTree size={11} />
@@ -671,8 +673,8 @@ function WorktreeSelector({
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[260px] max-h-[300px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg">
-          <div className="px-3 py-1.5 border-b border-gx-border/50 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[260px] max-h-[300px] overflow-auto rounded-lg border border-border bg-background shadow-lg">
+          <div className="px-3 py-1.5 border-b border-border/50 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             Worktree
           </div>
           <div className="py-1">
@@ -682,14 +684,14 @@ function WorktreeSelector({
               onClick={() => { onChange({ mode: "auto" }); onClose(); }}
               className={clsx(
                 "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                choice.mode === "auto" ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
+                choice.mode === "auto" ? "bg-primary/10" : "hover:bg-accent",
               )}
             >
               <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-medium text-gx-text">Auto (recommended)</div>
-                <div className="text-[10px] text-gx-muted">Crab creates an isolated worktree automatically</div>
+                <div className="text-[11px] font-medium text-foreground">Auto (recommended)</div>
+                <div className="text-[10px] text-muted-foreground">Crab creates an isolated worktree automatically</div>
               </div>
-              {choice.mode === "auto" && <span className="mt-0.5 text-gx-accent">✓</span>}
+              {choice.mode === "auto" && <span className="mt-0.5 text-primary">✓</span>}
             </button>
 
             {/* Primary workspace option */}
@@ -698,14 +700,14 @@ function WorktreeSelector({
               onClick={() => { onChange({ mode: "primary" }); onClose(); }}
               className={clsx(
                 "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                choice.mode === "primary" ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
+                choice.mode === "primary" ? "bg-primary/10" : "hover:bg-accent",
               )}
             >
               <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-medium text-gx-text">Work locally</div>
-                <div className="text-[10px] text-gx-muted">Run directly in the open repo folder</div>
+                <div className="text-[11px] font-medium text-foreground">Work locally</div>
+                <div className="text-[10px] text-muted-foreground">Run directly in the open repo folder</div>
                 {(primaryBranch || primaryDisplayPath) && (
-                  <div className="mt-0.5 flex items-center gap-2 text-[10px] text-gx-muted">
+                  <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
                     <span className="flex items-center gap-0.5">
                       <GitBranch size={9} />
                       {primaryBranch}
@@ -718,13 +720,13 @@ function WorktreeSelector({
                   </div>
                 )}
               </div>
-              {choice.mode === "primary" && <span className="mt-0.5 text-gx-accent">✓</span>}
+              {choice.mode === "primary" && <span className="mt-0.5 text-primary">✓</span>}
             </button>
 
             {/* Existing worktrees */}
             {nonMainWorktrees.length > 0 && (
               <>
-                <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-gx-muted/70 mt-1">
+                <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/70 mt-1">
                   Existing worktrees
                 </div>
                 {nonMainWorktrees.map((wt) => {
@@ -737,17 +739,17 @@ function WorktreeSelector({
                       onClick={() => { onChange({ mode: "existing", path: wt.path }); onClose(); }}
                       className={clsx(
                         "flex w-full items-start gap-2 px-3 py-2 text-left transition",
-                        isSelected ? "bg-gx-accent/10" : "hover:bg-gx-surface-hover",
+                        isSelected ? "bg-primary/10" : "hover:bg-accent",
                       )}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 text-[11px] font-medium text-gx-text">
+                        <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
                           <span className="truncate">{name}</span>
                           {wt.locked && (
-                            <span className="shrink-0 text-[9px] text-gx-warn">locked</span>
+                            <span className="shrink-0 text-[9px] text-warning">locked</span>
                           )}
                         </div>
-                        <div className="flex items-center gap-2 text-[10px] text-gx-muted">
+                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
                           <span className="flex items-center gap-0.5">
                             <GitBranch size={9} />
                             {wt.branch || "detached"}
@@ -755,7 +757,7 @@ function WorktreeSelector({
                           <span className="truncate font-mono opacity-60">{wt.path.split("/").slice(-2).join("/")}</span>
                         </div>
                       </div>
-                      {isSelected && <span className="mt-0.5 text-gx-accent">✓</span>}
+                      {isSelected && <span className="mt-0.5 text-primary">✓</span>}
                     </button>
                   );
                 })}
@@ -763,11 +765,11 @@ function WorktreeSelector({
             )}
 
             {/* Create new worktree */}
-            <div className="border-t border-gx-border/50 mt-1 pt-1">
+            <div className="border-t border-border/50 mt-1 pt-1">
               <button
                 type="button"
                 onClick={() => { onChange({ mode: "new", name: "", baseBranch: "" }); onClose(); }}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition"
               >
                 <Plus size={11} />
                 <span>Create new worktree manually…</span>
@@ -819,8 +821,8 @@ function DropdownButton({ open, onToggle, onClose, label, items, onSelect, selec
         className={clsx(
           "flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] transition border",
           open
-            ? "border-gx-accent/50 bg-gx-surface-hover text-gx-text"
-            : "border-gx-border text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+            ? "border-primary/50 bg-accent text-foreground"
+            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
       >
         {label}
@@ -828,7 +830,7 @@ function DropdownButton({ open, onToggle, onClose, label, items, onSelect, selec
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[160px] max-h-[240px] overflow-auto rounded-lg border border-gx-border bg-gx-bg shadow-lg">
+        <div className="absolute bottom-full right-0 z-50 mb-1 min-w-[160px] max-h-[240px] overflow-auto rounded-lg border border-border bg-background shadow-lg">
           <div className="py-1">
             {items.map((item) => (
               <button
@@ -839,14 +841,14 @@ function DropdownButton({ open, onToggle, onClose, label, items, onSelect, selec
                 className={clsx(
                   "flex w-full items-center gap-2 px-3 py-1.5 text-[11px] transition",
                   item.id === selectedId
-                    ? "bg-gx-accent/10 text-gx-accent"
-                    : "text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/10 text-primary"
+                    : "text-foreground hover:bg-accent",
                   item.disabled && "opacity-50 cursor-not-allowed",
                 )}
               >
                 <span className="flex-1 text-left">{item.label}</span>
                 {item.suffix && (
-                  <span className="text-[9px] text-gx-muted">{item.suffix}</span>
+                  <span className="text-[9px] text-muted-foreground">{item.suffix}</span>
                 )}
               </button>
             ))}

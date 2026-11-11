@@ -60,8 +60,8 @@ export function TurnCostChip({ cost, average, inputTokens, cacheReadTokens }: Pr
       className={clsx(
         "inline-flex items-center gap-0.5 rounded-full px-1 py-0.5 text-[9px] font-medium",
         isNudge
-          ? "bg-gx-warn/15 text-gx-warn"
-          : "bg-gx-surface text-gx-muted",
+          ? "bg-warning/15 text-warning"
+          : "bg-card text-muted-foreground",
       )}
     >
       {isNudge ? <AlertTriangle size={8} /> : <DollarSign size={8} />}

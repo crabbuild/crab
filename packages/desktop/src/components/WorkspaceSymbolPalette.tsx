@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * WorkspaceSymbolPalette — Cmd/Ctrl+T style fuzzy finder for symbols
  * across the whole workspace.
@@ -147,41 +148,41 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
       onClick={onClose}
     >
       <div
-        className="flex w-[min(720px,92vw)] max-h-[70vh] flex-col overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="flex w-[min(720px,92vw)] max-h-[70vh] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
-        <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2">
-          <Search size={14} className="shrink-0 text-gx-muted" />
-          <input
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+          <Search size={14} className="shrink-0 text-muted-foreground" />
+          <Input
             ref={inputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Search workspace symbols..."
-            className="flex-1 bg-transparent text-sm text-gx-text placeholder:text-gx-muted/50 outline-none"
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/50 outline-none"
             aria-label="Search workspace symbols"
             autoComplete="off"
             spellCheck={false}
           />
-          {loading && <Loader2 size={12} className="animate-spin text-gx-muted" />}
+          {loading && <Loader2 size={12} className="animate-spin text-muted-foreground" />}
         </div>
 
         {/* Results */}
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
           {lastError && (
-            <div className="px-3 py-4 text-xs text-gx-error">
+            <div className="px-3 py-4 text-xs text-destructive">
               Search failed: {lastError}
             </div>
           )}
           {!lastError && !loading && query.trim() && results.length === 0 && (
-            <div className="px-3 py-4 text-xs text-gx-muted">
+            <div className="px-3 py-4 text-xs text-muted-foreground">
               No symbols found for "{query.trim()}"
             </div>
           )}
           {!query.trim() && (
-            <div className="px-3 py-4 text-xs text-gx-muted">
+            <div className="px-3 py-4 text-xs text-muted-foreground">
               Start typing to search across functions, classes, and methods in your workspace.
             </div>
           )}
@@ -199,8 +200,8 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
               className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition",
                 idx === selectedIndex
-                  ? "bg-gx-accent/10 text-gx-text"
-                  : "text-gx-text/90 hover:bg-gx-surface-hover",
+                  ? "bg-primary/10 text-foreground"
+                  : "text-foreground/90 hover:bg-accent",
               )}
             >
               <SymbolKindIcon
@@ -211,11 +212,11 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
                 {symbol.name}
               </span>
               {symbol.containerName && (
-                <span className="shrink-0 truncate text-[10px] text-gx-muted">
+                <span className="shrink-0 truncate text-[10px] text-muted-foreground">
                   in {symbol.containerName}
                 </span>
               )}
-              <span className="ml-auto shrink-0 truncate text-[10px] text-gx-muted/70">
+              <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
                 {displayPath(symbol.uri)}:{symbol.range.startLineNumber}
               </span>
             </button>
@@ -223,7 +224,7 @@ export function WorkspaceSymbolPalette({ open, onClose, onNavigate }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-gx-border bg-gx-bg-sub px-3 py-1 text-[10px] text-gx-muted">
+        <div className="flex items-center justify-between border-t border-border bg-background px-3 py-1 text-[10px] text-muted-foreground">
           <span>
             {results.length > 0
               ? `${results.length} result${results.length === 1 ? "" : "s"}`

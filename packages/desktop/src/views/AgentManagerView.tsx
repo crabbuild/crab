@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 /**
  * Agent Manager View — browse, install, configure, and create agents.
  *
@@ -467,8 +468,8 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
   if (loading) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4">
-        <Loader2 size={28} className="animate-spin text-gx-accent" />
-        <p className="text-xs text-gx-muted">Detecting agents…</p>
+        <Loader2 size={28} className="animate-spin text-primary" />
+        <p className="text-xs text-muted-foreground">Detecting agents…</p>
       </div>
     );
   }
@@ -491,28 +492,28 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
         <div className="flex-1 overflow-y-auto p-4">
           <div className="mx-auto max-w-lg space-y-4">
             {/* Agent card */}
-            <div className="flex items-center gap-3 rounded-lg border border-gx-border bg-gx-surface p-4">
+            <div className="flex items-center gap-3 rounded-lg border border-border bg-card p-4">
               <div className={clsx("flex h-10 w-10 items-center justify-center rounded-lg", agentAccentBg(selectedAgent))}>
                 <AgentIcon agentName={selectedAgent} size={20} className={agentAccentColor(selectedAgent)} />
               </div>
               <div>
-                <h3 className="text-sm font-medium text-gx-text">{info.name}</h3>
-                <p className="text-xs text-gx-muted">{info.description}</p>
+                <h3 className="text-sm font-medium text-foreground">{info.name}</h3>
+                <p className="text-xs text-muted-foreground">{info.description}</p>
               </div>
             </div>
 
             {/* Install command */}
-            <div className="rounded-lg border border-gx-border bg-gx-bg p-4">
-              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+            <div className="rounded-lg border border-border bg-background p-4">
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 <Terminal size={11} />
                 Install command
               </div>
-              <div className="flex items-center gap-2 rounded-md border border-gx-border bg-gx-surface px-3 py-2">
-                <code className="flex-1 font-mono text-xs text-gx-text">{info.command}</code>
+              <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+                <code className="flex-1 font-mono text-xs text-foreground">{info.command}</code>
                 <button
                   type="button"
                   onClick={() => handleCopy(info.command)}
-                  className="shrink-0 rounded px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/10 transition"
+                  className="shrink-0 rounded px-2 py-0.5 text-[10px] text-primary hover:bg-primary/10 transition"
                 >
                   {copied ? <Check size={12} /> : <Copy size={12} />}
                 </button>
@@ -523,7 +524,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
                 type="button"
                 onClick={() => handleRunInstall(info.command, selectedAgent)}
                 disabled={installing === selectedAgent}
-                className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-gx-accent px-4 py-2.5 text-xs font-medium text-white hover:bg-gx-accent-hover transition disabled:opacity-50"
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-xs font-medium text-primary-foreground hover:bg-primary-hover transition disabled:opacity-50"
               >
                 {installing === selectedAgent ? (
                   <>
@@ -540,14 +541,14 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
             </div>
 
             {/* Steps */}
-            <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-              <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+            <div className="rounded-lg border border-border bg-card p-4">
+              <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Setup steps
               </h4>
               <ol className="space-y-2">
                 {info.steps.map((step, i) => (
-                  <li key={i} className="flex gap-2 text-xs text-gx-text">
-                    <span className="shrink-0 font-mono text-gx-accent">{i + 1}.</span>
+                  <li key={i} className="flex gap-2 text-xs text-foreground">
+                    <span className="shrink-0 font-mono text-primary">{i + 1}.</span>
                     <span>{step}</span>
                   </li>
                 ))}
@@ -561,7 +562,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
                 e.preventDefault();
                 (window as any).crab?.shell?.openExternal(info.url);
               }}
-              className="flex items-center gap-1.5 text-xs text-gx-accent hover:underline"
+              className="flex items-center gap-1.5 text-xs text-primary hover:underline"
             >
               <ExternalLink size={11} />
               View documentation
@@ -571,7 +572,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
             <button
               type="button"
               onClick={() => detectAgents(true)}
-              className="flex items-center gap-1.5 text-xs text-gx-muted hover:text-gx-text transition"
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition"
             >
               <RefreshCw size={11} />
               Re-detect agents
@@ -616,16 +617,16 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
         />
         <div className="flex-1 overflow-y-auto p-4">
           <div className="mx-auto max-w-lg space-y-4">
-            <p className="text-xs text-gx-muted">
+            <p className="text-xs text-muted-foreground">
               Connect any CLI agent via the generic adapter protocol. The adapter normalizes
               stdin/stdout, structured logs, and event streams into a unified event model —
               so agents like Devin, Windsurf, SWE-agent, Warp, Open Interpreter, Plandex,
               and others work without bespoke integration.
             </p>
 
-            <div className="rounded-lg border border-gx-border bg-gx-surface p-3">
-              <p className="text-[10px] text-gx-muted leading-relaxed">
-                <strong className="text-gx-text">How it works:</strong> The adapter spawns your agent binary,
+            <div className="rounded-lg border border-border bg-card p-3">
+              <p className="text-[10px] text-muted-foreground leading-relaxed">
+                <strong className="text-foreground">How it works:</strong> The adapter spawns your agent binary,
                 captures its output (text, JSON, or stream-json), translates events into the normalized
                 protocol (SessionStarted → FileEdited → DiffProduced → CommitSuggested → SessionCompleted),
                 and feeds them into the orchestrator UI.
@@ -634,50 +635,50 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
 
             {/* Name */}
             <div>
-              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Display Name
               </label>
-              <input
+              <Input
                 type="text"
                 placeholder="My Custom Agent"
                 value={customName}
                 onChange={(e) => setCustomName(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-2 text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
               />
             </div>
 
             {/* Binary path */}
             <div>
-              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Binary Path or Command
               </label>
-              <input
+              <Input
                 type="text"
                 placeholder="/usr/local/bin/my-agent or just my-agent"
                 value={customBinary}
                 onChange={(e) => setCustomBinary(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-2 font-mono text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
               />
-              <p className="mt-1 text-[10px] text-gx-muted">
+              <p className="mt-1 text-[10px] text-muted-foreground">
                 Must be on your PATH or an absolute path to the binary.
               </p>
             </div>
 
             {/* Args */}
             <div>
-              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Arguments (optional)
               </label>
-              <input
+              <Input
                 type="text"
                 placeholder="--message {prompt} --no-stream"
                 value={customArgs}
                 onChange={(e) => setCustomArgs(e.target.value)}
-                className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-2 font-mono text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
               />
-              <p className="mt-1 text-[10px] text-gx-muted">
-                Use <code className="rounded bg-gx-surface px-1">{"{prompt}"}</code> for the user message
-                and <code className="rounded bg-gx-surface px-1">{"{cwd}"}</code> for the working directory.
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Use <code className="rounded bg-card px-1">{"{prompt}"}</code> for the user message
+                and <code className="rounded bg-card px-1">{"{cwd}"}</code> for the working directory.
               </p>
             </div>
 
@@ -686,7 +687,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
               type="button"
               onClick={handleSaveCustomAgent}
               disabled={!customName.trim() || !customBinary.trim()}
-              className="flex w-full items-center justify-center gap-2 rounded-md bg-gx-accent px-4 py-2.5 text-xs font-medium text-white hover:bg-gx-accent-hover transition disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-xs font-medium text-primary-foreground hover:bg-primary-hover transition disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Plus size={13} />
               Add Agent
@@ -702,13 +703,13 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-gx-border px-4 py-3">
-        <Bot size={16} className="text-gx-accent" />
-        <h1 className="flex-1 text-sm font-semibold text-gx-text">Agent Manager</h1>
+      <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+        <Bot size={16} className="text-primary" />
+        <h1 className="flex-1 text-sm font-semibold text-foreground">Agent Manager</h1>
         <button
           type="button"
           onClick={() => detectAgents(true)}
-          className="flex items-center gap-1 rounded-md border border-gx-border px-2 py-1 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+          className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
           title="Re-detect agents"
         >
           <RefreshCw size={11} />
@@ -720,14 +721,14 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
         <div className="mx-auto max-w-2xl space-y-6">
           {/* Installed agents */}
           <section>
-            <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+            <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               Installed ({installedAgents.length})
             </h2>
             {installedAgents.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-gx-border bg-gx-bg p-6 text-center">
-                <Bot size={24} className="mx-auto mb-2 text-gx-muted/40" />
-                <p className="text-xs text-gx-muted">No agents installed yet.</p>
-                <p className="mt-1 text-[10px] text-gx-muted">Install one below to get started.</p>
+              <div className="rounded-lg border border-dashed border-border bg-background p-6 text-center">
+                <Bot size={24} className="mx-auto mb-2 text-muted-foreground/40" />
+                <p className="text-xs text-muted-foreground">No agents installed yet.</p>
+                <p className="mt-1 text-[10px] text-muted-foreground">Install one below to get started.</p>
               </div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -755,7 +756,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
               <>
                 {popular.length > 0 && (
                   <section>
-                    <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+                    <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                       Popular ({popular.length})
                     </h2>
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -774,7 +775,7 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
 
                 {community.length > 0 && (
                   <section>
-                    <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+                    <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                       Community ({community.length})
                     </h2>
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -799,18 +800,18 @@ export function AgentManagerView({ onNavigateToChat }: Props) {
             <button
               type="button"
               onClick={() => setPanel("create-custom")}
-              className="flex w-full items-center gap-3 rounded-lg border border-dashed border-gx-border bg-gx-bg p-4 text-left hover:border-gx-accent/50 hover:bg-gx-accent/5 transition group"
+              className="flex w-full items-center gap-3 rounded-lg border border-dashed border-border bg-background p-4 text-left hover:border-primary/50 hover:bg-primary/5 transition group"
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gx-surface group-hover:bg-gx-accent/10 transition">
-                <Plus size={18} className="text-gx-muted group-hover:text-gx-accent transition" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-card group-hover:bg-primary/10 transition">
+                <Plus size={18} className="text-muted-foreground group-hover:text-primary transition" />
               </div>
               <div>
-                <h3 className="text-xs font-medium text-gx-text">Add Custom Agent (Generic Adapter)</h3>
-                <p className="text-[10px] text-gx-muted">
+                <h3 className="text-xs font-medium text-foreground">Add Custom Agent (Generic Adapter)</h3>
+                <p className="text-[10px] text-muted-foreground">
                   Connect any CLI agent via stdin/stdout. Works with Devin, Windsurf, SWE-agent, Warp, and 30+ others.
                 </p>
               </div>
-              <ChevronRight size={14} className="ml-auto text-gx-muted" />
+              <ChevronRight size={14} className="ml-auto text-muted-foreground" />
             </button>
           </section>
 
@@ -833,25 +834,25 @@ function TaskSettingsSection() {
   const [expanded, setExpanded] = useState(true);
 
   return (
-    <section className="border-t border-gx-border/60 pt-4">
+    <section className="border-t border-border/60 pt-4">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center gap-2 text-left"
       >
-        <Settings size={13} className="text-gx-muted" />
-        <h2 className="flex-1 text-xs font-semibold uppercase tracking-wider text-gx-muted">
+        <Settings size={13} className="text-muted-foreground" />
+        <h2 className="flex-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Task Settings
         </h2>
         <ChevronDown
           size={13}
           className={clsx(
-            "text-gx-muted transition-transform",
+            "text-muted-foreground transition-transform",
             !expanded && "-rotate-90",
           )}
         />
       </button>
-      <p className="mt-1 text-[10px] text-gx-muted">
+      <p className="mt-1 text-[10px] text-muted-foreground">
         Worktree, scripts, preferences, and orchestrator configuration.
       </p>
       {expanded && (
@@ -937,28 +938,28 @@ function AgentConfigurePanel({
   return (
     <>
       {/* Agent info card */}
-      <div className="flex items-center gap-3 rounded-lg border border-gx-border bg-gx-surface p-4">
+      <div className="flex items-center gap-3 rounded-lg border border-border bg-card p-4">
         <div className={clsx("flex h-10 w-10 items-center justify-center rounded-lg", agentAccentBg(agentType))}>
           <AgentIcon agentName={agentType} size={20} className={agentAccentColor(agentType)} />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-medium text-gx-text">{agent?.name ?? agentType}</h3>
+          <h3 className="text-sm font-medium text-foreground">{agent?.name ?? agentType}</h3>
           {agent?.version && (
-            <p className="text-[10px] text-gx-muted">
+            <p className="text-[10px] text-muted-foreground">
               v{agent.version} — {agent.path}
             </p>
           )}
         </div>
         {agent?.available && (
-          <span className="rounded-full bg-gx-success/15 px-2 py-0.5 text-[10px] font-medium text-gx-success">
+          <span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success">
             Installed
           </span>
         )}
       </div>
 
       {/* Environment Variables */}
-      <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-        <h4 className="mb-3 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+      <div className="rounded-lg border border-border bg-card p-4">
+        <h4 className="mb-3 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           <Key size={11} />
           Environment Variables
         </h4>
@@ -966,7 +967,7 @@ function AgentConfigurePanel({
           {envVars.length > 0 ? (
             envVars.map((env) => (
               <div key={env.name}>
-                <label className="mb-1 block text-[10px] text-gx-muted">{env.label}</label>
+                <label className="mb-1 block text-[10px] text-muted-foreground">{env.label}</label>
                 <input
                   type={env.secret ? "password" : "text"}
                   placeholder={env.name}
@@ -975,12 +976,12 @@ function AgentConfigurePanel({
                     const newEnv = { ...currentEnv, [env.name]: e.target.value };
                     setConfig((prev) => ({ ...prev, env: newEnv }));
                   }}
-                  className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-1.5 font-mono text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
                 />
               </div>
             ))
           ) : (
-            <p className="text-xs text-gx-muted">
+            <p className="text-xs text-muted-foreground">
               No environment variables required. This agent uses its own authentication.
             </p>
           )}
@@ -988,7 +989,7 @@ function AgentConfigurePanel({
       </div>
 
       {/* Advanced settings (collapsed by default) */}
-      <div className="rounded-lg border border-gx-border bg-gx-surface">
+      <div className="rounded-lg border border-border bg-card">
         <button
           type="button"
           onClick={() => setShowAdvanced(!showAdvanced)}
@@ -997,35 +998,35 @@ function AgentConfigurePanel({
           <ChevronDown
             size={12}
             className={clsx(
-              "text-gx-muted transition-transform",
+              "text-muted-foreground transition-transform",
               !showAdvanced && "-rotate-90",
             )}
           />
-          <span className="text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             Advanced
           </span>
         </button>
         {showAdvanced && (
-          <div className="space-y-3 border-t border-gx-border/60 px-4 pb-4 pt-3">
+          <div className="space-y-3 border-t border-border/60 px-4 pb-4 pt-3">
             {/* Binary path override */}
             <div>
-              <label className="mb-1 block text-[10px] text-gx-muted">Binary path override</label>
-              <input
+              <label className="mb-1 block text-[10px] text-muted-foreground">Binary path override</label>
+              <Input
                 type="text"
                 placeholder={`(auto-detect from PATH)`}
                 value={(config.binaryPath as string) ?? ""}
                 onChange={(e) => setConfig((prev) => ({ ...prev, binaryPath: e.target.value || undefined }))}
-                className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-1.5 font-mono text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
               />
-              <p className="mt-1 text-[9px] text-gx-muted">
+              <p className="mt-1 text-[9px] text-muted-foreground">
                 Leave empty to use the binary found on PATH.
               </p>
             </div>
 
             {/* Extra CLI arguments */}
             <div>
-              <label className="mb-1 block text-[10px] text-gx-muted">Extra CLI arguments</label>
-              <input
+              <label className="mb-1 block text-[10px] text-muted-foreground">Extra CLI arguments</label>
+              <Input
                 type="text"
                 placeholder="--flag1 --flag2"
                 value={((config.extraArgs as string[]) ?? []).join(" ")}
@@ -1033,9 +1034,9 @@ function AgentConfigurePanel({
                   const args = e.target.value.trim() ? e.target.value.trim().split(/\s+/) : undefined;
                   setConfig((prev) => ({ ...prev, extraArgs: args }));
                 }}
-                className="w-full rounded-md border border-gx-border bg-gx-bg px-3 py-1.5 font-mono text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
               />
-              <p className="mt-1 text-[9px] text-gx-muted">
+              <p className="mt-1 text-[9px] text-muted-foreground">
                 Additional flags passed to the agent CLI on every invocation.
               </p>
             </div>
@@ -1045,8 +1046,8 @@ function AgentConfigurePanel({
 
       {/* Capabilities */}
       {Object.keys(capabilities).length > 0 && (
-        <div className="rounded-lg border border-gx-border bg-gx-surface p-4">
-          <h4 className="mb-3 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <h4 className="mb-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             Capabilities
           </h4>
           <div className="flex flex-wrap gap-2">
@@ -1084,23 +1085,23 @@ function AgentConfigurePanel({
           type="button"
           onClick={handleTest}
           disabled={testing}
-          className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-2 text-[11px] font-medium text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-[11px] font-medium text-foreground hover:bg-accent transition disabled:opacity-50"
         >
           {testing ? <Loader2 size={12} className="animate-spin" /> : <Terminal size={12} />}
           Test Connection
         </button>
         {testResult === "success" && (
-          <span className="text-[10px] text-gx-success">✓ Agent responding</span>
+          <span className="text-[10px] text-success">✓ Agent responding</span>
         )}
         {testResult === "failure" && (
-          <span className="text-[10px] text-gx-error">✗ {testError}</span>
+          <span className="text-[10px] text-destructive">✗ {testError}</span>
         )}
       </div>
 
       <button
         type="button"
         onClick={handleSave}
-        className="flex w-full items-center justify-center gap-2 rounded-md bg-gx-accent px-4 py-2.5 text-xs font-medium text-white hover:bg-gx-accent-hover transition"
+        className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-xs font-medium text-primary-foreground hover:bg-primary-hover transition"
       >
         <Check size={13} />
         {saved ? "Saved!" : "Save Configuration"}
@@ -1116,11 +1117,11 @@ function CapBadge({ label, supported }: { label: string; supported: boolean }) {
       className={clsx(
         "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-medium",
         supported
-          ? "bg-gx-success/10 text-gx-success"
-          : "bg-gx-muted/10 text-gx-muted",
+          ? "bg-success/10 text-success"
+          : "bg-muted-foreground/10 text-muted-foreground",
       )}
     >
-      <span className={clsx("h-1.5 w-1.5 rounded-full", supported ? "bg-gx-success" : "bg-gx-muted/40")} />
+      <span className={clsx("h-1.5 w-1.5 rounded-full", supported ? "bg-success" : "bg-muted-foreground/40")} />
       {label}
     </span>
   );
@@ -1128,16 +1129,16 @@ function CapBadge({ label, supported }: { label: string; supported: boolean }) {
 
 function PanelHeader({ title, onBack }: { title: string; onBack: () => void }) {
   return (
-    <div className="flex items-center gap-2 border-b border-gx-border px-4 py-3">
+    <div className="flex items-center gap-2 border-b border-border px-4 py-3">
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1 rounded-md p-1 text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+        className="flex items-center gap-1 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-accent transition"
         aria-label="Back"
       >
         <ChevronRight size={14} className="rotate-180" />
       </button>
-      <h1 className="flex-1 text-sm font-semibold text-gx-text">{title}</h1>
+      <h1 className="flex-1 text-sm font-semibold text-foreground">{title}</h1>
     </div>
   );
 }
@@ -1160,21 +1161,21 @@ function AgentCard({
   const info = AGENT_CATALOG[agent.type];
 
   return (
-    <div className="rounded-lg border border-gx-border bg-gx-surface p-4 transition hover:border-gx-accent/30">
+    <div className="rounded-lg border border-border bg-card p-4 transition hover:border-primary/30">
       <div className="flex items-start gap-3">
         <div className={clsx("flex h-9 w-9 items-center justify-center rounded-lg", agentAccentBg(agent.type))}>
           <AgentIcon agentName={agent.type} size={18} className={agentAccentColor(agent.type)} />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="text-xs font-medium text-gx-text">{agent.name}</h3>
+          <h3 className="text-xs font-medium text-foreground">{agent.name}</h3>
           {installed && agent.version && (
-            <p className="text-[10px] text-gx-muted">v{agent.version}</p>
+            <p className="text-[10px] text-muted-foreground">v{agent.version}</p>
           )}
           {!installed && info && (
-            <p className="text-[10px] text-gx-muted line-clamp-2">{info.description}</p>
+            <p className="text-[10px] text-muted-foreground line-clamp-2">{info.description}</p>
           )}
           {info?.vendor && (
-            <p className="text-[9px] text-gx-muted/70 mt-0.5">{info.vendor}</p>
+            <p className="text-[9px] text-muted-foreground/70 mt-0.5">{info.vendor}</p>
           )}
         </div>
       </div>
@@ -1185,7 +1186,7 @@ function AgentCard({
             <button
               type="button"
               onClick={onConfigure}
-              className="flex items-center gap-1 rounded-md border border-gx-border px-2 py-1 text-[10px] text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover transition"
+              className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition"
             >
               <Settings size={10} />
               Configure
@@ -1194,7 +1195,7 @@ function AgentCard({
               <button
                 type="button"
                 onClick={onSelect}
-                className="flex items-center gap-1 rounded-md bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 transition"
+                className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 transition"
               >
                 Use in Chat
                 <ChevronRight size={10} />
@@ -1206,7 +1207,7 @@ function AgentCard({
             type="button"
             onClick={onInstall}
             disabled={installing}
-            className="flex items-center gap-1.5 rounded-md bg-gx-accent px-3 py-1.5 text-[10px] font-medium text-white hover:bg-gx-accent-hover transition disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-[10px] font-medium text-primary-foreground hover:bg-primary-hover transition disabled:opacity-50"
           >
             {installing ? (
               <>

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * SSH Onboarding — first-run detection, quick-start wizard, and
  * contextual help for SSH remote connections.
@@ -147,10 +148,10 @@ export function FirstRunBanner({
   if (!detection.hasKeys && !detection.hasConfig) return null;
 
   return (
-    <div className="ssh-onboarding-banner" role="banner" aria-label="SSH setup available">
-      <div className="ssh-onboarding-banner__content">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-card p-3 text-xs" role="banner" aria-label="SSH setup available">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <span className="ssh-onboarding-banner__icon" aria-hidden="true">🔑</span>
-        <div className="ssh-onboarding-banner__text">
+        <div className="text-muted-foreground">
           {detection.hasConfig ? (
             <p>
               We found <strong>{detection.configHostCount} SSH hosts</strong> in your config.
@@ -164,22 +165,21 @@ export function FirstRunBanner({
           )}
         </div>
       </div>
-      <div className="ssh-onboarding-banner__actions">
+      <div className="flex items-center gap-2">
         {detection.hasConfig && (
-          <button className="ssh-onboarding-banner__btn--primary" onClick={onImport}>
+          <Button type="button" variant="default" onClick={onImport}>
             Import
-          </button>
+          </Button>
         )}
-        <button className="ssh-onboarding-banner__btn--secondary" onClick={onAddConnection}>
+        <Button type="button" variant="outline" onClick={onAddConnection}>
           Add Connection
-        </button>
-        <button
-          className="ssh-onboarding-banner__btn--dismiss"
+        </Button>
+        <Button type="button" variant="ghost" size="icon"
           onClick={onDismiss}
           aria-label="Dismiss SSH setup banner"
         >
           ✕
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -234,24 +234,24 @@ export function QuickStartWizard({
           {step === "test" && (
             <div className="ssh-wizard__test-step">
               {testResult === null && (
-                <button className="ssh-wizard__test-btn" onClick={handleTestConnection}>
+                <Button variant="outline" className="ssh-wizard__test-" onClick={handleTestConnection}>
                   Test Connection
-                </button>
+                </Button>
               )}
               {testResult === "pending" && <p>Testing connection...</p>}
               {testResult === "success" && (
                 <div className="ssh-wizard__test-success">
                   <span aria-hidden="true">✓</span> Connection successful!
-                  <button className="ssh-wizard__connect-btn" onClick={handleComplete}>
+                  <Button variant="outline" className="ssh-wizard__connect-" onClick={handleComplete}>
                     Save & Connect
-                  </button>
+                  </Button>
                 </div>
               )}
               {testResult === "failure" && (
                 <div className="ssh-wizard__test-failure">
                   <span aria-hidden="true">✕</span> Connection failed.
-                  <button onClick={() => setStep("configure")}>Go Back</button>
-                  <button onClick={handleTestConnection}>Retry</button>
+                  <Button onClick={() => setStep("configure")}>Go Back</Button>
+                  <Button onClick={handleTestConnection}>Retry</Button>
                 </div>
               )}
             </div>
@@ -259,7 +259,7 @@ export function QuickStartWizard({
         </div>
 
         <footer className="ssh-wizard__footer">
-          <button className="ssh-wizard__cancel" onClick={onClose}>Cancel</button>
+          <Button className="ssh-wizard__cancel" onClick={onClose}>Cancel</Button>
         </footer>
       </div>
     </div>
@@ -281,14 +281,14 @@ export function ErrorGuidance({ errorCode, errorMessage }: ErrorGuidanceProps) {
   return (
     <div className="ssh-error-guidance" role="alert">
       <p className="ssh-error-guidance__message">{errorMessage}</p>
-      <button
+      <Button
         className="ssh-error-guidance__toggle"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls="ssh-error-steps"
       >
         {expanded ? "Hide" : "What went wrong?"}
-      </button>
+      </Button>
       {expanded && (
         <div id="ssh-error-steps" className="ssh-error-guidance__steps">
           <h4>{remediation.title}</h4>

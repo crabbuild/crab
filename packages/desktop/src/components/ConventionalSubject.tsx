@@ -1,3 +1,5 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Standard conventional-commit types.
@@ -154,10 +156,10 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
   return (
     <div className="flex w-full items-center gap-1" onKeyDown={onKeyDown}>
       {/* Type dropdown */}
-      <select
+      <NativeSelect
         value={type}
         onChange={handleTypeChange}
-        className="shrink-0 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-1 text-xs text-gx-text focus:border-gx-accent focus-visible:outline-none"
+        className="shrink-0 rounded border border-border bg-background px-1.5 py-1 text-xs text-foreground focus:border-primary focus-visible:outline-none"
         aria-label="Commit type"
       >
         {COMMIT_TYPES.map((t) => (
@@ -165,16 +167,16 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
             {t}
           </option>
         ))}
-      </select>
+      </NativeSelect>
 
       {/* Scope input */}
-      <input
+      <Input
         type="text"
         value={scope}
         onChange={handleScopeChange}
         onKeyDown={onKeyDown}
         placeholder="scope"
-        className="w-16 shrink-0 rounded border border-gx-border bg-gx-bg-sub px-1.5 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+        className="w-16 shrink-0 rounded border border-border bg-background px-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
         aria-label="Commit scope"
       />
 
@@ -185,8 +187,8 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
         title={breaking ? "Breaking change (click to unset)" : "Mark as breaking change"}
         className={`shrink-0 rounded border px-1.5 py-1 text-xs font-bold transition ${
           breaking
-            ? "border-gx-error/60 bg-gx-error/20 text-gx-error"
-            : "border-gx-border bg-gx-bg-sub text-gx-muted hover:text-gx-text"
+            ? "border-destructive/60 bg-destructive/20 text-destructive"
+            : "border-border bg-background text-muted-foreground hover:text-foreground"
         }`}
         aria-label="Breaking change"
         aria-pressed={breaking}
@@ -195,14 +197,14 @@ export function ConventionalSubject({ value, onChange, onKeyDown }: Props) {
       </button>
 
       {/* Description input */}
-      <input
+      <Input
         ref={descRef}
         type="text"
         value={description}
         onChange={handleDescriptionChange}
         onKeyDown={onKeyDown}
         placeholder="description"
-        className="min-w-0 flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
         aria-label="Commit description"
       />
     </div>

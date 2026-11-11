@@ -1,3 +1,7 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { NativeSelect } from "@/components/ui/native-select";
 import { createContext,useContext,useEffect,useState,useCallback } from "react";
 import clsx from "clsx";
 import {
@@ -129,9 +133,9 @@ export function SettingsView() {
 
   return (
     <SettingsEditorContext.Provider value={scope}>
-    <div className="flex h-full min-h-0 w-full bg-gx-bg-sub">
-      <nav className="w-56 shrink-0 overflow-auto border-r border-gx-border bg-gx-surface py-2">
-        <div className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gx-text">
+    <div className="flex h-full min-h-0 w-full bg-background">
+      <nav className="w-56 shrink-0 overflow-auto border-r border-border bg-card py-2">
+        <div className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-foreground">
           <SettingsIcon size={14} />
           Settings
         </div>
@@ -144,8 +148,8 @@ export function SettingsView() {
                 className={clsx(
                   "flex w-full items-center gap-2 px-4 py-1.5 text-left text-[13px] transition",
                   section === s.id
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
                 )}
               >
                 <s.icon size={13} />
@@ -163,8 +167,8 @@ export function SettingsView() {
             hasRepo={hasRepo}
             repoName={activeRepo?.label ?? null}
           />
-          {workspace.error && <div role="alert" className="mb-4 rounded border border-gx-error/40 p-3 text-xs text-gx-error">Workspace settings: {workspace.error} <button type="button" className="underline" onClick={workspace.reload}>Retry loading workspace settings</button></div>}
-          {scope === "workspace" && !["appearance", "git"].includes(section) && <p className="mb-4 text-xs text-gx-muted">These controls manage this device. Choose User to change them.</p>}
+          {workspace.error && <div role="alert" className="mb-4 rounded border border-destructive/40 p-3 text-xs text-destructive">Workspace settings: {workspace.error} <button type="button" className="underline" onClick={workspace.reload}>Retry loading workspace settings</button></div>}
+          {scope === "workspace" && !["appearance", "git"].includes(section) && <p className="mb-4 text-xs text-muted-foreground">These controls manage this device. Choose User to change them.</p>}
           <fieldset disabled={scope === "workspace" && (!hasRepo || workspace.loading || !["appearance", "git"].includes(section))}>
           {section === "appearance" && <AppearanceAndEditor />}
           {section === "workspace" && <WorkspaceSection />}
@@ -210,7 +214,7 @@ function SettingsScopeToggle({
   return (
     <div className="mb-6">
       <div
-        className="inline-flex items-center rounded-md border border-gx-border bg-gx-surface p-0.5"
+        className="inline-flex items-center rounded-md border border-border bg-card p-0.5"
         role="tablist"
         aria-label="Settings scope"
       >
@@ -222,8 +226,8 @@ function SettingsScopeToggle({
           className={clsx(
             "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
             scope === "user"
-              ? "bg-gx-accent/15 text-gx-text shadow-sm"
-              : "text-gx-muted hover:text-gx-text",
+              ? "bg-primary/15 text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
           )}
         >
           <User size={12} />
@@ -240,8 +244,8 @@ function SettingsScopeToggle({
             "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition",
             !hasRepo && "cursor-not-allowed opacity-50",
             scope === "workspace"
-              ? "bg-gx-accent/15 text-gx-text shadow-sm"
-              : "text-gx-muted hover:text-gx-text",
+              ? "bg-primary/15 text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
           )}
         >
           <Folder size={12} />
@@ -249,7 +253,7 @@ function SettingsScopeToggle({
         </button>
       </div>
       {scope === "workspace" && repoName && (
-        <div className="mt-2 flex items-center gap-2 rounded border border-gx-accent/30 bg-gx-accent/5 px-3 py-2 text-xs text-gx-accent">
+        <div className="mt-2 flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
           <Folder size={12} className="shrink-0" />
           <span>
             Editing workspace settings for <span className="font-semibold">{repoName}</span>
@@ -326,22 +330,22 @@ function AppearanceAndEditor() {
           label="Import VS Code theme"
           hint="Import a VS Code theme JSON file. Maps workbench colors to Crab Desktop's palette."
         >
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={handleImportVsCodeTheme}
             aria-label="Import VS Code theme"
           >
             <Import size={12} /> Import .json
-          </button>
+          </Button>
         </Row>
         {importStatus && (
           <div
             className={clsx(
               "rounded border p-2 text-xs",
               importStatus.type === "success"
-                ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-                : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+                ? "border-success/40 bg-success/10 text-success"
+                : "border-destructive/40 bg-destructive/10 text-destructive",
             )}
           >
             {importStatus.message}
@@ -461,23 +465,23 @@ function WorkspaceSection() {
         </Row>
         <Row label="Default clone destination" hint="Pre-filled in the Clone dialog.">
           <div className="flex w-full items-center gap-2">
-            <input
-              className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs"
+            <Input
+              className="flex-1 rounded border border-border bg-background px-2 py-1 font-mono text-xs"
               placeholder="(prompt every time)"
               value={settings.defaultCloneDir ?? ""}
               readOnly
             />
-            <button type="button" className="btn text-xs" onClick={pickClone}>
+            <Button variant="outline" type="button" className="text-xs" onClick={pickClone}>
               Browse
-            </button>
+            </Button>
             {settings.defaultCloneDir && (
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={() => update("defaultCloneDir", null)}
               >
                 Clear
-              </button>
+              </Button>
             )}
           </div>
         </Row>
@@ -529,13 +533,13 @@ function WorkspaceSection() {
           label="Clear all saved sessions"
           hint="Purge all persisted session data from localStorage. Does not affect terminal processes or open repos."
         >
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={clearAllSessions}
           >
             <Trash2 size={12} /> Clear All Saved Sessions
-          </button>
+          </Button>
         </Row>
       </SubSection>
     </Section>
@@ -718,7 +722,7 @@ function ExperimentTracking() {
 
   return (
     <SubSection title="Experiment Tracking">
-      <div className="mb-2 text-[11px] text-gx-muted">Connect to an experiment tracking provider to view runs alongside commits.</div>
+      <div className="mb-2 text-[11px] text-muted-foreground">Connect to an experiment tracking provider to view runs alongside commits.</div>
       <Row label="Provider" hint="Select your experiment tracking service.">
         <Select
           value={provider}
@@ -734,9 +738,9 @@ function ExperimentTracking() {
       {config && (
         <>
           <Row label="Base URL" hint={config.helpText}>
-            <input
+            <Input
               type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+              className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
               placeholder={config.urlPlaceholder}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
@@ -747,27 +751,27 @@ function ExperimentTracking() {
             <div className="flex w-full items-center gap-2">
               <input
                 type={showToken ? "text" : "password"}
-                className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+                className="flex-1 rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
                 placeholder={provider === "wandb" ? "W&B API key" : "API token"}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
               />
-              <button
+              <Button variant="outline"
                 type="button"
-                className="btn text-xs"
+                className="text-xs"
                 onClick={() => setShowToken((v) => !v)}
                 title={showToken ? "Hide token" : "Show token"}
                 aria-label={showToken ? "Hide token" : "Show token"}
               >
                 {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-              </button>
+              </Button>
             </div>
           </Row>
 
           <div className="flex items-center gap-2">
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={testConnection}
               disabled={testing || !activeRepo || !baseUrl.trim()}
             >
@@ -778,10 +782,10 @@ function ExperimentTracking() {
               ) : (
                 "Test Connection"
               )}
-            </button>
-            <button
+            </Button>
+            <Button variant="default"
               type="button"
-              className="btn btn-primary text-xs"
+              className="text-xs"
               onClick={saveCredentials}
               disabled={saving || !activeRepo || !baseUrl.trim() || !token.trim()}
             >
@@ -792,11 +796,11 @@ function ExperimentTracking() {
               ) : (
                 "Save"
               )}
-            </button>
+            </Button>
           </div>
 
           {!activeRepo && (
-            <div className="text-[11px] text-gx-muted">
+            <div className="text-[11px] text-muted-foreground">
               Open a repository to configure experiment tracking.
             </div>
           )}
@@ -806,8 +810,8 @@ function ExperimentTracking() {
               className={clsx(
                 "rounded border p-2 text-xs",
                 feedback.type === "success"
-                  ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-                  : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-destructive/40 bg-destructive/10 text-destructive",
               )}
             >
               {feedback.message}
@@ -1084,8 +1088,8 @@ function ForgeAuthentication() {
           className={clsx(
             "rounded border p-2 text-xs",
             feedback.type === "success"
-              ? "border-gx-success/40 bg-gx-success/10 text-gx-success"
-              : "border-gx-error/40 bg-gx-error/10 text-gx-error",
+              ? "border-success/40 bg-success/10 text-success"
+              : "border-destructive/40 bg-destructive/10 text-destructive",
           )}
         >
           {feedback.message}
@@ -1094,19 +1098,19 @@ function ForgeAuthentication() {
 
       {/* Device flow modal overlay */}
       {deviceFlow && deviceFlow.userCode && (
-        <div className="rounded-lg border border-gx-accent/40 bg-gx-accent/5 p-4">
+        <div className="rounded-lg border border-primary/40 bg-primary/5 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-gx-text">
+              <div className="text-sm font-semibold text-foreground">
                 Authorize {FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)?.label}
               </div>
-              <p className="mt-1 text-xs text-gx-muted">
+              <p className="mt-1 text-xs text-muted-foreground">
                 A browser window has opened. Enter the code below to authorize Crab Desktop:
               </p>
             </div>
             <button
               type="button"
-              className="rounded p-1 text-gx-muted hover:text-gx-text"
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
               onClick={cancelDeviceFlow}
               aria-label="Cancel"
             >
@@ -1114,12 +1118,12 @@ function ForgeAuthentication() {
             </button>
           </div>
           <div className="mt-3 flex items-center gap-3">
-            <code className="rounded-md border border-gx-border bg-gx-bg px-4 py-2 font-mono text-lg font-bold tracking-widest text-gx-accent">
+            <code className="rounded-md border border-border bg-background px-4 py-2 font-mono text-lg font-bold tracking-widest text-primary">
               {deviceFlow.userCode}
             </code>
-            <button
+            <Button variant="outline"
               type="button"
-              className="btn text-xs"
+              className="text-xs"
               onClick={() => copyUserCode(deviceFlow.userCode)}
             >
               {copied ? (
@@ -1131,9 +1135,9 @@ function ForgeAuthentication() {
                   <Copy size={11} /> Copy
                 </>
               )}
-            </button>
+            </Button>
           </div>
-          <div className="mt-2 flex items-center gap-2 text-[11px] text-gx-muted">
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
             <Loader2 size={11} className="animate-spin" />
             Waiting for authorization…
           </div>
@@ -1142,7 +1146,7 @@ function ForgeAuthentication() {
 
       {/* Device flow initiating state (before user code is received) */}
       {deviceFlow && !deviceFlow.userCode && (
-        <div className="flex items-center gap-2 rounded-lg border border-gx-border bg-gx-surface p-3 text-xs text-gx-muted">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" />
           Starting OAuth device flow for {FORGE_PROVIDERS.find((p) => p.id === deviceFlow.provider)?.label}…
         </div>
@@ -1157,20 +1161,20 @@ function ForgeAuthentication() {
           return (
             <div
               key={provider.id}
-              className="rounded border border-gx-border bg-gx-surface p-4"
+              className="rounded border border-border bg-card p-4"
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-gx-text">
+                    <span className="text-sm font-semibold text-foreground">
                       {provider.label}
                     </span>
                     {status.loading ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-gx-bg-sub px-2 py-0.5 text-[10px] text-gx-muted">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
                         <Loader2 size={10} className="animate-spin" /> Checking…
                       </span>
                     ) : isConnected ? (
-                      <span className="inline-flex items-center rounded-full bg-gx-success/15 px-2 py-0.5 text-[10px] font-medium text-gx-success">
+                      <span className="inline-flex items-center rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success">
                         Connected
                         {status.hasOAuth && status.hasPat
                           ? " (OAuth + Token)"
@@ -1179,32 +1183,32 @@ function ForgeAuthentication() {
                             : " (Token)"}
                       </span>
                     ) : (
-                      <span className="inline-flex items-center rounded-full bg-gx-bg-sub px-2 py-0.5 text-[10px] text-gx-muted">
+                      <span className="inline-flex items-center rounded-full bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
                         Not configured
                       </span>
                     )}
                   </div>
-                  <div className="mt-0.5 text-[11px] text-gx-muted">
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
                     {provider.hint}
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                   {/* OAuth device flow button */}
                   {provider.supportsDeviceFlow && !isConnected && !isEditing && (
-                    <button
+                    <Button variant="default"
                       type="button"
-                      className="btn btn-primary text-xs"
+                      className="text-xs"
                       onClick={() => startDeviceFlow(provider.id)}
                       disabled={deviceFlow !== null}
                     >
                       Sign in
-                    </button>
+                    </Button>
                   )}
                   {/* PAT entry button */}
                   {!isEditing && (
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => {
                         setEditingProvider(provider.id);
                         setTokenInput("");
@@ -1213,13 +1217,13 @@ function ForgeAuthentication() {
                       }}
                     >
                       {isConnected ? "Update token" : "Use access token"}
-                    </button>
+                    </Button>
                   )}
                   {/* Remove buttons */}
                   {status.hasOAuth && !isEditing && (
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs text-gx-error hover:bg-gx-error/10"
+                      className="text-xs text-destructive hover:bg-destructive/10"
                       onClick={() => removeToken(provider.id, OAUTH_ACCOUNT)}
                       disabled={removing === provider.id}
                       aria-label={`Remove OAuth token for ${provider.label}`}
@@ -1230,12 +1234,12 @@ function ForgeAuthentication() {
                       ) : (
                         <Trash2 size={11} />
                       )}
-                    </button>
+                    </Button>
                   )}
                   {status.hasPat && !isEditing && (
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs text-gx-error hover:bg-gx-error/10"
+                      className="text-xs text-destructive hover:bg-destructive/10"
                       onClick={() => removeToken(provider.id, PAT_ACCOUNT)}
                       disabled={removing === provider.id}
                       aria-label={`Remove access token for ${provider.label}`}
@@ -1246,18 +1250,18 @@ function ForgeAuthentication() {
                       ) : (
                         <Trash2 size={11} />
                       )}
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
 
               {/* Token editing form */}
               {isEditing && (
-                <div className="mt-3 space-y-2 border-t border-gx-border/60 pt-3">
-                  <label className="block text-[11px] font-medium text-gx-text">
+                <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+                  <label className="block text-[11px] font-medium text-foreground">
                     Access Token
                   </label>
-                  <p className="text-[11px] text-gx-muted">
+                  <p className="text-[11px] text-muted-foreground">
                     {provider.tokenHelpText}
                     {provider.tokenHelpUrl && (
                       <>
@@ -1266,7 +1270,7 @@ function ForgeAuthentication() {
                           href={provider.tokenHelpUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-gx-accent underline hover:text-gx-accent/80"
+                          className="text-primary underline hover:text-primary/80"
                         >
                           Open token settings ↗
                         </a>
@@ -1276,26 +1280,26 @@ function ForgeAuthentication() {
                   <div className="flex items-center gap-2">
                     <input
                       type={showToken ? "text" : "password"}
-                      className="flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+                      className="flex-1 rounded border border-border bg-background px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus:border-primary"
                       placeholder="Paste your token here"
                       value={tokenInput}
                       onChange={(e) => setTokenInput(e.target.value)}
                       autoFocus
                     />
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => setShowToken((v) => !v)}
                       title={showToken ? "Hide token" : "Show token"}
                       aria-label={showToken ? "Hide token" : "Show token"}
                     >
                       {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-                    </button>
+                    </Button>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button
+                    <Button variant="default"
                       type="button"
-                      className="btn btn-primary text-xs"
+                      className="text-xs"
                       onClick={() => saveToken(provider.id)}
                       disabled={saving || !tokenInput.trim()}
                     >
@@ -1306,10 +1310,10 @@ function ForgeAuthentication() {
                       ) : (
                         "Save"
                       )}
-                    </button>
-                    <button
+                    </Button>
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => {
                         setEditingProvider(null);
                         setTokenInput("");
@@ -1317,7 +1321,7 @@ function ForgeAuthentication() {
                       }}
                     >
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -1402,57 +1406,57 @@ function StorageAndCache() {
 
       {/* Prefetch Profiles */}
       <SubSection title="Prefetch Profiles">
-        <div className="mb-2 text-[11px] text-gx-muted">
+        <div className="mb-2 text-[11px] text-muted-foreground">
           Named hydrate patterns you can run with one click. Great for &ldquo;training set&rdquo;, &ldquo;eval split&rdquo;, or &ldquo;reviewer-subset&rdquo; workflows.
         </div>
-        <div className="space-y-3 rounded border border-gx-border bg-gx-surface p-4">
-          <div className="text-xs text-gx-muted">Create a new profile</div>
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm focus-visible:outline-none focus:border-gx-accent"
+        <div className="space-y-3 rounded border border-border bg-card p-4">
+          <div className="text-xs text-muted-foreground">Create a new profile</div>
+          <Input
+            className="w-full rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary"
             placeholder="Name (e.g. training-subset)"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
           />
-          <textarea
-            className="h-20 w-full rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Textarea
+            className="h-20 w-full rounded border border-border bg-background p-2 font-mono text-xs focus-visible:outline-none focus:border-primary"
             placeholder={`data/train/**/*.parquet\nmodels/llama-7b/*.safetensors`}
             value={newPatterns}
             onChange={(e) => setNewPatterns(e.target.value)}
           />
-          <button
+          <Button variant="default"
             type="button"
-            className="btn btn-primary text-xs"
+            className="text-xs"
             onClick={saveNew}
             disabled={!newName.trim() || !newPatterns.trim()}
           >
             Save profile
-          </button>
+          </Button>
         </div>
 
         {prefetchErr && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+          <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
             {prefetchErr}
           </div>
         )}
-        {prefetchResult && <div role="status" className="text-xs text-gx-muted">{prefetchResult}</div>}
+        {prefetchResult && <div role="status" className="text-xs text-muted-foreground">{prefetchResult}</div>}
 
         {profiles.length === 0 ? (
-          <div className="text-xs text-gx-muted">No profiles saved yet.</div>
+          <div className="text-xs text-muted-foreground">No profiles saved yet.</div>
         ) : (
           <ul className="space-y-2">
             {profiles.map((p) => (
-              <li key={p.id} className="rounded border border-gx-border bg-gx-surface p-3">
+              <li key={p.id} className="rounded border border-border bg-card p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold">{p.name}</div>
-                    <div className="truncate font-mono text-[11px] text-gx-muted">
+                    <div className="truncate font-mono text-[11px] text-muted-foreground">
                       {p.patterns.join(", ")}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => runProfile(p.id, p.patterns)}
                       disabled={runningId !== null || !transfers.hydrate}
                       title={
@@ -1470,15 +1474,15 @@ function StorageAndCache() {
                           <Play size={11} /> Run
                         </>
                       )}
-                    </button>
-                    <button
+                    </Button>
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs"
+                      className="text-xs"
                       onClick={() => remove(p.id)}
                       title="Delete profile"
                     >
                       <Trash2 size={11} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </li>
@@ -1648,11 +1652,11 @@ function DiagnosticsSection() {
 
       {/* Telemetry */}
       <SubSection title="Telemetry">
-        <div className="mb-2 text-[11px] text-gx-muted">
+        <div className="mb-2 text-[11px] text-muted-foreground">
           Anonymous usage data helps improve Crab Desktop. No personally identifiable information is collected. Repo URLs are hashed to a non-reversible token.
         </div>
         {noTelemetryFlag && (
-          <div className="rounded border border-gx-warning/40 bg-gx-warning/10 p-3 text-xs text-gx-warning">
+          <div className="rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
             Telemetry is disabled by the <code className="font-mono">--no-telemetry</code> launch flag.
             This overrides the setting below.
           </div>
@@ -1670,22 +1674,22 @@ function DiagnosticsSection() {
           label="Preview telemetry payload"
           hint="See exactly what would be sent. The buffer shows events collected since the last flush."
         >
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => setShowPreview((v) => !v)}
           >
             {showPreview ? "Hide preview" : "Show preview"}
-          </button>
+          </Button>
         </Row>
         {showPreview && (
-          <div className="rounded border border-gx-border bg-gx-bg-sub p-3">
+          <div className="rounded border border-border bg-background p-3">
             {bufferContents.length === 0 ? (
-              <div className="text-xs text-gx-muted">
+              <div className="text-xs text-muted-foreground">
                 No events in the buffer. Events are collected when telemetry is enabled and you use the app.
               </div>
             ) : (
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-gx-text">
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-foreground">
                 {bufferContents.map((e) => JSON.stringify(e, null, 2)).join("\n")}
               </pre>
             )}
@@ -1737,7 +1741,7 @@ function GeneralSection() {
     <Section title="General" subtitle="About, keyboard shortcuts, and reset.">
       {/* About */}
       <SubSection title="About Crab Desktop">
-        <div className="rounded border border-gx-border bg-gx-surface p-5">
+        <div className="rounded border border-border bg-card p-5">
           <div className="mb-3 text-lg font-semibold">Crab Desktop</div>
           <div className="grid grid-cols-2 gap-3 text-sm">
             <KV label="Desktop version" value={desktopVersion} />
@@ -1749,38 +1753,38 @@ function GeneralSection() {
             <KV label="Platform" value={data ? `${data.os}/${data.arch}` : "…"} />
           </div>
           {aboutErr && (
-            <div className="mt-3 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+            <div className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
               {aboutErr}
             </div>
           )}
         </div>
         <Row label="Show welcome tour" hint="Reopen the first-run welcome tour.">
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn text-xs"
+            className="text-xs"
             onClick={() => update("welcomeSeen", false)}
             aria-label="Show welcome tour"
           >
             <Play size={12} /> Reopen tour
-          </button>
+          </Button>
         </Row>
-        <div className="mt-2 text-xs text-gx-muted">
+        <div className="mt-2 text-xs text-muted-foreground">
           Crab stores large files in cloud object storage and works alongside standard git.
         </div>
       </SubSection>
 
       {/* Keyboard Shortcuts */}
       <SubSection title="Keyboard Shortcuts">
-        <div className="mb-2 text-[11px] text-gx-muted">Shortcuts are not yet customizable.</div>
-        <div className="overflow-hidden rounded border border-gx-border">
+        <div className="mb-2 text-[11px] text-muted-foreground">Shortcuts are not yet customizable.</div>
+        <div className="overflow-hidden rounded border border-border">
           <table className="w-full text-sm">
             <tbody>
               {shortcutRows.map(([action, keys], i) => (
                 <tr
                   key={action}
-                  className={i < shortcutRows.length - 1 ? "border-b border-gx-border/60" : undefined}
+                  className={i < shortcutRows.length - 1 ? "border-b border-border/60" : undefined}
                 >
-                  <td className="px-3 py-2 text-gx-text">{action}</td>
+                  <td className="px-3 py-2 text-foreground">{action}</td>
                   <td className="px-3 py-2 text-right">
                     <span className="kbd">{keys}</span>
                   </td>
@@ -1794,9 +1798,9 @@ function GeneralSection() {
       {/* Reset */}
       <SubSection title="Reset">
         <Row label="Reset all settings" hint="Returns every toggle on this page to its default.">
-          <button type="button" className="btn text-xs" onClick={resetAll}>
+          <Button variant="outline" type="button" className="text-xs" onClick={resetAll}>
             <RotateCcw size={12} /> Reset
-          </button>
+          </Button>
         </Row>
       </SubSection>
     </Section>
@@ -1866,8 +1870,8 @@ function SshSettings() {
       {features.sshRemoteEnabled && (
         <>
           {/* Global defaults */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Global Defaults</h3>
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">Global Defaults</h3>
             <Row label="Keep-alive interval" hint="Seconds between SSH keep-alive packets.">
               <NumberInput
                 value={15}
@@ -1900,38 +1904,38 @@ function SshSettings() {
           </div>
 
           {/* Known Hosts */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Saved host keys</h3>
-            <p className="mb-2 text-xs text-gx-muted">Keys approved in Crab. OpenSSH user and system trust records are also checked when connecting.</p>
-            {hostError && <p role="alert" className="mb-2 text-xs text-red-500">{hostError}</p>}
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">Saved host keys</h3>
+            <p className="mb-2 text-xs text-muted-foreground">Keys approved in Crab. OpenSSH user and system trust records are also checked when connecting.</p>
+            {hostError && <p role="alert" className="mb-2 text-xs text-destructive">{hostError}</p>}
             {knownHosts.length === 0 ? (
-              <p className="text-xs text-gx-muted">No host keys approved in Crab yet.</p>
+              <p className="text-xs text-muted-foreground">No host keys approved in Crab yet.</p>
             ) : (
               <ul className="space-y-2">
                 {knownHosts.map((host) => (
                   <li
                     key={`${host.hostname}:${host.port}:${host.keyType}`}
-                    className="flex items-center justify-between rounded border border-gx-border bg-gx-surface p-2"
+                    className="flex items-center justify-between rounded border border-border bg-card p-2"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-xs font-medium text-gx-text">
+                      <div className="truncate text-xs font-medium text-foreground">
                         {host.hostname}:{host.port}
                       </div>
-                      <div className="truncate font-mono text-[10px] text-gx-muted">
+                      <div className="truncate font-mono text-[10px] text-muted-foreground">
                         {host.keyType} {host.fingerprint.slice(0, 32)}...
                       </div>
-                      <div className="text-[10px] text-gx-muted">
+                      <div className="text-[10px] text-muted-foreground">
                         Added {new Date(host.addedAt).toLocaleDateString()}
                       </div>
                     </div>
-                    <button
+                    <Button variant="outline"
                       type="button"
-                      className="btn text-xs text-red-500 hover:text-red-600"
+                      className="text-xs text-destructive hover:text-destructive"
                       onClick={() => removeKnownHost(host.hostname, host.port, host.keyType)}
                       aria-label={`Remove ${host.hostname} from known hosts`}
                     >
                       <Trash2 size={12} />
-                    </button>
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -1939,25 +1943,25 @@ function SshSettings() {
           </div>
 
           {/* Diagnostics */}
-          <div className="mt-4 border-t border-gx-border pt-4">
-            <h3 className="mb-3 text-xs font-semibold text-gx-text">Diagnostics</h3>
+          <div className="mt-4 border-t border-border pt-4">
+            <h3 className="mb-3 text-xs font-semibold text-foreground">Diagnostics</h3>
             {stats ? (
               <div className="grid grid-cols-3 gap-4">
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.successRate}%</div>
-                  <div className="text-[10px] text-gx-muted">Success Rate</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">{stats.successRate}%</div>
+                  <div className="text-[10px] text-muted-foreground">Success Rate</div>
                 </div>
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.avgLatencyMs}ms</div>
-                  <div className="text-[10px] text-gx-muted">Avg Latency</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">{stats.avgLatencyMs}ms</div>
+                  <div className="text-[10px] text-muted-foreground">Avg Latency</div>
                 </div>
-                <div className="rounded border border-gx-border bg-gx-surface p-3 text-center">
-                  <div className="text-lg font-bold text-gx-text">{stats.reconnections}</div>
-                  <div className="text-[10px] text-gx-muted">Reconnections</div>
+                <div className="rounded border border-border bg-card p-3 text-center">
+                  <div className="text-lg font-bold text-foreground">{stats.reconnections}</div>
+                  <div className="text-[10px] text-muted-foreground">Reconnections</div>
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-gx-muted">No connection statistics available yet. Stats are collected after your first SSH connection.</p>
+              <p className="text-xs text-muted-foreground">No connection statistics available yet. Stats are collected after your first SSH connection.</p>
             )}
           </div>
         </>
@@ -1979,8 +1983,8 @@ function Section({
 }) {
   return (
     <section>
-      <h2 className="mb-1 text-lg font-semibold text-gx-text">{title}</h2>
-      {subtitle && <div className="mb-4 text-xs text-gx-muted">{subtitle}</div>}
+      <h2 className="mb-1 text-lg font-semibold text-foreground">{title}</h2>
+      {subtitle && <div className="mb-4 text-xs text-muted-foreground">{subtitle}</div>}
       <div className="space-y-5">{children}</div>
     </section>
   );
@@ -1994,8 +1998,8 @@ function SubSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mt-6 border-t border-gx-border pt-5 first:mt-0 first:border-t-0 first:pt-0">
-      <h3 className="mb-3 text-sm font-semibold text-gx-text">{title}</h3>
+    <div className="mt-6 border-t border-border pt-5 first:mt-0 first:border-t-0 first:pt-0">
+      <h3 className="mb-3 text-sm font-semibold text-foreground">{title}</h3>
       <div className="space-y-4">{children}</div>
     </div>
   );
@@ -2015,14 +2019,14 @@ function Row({
   const scope = useContext(SettingsEditorContext), workspace = useWorkspaceSettings();
   const overridden = setting && workspace.workspaceSettings && Object.hasOwn(workspace.workspaceSettings, setting);
   return (
-    <fieldset aria-label={label} disabled={scope === "workspace" && (!setting || !isWorkspaceSetting(setting))} className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-gx-border/60 pb-4 last:border-b-0">
+    <fieldset aria-label={label} disabled={scope === "workspace" && (!setting || !isWorkspaceSetting(setting))} className="grid grid-cols-[1fr_auto] items-start gap-6 border-b border-border/60 pb-4 last:border-b-0">
       <div>
-        <div className="flex items-center text-sm text-gx-text">
+        <div className="flex items-center text-sm text-foreground">
           {label}
           {overridden && <ScopeChip />}
-          {scope === "workspace" && setting && overridden && <button type="button" className="ml-2 text-xs text-gx-accent" aria-label={`Use User value for ${label}`} onClick={() => void workspace.clearWorkspaceSetting(setting)}>Use User value</button>}
+          {scope === "workspace" && setting && overridden && <button type="button" className="ml-2 text-xs text-primary" aria-label={`Use User value for ${label}`} onClick={() => void workspace.clearWorkspaceSetting(setting)}>Use User value</button>}
         </div>
-        {hint && <div className="mt-1 max-w-md text-[11.5px] text-gx-muted">{hint}</div>}
+        {hint && <div className="mt-1 max-w-md text-[11.5px] text-muted-foreground">{hint}</div>}
       </div>
       <div className="min-w-[200px]">{children}</div>
     </fieldset>
@@ -2039,13 +2043,13 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       className={clsx(
         "relative inline-flex h-5 w-9 items-center rounded-full border transition",
         checked
-          ? "border-gx-accent bg-gx-accent/70"
-          : "border-gx-border bg-gx-bg-sub",
+          ? "border-primary bg-primary/70"
+          : "border-border bg-background",
       )}
     >
       <span
         className={clsx(
-          "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition",
+          "inline-block h-3.5 w-3.5 transform rounded-full bg-background shadow transition",
           checked ? "translate-x-[18px]" : "translate-x-[2px]",
         )}
       />
@@ -2063,8 +2067,8 @@ function Select({
   options: Array<{ value: string; label: string; disabled?: boolean }>;
 }) {
   return (
-    <select
-      className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm focus-visible:outline-none focus:border-gx-accent"
+    <NativeSelect
+      className="rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary"
       value={value}
       onChange={(e) => onChange(e.target.value)}
     >
@@ -2073,7 +2077,7 @@ function Select({
           {o.label}
         </option>
       ))}
-    </select>
+    </NativeSelect>
   );
 }
 
@@ -2094,7 +2098,7 @@ function NumberInput({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <input
+      <Input
         type="number"
         value={value}
         min={min}
@@ -2105,9 +2109,9 @@ function NumberInput({
           if (!Number.isFinite(n)) return;
           onChange(n);
         }}
-        className="w-24 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-gx-accent"
+        className="w-24 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
       />
-      {suffix && <span className="text-xs text-gx-muted">{suffix}</span>}
+      {suffix && <span className="text-xs text-muted-foreground">{suffix}</span>}
     </div>
   );
 }
@@ -2115,8 +2119,8 @@ function NumberInput({
 function KV({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-gx-muted">{label}</div>
-      <div className="mt-0.5 font-mono text-sm text-gx-text">{value}</div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-0.5 font-mono text-sm text-foreground">{value}</div>
     </div>
   );
 }

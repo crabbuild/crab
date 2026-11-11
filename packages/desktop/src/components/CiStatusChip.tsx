@@ -39,10 +39,10 @@ const STATUS_CONFIG: Record<
   AggregateCheckStatus,
   { icon: typeof CheckCircle2; color: string; label: string }
 > = {
-  success: { icon: CheckCircle2, color: "text-gx-success", label: "Checks passed" },
-  failure: { icon: XCircle, color: "text-gx-error", label: "Checks failed" },
-  pending: { icon: Clock, color: "text-gx-warn", label: "Checks pending" },
-  running: { icon: Loader2, color: "text-gx-warn", label: "Checks running" },
+  success: { icon: CheckCircle2, color: "text-success", label: "Checks passed" },
+  failure: { icon: XCircle, color: "text-destructive", label: "Checks failed" },
+  pending: { icon: Clock, color: "text-warning", label: "Checks pending" },
+  running: { icon: Loader2, color: "text-warning", label: "Checks running" },
 };
 
 // ── Compact chip (for Timeline commit rows) ─────────────────────────
@@ -112,13 +112,13 @@ interface CiChecksListProps {
 }
 
 function conclusionIcon(status: CiCheckStatus, conclusion: CiCheckConclusion) {
-  if (status === "queued") return <Clock size={12} className="text-gx-warn" />;
-  if (status === "in_progress") return <Loader2 size={12} className="animate-spin text-gx-warn" />;
+  if (status === "queued") return <Clock size={12} className="text-warning" />;
+  if (status === "in_progress") return <Loader2 size={12} className="animate-spin text-warning" />;
   // completed
   if (conclusion === "success" || conclusion === "neutral" || conclusion === "skipped") {
-    return <CheckCircle2 size={12} className="text-gx-success" />;
+    return <CheckCircle2 size={12} className="text-success" />;
   }
-  return <XCircle size={12} className="text-gx-error" />;
+  return <XCircle size={12} className="text-destructive" />;
 }
 
 /**
@@ -135,7 +135,7 @@ export function CiChecksList({ checks }: CiChecksListProps) {
           key={check.name}
           className={clsx(
             "flex items-center gap-2 rounded px-2 py-1 text-[11px]",
-            check.url && "cursor-pointer hover:bg-gx-surface-hover",
+            check.url && "cursor-pointer hover:bg-accent",
           )}
           onClick={() => {
             if (check.url) {
@@ -146,8 +146,8 @@ export function CiChecksList({ checks }: CiChecksListProps) {
           aria-label={`${check.name}: ${check.status}${check.conclusion ? ` (${check.conclusion})` : ""}`}
         >
           {conclusionIcon(check.status, check.conclusion)}
-          <span className="min-w-0 flex-1 truncate text-gx-text">{check.name}</span>
-          <span className="shrink-0 text-[10px] text-gx-muted">
+          <span className="min-w-0 flex-1 truncate text-foreground">{check.name}</span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">
             {check.status === "completed" ? (check.conclusion ?? "done") : check.status}
           </span>
         </div>

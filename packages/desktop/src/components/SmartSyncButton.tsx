@@ -82,7 +82,7 @@ export function SmartSyncButton({
       type="button"
       onClick={handleClick}
       disabled={loading}
-      className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] text-gx-text hover:bg-gx-bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
+      className="flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] text-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
       title={config.label}
     >
       {loading ? (

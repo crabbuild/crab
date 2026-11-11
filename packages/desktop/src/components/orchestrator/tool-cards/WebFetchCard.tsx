@@ -66,9 +66,9 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Globe size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">{isSearch ? "Search" : "Fetch"}</span>
-        <span className="truncate text-gx-text/70">{isSearch ? query : domain || url}</span>
+        <Globe size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">{isSearch ? "Search" : "Fetch"}</span>
+        <span className="truncate text-foreground/70">{isSearch ? query : domain || url}</span>
       </>
     );
     return (
@@ -81,31 +81,31 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       {/* Header */}
       <button
         type="button"
         onClick={() => hasContent && setExpanded(!expanded)}
         className={clsx(
           "flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left transition",
-          hasContent && "hover:bg-gx-surface-hover cursor-pointer",
+          hasContent && "hover:bg-accent cursor-pointer",
           !hasContent && "cursor-default",
         )}
       >
-        <Globe size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">
+        <Globe size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">
           {isSearch ? "Search" : "Fetch"}
         </span>
 
         {/* URL or query */}
         <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
           {isSearch ? (
-            <span className="text-gx-text/80 italic truncate">&ldquo;{query}&rdquo;</span>
+            <span className="text-foreground/80 italic truncate">&ldquo;{query}&rdquo;</span>
           ) : (
             <>
-              <span className="text-gx-text/80 font-medium">{domain}</span>
+              <span className="text-foreground/80 font-medium">{domain}</span>
               {url && url !== domain && (
-                <span className="text-[9px] text-gx-muted/60 truncate">{url}</span>
+                <span className="text-[9px] text-muted-foreground/60 truncate">{url}</span>
               )}
             </>
           )}
@@ -118,7 +118,7 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="shrink-0 text-gx-muted hover:text-gx-accent transition p-0.5"
+            className="shrink-0 text-muted-foreground hover:text-primary transition p-0.5"
             aria-label="Open URL"
           >
             <ExternalLink size={9} />
@@ -127,14 +127,14 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
 
         {hasContent && (
           expanded
-            ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-            : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+            ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+            : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         )}
       </button>
 
       {/* Expanded: fetched content */}
       {expanded && hasContent && (
-        <div className="border-t border-gx-border/30 max-h-[300px] overflow-auto px-2.5 py-2">
+        <div className="border-t border-border/30 max-h-[300px] overflow-auto px-2.5 py-2">
           {looksLikeMarkdown(content) ? (
             <div className="prose-agent text-[11px]">
               <Streamdown shikiTheme={["github-light", "github-dark"]}>
@@ -144,7 +144,7 @@ export function WebFetchCard({ event, defaultExpanded = false, collapsed: collap
               </Streamdown>
             </div>
           ) : (
-            <pre className="font-mono text-[10px] leading-[1.5] text-gx-text/60 whitespace-pre-wrap break-words">
+            <pre className="font-mono text-[10px] leading-[1.5] text-foreground/60 whitespace-pre-wrap break-words">
               {content.length > CONTENT_TRUNCATION_LIMIT
                 ? content.slice(0, CONTENT_TRUNCATION_LIMIT) + "\n… (truncated)"
                 : content}

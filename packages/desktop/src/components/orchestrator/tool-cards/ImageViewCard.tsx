@@ -54,9 +54,9 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
   if (collapsed) {
     const defaultSummary = (
       <>
-        <ImageIcon size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">Image</span>
-        <span className="truncate text-gx-text/70">{shortPath}</span>
+        <ImageIcon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">Image</span>
+        <span className="truncate text-foreground/70">{shortPath}</span>
       </>
     );
     return (
@@ -102,19 +102,19 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
   const canRender = isSupportedFormat && (!!dataUrl || !!error || loading);
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left hover:bg-gx-surface-hover transition cursor-pointer"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[10px] text-left hover:bg-accent transition cursor-pointer"
       >
-        <ImageIcon size={11} className="shrink-0 text-gx-muted" />
-        <span className="shrink-0 font-medium text-gx-muted">Image</span>
+        <ImageIcon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium text-muted-foreground">Image</span>
         <span className="min-w-0 flex-1 truncate">
-          <span className="text-gx-text/90 font-medium">{shortPath}</span>
+          <span className="text-foreground/90 font-medium">{shortPath}</span>
         </span>
         {!isSupportedFormat && rawPath && (
-          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-gx-warn">
+          <span className="shrink-0 inline-flex items-center gap-0.5 text-[8px] text-warning">
             <AlertTriangle size={9} /> {ext || "no ext"}
           </span>
         )}
@@ -122,40 +122,40 @@ export function ImageViewCard({ event, defaultExpanded = true, collapsed: collap
           <a
             href={absolutePath}
             onClick={(e) => e.stopPropagation()}
-            className="shrink-0 text-gx-muted hover:text-gx-accent transition p-0.5"
+            className="shrink-0 text-muted-foreground hover:text-primary transition p-0.5"
             title="Open file location"
           >
             <ExternalLink size={9} />
           </a>
         )}
         {expanded
-          ? <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
-          : <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />}
+          ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
+          : <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />}
       </button>
 
       {expanded && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2 bg-gx-bg/30">
+        <div className="border-t border-border/30 px-2.5 py-2 bg-background/30">
           {!isSupportedFormat ? (
-            <p className="text-[10px] text-gx-muted italic">
+            <p className="text-[10px] text-muted-foreground italic">
               Unsupported format — only PNG, JPEG, GIF, WebP, SVG, BMP, ICO, AVIF render inline.
             </p>
           ) : !ctx?.worktreePath && !rawPath.startsWith("/") ? (
-            <p className="text-[10px] text-gx-muted italic">
+            <p className="text-[10px] text-muted-foreground italic">
               No worktree available to resolve this path.
             </p>
           ) : loading ? (
-            <p className="text-[10px] text-gx-muted">Loading…</p>
+            <p className="text-[10px] text-muted-foreground">Loading…</p>
           ) : error ? (
-            <p className="text-[10px] text-gx-error">⚠ {error}</p>
+            <p className="text-[10px] text-destructive">⚠ {error}</p>
           ) : dataUrl ? (
             <img
               src={dataUrl}
               alt={shortPath}
-              className="max-h-[280px] w-auto rounded border border-gx-border/40"
+              className="max-h-[280px] w-auto rounded border border-border/40"
             />
           ) : null}
           {canRender && rawPath && (
-            <p className="mt-1.5 truncate font-mono text-[9px] text-gx-muted/70">{rawPath}</p>
+            <p className="mt-1.5 truncate font-mono text-[9px] text-muted-foreground/70">{rawPath}</p>
           )}
         </div>
       )}

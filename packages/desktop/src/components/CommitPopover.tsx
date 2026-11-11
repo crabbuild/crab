@@ -80,10 +80,10 @@ export function CommitPopover({ commit, isOnHead, anchor, offset = 10 }: Props) 
         maxHeight: POPOVER_MAX_HEIGHT,
         zIndex: 50,
       }}
-      className="pointer-events-none flex flex-col gap-2 overflow-hidden rounded-lg border border-gx-border bg-gx-surface p-3 text-[11.5px] text-gx-text shadow-2xl"
+      className="pointer-events-none flex flex-col gap-2 overflow-hidden rounded-lg border border-border bg-card p-3 text-[11.5px] text-foreground shadow-2xl"
     >
       <div className="text-[13px] font-semibold leading-tight">{subject}</div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gx-muted">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
         <span className="flex items-center gap-1 font-mono">
           <GitCommitVertical size={11} /> {commit.sha.slice(0, 12)}
         </span>
@@ -94,25 +94,25 @@ export function CommitPopover({ commit, isOnHead, anchor, offset = 10 }: Props) 
           <Clock size={11} /> {formatDateTime(commit.date)}
         </span>
         {commit.parents.length > 1 && (
-          <span className="flex items-center gap-1 text-gx-accent">
+          <span className="flex items-center gap-1 text-primary">
             <GitMerge size={11} /> merge · {commit.parents.length} parents
           </span>
         )}
       </div>
 
       {body && (
-        <div className="overflow-auto whitespace-pre-wrap rounded border border-gx-border/60 bg-gx-bg-sub p-2 font-mono text-[11px] text-gx-text/90">
+        <div className="overflow-auto whitespace-pre-wrap rounded border border-border/60 bg-background p-2 font-mono text-[11px] text-foreground/90">
           {body}
         </div>
       )}
 
       <div className="flex items-center gap-1 text-[10.5px]">
         {isOnHead ? (
-          <span className="flex items-center gap-1 text-gx-success">
+          <span className="flex items-center gap-1 text-success">
             <ArrowRight size={11} /> contained in HEAD
           </span>
         ) : (
-          <span className="text-gx-muted">not an ancestor of HEAD</span>
+          <span className="text-muted-foreground">not an ancestor of HEAD</span>
         )}
       </div>
 
@@ -139,12 +139,12 @@ export function CommitPopover({ commit, isOnHead, anchor, offset = 10 }: Props) 
       )}
 
       {commit.parents.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 text-[10px] text-gx-muted">
+        <div className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
           <span className="uppercase tracking-wider">Parents:</span>
           {commit.parents.map((p) => (
             <code
               key={p}
-              className="rounded bg-gx-bg-sub px-1 py-[1px] font-mono text-[10px] text-gx-muted"
+              className="rounded bg-background px-1 py-[1px] font-mono text-[10px] text-muted-foreground"
             >
               {p.slice(0, 7)}
             </code>
@@ -166,8 +166,8 @@ function RefSection({
 }) {
   return (
     <div className="flex items-start gap-1.5 text-[10px]">
-      <span className="mt-[2px] text-gx-muted">{icon}</span>
-      <span className="mt-[2px] w-14 shrink-0 uppercase tracking-wider text-gx-muted">
+      <span className="mt-[2px] text-muted-foreground">{icon}</span>
+      <span className="mt-[2px] w-14 shrink-0 uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
       <div className="flex min-w-0 flex-wrap gap-1">
@@ -177,14 +177,14 @@ function RefSection({
             .replace(/^refs\/tags\//, "")
             .replace(/^refs\/remotes\//, "");
           const cls = clsx(
-            "max-w-[160px] truncate rounded-full border bg-gx-bg-sub px-1.5 py-[1px] font-mono text-[9px]",
+            "max-w-[160px] truncate rounded-full border bg-background px-1.5 py-[1px] font-mono text-[9px]",
             r.kind === "tag"
-              ? "border-gx-warn/50 text-gx-warn"
+              ? "border-warning/50 text-warning"
               : r.kind === "head" || r.kind === "head_target"
-                ? "border-gx-accent/50 text-gx-accent"
+                ? "border-primary/50 text-primary"
                 : r.kind === "remote"
-                  ? "border-gx-muted/40 text-gx-muted"
-                  : "border-gx-success/40 text-gx-success",
+                  ? "border-muted-foreground/40 text-muted-foreground"
+                  : "border-success/40 text-success",
           );
           return (
             <span key={`${r.name}-${i}`} className={cls} title={r.name}>

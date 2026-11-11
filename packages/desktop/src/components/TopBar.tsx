@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Terminal } from "lucide-react";
 import clsx from "clsx";
@@ -137,7 +139,7 @@ export function TopBar({
 
   return (
     <header
-      className="flex h-11 shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface pr-3 pl-[84px]"
+      className="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-card pr-3 pl-[84px]"
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >
       <div
@@ -147,7 +149,7 @@ export function TopBar({
         {!repoSidebarOpen && (
           <button
             type="button"
-            className="flex h-7 w-7 items-center justify-center rounded text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition hover:bg-accent hover:text-foreground"
             onClick={onExpandRepoSidebar}
             title="Show Repositories (⇧⌘B)"
             aria-label="Show Repositories"
@@ -157,7 +159,7 @@ export function TopBar({
         )}
         <button
           type="button"
-          className="flex h-7 w-7 items-center justify-center rounded text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-30 disabled:pointer-events-none"
+          className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
           onClick={onBack}
           disabled={!canBack}
           title="Go Back (⌘[)"
@@ -167,7 +169,7 @@ export function TopBar({
         </button>
         <button
           type="button"
-          className="flex h-7 w-7 items-center justify-center rounded text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text disabled:opacity-30 disabled:pointer-events-none"
+          className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
           onClick={onForward}
           disabled={!canForward}
           title="Go Forward (⌘])"
@@ -190,18 +192,18 @@ export function TopBar({
             ref={wsDropdownRef}
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            <div className="flex max-w-full items-center rounded-md border border-gx-border/60 bg-gx-bg-sub text-xs">
-              <button type="button" aria-label="Repository overview" title="Repository overview" onClick={onShowOverview} className="flex min-w-0 items-center gap-2 rounded-l-md px-3 py-1 hover:bg-gx-surface-hover">
-                <FolderGit2 size={12} className="shrink-0 text-gx-accent" />
-                <span className="max-w-32 truncate text-gx-muted">{workspaceName}</span>
-                {activeRepo && <><ChevronRight size={10} className="shrink-0 text-gx-muted" /><span className="max-w-40 truncate text-gx-text">{activeRepo.label}</span></>}
+            <div className="flex max-w-full items-center rounded-md border border-border/60 bg-background text-xs">
+              <button type="button" aria-label="Repository overview" title="Repository overview" onClick={onShowOverview} className="flex min-w-0 items-center gap-2 rounded-l-md px-3 py-1 hover:bg-accent">
+                <FolderGit2 size={12} className="shrink-0 text-primary" />
+                <span className="max-w-32 truncate text-muted-foreground">{workspaceName}</span>
+                {activeRepo && <><ChevronRight size={10} className="shrink-0 text-muted-foreground" /><span className="max-w-40 truncate text-foreground">{activeRepo.label}</span></>}
               </button>
-              <button type="button" aria-label="Switch repository" aria-expanded={wsDropdownOpen} onClick={() => setWsDropdownOpen((value) => !value)} className="rounded-r-md border-l border-gx-border px-2 py-2 text-gx-muted hover:bg-gx-surface-hover"><ChevronDown size={10} /></button>
+              <button type="button" aria-label="Switch repository" aria-expanded={wsDropdownOpen} onClick={() => setWsDropdownOpen((value) => !value)} className="rounded-r-md border-l border-border px-2 py-2 text-muted-foreground hover:bg-accent"><ChevronDown size={10} /></button>
             </div>
 
             {/* Dropdown list of workspace repos */}
             {wsDropdownOpen && (
-              <div className="absolute left-1/2 -translate-x-1/2 top-full z-50 mt-1 w-64 max-h-[320px] overflow-y-auto rounded-lg border border-gx-border bg-gx-surface shadow-xl py-1">
+              <div className="absolute left-1/2 -translate-x-1/2 top-full z-50 mt-1 w-64 max-h-[320px] overflow-y-auto rounded-lg border border-border bg-card shadow-xl py-1">
                 {workspaceRepos.map((entry) => {
                   const isActive = entry.relativePath === activeWorkspaceRelativePath;
                   const isDirty = (entry.dirtyCount ?? 0) > 0;
@@ -212,8 +214,8 @@ export function TopBar({
                       className={clsx(
                         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition",
                         isActive
-                          ? "bg-gx-accent/10 text-gx-text"
-                          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                          ? "bg-primary/10 text-foreground"
+                          : "text-muted-foreground hover:bg-accent hover:text-foreground",
                       )}
                       onClick={() => {
                         setWsDropdownOpen(false);
@@ -222,21 +224,21 @@ export function TopBar({
                     >
                       <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
                       {entry.branch && (
-                        <span className="shrink-0 text-[10px] text-gx-muted font-mono max-w-[80px] truncate">
+                        <span className="shrink-0 text-[10px] text-muted-foreground font-mono max-w-[80px] truncate">
                           {entry.branch}
                         </span>
                       )}
                       {isDirty && (
-                        <span className="shrink-0 h-2 w-2 rounded-full bg-orange-400" title={`${entry.dirtyCount} changes`} />
+                        <span className="shrink-0 h-2 w-2 rounded-full bg-warning" title={`${entry.dirtyCount} changes`} />
                       )}
                       {isActive && (
-                        <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-gx-accent" />
+                        <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-primary" />
                       )}
                     </button>
                   );
                 })}
                 {workspaceRepos.length === 0 && (
-                  <div className="px-3 py-2 text-[11px] text-gx-muted text-center">No repos in workspace</div>
+                  <div className="px-3 py-2 text-[11px] text-muted-foreground text-center">No repos in workspace</div>
                 )}
               </div>
             )}
@@ -244,7 +246,7 @@ export function TopBar({
         ) : activeRepo ? (
           /* Single repo mode: standalone repo — show repo icon + name, no dropdown */
           <button
-            className="flex min-w-0 max-w-full items-center gap-2 rounded-md border border-gx-border/60 bg-gx-bg-sub px-3 py-1 text-[12px]"
+            className="flex min-w-0 max-w-full items-center gap-2 rounded-md border border-border/60 bg-background px-3 py-1 text-[12px]"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
             title={`${activeRepo.label}\n${activeRepo.url}`}
             type="button"
@@ -252,33 +254,33 @@ export function TopBar({
             onClick={onShowOverview}
           >
             {isWorktree ? (
-              <FolderTree size={12} className="shrink-0 text-gx-accent" />
+              <FolderTree size={12} className="shrink-0 text-primary" />
             ) : activeRepo.is_remote ? (
-              <Cloud size={12} className="shrink-0 text-gx-accent" />
+              <Cloud size={12} className="shrink-0 text-primary" />
             ) : (
-              <FolderGit2 size={12} className="shrink-0 text-gx-muted" />
+              <FolderGit2 size={12} className="shrink-0 text-muted-foreground" />
             )}
             {isWorktree && worktreeName ? (
               <>
-                <span className="shrink-0 text-gx-muted text-[11px]">
+                <span className="shrink-0 text-muted-foreground text-[11px]">
                   {activeRepo.url
                     ? activeRepo.url.split("/").filter(Boolean).pop() ?? "repo"
                     : "repo"}
                 </span>
-                <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
-                <span className="min-w-0 truncate font-medium text-gx-accent">
+                <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
+                <span className="min-w-0 truncate font-medium text-primary">
                   {worktreeName}
                 </span>
               </>
             ) : (
-              <span className="min-w-0 truncate font-medium text-gx-text">
+              <span className="min-w-0 truncate font-medium text-foreground">
                 {activeRepo.label}
               </span>
             )}
           </button>
         ) : (
           <div
-            className="select-none text-[11px] text-gx-muted"
+            className="select-none text-[11px] text-muted-foreground"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             No repository open
@@ -294,9 +296,9 @@ export function TopBar({
           type="button"
           onClick={onToggleActivityDrawer}
           className={clsx(
-            "flex h-7 items-center gap-1.5 rounded px-2 text-[11px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text",
-            activityDrawerOpen && "bg-gx-accent/15 text-gx-accent",
-            running > 0 && !activityDrawerOpen && "text-gx-warn",
+            "flex h-7 items-center gap-1.5 rounded px-2 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground",
+            activityDrawerOpen && "bg-primary/15 text-primary",
+            running > 0 && !activityDrawerOpen && "text-warning",
           )}
           title="Toggle Activity (background jobs)"
           aria-label="Activity"
@@ -305,7 +307,7 @@ export function TopBar({
         >
           <Activity size={14} />
           Activity
-          {running > 0 && <span className="rounded bg-gx-warn/20 px-1 tabular-nums text-gx-warn">{running}</span>}
+          {running > 0 && <span className="rounded bg-warning/20 px-1 tabular-nums text-warning">{running}</span>}
         </button>
         <TerminalSplitButton
           terminalActive={terminalActive}
@@ -443,28 +445,28 @@ function TerminalSplitButton({
   return (
     <div className="relative inline-flex" ref={dropdownRef}>
       {/* Main button — opens the terminal page */}
-      <button
+      <Button variant="outline"
         type="button"
         className={clsx(
-          "btn text-xs rounded-r-none border-r-0 pr-1.5",
-          terminalActive && "border-gx-accent text-gx-accent",
-        )}
+ " text-xs rounded-r-none border-r-0 pr-1.5",
+ terminalActive && "border-primary text-primary",
+ )}
         onClick={onOpenTerminal}
         title="Open Terminal (⌃`)"
         aria-label="Open Terminal"
       >
         <Terminal size={14} />
         Terminal
-      </button>
+      </Button>
 
       {/* Dropdown chevron — opens agent preset menu */}
-      <button
+      <Button variant="outline"
         type="button"
         className={clsx(
-          "btn text-xs rounded-l-none border-l-0 pl-1 pr-1.5",
-          terminalActive && "border-gx-accent text-gx-accent",
-          dropdownOpen && "bg-gx-surface-hover",
-        )}
+ " text-xs rounded-l-none border-l-0 pl-1 pr-1.5",
+ terminalActive && "border-primary text-primary",
+ dropdownOpen && "bg-accent",
+ )}
         onClick={() => setDropdownOpen((o) => !o)}
         title="Open terminal with AI agent"
         aria-label="Terminal options"
@@ -472,11 +474,11 @@ function TerminalSplitButton({
         aria-expanded={dropdownOpen}
       >
         <ChevronDown size={10} />
-      </button>
+      </Button>
 
       {/* Dropdown menu */}
       {dropdownOpen && (
-        <div className="absolute right-0 top-full z-50 mt-1 min-w-[260px] rounded-lg border border-gx-border bg-gx-surface shadow-xl">
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-[260px] rounded-lg border border-border bg-card shadow-xl">
           <div className="py-1">
             {/* Plain terminal option — always first */}
             <button
@@ -485,18 +487,18 @@ function TerminalSplitButton({
                 setDropdownOpen(false);
                 onOpenTerminal();
               }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-foreground hover:bg-accent"
             >
-              <Terminal size={13} className="shrink-0 text-gx-muted" />
+              <Terminal size={13} className="shrink-0 text-muted-foreground" />
               <span className="font-medium">Open Terminal</span>
-              <span className="ml-auto text-gx-muted text-[10px]">⌃`</span>
+              <span className="ml-auto text-muted-foreground text-[10px]">⌃`</span>
             </button>
 
             {/* Separator */}
-            <div className="border-t border-gx-border my-1" />
+            <div className="border-t border-border my-1" />
 
             {/* Agent CLI presets header */}
-            <div className="px-3 py-1 text-[10px] font-medium uppercase text-gx-muted tracking-wide">
+            <div className="px-3 py-1 text-[10px] font-medium uppercase text-muted-foreground tracking-wide">
               AI Code Agents
             </div>
 
@@ -508,15 +510,15 @@ function TerminalSplitButton({
                 onMouseEnter={() => handleMouseEnter(preset.id)}
                 onMouseLeave={handleMouseLeave}
               >
-                <div className="flex w-full items-center hover:bg-gx-surface-hover">
+                <div className="flex w-full items-center hover:bg-accent">
                   <button
                     type="button"
                     onClick={() => handlePresetSelect(preset)}
-                    className="flex flex-1 items-center gap-2 pl-3 pr-1 py-1.5 text-left text-[11px] text-gx-text"
+                    className="flex flex-1 items-center gap-2 pl-3 pr-1 py-1.5 text-left text-[11px] text-foreground"
                   >
                     <AgentIcon agentName={preset.icon} size={13} className={agentAccentColor(preset.icon)} />
                     <span className="truncate font-medium">{preset.name}</span>
-                    <span className="ml-auto text-gx-muted font-mono text-[10px]">{preset.command}</span>
+                    <span className="ml-auto text-muted-foreground font-mono text-[10px]">{preset.command}</span>
                   </button>
                   {preset.subOptions && preset.subOptions.length > 0 && (
                     <button
@@ -525,7 +527,7 @@ function TerminalSplitButton({
                         e.stopPropagation();
                         setHoveredId((prev) => (prev === preset.id ? null : preset.id));
                       }}
-                      className="flex items-center justify-center px-2 py-1.5 text-gx-muted hover:text-gx-text shrink-0"
+                      className="flex items-center justify-center px-2 py-1.5 text-muted-foreground hover:text-foreground shrink-0"
                     >
                       <ChevronRight size={10} />
                     </button>
@@ -535,7 +537,7 @@ function TerminalSplitButton({
                 {/* Flyout sub-menu for agent modes/flags */}
                 {hoveredId === preset.id && preset.subOptions && preset.subOptions.length > 0 && (
                   <div
-                    className="fixed z-[9999] min-w-[240px] max-w-[300px] rounded-lg border border-gx-border bg-gx-surface py-1 shadow-xl"
+                    className="fixed z-[9999] min-w-[240px] max-w-[300px] rounded-lg border border-border bg-card py-1 shadow-xl"
                     ref={(el) => {
                       if (!el) return;
                       const parent = el.parentElement;
@@ -557,7 +559,7 @@ function TerminalSplitButton({
                     onMouseEnter={handleSubMenuEnter}
                     onMouseLeave={handleSubMenuLeave}
                   >
-                    <div className="px-3 py-1 text-[10px] font-medium uppercase text-gx-muted tracking-wide">
+                    <div className="px-3 py-1 text-[10px] font-medium uppercase text-muted-foreground tracking-wide">
                       {preset.name} Modes
                     </div>
                     {preset.subOptions.map((sub) => (
@@ -568,20 +570,20 @@ function TerminalSplitButton({
                             <button
                               type="button"
                               onClick={() => setChoicesForSub((prev) => (prev === sub.id ? null : sub.id))}
-                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                               title={sub.description}
                             >
                               <span className="truncate">{sub.label}</span>
                               <ChevronRight size={9} className="ml-auto shrink-0 opacity-60" />
                             </button>
                             {choicesForSub === sub.id && (
-                              <div className="border-l-2 border-gx-accent/30 ml-3 pl-1 py-0.5">
+                              <div className="border-l-2 border-primary/30 ml-3 pl-1 py-0.5">
                                 {sub.choices.map((choice) => (
                                   <button
                                     key={choice.id}
                                     type="button"
                                     onClick={() => handleChoiceSelect(preset, sub, choice)}
-                                    className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text rounded"
+                                    className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground rounded"
                                     title={choice.description}
                                   >
                                     <span className="truncate">{choice.label}</span>
@@ -599,14 +601,14 @@ function TerminalSplitButton({
                                     }}
                                     className="flex items-center gap-1"
                                   >
-                                    <input
+                                    <Input
                                       type="text"
                                       value={inputForSub?.subId === sub.id ? inputValue : ""}
                                       onChange={(e) => { setInputValue(e.target.value); setInputForSub({ presetId: preset.id, subId: sub.id, command: sub.command, placeholder: sub.inputPlaceholder || "custom" }); }}
                                       placeholder={sub.inputPlaceholder || "custom value"}
-                                      className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-gx-border bg-gx-bg text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                                      className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-border bg-background text-foreground font-mono focus:outline-none focus:border-primary"
                                     />
-                                    <button type="submit" className="text-[10px] text-gx-accent hover:text-gx-text px-1">↵</button>
+                                    <button type="submit" className="text-[10px] text-primary hover:text-foreground px-1">↵</button>
                                   </form>
                                 </div>
                               </div>
@@ -626,7 +628,7 @@ function TerminalSplitButton({
                                 });
                                 setInputValue("");
                               }}
-                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                               title={sub.description}
                             >
                               <span className="truncate">{sub.label}</span>
@@ -638,18 +640,18 @@ function TerminalSplitButton({
                                   onSubmit={(e) => { e.preventDefault(); handleInputSubmit(preset, sub); }}
                                   className="flex items-center gap-1"
                                 >
-                                  <input
+                                  <Input
                                     type="text"
                                     value={inputValue}
                                     onChange={(e) => setInputValue(e.target.value)}
                                     placeholder={inputForSub.placeholder}
-                                    className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-gx-border bg-gx-bg text-gx-text font-mono focus:outline-none focus:border-gx-accent"
+                                    className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] rounded border border-border bg-background text-foreground font-mono focus:outline-none focus:border-primary"
                                     autoFocus
                                   />
                                   <button
                                     type="submit"
                                     disabled={!inputValue.trim()}
-                                    className="text-[10px] text-gx-accent hover:text-gx-text px-1 disabled:opacity-30"
+                                    className="text-[10px] text-primary hover:text-foreground px-1 disabled:opacity-30"
                                   >
                                     ↵
                                   </button>
@@ -662,7 +664,7 @@ function TerminalSplitButton({
                           <button
                             type="button"
                             onClick={() => handleSubOptionSelect(preset, sub)}
-                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                             title={sub.description}
                           >
                             <span className="truncate">{sub.label}</span>
@@ -679,8 +681,8 @@ function TerminalSplitButton({
             {/* Custom commands section */}
             {grouped.custom.length > 0 && (
               <>
-                <div className="border-t border-gx-border my-1" />
-                <div className="px-3 py-1 text-[10px] font-medium uppercase text-gx-muted tracking-wide">
+                <div className="border-t border-border my-1" />
+                <div className="px-3 py-1 text-[10px] font-medium uppercase text-muted-foreground tracking-wide">
                   Custom Commands
                 </div>
                 {grouped.custom.map((cmd) => (
@@ -688,11 +690,11 @@ function TerminalSplitButton({
                     key={cmd.id}
                     type="button"
                     onClick={() => handlePresetSelect(cmd)}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-gx-text hover:bg-gx-surface-hover"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-foreground hover:bg-accent"
                   >
-                    <Terminal size={11} className="shrink-0 text-gx-muted" />
+                    <Terminal size={11} className="shrink-0 text-muted-foreground" />
                     <span className="truncate">{cmd.name}</span>
-                    <span className="ml-auto font-mono text-[10px] text-gx-muted truncate max-w-[100px]">{cmd.command}</span>
+                    <span className="ml-auto font-mono text-[10px] text-muted-foreground truncate max-w-[100px]">{cmd.command}</span>
                   </button>
                 ))}
               </>

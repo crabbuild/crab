@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Remote file browser component — Finder-like experience.
  *
@@ -338,54 +339,54 @@ export function RemoteFileBrowser({
   const canGoForward = historyIndex < history.length - 1;
 
   return (
-    <div className="flex flex-col h-full bg-gx-bg text-gx-text">
+    <div className="flex flex-col h-full bg-background text-foreground">
       {/* Toolbar */}
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-gx-border bg-gx-surface">
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border bg-card">
         {/* Back / Forward */}
-        <button
+        <Button size="icon" variant="ghost"
           onClick={handleBack}
           disabled={!canGoBack}
-          className="btn-icon"
+
           title="Back"
           aria-label="Navigate back"
         >
           <ArrowLeft className="w-4 h-4" />
-        </button>
-        <button
+        </Button>
+        <Button size="icon" variant="ghost"
           onClick={handleForward}
           disabled={!canGoForward}
-          className="btn-icon"
+
           title="Forward"
           aria-label="Navigate forward"
         >
           <ArrowRight className="w-4 h-4" />
-        </button>
+        </Button>
 
         {/* Up / Home */}
-        <button
+        <Button size="icon" variant="ghost"
           onClick={() => handleNavigate(parentPath(currentPath))}
           disabled={currentPath === "/"}
-          className="btn-icon"
+
           title="Go to parent directory"
           aria-label="Go to parent directory"
         >
           <ChevronRight className="w-4 h-4 rotate-[-90deg]" />
-        </button>
-        <button
+        </Button>
+        <Button size="icon" variant="ghost"
           onClick={handleGoHome}
-          className="btn-icon"
+
           title="Go to home directory"
           aria-label="Go to home directory"
         >
           <Home className="w-4 h-4" />
-        </button>
+        </Button>
 
         {/* Profile label */}
         <div className="flex items-center gap-1.5 ml-2 mr-auto">
           {profileColour && (
             <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: profileColour }} />
           )}
-          <span className="text-xs font-medium text-gx-muted truncate max-w-[120px]">
+          <span className="text-xs font-medium text-muted-foreground truncate max-w-[120px]">
             {profileLabel}
           </span>
           {/* Sync pair status badge */}
@@ -393,52 +394,52 @@ export function RemoteFileBrowser({
         </div>
 
         {/* View toggles */}
-        <button
+        <Button size="icon" variant="ghost"
           onClick={() => setShowTree((v) => !v)}
-          className={clsx("btn-icon", showTree && "bg-gx-surface-hover text-gx-text")}
+          className={clsx("", showTree && "bg-accent text-foreground")}
           title="Toggle tree sidebar"
           aria-label="Toggle tree sidebar"
         >
           <PanelLeft className="w-4 h-4" />
-        </button>
-        <button
+        </Button>
+        <Button size="icon" variant="ghost"
           onClick={() => setViewMode("list")}
-          className={clsx("btn-icon", viewMode === "list" && "bg-gx-surface-hover text-gx-text")}
+          className={clsx("", viewMode === "list" && "bg-accent text-foreground")}
           title="List view"
           aria-label="Switch to list view"
         >
           <List className="w-4 h-4" />
-        </button>
-        <button
+        </Button>
+        <Button size="icon" variant="ghost"
           onClick={() => setViewMode("grid")}
-          className={clsx("btn-icon", viewMode === "grid" && "bg-gx-surface-hover text-gx-text")}
+          className={clsx("", viewMode === "grid" && "bg-accent text-foreground")}
           title="Grid view"
           aria-label="Switch to grid view"
         >
           <Grid className="w-4 h-4" />
-        </button>
+        </Button>
 
         {/* Refresh */}
-        <button
+        <Button size="icon" variant="ghost"
           onClick={handleRefresh}
-          className="btn-icon"
+
           title="Refresh"
           aria-label="Refresh file list"
         >
           <RefreshCw className="w-3.5 h-3.5" />
-        </button>
+        </Button>
       </div>
 
       {/* Breadcrumb */}
-      <div className="flex items-center gap-0.5 px-3 py-1.5 text-xs text-gx-muted overflow-x-auto border-b border-gx-border bg-gx-bg-sub scrollbar-none">
+      <div className="flex items-center gap-0.5 px-3 py-1.5 text-xs text-muted-foreground overflow-x-auto border-b border-border bg-background scrollbar-none">
         {segments.map((seg, i) => (
           <span key={seg.path} className="flex items-center gap-0.5 shrink-0">
-            {i > 0 && <ChevronRight className="w-3 h-3 text-gx-muted/50" />}
+            {i > 0 && <ChevronRight className="w-3 h-3 text-muted-foreground/50" />}
             <button
               onClick={() => handleNavigate(seg.path)}
               className={clsx(
-                "px-1 py-0.5 rounded hover:bg-gx-surface-hover hover:text-gx-text transition-colors truncate max-w-[140px]",
-                i === segments.length - 1 ? "font-medium text-gx-text" : "text-gx-muted",
+                "px-1 py-0.5 rounded hover:bg-accent hover:text-foreground transition-colors truncate max-w-[140px]",
+                i === segments.length - 1 ? "font-medium text-foreground" : "text-muted-foreground",
               )}
             >
               {seg.label === "/" ? <Home className="w-3 h-3 inline" /> : seg.label}
@@ -449,12 +450,12 @@ export function RemoteFileBrowser({
 
       {/* Git repo banner */}
       {hasGitDir && onOpenRepo && (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-gx-accent/10 border-b border-gx-accent/20">
-          <FolderGit2 className="w-4 h-4 text-gx-accent" />
-          <span className="text-xs text-gx-accent">Git repository detected</span>
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/20">
+          <FolderGit2 className="w-4 h-4 text-primary" />
+          <span className="text-xs text-primary">Git repository detected</span>
           <button
             onClick={handleOpenRepo}
-            className="ml-auto text-xs px-2 py-0.5 rounded bg-gx-accent text-white hover:bg-gx-accent-hover transition-colors"
+            className="ml-auto text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary-hover transition-colors"
           >
             Open Repo
           </button>
@@ -465,7 +466,7 @@ export function RemoteFileBrowser({
       <div className="flex flex-1 overflow-hidden">
         {/* Tree sidebar */}
         {showTree && (
-          <div className="w-48 border-r border-gx-border bg-gx-bg-sub overflow-y-auto shrink-0">
+          <div className="w-48 border-r border-border bg-background overflow-y-auto shrink-0">
             <div className="py-1">
               {treeNodes.map((node) => (
                 <TreeNodeRow
@@ -486,37 +487,37 @@ export function RemoteFileBrowser({
           {/* Loading state */}
           {loading && (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
-              <Loader2 className="w-6 h-6 animate-spin text-gx-accent" />
-              <span className="text-sm text-gx-muted">Loading directory...</span>
+              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+              <span className="text-sm text-muted-foreground">Loading directory...</span>
             </div>
           )}
 
           {/* Error state */}
           {error && !loading && (
             <div className="flex flex-col items-center justify-center py-12 gap-3">
-              <Lock className="w-8 h-8 text-gx-error" />
-              <p className="text-sm text-gx-error max-w-xs text-center">{error}</p>
-              <button
+              <Lock className="w-8 h-8 text-destructive" />
+              <p className="text-sm text-destructive max-w-xs text-center">{error}</p>
+              <Button variant="default"
                 onClick={handleRefresh}
-                className="btn btn-primary text-xs"
+                className="text-xs"
               >
                 <RefreshCw className="w-3 h-3" />
                 Retry
-              </button>
+              </Button>
             </div>
           )}
 
           {/* Empty state */}
           {!loading && !error && sortedEntries.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
-              <FolderOpen className="w-8 h-8 text-gx-muted/50" />
-              <span className="text-sm text-gx-muted">This directory is empty</span>
+              <FolderOpen className="w-8 h-8 text-muted-foreground/50" />
+              <span className="text-sm text-muted-foreground">This directory is empty</span>
             </div>
           )}
 
           {/* List view */}
           {!loading && !error && sortedEntries.length > 0 && viewMode === "list" && (
-            <div className="divide-y divide-gx-border/30">
+            <div className="divide-y divide-border/30">
               {sortedEntries.map((entry) => (
                 <FileEntryRow
                   key={entry.path}
@@ -581,8 +582,8 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
       <div
         className={clsx(
           "flex items-center gap-1 px-2 py-0.5 text-xs cursor-pointer select-none",
-          "hover:bg-gx-surface-hover transition-colors",
-          isActive && "bg-gx-accent/10 text-gx-accent",
+          "hover:bg-accent transition-colors",
+          isActive && "bg-primary/10 text-primary",
         )}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
       >
@@ -592,11 +593,11 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
           aria-label={node.expanded ? "Collapse" : "Expand"}
         >
           {node.loading ? (
-            <Loader2 className="w-3 h-3 animate-spin text-gx-muted" />
+            <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
           ) : (
             <ChevronRight
               className={clsx(
-                "w-3 h-3 text-gx-muted transition-transform",
+                "w-3 h-3 text-muted-foreground transition-transform",
                 node.expanded && "rotate-90",
               )}
             />
@@ -607,9 +608,9 @@ function TreeNodeRow({ node, depth, currentPath, onToggle, onNavigate }: TreeNod
           className="flex items-center gap-1 flex-1 truncate"
         >
           {node.expanded ? (
-            <FolderOpen className="w-3.5 h-3.5 text-gx-accent shrink-0" />
+            <FolderOpen className="w-3.5 h-3.5 text-primary shrink-0" />
           ) : (
-            <Folder className="w-3.5 h-3.5 text-gx-accent shrink-0" />
+            <Folder className="w-3.5 h-3.5 text-primary shrink-0" />
           )}
           <span className="truncate">{node.name}</span>
         </button>
@@ -646,8 +647,8 @@ function FileEntryRow({ entry, syncStatus, onClick, onContextMenu, onAction }: F
     <button
       className={clsx(
         "flex items-center gap-2.5 w-full px-3 py-1.5 text-left text-sm group",
-        "hover:bg-gx-surface-hover transition-colors",
-        "focus:outline-none focus-visible:bg-gx-surface-hover",
+        "hover:bg-accent transition-colors",
+        "focus:outline-none focus-visible:bg-accent",
       )}
       onClick={onClick}
       onContextMenu={onContextMenu}
@@ -655,24 +656,24 @@ function FileEntryRow({ entry, syncStatus, onClick, onContextMenu, onAction }: F
       aria-label={`${isDir ? "Directory" : "File"}: ${name}`}
     >
       {isDir ? (
-        <Folder className="w-4 h-4 shrink-0 text-gx-accent" />
+        <Folder className="w-4 h-4 shrink-0 text-primary" />
       ) : (
-        <File className="w-4 h-4 shrink-0 text-gx-muted" />
+        <File className="w-4 h-4 shrink-0 text-muted-foreground" />
       )}
       {syncStatus && <SyncStatusIcon status={syncStatus} size="sm" />}
-      <span className="truncate flex-1 text-gx-text">{name}</span>
+      <span className="truncate flex-1 text-foreground">{name}</span>
       {entry.size != null && !isDir && (
-        <span className="text-xs text-gx-muted shrink-0 tabular-nums">
+        <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
           {formatSize(entry.size)}
         </span>
       )}
-      <button
+      <Button size="icon" variant="ghost"
         onClick={(e) => { e.stopPropagation(); onAction(e); }}
-        className="opacity-0 group-hover:opacity-100 btn-icon shrink-0 transition-opacity"
+        className="opacity-0 group-hover:opacity-100 shrink-0 transition-opacity"
         aria-label="More actions"
       >
         <MoreVertical className="w-3.5 h-3.5" />
-      </button>
+      </Button>
     </button>
   );
 }
@@ -693,21 +694,21 @@ function FileEntryCard({ entry, onClick, onContextMenu }: FileEntryCardProps) {
     <button
       className={clsx(
         "flex flex-col items-center gap-1.5 p-3 rounded-lg text-center",
-        "hover:bg-gx-surface-hover transition-colors cursor-pointer",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-gx-accent",
+        "hover:bg-accent transition-colors cursor-pointer",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary",
       )}
       onClick={onClick}
       onContextMenu={onContextMenu}
       aria-label={`${isDir ? "Directory" : "File"}: ${name}`}
     >
       {isDir ? (
-        <Folder className="w-10 h-10 text-gx-accent" />
+        <Folder className="w-10 h-10 text-primary" />
       ) : (
-        <File className="w-10 h-10 text-gx-muted" />
+        <File className="w-10 h-10 text-muted-foreground" />
       )}
-      <span className="text-xs text-gx-text truncate w-full leading-tight">{name}</span>
+      <span className="text-xs text-foreground truncate w-full leading-tight">{name}</span>
       {entry.size != null && !isDir && (
-        <span className="text-[10px] text-gx-muted tabular-nums">{formatSize(entry.size)}</span>
+        <span className="text-[10px] text-muted-foreground tabular-nums">{formatSize(entry.size)}</span>
       )}
     </button>
   );
@@ -744,7 +745,7 @@ function ContextMenu({ x, y, entry, onOpenTerminal, onSetupSync, onDownload, onD
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 min-w-[160px] rounded-lg border border-gx-border bg-gx-surface shadow-lg py-1"
+      className="fixed z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg py-1"
       style={{ left: pos.x, top: pos.y }}
       role="menu"
     >
@@ -757,7 +758,7 @@ function ContextMenu({ x, y, entry, onOpenTerminal, onSetupSync, onDownload, onD
       )}
       {isDir && onSetupSync && (
         <>
-          <div className="my-1 border-t border-gx-border/50" />
+          <div className="my-1 border-t border-border/50" />
           <ContextMenuItem
             icon={<RefreshCw className="w-3.5 h-3.5" />}
             label="Sync this folder locally"
@@ -770,7 +771,7 @@ function ContextMenu({ x, y, entry, onOpenTerminal, onSetupSync, onDownload, onD
         label={isDir ? "Download Folder" : "Download File"}
         onClick={() => { onDownload(); onClose(); }}
       />
-      <div className="my-1 border-t border-gx-border/50" />
+      <div className="my-1 border-t border-border/50" />
       <ContextMenuItem
         icon={<Trash2 className="w-3.5 h-3.5" />}
         label="Delete"
@@ -797,8 +798,8 @@ function ContextMenuItem({
       className={clsx(
         "flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left transition-colors",
         danger
-          ? "text-gx-error hover:bg-gx-error/10"
-          : "text-gx-text hover:bg-gx-surface-hover",
+          ? "text-destructive hover:bg-destructive/10"
+          : "text-foreground hover:bg-accent",
       )}
       onClick={onClick}
       role="menuitem"

@@ -187,37 +187,37 @@ export function EditCard({
         <button
           type="button"
           onClick={toggleCollapse}
-          className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gx-surface-hover transition cursor-pointer"
+          className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
           aria-expanded="false"
         >
           <Icon size={11} className={clsx("shrink-0", accent)} />
 
           {kind === "update" && (
             <>
-              <span className="text-[10px] text-gx-text/90 font-medium truncate">
+              <span className="text-[10px] text-foreground/90 font-medium truncate">
                 Edited {shortPath || "(no path)"}
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-gx-success">+{stats.added}</span>
-                  <span className="text-[9px] font-mono text-gx-error">−{stats.removed}</span>
+                  <span className="text-[9px] font-mono text-success">+{stats.added}</span>
+                  <span className="text-[9px] font-mono text-destructive">−{stats.removed}</span>
                 </span>
               )}
               {/* Empty diff, no badge — quietly styled one-liner */}
               {(diffEmpty || diffEmptyUpdate) && !stats.show && (
-                <span className="text-[9px] text-gx-muted/60 italic" />
+                <span className="text-[9px] text-muted-foreground/60 italic" />
               )}
             </>
           )}
 
           {kind === "add" && (
             <>
-              <span className="text-[10px] text-gx-text/90 font-medium truncate">
+              <span className="text-[10px] text-foreground/90 font-medium truncate">
                 Created {shortPath || "(no path)"}
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-gx-success">+ {stats.added} lines</span>
+                  <span className="text-[9px] font-mono text-success">+ {stats.added} lines</span>
                 </span>
               )}
             </>
@@ -225,12 +225,12 @@ export function EditCard({
 
           {kind === "delete" && (
             <>
-              <span className="text-[10px] text-gx-text/90 font-medium truncate line-through">
+              <span className="text-[10px] text-foreground/90 font-medium truncate line-through">
                 Deleted {shortPath || "(no path)"}
               </span>
               {stats.show && (
                 <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-[9px] font-mono text-gx-error">− {stats.removed} lines</span>
+                  <span className="text-[9px] font-mono text-destructive">− {stats.removed} lines</span>
                 </span>
               )}
             </>
@@ -238,7 +238,7 @@ export function EditCard({
 
           <span className="flex-1" />
           <StatusBadge status={status} />
-          <ChevronRight size={10} className="shrink-0 text-gx-muted/60" />
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground/60" />
         </button>
       </div>
     );
@@ -252,7 +252,7 @@ export function EditCard({
       <button
         type="button"
         onClick={toggleCollapse}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gx-surface-hover transition cursor-pointer"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent transition cursor-pointer"
         aria-expanded="true"
       >
         <Icon size={11} className={clsx("shrink-0", accent)} />
@@ -261,7 +261,7 @@ export function EditCard({
         {/* File path */}
         <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
           <span className={clsx(
-            "text-[10px] text-gx-text/90 font-medium truncate",
+            "text-[10px] text-foreground/90 font-medium truncate",
             kind === "delete" && "line-through",
           )}>
             {shortPath || "(no path)"}
@@ -272,10 +272,10 @@ export function EditCard({
         {stats.show && (
           <span className="flex items-center gap-1.5 shrink-0">
             {stats.added > 0 && (
-              <span className="text-[9px] font-mono text-gx-success">+{stats.added}</span>
+              <span className="text-[9px] font-mono text-success">+{stats.added}</span>
             )}
             {stats.removed > 0 && (
-              <span className="text-[9px] font-mono text-gx-error">-{stats.removed}</span>
+              <span className="text-[9px] font-mono text-destructive">-{stats.removed}</span>
             )}
           </span>
         )}
@@ -287,11 +287,11 @@ export function EditCard({
         {canManipulateHunk && (
           <span className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
             {hunkState === "applied" ? (
-              <span className="inline-flex items-center gap-0.5 text-[9px] text-gx-success">
+              <span className="inline-flex items-center gap-0.5 text-[9px] text-success">
                 <Check size={9} /> Applied
               </span>
             ) : hunkState === "reverted" ? (
-              <span className="inline-flex items-center gap-0.5 text-[9px] text-gx-warn">
+              <span className="inline-flex items-center gap-0.5 text-[9px] text-warning">
                 <Undo2 size={9} /> Reverted
               </span>
             ) : (
@@ -300,7 +300,7 @@ export function EditCard({
                   type="button"
                   disabled={hunkState === "applying" || hunkState === "reverting"}
                   onClick={() => void applyHunk()}
-                  className="inline-flex items-center gap-0.5 rounded border border-gx-success/40 bg-gx-success/10 px-1 py-0.5 text-[9px] text-gx-success hover:bg-gx-success/20 transition disabled:opacity-50"
+                  className="inline-flex items-center gap-0.5 rounded border border-success/40 bg-success/10 px-1 py-0.5 text-[9px] text-success hover:bg-success/20 transition disabled:opacity-50"
                   title="Apply this edit to disk"
                 >
                   {hunkState === "applying" ? <Loader2 size={9} className="animate-spin" /> : <Check size={9} />}
@@ -310,7 +310,7 @@ export function EditCard({
                   type="button"
                   disabled={hunkState === "applying" || hunkState === "reverting"}
                   onClick={() => void revertHunkAction()}
-                  className="inline-flex items-center gap-0.5 rounded border border-gx-error/40 bg-gx-error/10 px-1 py-0.5 text-[9px] text-gx-error hover:bg-gx-error/20 transition disabled:opacity-50"
+                  className="inline-flex items-center gap-0.5 rounded border border-destructive/40 bg-destructive/10 px-1 py-0.5 text-[9px] text-destructive hover:bg-destructive/20 transition disabled:opacity-50"
                   title="Revert this edit"
                 >
                   {hunkState === "reverting" ? <Loader2 size={9} className="animate-spin" /> : <Undo2 size={9} />}
@@ -321,12 +321,12 @@ export function EditCard({
           </span>
         )}
 
-        <ChevronDown size={10} className="shrink-0 text-gx-muted/60" />
+        <ChevronDown size={10} className="shrink-0 text-muted-foreground/60" />
       </button>
 
       {/* Hunk error, if any */}
       {hunkError && (
-        <div className="border-t border-gx-error/30 bg-gx-error/5 px-2.5 py-1 text-[9px] text-gx-error">
+        <div className="border-t border-destructive/30 bg-destructive/5 px-2.5 py-1 text-[9px] text-destructive">
           {hunkError}
         </div>
       )}
@@ -361,7 +361,7 @@ function ExpandedBody({
   // No content yet (item.started before any delta) — show a spinner.
   if (!body && status === "in_progress") {
     return (
-      <div className="border-t border-gx-border/30 px-2.5 py-2 flex items-center gap-2 text-[10px] text-gx-muted">
+      <div className="border-t border-border/30 px-2.5 py-2 flex items-center gap-2 text-[10px] text-muted-foreground">
         <Loader2 size={10} className="animate-spin" />
         Waiting for patch…
       </div>
@@ -372,7 +372,7 @@ function ExpandedBody({
   // "No displayable changes" placeholder.
   if (!body && kind !== "add") {
     return (
-      <div className="border-t border-gx-border/30 px-2.5 py-2 text-[10px] text-gx-muted/60 italic">
+      <div className="border-t border-border/30 px-2.5 py-2 text-[10px] text-muted-foreground/60 italic">
         Edited {filePath.split("/").pop() ?? filePath}
       </div>
     );
@@ -380,7 +380,7 @@ function ExpandedBody({
 
   if (!body) {
     return (
-      <div className="border-t border-gx-border/30 px-2.5 py-2 text-[10px] text-gx-muted italic">
+      <div className="border-t border-border/30 px-2.5 py-2 text-[10px] text-muted-foreground italic">
         (no body)
       </div>
     );
@@ -389,7 +389,7 @@ function ExpandedBody({
   // New file: render the body as syntax-highlighted code.
   if (kind === "add" && newFileContent) {
     return (
-      <div className="border-t border-gx-border/30 max-h-[320px] overflow-auto">
+      <div className="border-t border-border/30 max-h-[320px] overflow-auto">
         <ShikiPreview code={newFileContent} path={filePath} />
       </div>
     );
@@ -402,7 +402,7 @@ function ExpandedBody({
 
   if (synth) {
     return (
-      <div className="border-t border-gx-border/30 max-h-[320px] overflow-auto bg-gx-bg/30">
+      <div className="border-t border-border/30 max-h-[320px] overflow-auto bg-background/30">
         <UnifiedDiff patch={synth} />
       </div>
     );
@@ -411,7 +411,7 @@ function ExpandedBody({
   // Last-resort fallback for non-diff non-add bodies (e.g., a raw
   // Edit with old_string == new_string == "" and only `content`).
   return (
-    <div className="border-t border-gx-border/30 max-h-[320px] overflow-auto">
+    <div className="border-t border-border/30 max-h-[320px] overflow-auto">
       <ShikiPreview code={body} path={filePath} />
     </div>
   );
@@ -442,23 +442,23 @@ function renderingHints(kind: EditKind, tool: string | undefined): {
   label: string;
   accent: string;
 } {
-  if (kind === "add") return { Icon: FilePlus2, label: "Write", accent: "text-gx-success/80" };
-  if (kind === "delete") return { Icon: FileMinus2, label: "Delete", accent: "text-gx-error/80" };
-  return { Icon: FilePen, label: tool === "MultiEdit" ? "MultiEdit" : "Edit", accent: "text-gx-muted" };
+  if (kind === "add") return { Icon: FilePlus2, label: "Write", accent: "text-success/80" };
+  if (kind === "delete") return { Icon: FileMinus2, label: "Delete", accent: "text-destructive/80" };
+  return { Icon: FilePen, label: tool === "MultiEdit" ? "MultiEdit" : "Edit", accent: "text-muted-foreground" };
 }
 
 function statusTone(status: EditStatus): { border: string; bg: string } {
   switch (status) {
     case "in_progress":
     case "updated":
-      return { border: "border-gx-info/30", bg: "bg-gx-info/5" };
+      return { border: "border-info/30", bg: "bg-info/5" };
     case "failed":
-      return { border: "border-gx-error/40", bg: "bg-gx-error/5" };
+      return { border: "border-destructive/40", bg: "bg-destructive/5" };
     case "declined":
-      return { border: "border-gx-warn/40", bg: "bg-gx-warn/5" };
+      return { border: "border-warning/40", bg: "bg-warning/5" };
     case "completed":
     default:
-      return { border: "border-gx-border/40", bg: "" };
+      return { border: "border-border/40", bg: "" };
   }
 }
 
@@ -466,21 +466,21 @@ function StatusBadge({ status }: { status: EditStatus }) {
   if (status === "completed") return null;
   if (status === "in_progress" || status === "updated") {
     return (
-      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-gx-info border border-gx-info/30 bg-gx-info/10">
+      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-info border border-info/30 bg-info/10">
         <Loader2 size={9} className="animate-spin" /> running
       </span>
     );
   }
   if (status === "failed") {
     return (
-      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-gx-error border border-gx-error/30 bg-gx-error/10">
+      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-destructive border border-destructive/30 bg-destructive/10">
         <XCircle size={9} /> failed
       </span>
     );
   }
   if (status === "declined") {
     return (
-      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-gx-warn border border-gx-warn/30 bg-gx-warn/10">
+      <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[8px] font-medium text-warning border border-warning/30 bg-warning/10">
         <ShieldOff size={9} /> declined
       </span>
     );

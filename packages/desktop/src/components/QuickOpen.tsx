@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { DirEntry } from "../ipc";
@@ -51,10 +52,10 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
       onClick={onClose}
     >
       <div
-        className="w-[min(640px,92vw)] overflow-hidden rounded-lg border border-gx-border bg-gx-surface shadow-2xl"
+        className="w-[min(640px,92vw)] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <input
+        <Input
           ref={inputRef}
           type="text"
           value={query}
@@ -75,11 +76,11 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
               commit();
             }
           }}
-          className="w-full bg-gx-bg-sub px-4 py-3 font-mono text-sm focus-visible:outline-none"
+          className="w-full bg-background px-4 py-3 font-mono text-sm focus-visible:outline-none"
           placeholder="Go to file…"
           aria-label="Go to file"
         />
-        <ul role="listbox" className="max-h-[60vh] overflow-auto border-t border-gx-border">
+        <ul role="listbox" className="max-h-[60vh] overflow-auto border-t border-border">
           {matches.map((m, i) => (
             <li
               key={m.path}
@@ -87,7 +88,7 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
               aria-selected={i === sel}
               className={clsx(
                 "flex cursor-pointer items-center gap-2 px-3 py-2 font-mono text-[12.5px]",
-                i === sel ? "bg-gx-accent/25 text-gx-text" : "text-gx-text hover:bg-gx-surface-hover",
+                i === sel ? "bg-primary/25 text-foreground" : "text-foreground hover:bg-accent",
               )}
               onMouseEnter={() => setSel(i)}
               onClick={() => {
@@ -97,13 +98,13 @@ export function QuickOpen({ entries, open, onClose, onPick }: Props) {
             >
               <FileIcon path={m.path} kind={m.kind} />
               <span className="truncate">{m.path.split("/").pop()}</span>
-              <span className="ml-auto truncate text-[11px] text-gx-muted" title={m.path}>
+              <span className="ml-auto truncate text-[11px] text-muted-foreground" title={m.path}>
                 {m.path}
               </span>
             </li>
           ))}
           {matches.length === 0 && (
-            <li className="px-3 py-4 text-center text-xs text-gx-muted">No matches</li>
+            <li className="px-3 py-4 text-center text-xs text-muted-foreground">No matches</li>
           )}
         </ul>
       </div>

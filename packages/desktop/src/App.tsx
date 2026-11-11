@@ -548,7 +548,7 @@ function Shell() {
   }, []);
 
   return (
-    <div className={`flex h-full w-full flex-col bg-gx-bg text-gx-text ${showActivityBar ? "[--activity-bar-width:3rem]" : "[--activity-bar-width:0px]"}`}>
+    <div className={`flex h-full w-full flex-col bg-background text-foreground ${showActivityBar ? "[--activity-bar-width:3rem]" : "[--activity-bar-width:0px]"}`}>
       <TopBar
         repoSidebarOpen={repoSidebarOpen}
         onExpandRepoSidebar={() => setRepoSidebarOpen(true)}
@@ -595,7 +595,7 @@ function Shell() {
           )}
           {/* Share the rail width with WorkspaceShell; keep one host mounted
               across page and repository changes so PTYs are never recreated. */}
-          <section aria-label="Terminal page" className={terminalActive ? "absolute inset-y-0 right-0 left-[var(--activity-bar-width)] flex min-h-0 bg-gx-bg-sub" : "hidden"}>
+          <section aria-label="Terminal page" className={terminalActive ? "absolute inset-y-0 right-0 left-[var(--activity-bar-width)] flex min-h-0 bg-background" : "hidden"}>
             {terminalActivated && (
               <TerminalKeepAlive
                 ref={terminalKeepAliveRef}

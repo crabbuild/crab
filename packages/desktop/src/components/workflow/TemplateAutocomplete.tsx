@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { rpc } from "../../ipc";
@@ -177,10 +178,10 @@ export function TemplateAutocomplete({
 
   return (
     <div className="relative">
-      <input
+      <Input
         ref={inputRef}
         type="text"
-        className={clsx("input-field w-full font-mono text-xs", className)}
+        className={clsx(" w-full font-mono text-xs", className)}
         value={value}
         onChange={handleInput}
         onKeyDown={handleKeyDown}
@@ -192,7 +193,7 @@ export function TemplateAutocomplete({
       {/* Tooltip for resolved values */}
       {tooltip && (
         <div
-          className="absolute -top-7 z-50 rounded border border-gx-border bg-gx-surface px-2 py-0.5 text-[10px] text-gx-muted shadow"
+          className="absolute -top-7 z-50 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground shadow"
           style={{ left: tooltip.x }}
         >
           {tooltip.text}
@@ -203,7 +204,7 @@ export function TemplateAutocomplete({
       {showDropdown && (
         <div
           ref={dropdownRef}
-          className="absolute left-0 top-full z-50 mt-1 max-h-48 w-full overflow-y-auto rounded border border-gx-border bg-gx-surface shadow-lg"
+          className="absolute left-0 top-full z-50 mt-1 max-h-48 w-full overflow-y-auto rounded border border-border bg-card shadow-lg"
         >
           {completions.map((c, i) => (
             <button
@@ -212,8 +213,8 @@ export function TemplateAutocomplete({
               className={clsx(
                 "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                 i === selectedIndex
-                  ? "bg-gx-accent/10 text-gx-text"
-                  : "text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-primary/10 text-foreground"
+                  : "text-foreground hover:bg-accent",
               )}
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -221,11 +222,11 @@ export function TemplateAutocomplete({
               }}
               onMouseEnter={() => setSelectedIndex(i)}
             >
-              <span className="rounded bg-gx-bg px-1 py-0.5 text-[10px] text-gx-muted">
+              <span className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground">
                 {c.source}
               </span>
               <span className="flex-1 font-mono">{c.key}</span>
-              <span className="truncate text-gx-muted">{c.value}</span>
+              <span className="truncate text-muted-foreground">{c.value}</span>
             </button>
           ))}
         </div>

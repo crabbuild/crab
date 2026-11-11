@@ -1,3 +1,5 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
@@ -85,13 +87,13 @@ function getFileIcon(path: string) {
   const AUDIO = new Set(["mp3", "wav", "flac", "aac", "ogg", "wma", "m4a"]);
   const DATA = new Set(["safetensors", "bin", "pt", "pth", "onnx", "h5", "hdf5", "parquet", "arrow", "feather", "pkl", "pickle", "npy", "npz", "db", "sqlite", "sqlite3"]);
 
-  if (ARCHIVE.has(ext)) return { Icon: FileArchive, color: "text-gx-warn" };
-  if (IMAGE.has(ext)) return { Icon: FileImage, color: "text-pink-400" };
-  if (VIDEO.has(ext)) return { Icon: FileVideo, color: "text-gx-thinking" };
-  if (AUDIO.has(ext)) return { Icon: FileAudio, color: "text-gx-info" };
-  if (DATA.has(ext)) return { Icon: FileCog, color: "text-orange-400" };
-  if (ext === "pdf") return { Icon: File, color: "text-gx-error" };
-  return { Icon: File, color: "text-gx-accent" };
+  if (ARCHIVE.has(ext)) return { Icon: FileArchive, color: "text-warning" };
+  if (IMAGE.has(ext)) return { Icon: FileImage, color: "text-thinking" };
+  if (VIDEO.has(ext)) return { Icon: FileVideo, color: "text-thinking" };
+  if (AUDIO.has(ext)) return { Icon: FileAudio, color: "text-info" };
+  if (DATA.has(ext)) return { Icon: FileCog, color: "text-warning" };
+  if (ext === "pdf") return { Icon: File, color: "text-destructive" };
+  return { Icon: File, color: "text-primary" };
 }
 
 export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
@@ -322,8 +324,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   if (showPush) {
     return (
       <div className="flex h-full flex-col">
-        <div className="border-b border-gx-border px-4 py-2">
-          <button type="button" className="text-xs text-gx-accent hover:underline" onClick={() => setShowPush(false)}>← Back to files</button>
+        <div className="border-b border-border px-4 py-2">
+          <button type="button" className="text-xs text-primary hover:underline" onClick={() => setShowPush(false)}>← Back to files</button>
         </div>
         <PushFlowPanel repo={repo} onComplete={() => { setShowPush(false); loadFiles(); }} />
       </div>
@@ -341,14 +343,14 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       />
 
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center gap-0 border-b border-gx-border bg-gx-surface">
+      <div className="flex shrink-0 items-center gap-0 border-b border-border bg-card">
         <button
           type="button"
           className={clsx(
             "px-4 py-2.5 text-xs font-medium transition",
             tab === "files"
-              ? "border-b-2 border-gx-accent text-gx-text"
-              : "text-gx-muted hover:text-gx-text",
+              ? "border-b-2 border-primary text-foreground"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTab("files")}
         >
@@ -359,8 +361,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           className={clsx(
             "px-4 py-2.5 text-xs font-medium transition",
             tab === "storage-map"
-              ? "border-b-2 border-gx-accent text-gx-text"
-              : "text-gx-muted hover:text-gx-text",
+              ? "border-b-2 border-primary text-foreground"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTab("storage-map")}
         >
@@ -371,8 +373,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           className={clsx(
             "px-4 py-2.5 text-xs font-medium transition",
             tab === "hydrate"
-              ? "border-b-2 border-gx-accent text-gx-text"
-              : "text-gx-muted hover:text-gx-text",
+              ? "border-b-2 border-primary text-foreground"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTab("hydrate")}
         >
@@ -383,8 +385,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
           className={clsx(
             "px-4 py-2.5 text-xs font-medium transition",
             tab === "datasets"
-              ? "border-b-2 border-gx-accent text-gx-text"
-              : "text-gx-muted hover:text-gx-text",
+              ? "border-b-2 border-primary text-foreground"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTab("datasets")}
         >
@@ -398,7 +400,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       ) : tab === "hydrate" ? (
         <HydratePage repo={repo} />
       ) : crabStatus.status === "loading" ? (
-        <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+        <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
           <Loader2 size={14} className="animate-spin" /> Checking repository status…
         </div>
       ) : needsSetup ? (
@@ -581,27 +583,27 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
     <div className="relative flex min-h-0 flex-1">
       {/* Main list/tree area */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-center gap-3 border-b border-gx-border bg-gx-surface px-3 py-2 text-[11px] text-gx-muted">
+        <div className="flex shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-[11px] text-muted-foreground">
           {/* List/tree toggle — left side */}
-          <div className="flex overflow-hidden rounded border border-gx-border">
-            <button type="button" className={clsx("px-1.5 py-0.5", mode === "list" ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:text-gx-text")} onClick={() => setMode("list")} title="List view" aria-label="List view"><List size={11} /></button>
-            <button type="button" className={clsx("px-1.5 py-0.5", mode === "tree" ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:text-gx-text")} onClick={() => setMode("tree")} title="Tree view" aria-label="Tree view"><FolderTree size={11} /></button>
+          <div className="flex overflow-hidden rounded border border-border">
+            <button type="button" className={clsx("px-1.5 py-0.5", mode === "list" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => setMode("list")} title="List view" aria-label="List view"><List size={11} /></button>
+            <button type="button" className={clsx("px-1.5 py-0.5", mode === "tree" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => setMode("tree")} title="Tree view" aria-label="Tree view"><FolderTree size={11} /></button>
           </div>
-          <Binary size={13} className="text-gx-accent" />
+          <Binary size={13} className="text-primary" />
           <span>
-            Top <strong className="text-gx-text">{data?.length ?? 0}</strong> pointers ·{" "}
+            Top <strong className="text-foreground">{data?.length ?? 0}</strong> pointers ·{" "}
             {formatBytes(totalBytes)} total
           </span>
           {/* Hydration summary */}
           {hydration.summary && (
             <span className="text-[10px]">
-              · <span className="text-gx-success">{hydration.summary.hydrated}</span> hydrated
-              · <span className="text-gx-accent">{hydration.summary.pointer}</span> pointer
+              · <span className="text-success">{hydration.summary.hydrated}</span> hydrated
+              · <span className="text-primary">{hydration.summary.pointer}</span> pointer
             </span>
           )}
           <div className="ml-auto flex items-center gap-2">
-            <select
-              className="rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5 text-[11px] focus-visible:outline-none"
+            <NativeSelect
+              className="rounded border border-border bg-background px-2 py-0.5 text-[11px] focus-visible:outline-none"
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value) as 50 | 100 | 250 | 500)}
             >
@@ -609,30 +611,30 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
               <option value="100">Top 100</option>
               <option value="250">Top 250</option>
               <option value="500">Top 500</option>
-            </select>
+            </NativeSelect>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto">
           {err && (
-            <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+            <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               {err}
             </div>
           )}
           {!err && data == null && (
-            <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+            <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" /> Scanning pointers…
             </div>
           )}
           {data && data.length === 0 && (
-            <div className="p-6 text-center text-sm text-gx-muted">
+            <div className="p-6 text-center text-sm text-muted-foreground">
               No pointer-tracked files yet.
             </div>
           )}
           {data && data.length > 0 && mode === "list" && (
             <div>
               {/* Table header */}
-              <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+              <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 <span className="shrink-0 w-6 text-right">#</span>
                 <span className="shrink-0 w-3" /> {/* icon spacer */}
                 <span className="min-w-0 flex-1">File</span>
@@ -709,35 +711,35 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
   const { Icon: FileIcon, color: iconColor } = getFileIcon(entry.path);
 
   return (
-    <div className={clsx("group flex items-center gap-2 border-b border-gx-border/40 px-3 py-1.5 text-xs transition hover:bg-gx-surface-hover", isActive && "bg-gx-accent/5")}>
-      <span className="shrink-0 w-6 text-right tabular-nums text-gx-muted">{index + 1}</span>
+    <div className={clsx("group flex items-center gap-2 border-b border-border/40 px-3 py-1.5 text-xs transition hover:bg-accent", isActive && "bg-primary/5")}>
+      <span className="shrink-0 w-6 text-right tabular-nums text-muted-foreground">{index + 1}</span>
       <FileIcon size={13} className={clsx("shrink-0", iconColor)} />
       <div className="flex min-w-0 flex-1 items-baseline gap-1">
-        <span className="truncate font-mono text-gx-text">{fileName}</span>
-        {dirPath && <span className="truncate text-[10px] text-gx-muted">{dirPath}</span>}
+        <span className="truncate font-mono text-foreground">{fileName}</span>
+        {dirPath && <span className="truncate text-[10px] text-muted-foreground">{dirPath}</span>}
       </div>
       {/* Hydration status badge */}
       <span className={clsx(
         "shrink-0 w-16 text-center rounded px-1.5 py-0.5 text-[10px] font-medium",
-        isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
+        isHydrated ? "bg-success/10 text-success" : "bg-primary/10 text-primary",
       )}>
         {hydrationState ?? "Unknown"}
       </span>
-      <span className="shrink-0 w-16 text-right tabular-nums text-gx-muted">{formatBytes(entry.size)}</span>
+      <span className="shrink-0 w-16 text-right tabular-nums text-muted-foreground">{formatBytes(entry.size)}</span>
       <div className="flex shrink-0 items-center gap-1.5 w-24 justify-end">
-        <span className="relative h-1.5 w-14 overflow-hidden rounded-full bg-gx-bg-sub">
-          <span className="absolute inset-y-0 left-0 bg-gx-accent" style={{ width: `${share}%` }} />
+        <span className="relative h-1.5 w-14 overflow-hidden rounded-full bg-background">
+          <span className="absolute inset-y-0 left-0 bg-primary" style={{ width: `${share}%` }} />
         </span>
-        <span className="tabular-nums text-[10px] text-gx-muted w-10 text-right">{share.toFixed(1)}%</span>
+        <span className="tabular-nums text-[10px] text-muted-foreground w-10 text-right">{share.toFixed(1)}%</span>
       </div>
       {/* Actions column */}
       <div className="flex shrink-0 w-14 items-center justify-center gap-1">
         {actionInProgress ? (
-          <Loader2 size={12} className="animate-spin text-gx-muted" />
+          <Loader2 size={12} className="animate-spin text-muted-foreground" />
         ) : isHydrated && onDehydrate ? (
           <button
             type="button"
-            className="rounded p-1 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
+            className="rounded p-1 text-muted-foreground transition hover:bg-primary/10 hover:text-primary"
             onClick={onDehydrate}
             title="Dehydrate — replace with pointer to free disk space"
             aria-label={`Dehydrate ${fileName}`}
@@ -747,7 +749,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
         ) : isPointer && onHydrate ? (
           <button
             type="button"
-            className="rounded p-1 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"
+            className="rounded p-1 text-muted-foreground transition hover:bg-success/10 hover:text-success"
             onClick={onHydrate}
             title="Hydrate — download full content"
             aria-label={`Hydrate ${fileName}`}
@@ -758,8 +760,8 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
         <button
           type="button"
           className={clsx(
-            "rounded p-1 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent",
-            isActive && "text-gx-accent",
+            "rounded p-1 text-muted-foreground transition hover:bg-primary/10 hover:text-primary",
+            isActive && "text-primary",
           )}
           onClick={onShowHistory}
           title="File history"
@@ -789,17 +791,17 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
     return (
       <div>
         <div
-          className="flex cursor-pointer items-center gap-1.5 px-2 py-1 text-xs text-gx-muted hover:bg-gx-surface-hover"
+          className="flex cursor-pointer items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
           onClick={() => setDirExpanded(!dirExpanded)}
         >
           {dirExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-          <Folder size={11} className="text-gx-accent/70" />
+          <Folder size={11} className="text-primary/70" />
           <span className="font-mono">{node.name}/</span>
           <span className="ml-auto flex items-center gap-1.5 text-[10px]">
             <span className="tabular-nums">{formatBytes(node.totalSize)}</span>
-            <span className="relative h-1 w-10 overflow-hidden rounded-full bg-gx-bg-sub">
-              <span className="absolute inset-y-0 left-0 bg-gx-accent/60" style={{ width: `${share}%` }} />
+            <span className="relative h-1 w-10 overflow-hidden rounded-full bg-background">
+              <span className="absolute inset-y-0 left-0 bg-primary/60" style={{ width: `${share}%` }} />
             </span>
             <span className="tabular-nums w-9 text-right">{share.toFixed(1)}%</span>
           </span>
@@ -833,33 +835,33 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
 
   return (
     <div
-      className={clsx("group flex items-center gap-1.5 px-2 py-1.5 text-xs transition hover:bg-gx-surface-hover", isActive && "bg-gx-accent/5")}
+      className={clsx("group flex items-center gap-1.5 px-2 py-1.5 text-xs transition hover:bg-accent", isActive && "bg-primary/5")}
       style={{ paddingLeft: `${depth * 14 + 8}px` }}
     >
       <FileIcon size={13} className={clsx("shrink-0", iconColor)} />
-      <span className="min-w-0 flex-1 truncate font-mono text-gx-text">{node.name}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-foreground">{node.name}</span>
       {/* Hydration status badge */}
       <span className={clsx(
         "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
-        isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
+        isHydrated ? "bg-success/10 text-success" : "bg-primary/10 text-primary",
       )}>
         {hydrationState ?? "Unknown"}
       </span>
-      <span className="ml-2 flex items-center gap-1.5 text-[10px] text-gx-muted">
+      <span className="ml-2 flex items-center gap-1.5 text-[10px] text-muted-foreground">
         <span className="tabular-nums">{formatBytes(entry.size)}</span>
-        <span className="relative h-1 w-10 overflow-hidden rounded-full bg-gx-bg-sub">
-          <span className="absolute inset-y-0 left-0 bg-gx-accent" style={{ width: `${share}%` }} />
+        <span className="relative h-1 w-10 overflow-hidden rounded-full bg-background">
+          <span className="absolute inset-y-0 left-0 bg-primary" style={{ width: `${share}%` }} />
         </span>
         <span className="tabular-nums w-9 text-right">{share.toFixed(1)}%</span>
       </span>
       {/* Actions */}
       <div className="flex shrink-0 items-center gap-0.5">
         {isActionInProgress ? (
-          <Loader2 size={11} className="animate-spin text-gx-muted" />
+          <Loader2 size={11} className="animate-spin text-muted-foreground" />
         ) : isHydrated && onDehydrate ? (
           <button
             type="button"
-            className="rounded p-0.5 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
+            className="rounded p-0.5 text-muted-foreground transition hover:bg-primary/10 hover:text-primary"
             onClick={() => onDehydrate(entry.path)}
             title="Dehydrate — replace with pointer to free disk space"
             aria-label={`Dehydrate ${node.name}`}
@@ -869,7 +871,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
         ) : isPointer && onHydrate ? (
           <button
             type="button"
-            className="rounded p-0.5 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"
+            className="rounded p-0.5 text-muted-foreground transition hover:bg-success/10 hover:text-success"
             onClick={() => onHydrate(entry.path)}
             title="Hydrate — download full content"
             aria-label={`Hydrate ${node.name}`}
@@ -880,8 +882,8 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
         <button
           type="button"
           className={clsx(
-            "rounded p-0.5 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent",
-            isActive && "text-gx-accent",
+            "rounded p-0.5 text-muted-foreground transition hover:bg-primary/10 hover:text-primary",
+            isActive && "text-primary",
           )}
           onClick={() => onShowHistory(entry)}
           title="File history"
@@ -932,17 +934,17 @@ function FileHistoryDrawer({ entry, repoId, onClose, onSelectCommit }: {
   }, [repoId, entry.path]);
 
   return (
-    <div className="flex h-full w-72 shrink-0 flex-col border-l border-gx-border bg-gx-surface">
+    <div className="flex h-full w-72 shrink-0 flex-col border-l border-border bg-card">
       {/* Drawer header */}
-      <div className="flex items-center gap-2 border-b border-gx-border px-3 py-2.5">
-        <History size={13} className="shrink-0 text-gx-accent" />
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
+        <History size={13} className="shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-medium text-gx-text" title={entry.path}>{fileName}</div>
-          <div className="truncate text-[10px] text-gx-muted">{entry.path}</div>
+          <div className="truncate text-xs font-medium text-foreground" title={entry.path}>{fileName}</div>
+          <div className="truncate text-[10px] text-muted-foreground">{entry.path}</div>
         </div>
         <button
           type="button"
-          className="shrink-0 rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+          className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
           onClick={onClose}
           aria-label="Close history"
         >
@@ -951,55 +953,55 @@ function FileHistoryDrawer({ entry, repoId, onClose, onSelectCommit }: {
       </div>
 
       {/* File info summary */}
-      <div className="border-b border-gx-border/50 px-3 py-2 text-[10px]">
+      <div className="border-b border-border/50 px-3 py-2 text-[10px]">
         <div className="flex items-center justify-between">
-          <span className="text-gx-muted">Size</span>
-          <span className="text-gx-text">{formatBytes(entry.size)}</span>
+          <span className="text-muted-foreground">Size</span>
+          <span className="text-foreground">{formatBytes(entry.size)}</span>
         </div>
         <div className="mt-1 flex items-center justify-between">
-          <span className="text-gx-muted">Kind</span>
-          <span className="text-gx-accent">{entry.kind}</span>
+          <span className="text-muted-foreground">Kind</span>
+          <span className="text-primary">{entry.kind}</span>
         </div>
         {entry.pointer_hash && (
           <div className="mt-1 flex items-center justify-between">
-            <span className="text-gx-muted">Pointer</span>
-            <span className="font-mono text-gx-text">{entry.pointer_hash.slice(0, 12)}…</span>
+            <span className="text-muted-foreground">Pointer</span>
+            <span className="font-mono text-foreground">{entry.pointer_hash.slice(0, 12)}…</span>
           </div>
         )}
       </div>
 
       {/* Commit list */}
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gx-muted">
+        <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Commits ({loadingHistory ? "…" : history?.length ?? 0})
         </div>
         {loadingHistory && (
-          <div className="flex items-center gap-1.5 px-3 py-4 text-xs text-gx-muted">
+          <div className="flex items-center gap-1.5 px-3 py-4 text-xs text-muted-foreground">
             <Loader2 size={11} className="animate-spin" /> Loading…
           </div>
         )}
         {historyErr && (
-          <div className="mx-3 rounded border border-gx-error/30 bg-gx-error/5 px-2 py-1.5 text-[11px] text-gx-error">
+          <div className="mx-3 rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-[11px] text-destructive">
             {historyErr}
           </div>
         )}
         {history && history.length === 0 && (
-          <div className="px-3 py-4 text-xs text-gx-muted">No commits found for this file.</div>
+          <div className="px-3 py-4 text-xs text-muted-foreground">No commits found for this file.</div>
         )}
         {history && history.length > 0 && (
           <div className="space-y-px px-1">
             {history.map((commit) => (
               <div
                 key={commit.sha}
-                className={clsx("rounded px-2 py-1.5 hover:bg-gx-surface-hover", onSelectCommit && "cursor-pointer")}
+                className={clsx("rounded px-2 py-1.5 hover:bg-accent", onSelectCommit && "cursor-pointer")}
                 onClick={() => onSelectCommit?.(commit.sha)}
               >
                 <div className="flex items-center gap-2">
-                  <span className="shrink-0 font-mono text-[10px] text-gx-accent">{commit.sha.slice(0, 7)}</span>
-                  <span className="shrink-0 text-[10px] text-gx-muted">{relativeTime(commit.date)}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-primary">{commit.sha.slice(0, 7)}</span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{relativeTime(commit.date)}</span>
                 </div>
-                <div className="mt-0.5 truncate text-[11px] text-gx-text" title={commit.subject}>{commit.subject}</div>
-                <div className="mt-0.5 text-[10px] text-gx-muted">{commit.author}</div>
+                <div className="mt-0.5 truncate text-[11px] text-foreground" title={commit.subject}>{commit.subject}</div>
+                <div className="mt-0.5 text-[10px] text-muted-foreground">{commit.author}</div>
               </div>
             ))}
           </div>
@@ -1110,34 +1112,34 @@ function FilesPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-gx-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="flex items-center gap-3">
           {/* View mode toggle */}
-          <div className="flex overflow-hidden rounded border border-gx-border">
-            <button type="button" className={clsx("px-1.5 py-1", viewMode === "list" ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:text-gx-text")} onClick={() => onSetViewMode("list")} title="List view" aria-label="List view"><List size={12} /></button>
-            <button type="button" className={clsx("px-1.5 py-1", viewMode === "tree" ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:text-gx-text")} onClick={() => onSetViewMode("tree")} title="Tree view" aria-label="Tree view"><FolderTree size={12} /></button>
-            <button type="button" className={clsx("px-1.5 py-1", viewMode === "card" ? "bg-gx-accent/15 text-gx-text" : "text-gx-muted hover:text-gx-text")} onClick={() => onSetViewMode("card")} title="Card view" aria-label="Card view"><Grid3X3 size={12} /></button>
+          <div className="flex overflow-hidden rounded border border-border">
+            <button type="button" className={clsx("px-1.5 py-1", viewMode === "list" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => onSetViewMode("list")} title="List view" aria-label="List view"><List size={12} /></button>
+            <button type="button" className={clsx("px-1.5 py-1", viewMode === "tree" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => onSetViewMode("tree")} title="Tree view" aria-label="Tree view"><FolderTree size={12} /></button>
+            <button type="button" className={clsx("px-1.5 py-1", viewMode === "card" ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => onSetViewMode("card")} title="Card view" aria-label="Card view"><Grid3X3 size={12} /></button>
           </div>
           {!loading && (
-            <span className="text-xs text-gx-muted">
+            <span className="text-xs text-muted-foreground">
               {untrackedFiles.length} untracked
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          <select className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[10px] text-gx-muted focus-visible:outline-none" value={sizeThreshold} onChange={(e) => onSetSizeThreshold(Number(e.target.value))}>
+          <NativeSelect className="rounded border border-border bg-background px-2 py-1 text-[10px] text-muted-foreground focus-visible:outline-none" value={sizeThreshold} onChange={(e) => onSetSizeThreshold(Number(e.target.value))}>
             <option value={0}>All files</option>
             <option value={1}>≥ 1 MB</option>
             <option value={10}>≥ 10 MB</option>
             <option value={50}>≥ 50 MB</option>
             <option value={100}>≥ 100 MB</option>
-          </select>
-          <button type="button" className="text-gx-muted hover:text-gx-text" onClick={onRefresh} title="Refresh" aria-label="Refresh file list"><RefreshCw size={12} /></button>
+          </NativeSelect>
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onRefresh} title="Refresh" aria-label="Refresh file list"><RefreshCw size={12} /></button>
         </div>
       </div>
 
-      {loading && <div className="flex items-center gap-2 p-4 text-xs text-gx-muted"><Loader2 size={12} className="animate-spin" /> Scanning...</div>}
-      {error && phase !== "tracking" && <div className="mx-4 mt-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{error}</div>}
+      {loading && <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" /> Scanning...</div>}
+      {error && phase !== "tracking" && <div className="mx-4 mt-3 rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{error}</div>}
 
       {/* Keep the commit draft mounted while scans refresh the file list. */}
       <div className="min-h-0 flex-1 overflow-auto">
@@ -1157,18 +1159,18 @@ function FilesPanel({
         {/* ── Untracked section ── */}
         {untrackedFiles.length > 0 && (
           <div>
-            <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover" onClick={() => onSetExpandUntracked(!expandUntracked)}>
+            <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent" onClick={() => onSetExpandUntracked(!expandUntracked)}>
               {expandUntracked ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-              <FileWarning size={11} className="text-gx-warn" />
+              <FileWarning size={11} className="text-warning" />
               Not Tracked ({untrackedFiles.length})
             </button>
             {expandUntracked && (
-              <div className="ml-6 border-l border-gx-border/30">
+              <div className="ml-6 border-l border-border/30">
                 {phase === "browse" && untrackedFiles.length > 1 && (
-                  <div className="flex items-center gap-3 border-b border-gx-border/50 px-4 py-1.5 text-[10px] text-gx-muted">
-                    <button type="button" className="hover:text-gx-text" onClick={onSelectAll}>Select all</button>
-                    <button type="button" className="hover:text-gx-text" onClick={onSelectNone}>Clear</button>
-                    {selected.size > 0 && <span className="ml-auto text-gx-accent">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
+                  <div className="flex items-center gap-3 border-b border-border/50 px-4 py-1.5 text-[10px] text-muted-foreground">
+                    <button type="button" className="hover:text-foreground" onClick={onSelectAll}>Select all</button>
+                    <button type="button" className="hover:text-foreground" onClick={onSelectNone}>Clear</button>
+                    {selected.size > 0 && <span className="ml-auto text-primary">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
                   </div>
                 )}
                 {viewMode === "list"
@@ -1178,12 +1180,12 @@ function FilesPanel({
                   : <CardView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} selectable={phase === "browse"} />
                 }
                 {phase === "browse" && selected.size > 0 && (
-                  <div className="border-t border-gx-border/50 px-4 py-3">
-                    <button type="button" className="btn btn-primary text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</button>
-                    <p className="mt-1.5 text-[10px] text-gx-muted">Files will be chunked, deduplicated, and staged for push.</p>
+                  <div className="border-t border-border/50 px-4 py-3">
+                    <Button variant="default" type="button" className="text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</Button>
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">Files will be chunked, deduplicated, and staged for push.</p>
                   </div>
                 )}
-                {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-gx-accent"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
+                {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-primary"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
               </div>
             )}
           </div>
@@ -1191,28 +1193,28 @@ function FilesPanel({
 
         {/* ── Tracking result ── */}
         {phase === "tracked" && trackResult && (
-          <div className="mx-4 my-3 rounded border border-gx-success/30 bg-gx-success/5 p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-gx-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
-            {trackResult.errors > 0 && <div className="mt-2 text-xs text-gx-error">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
+          <div className="mx-4 my-3 rounded border border-success/30 bg-success/5 p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
+            {trackResult.errors > 0 && <div className="mt-2 text-xs text-destructive">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
             <div className="mt-3 flex gap-2">
-              <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}><Upload size={11} /> Push</button>
-              <button type="button" className="btn text-xs" onClick={onReset}>Done</button>
+              <Button variant="default" type="button" className="text-xs" onClick={onShowPush}><Upload size={11} /> Push</Button>
+              <Button variant="outline" type="button" className="text-xs" onClick={onReset}>Done</Button>
             </div>
           </div>
         )}
         {phase === "error" && (
           <div className="mx-4 my-3 space-y-2">
-            <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error"><XCircle size={12} /> {error}</div>
-            <button type="button" className="btn text-xs" onClick={onReset}>Try Again</button>
+            <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"><XCircle size={12} /> {error}</div>
+            <Button variant="outline" type="button" className="text-xs" onClick={onReset}>Try Again</Button>
           </div>
         )}
 
         {/* Empty */}
         {untrackedFiles.length === 0 && !loading && !error && !stagingStats?.files?.length && (
           <div className="flex flex-col items-center justify-center p-8 text-center">
-            <FolderOpen size={32} className="mb-3 text-gx-muted/40" />
-            <div className="text-sm text-gx-text">No large files to track</div>
-            <div className="mt-1 text-xs text-gx-muted">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
+            <FolderOpen size={32} className="mb-3 text-muted-foreground/40" />
+            <div className="text-sm text-foreground">No large files to track</div>
+            <div className="mt-1 text-xs text-muted-foreground">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
           </div>
         )}
       </div>
@@ -1232,19 +1234,19 @@ function FileRow({ file, selected, onToggle, progress, selectable = true, onCont
   const { Icon: FileIcon, color: iconColor } = getFileIcon(file.path);
 
   return (
-    <div className={clsx("flex items-center gap-2 px-6 py-2 text-xs transition", selectable && "cursor-pointer hover:bg-gx-surface-hover", selected && "bg-gx-accent/5")} onClick={selectable ? onToggle : undefined} onContextMenu={onContextMenu}>
-      {selectable && !progress && <input type="checkbox" checked={selected} onChange={onToggle} className="h-3.5 w-3.5 shrink-0 rounded border-gx-border accent-gx-accent" onClick={(e) => e.stopPropagation()} />}
-      {progress === "tracking" && <Loader2 size={12} className="shrink-0 animate-spin text-gx-accent" />}
-      {progress === "done" && <CheckCircle2 size={12} className="shrink-0 text-gx-success" />}
-      {progress === "error" && <XCircle size={12} className="shrink-0 text-gx-error" />}
+    <div className={clsx("flex items-center gap-2 px-6 py-2 text-xs transition", selectable && "cursor-pointer hover:bg-accent", selected && "bg-primary/5")} onClick={selectable ? onToggle : undefined} onContextMenu={onContextMenu}>
+      {selectable && !progress && <input type="checkbox" checked={selected} onChange={onToggle} className="h-3.5 w-3.5 shrink-0 rounded border-border accent-primary" onClick={(e) => e.stopPropagation()} />}
+      {progress === "tracking" && <Loader2 size={12} className="shrink-0 animate-spin text-primary" />}
+      {progress === "done" && <CheckCircle2 size={12} className="shrink-0 text-success" />}
+      {progress === "error" && <XCircle size={12} className="shrink-0 text-destructive" />}
       {!progress && <FileIcon size={14} className={clsx("shrink-0", iconColor)} />}
       <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-        <span className="truncate font-mono text-gx-text">{fileName}</span>
-        {dirPath && <span className="truncate text-[10px] text-gx-muted">{dirPath}</span>}
+        <span className="truncate font-mono text-foreground">{fileName}</span>
+        {dirPath && <span className="truncate text-[10px] text-muted-foreground">{dirPath}</span>}
       </div>
-      <span className="shrink-0 tabular-nums text-gx-muted">{file.size > 0 ? formatBytes(file.size) : "?"}</span>
-      {!file.tracked && file.kind === "untracked" && !progress && <span className="shrink-0 rounded bg-gx-warn/10 px-1.5 py-0.5 text-[10px] font-medium text-gx-warn">new</span>}
-      {!file.tracked && file.kind === "committed" && !progress && <span className="shrink-0 rounded bg-gx-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-gx-accent">large</span>}
+      <span className="shrink-0 tabular-nums text-muted-foreground">{file.size > 0 ? formatBytes(file.size) : "?"}</span>
+      {!file.tracked && file.kind === "untracked" && !progress && <span className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">new</span>}
+      {!file.tracked && file.kind === "committed" && !progress && <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">large</span>}
     </div>
   );
 }
@@ -1310,9 +1312,9 @@ function TreeNodeRow({ node, depth, selected, onToggle, progress, selectable, tr
   if (node.isDir) {
     return (
       <div>
-        <div className="flex cursor-pointer items-center gap-1 px-2 py-0.5 text-xs text-gx-muted hover:bg-gx-surface-hover" style={{ paddingLeft: `${depth * 12 + 8}px` }} onClick={() => setExpanded(!expanded)}>
+        <div className="flex cursor-pointer items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent" style={{ paddingLeft: `${depth * 12 + 8}px` }} onClick={() => setExpanded(!expanded)}>
           {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-          <Folder size={11} className="text-gx-accent/70" />
+          <Folder size={11} className="text-primary/70" />
           <span className="font-mono">{node.name}/</span>
         </div>
         {expanded && node.children.map((child) => <TreeNodeRow key={child.path} node={child} depth={depth + 1} selected={selected} onToggle={onToggle} progress={progress} selectable={selectable} tracked={tracked} removingPaths={removingPaths} onRemove={onRemove} onFileContextMenu={onFileContextMenu} />)}
@@ -1326,18 +1328,18 @@ function TreeNodeRow({ node, depth, selected, onToggle, progress, selectable, tr
   const isRemoving = removingPaths?.has(file.path);
 
   return (
-    <div className={clsx("group flex items-center gap-2 py-0.5 text-xs transition", selectable && "cursor-pointer hover:bg-gx-surface-hover", isSelected && "bg-gx-accent/5")} style={{ paddingLeft: `${depth * 12 + 8}px` }} onClick={selectable ? () => onToggle(file.path) : undefined} onContextMenu={onFileContextMenu ? (e) => onFileContextMenu(e, file.path) : undefined}>
-      {selectable && !prog && <input type="checkbox" checked={isSelected} onChange={() => onToggle(file.path)} className="h-3 w-3 shrink-0 rounded border-gx-border accent-gx-accent" onClick={(e) => e.stopPropagation()} />}
-      {prog === "tracking" && <Loader2 size={10} className="shrink-0 animate-spin text-gx-accent" />}
-      {prog === "done" && <CheckCircle2 size={10} className="shrink-0 text-gx-success" />}
-      {prog === "error" && <XCircle size={10} className="shrink-0 text-gx-error" />}
-      {!selectable && !prog && <File size={10} className={clsx("shrink-0", tracked ? "text-gx-success" : "text-gx-muted")} />}
-      <span className="min-w-0 flex-1 truncate font-mono text-gx-text">{node.name}</span>
-      <span className="shrink-0 tabular-nums text-gx-muted">{file.size > 0 ? formatBytes(file.size) : "?"}</span>
+    <div className={clsx("group flex items-center gap-2 py-0.5 text-xs transition", selectable && "cursor-pointer hover:bg-accent", isSelected && "bg-primary/5")} style={{ paddingLeft: `${depth * 12 + 8}px` }} onClick={selectable ? () => onToggle(file.path) : undefined} onContextMenu={onFileContextMenu ? (e) => onFileContextMenu(e, file.path) : undefined}>
+      {selectable && !prog && <input type="checkbox" checked={isSelected} onChange={() => onToggle(file.path)} className="h-3 w-3 shrink-0 rounded border-border accent-primary" onClick={(e) => e.stopPropagation()} />}
+      {prog === "tracking" && <Loader2 size={10} className="shrink-0 animate-spin text-primary" />}
+      {prog === "done" && <CheckCircle2 size={10} className="shrink-0 text-success" />}
+      {prog === "error" && <XCircle size={10} className="shrink-0 text-destructive" />}
+      {!selectable && !prog && <File size={10} className={clsx("shrink-0", tracked ? "text-success" : "text-muted-foreground")} />}
+      <span className="min-w-0 flex-1 truncate font-mono text-foreground">{node.name}</span>
+      <span className="shrink-0 tabular-nums text-muted-foreground">{file.size > 0 ? formatBytes(file.size) : "?"}</span>
       {tracked && !isRemoving && onRemove && (
-        <button type="button" className="shrink-0 rounded px-1 text-[10px] text-gx-muted opacity-0 hover:text-gx-error group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); onRemove(file.path); }}><Trash2 size={9} /></button>
+        <button type="button" className="shrink-0 rounded px-1 text-[10px] text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); onRemove(file.path); }}><Trash2 size={9} /></button>
       )}
-      {isRemoving && <Loader2 size={9} className="shrink-0 animate-spin text-gx-muted" />}
+      {isRemoving && <Loader2 size={9} className="shrink-0 animate-spin text-muted-foreground" />}
     </div>
   );
 }
@@ -1362,21 +1364,21 @@ function CardView({ files, selected, onToggle, selectable }: {
             className={clsx(
               "relative group flex cursor-pointer flex-col items-center gap-1.5 rounded-lg border p-3 text-center transition",
               isSelected
-                ? "border-gx-accent bg-gx-accent/5"
-                : "border-gx-border/50 hover:border-gx-border hover:bg-gx-surface-hover",
+                ? "border-primary bg-primary/5"
+                : "border-border/50 hover:border-border hover:bg-accent",
             )}
             onClick={() => selectable && onToggle(file.path)}
           >
             {isSelected && (
               <div className="absolute right-1.5 top-1.5">
-                <CheckCircle2 size={12} className="text-gx-accent" />
+                <CheckCircle2 size={12} className="text-primary" />
               </div>
             )}
             <FileIcon size={28} className={clsx(iconColor)} />
-            <span className="w-full truncate text-[10px] font-mono text-gx-text" title={file.path}>
+            <span className="w-full truncate text-[10px] font-mono text-foreground" title={file.path}>
               {fileName}
             </span>
-            <span className="text-[9px] text-gx-muted">
+            <span className="text-[9px] text-muted-foreground">
               {file.size > 0 ? formatBytes(file.size) : "?"}
             </span>
           </div>

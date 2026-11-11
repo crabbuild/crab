@@ -123,7 +123,7 @@ export function LspStatus({ language }: LspStatusProps) {
     <div className="relative" ref={popoverRef}>
       <button
         type="button"
-        className="flex items-center gap-1 text-[11px] hover:text-gx-text"
+        className="flex items-center gap-1 text-[11px] hover:text-foreground"
         onClick={() => setPopoverOpen((o) => !o)}
         title={`LSP: ${serverName} (${state})`}
       >
@@ -134,15 +134,15 @@ export function LspStatus({ language }: LspStatusProps) {
       </button>
 
       {popoverOpen && (
-        <div className="absolute bottom-full right-0 mb-1 w-64 rounded border border-gx-border bg-gx-surface p-3 shadow-lg text-xs z-50">
-          <div className="mb-2 font-medium text-gx-text">Language Server</div>
+        <div className="absolute bottom-full right-0 mb-1 w-64 rounded border border-border bg-card p-3 shadow-lg text-xs z-50">
+          <div className="mb-2 font-medium text-foreground">Language Server</div>
 
-          <div className="space-y-1 text-gx-muted">
+          <div className="space-y-1 text-muted-foreground">
             <Row label="Language" value={language} />
             <Row label="Command" value={activeServer?.command ?? "—"} />
             <Row label="Status" value={stateLabel(state)} />
             {activeServer?.error && (
-              <div className="mt-1 text-gx-error text-[10px] break-all">
+              <div className="mt-1 text-destructive text-[10px] break-all">
                 {activeServer.error}
               </div>
             )}
@@ -150,13 +150,13 @@ export function LspStatus({ language }: LspStatusProps) {
 
           {isInstalling && installProgress && (
             <div className="mt-2">
-              <div className="text-[10px] text-gx-muted mb-1">
+              <div className="text-[10px] text-muted-foreground mb-1">
                 {installLabel(installProgress)}
               </div>
               {installProgress.phase === "downloading" && installProgress.percent != null && (
-                <div className="h-1 rounded bg-gx-bg-sub overflow-hidden">
+                <div className="h-1 rounded bg-background overflow-hidden">
                   <div
-                    className="h-full bg-gx-accent transition-all"
+                    className="h-full bg-primary transition-all"
                     style={{ width: `${Math.round((installProgress.percent ?? 0) * 100)}%` }}
                   />
                 </div>
@@ -168,7 +168,7 @@ export function LspStatus({ language }: LspStatusProps) {
             <button
               type="button"
               onClick={handleRestart}
-              className="mt-2 flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[11px] text-gx-accent hover:bg-gx-accent/20"
+              className="mt-2 flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
             >
               <RotateCcw size={10} />
               Restart
@@ -179,7 +179,7 @@ export function LspStatus({ language }: LspStatusProps) {
             <button
               type="button"
               onClick={handleInstall}
-              className="mt-2 flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[11px] text-gx-accent hover:bg-gx-accent/20"
+              className="mt-2 flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
             >
               <Download size={10} />
               Install {language} language server
@@ -196,15 +196,15 @@ export function LspStatus({ language }: LspStatusProps) {
 function StatusIcon({ state }: { state: ServerState }) {
   switch (state) {
     case "running":
-      return <Check size={11} className="text-gx-success" />;
+      return <Check size={11} className="text-success" />;
     case "restarting":
-      return <Loader2 size={11} className="animate-spin text-gx-warn" />;
+      return <Loader2 size={11} className="animate-spin text-warning" />;
     case "error":
-      return <X size={11} className="text-gx-error" />;
+      return <X size={11} className="text-destructive" />;
     case "stopped":
     case "discovered":
     default:
-      return <Minus size={11} className="text-gx-muted" />;
+      return <Minus size={11} className="text-muted-foreground" />;
   }
 }
 
@@ -250,7 +250,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between">
       <span>{label}</span>
-      <span className="text-gx-text max-w-[140px] truncate">{value}</span>
+      <span className="text-foreground max-w-[140px] truncate">{value}</span>
     </div>
   );
 }

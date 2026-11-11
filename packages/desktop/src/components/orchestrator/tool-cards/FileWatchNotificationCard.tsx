@@ -16,10 +16,10 @@ import { CollapsedCardLine } from "./CollapsedCardLine";
 
 const kindIcon = (kind: string) => {
   switch (kind) {
-    case "created": return <FilePlus size={11} className="shrink-0 text-gx-success" />;
-    case "modified": return <FileEdit size={11} className="shrink-0 text-gx-info" />;
-    case "deleted": return <FileX size={11} className="shrink-0 text-gx-error" />;
-    default: return <FolderOpen size={11} className="shrink-0 text-gx-muted" />;
+    case "created": return <FilePlus size={11} className="shrink-0 text-success" />;
+    case "modified": return <FileEdit size={11} className="shrink-0 text-info" />;
+    case "deleted": return <FileX size={11} className="shrink-0 text-destructive" />;
+    default: return <FolderOpen size={11} className="shrink-0 text-muted-foreground" />;
   }
 };
 
@@ -48,8 +48,8 @@ export function FileWatchNotificationCard({
   const defaultSummary = (
     <>
       {kindIcon(kind)}
-      <span className="font-medium text-gx-text/60 text-[10px]">{kindLabel(kind)}</span>
-      <span className="truncate text-gx-text/40 text-[10px] font-mono">{path}</span>
+      <span className="font-medium text-foreground/60 text-[10px]">{kindLabel(kind)}</span>
+      <span className="truncate text-foreground/40 text-[10px] font-mono">{path}</span>
     </>
   );
 
@@ -67,17 +67,17 @@ export function FileWatchNotificationCard({
   // Expanded (rarely used, but complete)
   return (
     <div className={clsx(
-      "flex items-center gap-2 rounded-md border border-gx-border/20",
-      "bg-gx-surface-hover/30 px-2.5 py-1.5",
+      "flex items-center gap-2 rounded-md border border-border/20",
+      "bg-accent/30 px-2.5 py-1.5",
     )}>
       {kindIcon(kind)}
-      <span className="text-[10px] text-gx-text/60">
+      <span className="text-[10px] text-foreground/60">
         <span className="font-medium">{kindLabel(kind)}</span>
         {" "}
-        <code className="text-gx-text/40 font-mono">{path}</code>
+        <code className="text-foreground/40 font-mono">{path}</code>
       </span>
       {watchId && (
-        <span className="text-[8px] text-gx-muted/50 font-mono ml-auto">
+        <span className="text-[8px] text-muted-foreground/50 font-mono ml-auto">
           {watchId.slice(0, 8)}
         </span>
       )}

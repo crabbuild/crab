@@ -32,17 +32,17 @@ export function BreadcrumbBar({
 
   return (
     <nav
-      className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-gx-border bg-gx-surface px-3 py-1 text-[11px]"
+      className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border bg-card px-3 py-1 text-[11px]"
       aria-label="Breadcrumb"
     >
       {pathSegments.map((segment, idx) => (
         <span key={`path-${idx}`} className="flex items-center gap-0.5">
           {idx > 0 && (
-            <ChevronRight size={10} className="shrink-0 text-gx-muted" />
+            <ChevronRight size={10} className="shrink-0 text-muted-foreground" />
           )}
           <button
             type="button"
-            className="rounded px-1 py-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition truncate max-w-[160px]"
+            className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground transition truncate max-w-[160px]"
             title={segment}
           >
             {segment}
@@ -52,10 +52,10 @@ export function BreadcrumbBar({
 
       {symbolChain.map((symbol, idx) => (
         <span key={`sym-${idx}`} className="flex items-center gap-0.5">
-          <ChevronRight size={10} className="shrink-0 text-gx-muted" />
+          <ChevronRight size={10} className="shrink-0 text-muted-foreground" />
           <button
             type="button"
-            className="flex items-center gap-1 rounded px-1 py-0.5 text-gx-text hover:bg-gx-surface-hover transition truncate max-w-[160px]"
+            className="flex items-center gap-1 rounded px-1 py-0.5 text-foreground hover:bg-accent transition truncate max-w-[160px]"
             title={`${symbol.kind}: ${symbol.name} (line ${symbol.range.startLine + 1})`}
             onClick={() => onNavigateToSymbol?.(symbol)}
           >

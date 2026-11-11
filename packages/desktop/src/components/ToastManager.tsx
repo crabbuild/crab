@@ -16,23 +16,23 @@ const kindConfig: Record<
 > = {
   success: {
     icon: CheckCircle2,
-    accent: "text-gx-success",
-    bg: "border-gx-success/40",
+    accent: "text-success",
+    bg: "border-success/40",
   },
   error: {
     icon: XCircle,
-    accent: "text-gx-error",
-    bg: "border-gx-error/40",
+    accent: "text-destructive",
+    bg: "border-destructive/40",
   },
   info: {
     icon: Info,
-    accent: "text-gx-info",
-    bg: "border-gx-info/40",
+    accent: "text-info",
+    bg: "border-info/40",
   },
   warning: {
     icon: AlertTriangle,
-    accent: "text-gx-warn",
-    bg: "border-gx-warn/40",
+    accent: "text-warning",
+    bg: "border-warning/40",
   },
 };
 
@@ -54,20 +54,20 @@ function ToastCard({ toast }: { toast: Toast }) {
 
   return (
     <div
-      className={`animate-slide-in-right flex w-80 items-start gap-3 rounded-lg border ${bg} bg-gx-surface p-3 shadow-lg`}
+      className={`animate-slide-in-right flex w-80 items-start gap-3 rounded-lg border ${bg} bg-card p-3 shadow-lg`}
       role="alert"
       aria-live="assertive"
     >
       <Icon className={`mt-0.5 h-5 w-5 shrink-0 ${accent}`} aria-hidden />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-gx-text">{toast.title}</p>
+        <p className="text-sm font-semibold text-foreground">{toast.title}</p>
         {toast.body && (
-          <p className="mt-0.5 text-xs text-gx-muted">{toast.body}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{toast.body}</p>
         )}
         {toast.action && (
           <button
             type="button"
-            className="mt-1.5 text-xs font-medium text-gx-info hover:text-blue-300"
+            className="mt-1.5 text-xs font-medium text-info hover:text-info"
             onClick={toast.action.onClick}
           >
             {toast.action.label}
@@ -76,7 +76,7 @@ function ToastCard({ toast }: { toast: Toast }) {
       </div>
       <button
         type="button"
-        className="shrink-0 rounded p-0.5 text-gx-muted hover:text-gx-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
         onClick={() => dismissToast(toast.id)}
         aria-label="Dismiss notification"
       >

@@ -1,3 +1,6 @@
+import { NativeSelect } from "@/components/ui/native-select";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import {
@@ -70,8 +73,8 @@ export function OrchestratorSettings() {
           label="Default agent"
           hint="Which agent CLI to use for new tasks."
         >
-          <select
-            className="rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm focus-visible:outline-none focus:border-gx-accent"
+          <NativeSelect
+            className="rounded border border-border bg-background px-2 py-1 text-sm focus-visible:outline-none focus:border-primary"
             value={settings.orchestratorDefaultAgent}
             onChange={(e) => update("orchestratorDefaultAgent", e.target.value)}
           >
@@ -85,7 +88,7 @@ export function OrchestratorSettings() {
                 <option value="codex">Codex</option>
               </>
             )}
-          </select>
+          </NativeSelect>
         </SettingsRow>
 
         <SettingsRow
@@ -118,8 +121,8 @@ export function OrchestratorSettings() {
           label="Base directory"
           hint="Where agent worktrees are created. Leave empty for system temp."
         >
-          <input
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent"
+          <Input
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary"
             placeholder="(system temp)"
             value={settings.orchestratorWorktreeBaseDir}
             onChange={(e) => update("orchestratorWorktreeBaseDir", e.target.value)}
@@ -142,14 +145,14 @@ export function OrchestratorSettings() {
 
       {/* ── Scripts ──────────────────────────────────────────────── */}
       <CollapsibleGroup title="Scripts" icon={Play}>
-        <div className="mb-2 text-[10px] text-gx-muted">
+        <div className="mb-2 text-[10px] text-muted-foreground">
           Lifecycle scripts run in the workspace directory. Override per-repo via{" "}
-          <code className="font-mono text-gx-text/80">crab-orchestrator.json</code>.
+          <code className="font-mono text-foreground/80">crab-orchestrator.json</code>.
         </div>
 
         <SettingsRow label="Setup script" hint="Runs before the first agent turn in a new or restored worktree (e.g. npm install).">
-          <textarea
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent resize-y min-h-[48px]"
+          <Textarea
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary resize-y min-h-[48px]"
             placeholder="npm install"
             value={settings.orchestratorSetupScript}
             onChange={(e) => update("orchestratorSetupScript", e.target.value)}
@@ -158,8 +161,8 @@ export function OrchestratorSettings() {
         </SettingsRow>
 
         <SettingsRow label="Run script" hint="Runs when you click 'Run' in the workspace.">
-          <textarea
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent resize-y min-h-[48px]"
+          <Textarea
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary resize-y min-h-[48px]"
             placeholder="npm run dev"
             value={settings.orchestratorRunScript}
             onChange={(e) => update("orchestratorRunScript", e.target.value)}
@@ -168,8 +171,8 @@ export function OrchestratorSettings() {
         </SettingsRow>
 
         <SettingsRow label="Archive script" hint="Runs before worktree removal.">
-          <textarea
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent resize-y min-h-[48px]"
+          <Textarea
+            className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary resize-y min-h-[48px]"
             placeholder="npm run clean"
             value={settings.orchestratorArchiveScript}
             onChange={(e) => update("orchestratorArchiveScript", e.target.value)}
@@ -189,7 +192,7 @@ export function OrchestratorSettings() {
 
         <SettingsRow label="Port range" hint="Auto-assign unique ports per workspace.">
           <div className="flex items-center gap-2">
-            <input
+            <Input
               type="number"
               value={settings.orchestratorPortRangeStart}
               min={1024}
@@ -200,10 +203,10 @@ export function OrchestratorSettings() {
                   update("orchestratorPortRangeStart", n);
                 }
               }}
-              className="w-20 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-gx-accent"
+              className="w-20 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
             />
-            <span className="text-xs text-gx-muted">–</span>
-            <input
+            <span className="text-xs text-muted-foreground">–</span>
+            <Input
               type="number"
               value={settings.orchestratorPortRangeEnd}
               min={1024}
@@ -214,7 +217,7 @@ export function OrchestratorSettings() {
                   update("orchestratorPortRangeEnd", n);
                 }
               }}
-              className="w-20 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-gx-accent"
+              className="w-20 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
             />
           </div>
         </SettingsRow>
@@ -222,9 +225,9 @@ export function OrchestratorSettings() {
 
       {/* ── Preferences ──────────────────────────────────────────── */}
       <CollapsibleGroup title="Preferences" icon={FileText}>
-        <div className="mb-2 text-[10px] text-gx-muted">
+        <div className="mb-2 text-[10px] text-muted-foreground">
           Injected into agent prompts. Override per-repo via{" "}
-          <code className="font-mono text-gx-text/80">.crab/orchestrator/preferences.md</code>.
+          <code className="font-mono text-foreground/80">.crab/orchestrator/preferences.md</code>.
         </div>
         <PreferencesSection />
       </CollapsibleGroup>
@@ -233,21 +236,21 @@ export function OrchestratorSettings() {
       <CollapsibleGroup title="Extensions" icon={Server}>
         <div className="space-y-4">
           <div>
-            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               MCP Servers
             </h4>
             <MCPServersSection />
           </div>
 
-          <div className="border-t border-gx-border/40 pt-3">
-            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+          <div className="border-t border-border/40 pt-3">
+            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               Templates
             </h4>
             <TemplatesSection />
           </div>
 
-          <div className="border-t border-gx-border/40 pt-3">
-            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gx-muted">
+          <div className="border-t border-border/40 pt-3">
+            <h4 className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               Slash Commands
             </h4>
             <CommandsSection />
@@ -279,24 +282,24 @@ function CollapsibleGroup({
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="rounded-lg border border-gx-border/60 bg-gx-surface/50">
+    <div className="rounded-lg border border-border/60 bg-card/50">
       <button
         type="button"
         onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-2 px-4 py-3 text-left"
       >
-        <Icon size={13} className="text-gx-muted" />
-        <span className="flex-1 text-xs font-medium text-gx-text">{title}</span>
+        <Icon size={13} className="text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-foreground">{title}</span>
         <ChevronDown
           size={13}
           className={clsx(
-            "text-gx-muted transition-transform",
+            "text-muted-foreground transition-transform",
             !open && "-rotate-90",
           )}
         />
       </button>
       {open && (
-        <div className="space-y-4 border-t border-gx-border/40 px-4 pb-4 pt-3">
+        <div className="space-y-4 border-t border-border/40 px-4 pb-4 pt-3">
           {children}
         </div>
       )}
@@ -318,8 +321,8 @@ function SettingsRow({
   return (
     <div className="grid grid-cols-[1fr_auto] items-start gap-4 pb-3 last:pb-0">
       <div>
-        <div className="text-xs text-gx-text">{label}</div>
-        {hint && <div className="mt-0.5 max-w-sm text-[10px] text-gx-muted">{hint}</div>}
+        <div className="text-xs text-foreground">{label}</div>
+        {hint && <div className="mt-0.5 max-w-sm text-[10px] text-muted-foreground">{hint}</div>}
       </div>
       <div className="min-w-[180px]">{children}</div>
     </div>
@@ -336,13 +339,13 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       className={clsx(
         "relative inline-flex h-5 w-9 items-center rounded-full border transition",
         checked
-          ? "border-gx-accent bg-gx-accent/70"
-          : "border-gx-border bg-gx-bg-sub",
+          ? "border-primary bg-primary/70"
+          : "border-border bg-background",
       )}
     >
       <span
         className={clsx(
-          "inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition",
+          "inline-block h-3.5 w-3.5 transform rounded-full bg-background shadow transition",
           checked ? "translate-x-[18px]" : "translate-x-[2px]",
         )}
       />
@@ -365,7 +368,7 @@ function NumberInput({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <input
+      <Input
         type="number"
         value={value}
         min={min}
@@ -374,9 +377,9 @@ function NumberInput({
           const n = Number(e.target.value);
           if (Number.isFinite(n) && n >= min && n <= max) onChange(n);
         }}
-        className="w-20 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-gx-accent"
+        className="w-20 rounded border border-border bg-background px-2 py-1 text-sm font-mono focus-visible:outline-none focus:border-primary"
       />
-      {suffix && <span className="text-[10px] text-gx-muted">{suffix}</span>}
+      {suffix && <span className="text-[10px] text-muted-foreground">{suffix}</span>}
     </div>
   );
 }
@@ -408,7 +411,7 @@ function PreferencesSection() {
 
   if (!loaded) {
     return (
-      <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 size={11} className="animate-spin" /> Loading…
       </div>
     );
@@ -463,9 +466,9 @@ function PrefField({
 }) {
   return (
     <div>
-      <label className="mb-1 block text-[10px] font-medium text-gx-muted">{label}</label>
-      <textarea
-        className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-gx-accent resize-y min-h-[40px]"
+      <label className="mb-1 block text-[10px] font-medium text-muted-foreground">{label}</label>
+      <Textarea
+        className="w-full rounded border border-border bg-background px-2 py-1 font-mono text-xs focus-visible:outline-none focus:border-primary resize-y min-h-[40px]"
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -494,7 +497,7 @@ function MCPServersSection() {
 
   if (!loaded) {
     return (
-      <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 size={11} className="animate-spin" /> Scanning…
       </div>
     );
@@ -502,8 +505,8 @@ function MCPServersSection() {
 
   if (servers.length === 0) {
     return (
-      <p className="text-[10px] text-gx-muted">
-        No MCP servers configured. Add a <code className="font-mono text-gx-text/80">.mcp.json</code> to your repo root.
+      <p className="text-[10px] text-muted-foreground">
+        No MCP servers configured. Add a <code className="font-mono text-foreground/80">.mcp.json</code> to your repo root.
       </p>
     );
   }
@@ -511,10 +514,10 @@ function MCPServersSection() {
   return (
     <div className="space-y-1.5">
       {servers.map((s) => (
-        <div key={s.name} className="flex items-center gap-2 rounded border border-gx-border/60 bg-gx-bg px-3 py-1.5">
-          <Server size={10} className="text-gx-accent shrink-0" />
-          <span className="text-[10px] font-medium text-gx-text">{s.name}</span>
-          <span className="flex-1 truncate text-[9px] font-mono text-gx-muted">{s.command}</span>
+        <div key={s.name} className="flex items-center gap-2 rounded border border-border/60 bg-background px-3 py-1.5">
+          <Server size={10} className="text-primary shrink-0" />
+          <span className="text-[10px] font-medium text-foreground">{s.name}</span>
+          <span className="flex-1 truncate text-[9px] font-mono text-muted-foreground">{s.command}</span>
         </div>
       ))}
     </div>
@@ -549,7 +552,7 @@ function UsageSection() {
 
   if (!loaded) {
     return (
-      <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 size={11} className="animate-spin" /> Loading usage…
       </div>
     );
@@ -560,7 +563,7 @@ function UsageSection() {
 
   if (costs.length === 0) {
     return (
-      <p className="text-[10px] text-gx-muted">No usage data yet. Costs are tracked per task.</p>
+      <p className="text-[10px] text-muted-foreground">No usage data yet. Costs are tracked per task.</p>
     );
   }
 
@@ -568,22 +571,22 @@ function UsageSection() {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-lg font-semibold text-gx-text">
+          <div className="text-lg font-semibold text-foreground">
             {totalCost === undefined ? "Unavailable" : `$${totalCost.toFixed(2)}`}
           </div>
-          <div className="text-[10px] text-gx-muted">
+          <div className="text-[10px] text-muted-foreground">
             Total across {costs.length} workspace{costs.length !== 1 ? "s" : ""}
           </div>
         </div>
-        <select
-          className="rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5 text-[10px] focus-visible:outline-none"
+        <NativeSelect
+          className="rounded border border-border bg-background px-2 py-0.5 text-[10px] focus-visible:outline-none"
           value={range}
           onChange={(e) => setRange(e.target.value as DateRange)}
         >
           <option value="7d">Last 7 days</option>
           <option value="30d">Last 30 days</option>
           <option value="all">All time</option>
-        </select>
+        </NativeSelect>
       </div>
     </div>
   );

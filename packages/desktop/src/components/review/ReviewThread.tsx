@@ -1,3 +1,4 @@
+import { Textarea } from "@/components/ui/textarea";
 import { useCallback, useRef, useState, useEffect, type KeyboardEvent } from "react";
 import clsx from "clsx";
 import {
@@ -132,34 +133,34 @@ export function ReviewThreadComponent({
     return (
       <div
         className={clsx(
-          "my-1 rounded border border-gx-border bg-gx-surface shadow-sm",
+          "my-1 rounded border border-border bg-card shadow-sm",
           thread.outdated && "opacity-60",
         )}
       >
         <button
           type="button"
-          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground hover:bg-accent"
           onClick={() => setExpanded(true)}
           aria-label="Expand resolved thread"
         >
           <ChevronRight size={12} className="shrink-0" />
-          <Check size={12} className="shrink-0 text-green-400" />
+          <Check size={12} className="shrink-0 text-success" />
           <span className="truncate">
-            <span className="font-medium text-gx-text">{firstComment?.author ?? "Unknown"}</span>
+            <span className="font-medium text-foreground">{firstComment?.author ?? "Unknown"}</span>
             {" · "}
             {summaryText}
           </span>
         </button>
         {resolveError && (
-          <div className="flex items-center justify-between border-t border-red-500/30 bg-red-500/5 px-3 py-1.5">
-            <span className="flex items-center gap-1.5 text-[10px] text-red-400">
+          <div className="flex items-center justify-between border-t border-destructive/30 bg-destructive/5 px-3 py-1.5">
+            <span className="flex items-center gap-1.5 text-[10px] text-destructive">
               <AlertCircle size={10} />
               {resolveError}
             </span>
             {onDismissResolveError && (
               <button
                 type="button"
-                className="inline-flex items-center rounded p-0.5 text-red-400 hover:bg-red-500/10"
+                className="inline-flex items-center rounded p-0.5 text-destructive hover:bg-destructive/10"
                 onClick={() => onDismissResolveError(thread.threadId)}
                 aria-label="Dismiss resolve error"
               >
@@ -175,14 +176,14 @@ export function ReviewThreadComponent({
   return (
     <div
       className={clsx(
-        "my-1 rounded border border-gx-border bg-gx-surface shadow-sm",
+        "my-1 rounded border border-border bg-card shadow-sm",
         thread.outdated && "opacity-60",
       )}
       aria-label={`Review thread on ${thread.path}:${thread.line}`}
     >
       {/* Header: file:line anchor + Resolve/Unresolve */}
-      <div className="flex items-center justify-between border-b border-gx-border/50 px-3 py-1.5">
-        <div className="flex items-center gap-1.5 text-[10px] text-gx-muted">
+      <div className="flex items-center justify-between border-b border-border/50 px-3 py-1.5">
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
           <FileText size={10} className="shrink-0" />
           <span
             className={clsx(
@@ -193,7 +194,7 @@ export function ReviewThreadComponent({
             {thread.path}:{thread.line}
           </span>
           {thread.outdated && (
-            <span className="inline-flex items-center rounded bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-medium text-orange-400">
+            <span className="inline-flex items-center rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-warning">
               Outdated
             </span>
           )}
@@ -203,8 +204,8 @@ export function ReviewThreadComponent({
           className={clsx(
             "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
             thread.resolved
-              ? "text-gx-muted hover:bg-orange-500/10 hover:text-orange-400"
-              : "text-gx-muted hover:bg-green-500/10 hover:text-green-400",
+              ? "text-muted-foreground hover:bg-warning/10 hover:text-warning"
+              : "text-muted-foreground hover:bg-success/10 hover:text-success",
           )}
           onClick={handleResolve}
           aria-label={thread.resolved ? "Unresolve thread" : "Resolve thread"}
@@ -225,15 +226,15 @@ export function ReviewThreadComponent({
 
       {/* Inline error from failed resolve/unresolve */}
       {resolveError && (
-        <div className="flex items-center justify-between border-b border-red-500/30 bg-red-500/5 px-3 py-1.5">
-          <span className="flex items-center gap-1.5 text-[10px] text-red-400">
+        <div className="flex items-center justify-between border-b border-destructive/30 bg-destructive/5 px-3 py-1.5">
+          <span className="flex items-center gap-1.5 text-[10px] text-destructive">
             <AlertCircle size={10} />
             {resolveError}
           </span>
           {onDismissResolveError && (
             <button
               type="button"
-              className="inline-flex items-center rounded p-0.5 text-red-400 hover:bg-red-500/10"
+              className="inline-flex items-center rounded p-0.5 text-destructive hover:bg-destructive/10"
               onClick={() => onDismissResolveError(thread.threadId)}
               aria-label="Dismiss resolve error"
             >
@@ -244,7 +245,7 @@ export function ReviewThreadComponent({
       )}
 
       {/* Comments */}
-      <div className="divide-y divide-gx-border/30">
+      <div className="divide-y divide-border/30">
         {thread.comments.map((comment) => {
           const optimistic = comment as OptimisticThreadComment;
           if (optimistic.failed) {
@@ -276,10 +277,10 @@ export function ReviewThreadComponent({
       </div>
 
       {/* Reply input */}
-      <div className="border-t border-gx-border/50 px-3 py-2">
-        <textarea
+      <div className="border-t border-border/50 px-3 py-2">
+        <Textarea
           ref={replyRef}
-          className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+          className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
           rows={2}
           placeholder="Write a reply…"
           value={replyBody}
@@ -290,7 +291,7 @@ export function ReviewThreadComponent({
         <div className="mt-1.5 flex items-center justify-end">
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!replyBody.trim() || replyLoading}
             onClick={handleReply}
             aria-label="Submit reply"
@@ -410,11 +411,11 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
       {/* Comment header: author + timestamp + overflow menu */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-[10px]">
-          <span className="font-medium text-gx-text">@{comment.author}</span>
-          <span className="text-gx-muted">·</span>
-          <span className="text-gx-muted">{formatRelativeDate(comment.createdAt)}</span>
+          <span className="font-medium text-foreground">@{comment.author}</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">{formatRelativeDate(comment.createdAt)}</span>
           {comment.edited && (
-            <span className="text-gx-muted italic">(edited)</span>
+            <span className="text-muted-foreground italic">(edited)</span>
           )}
         </div>
 
@@ -422,7 +423,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
           <div className="relative" ref={menuRef}>
             <button
               type="button"
-              className="inline-flex items-center rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              className="inline-flex items-center rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="Comment actions"
               aria-expanded={menuOpen}
@@ -431,10 +432,10 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             </button>
 
             {menuOpen && (
-              <div className="absolute right-0 top-full z-10 mt-1 min-w-[100px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
+              <div className="absolute right-0 top-full z-10 mt-1 min-w-[100px] rounded border border-border bg-card py-1 shadow-lg">
                 <button
                   type="button"
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-gx-text hover:bg-gx-surface-hover"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-foreground hover:bg-accent"
                   onClick={handleStartEdit}
                 >
                   <Pencil size={10} />
@@ -442,7 +443,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
                 </button>
                 <button
                   type="button"
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-red-400 hover:bg-red-500/10"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-destructive hover:bg-destructive/10"
                   onClick={handleDelete}
                 >
                   <Trash2 size={10} />
@@ -458,9 +459,9 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
       <div className="mt-1">
         {editing ? (
           <>
-            <textarea
+            <Textarea
               ref={textareaRef}
-              className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+              className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none"
               rows={3}
               value={editBody}
               onChange={(e) => setEditBody(e.target.value)}
@@ -468,7 +469,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
               aria-label="Edit comment body"
             />
             {editError && (
-              <div className="mt-1 flex items-center gap-1.5 text-[10px] text-red-400">
+              <div className="mt-1 flex items-center gap-1.5 text-[10px] text-destructive">
                 <AlertCircle size={10} />
                 {editError}
               </div>
@@ -476,7 +477,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             <div className="mt-1.5 flex items-center justify-end gap-2">
               <button
                 type="button"
-                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={handleCancelEdit}
                 aria-label="Cancel editing"
               >
@@ -485,7 +486,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
               </button>
               <button
                 type="button"
-                className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-1 text-[10px] text-primary hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!editBody.trim() || editLoading}
                 onClick={handleSaveEdit}
                 aria-label="Save comment changes"
@@ -496,7 +497,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             </div>
           </>
         ) : (
-          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">
             {comment.body}
           </p>
         )}
@@ -504,11 +505,11 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
 
       {/* Delete confirmation */}
       {deleteConfirm && (
-        <div className="mt-2 flex items-center gap-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1.5">
-          <span className="text-[10px] text-red-400">Delete this comment?</span>
+        <div className="mt-2 flex items-center gap-2 rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5">
+          <span className="text-[10px] text-destructive">Delete this comment?</span>
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded bg-red-500/15 px-2 py-0.5 text-[10px] text-red-400 hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-destructive/15 px-2 py-0.5 text-[10px] text-destructive hover:bg-destructive/25 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleConfirmDelete}
             disabled={deleteLoading}
             aria-label="Confirm delete"
@@ -517,7 +518,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
           </button>
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => { setDeleteConfirm(false); setDeleteError(null); }}
             disabled={deleteLoading}
             aria-label="Cancel delete"
@@ -525,7 +526,7 @@ function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProp
             Cancel
           </button>
           {deleteError && (
-            <span className="flex items-center gap-1 text-[10px] text-red-400">
+            <span className="flex items-center gap-1 text-[10px] text-destructive">
               <AlertCircle size={10} />
               {deleteError}
             </span>
@@ -547,15 +548,15 @@ function PendingCommentItem({ comment }: PendingCommentItemProps) {
   return (
     <div className="px-3 py-2 opacity-70">
       <div className="flex items-center gap-1.5 text-[10px]">
-        <span className="font-medium text-gx-text">@{comment.author}</span>
-        <span className="text-gx-muted">·</span>
-        <span className="inline-flex items-center gap-1 text-gx-muted">
+        <span className="font-medium text-foreground">@{comment.author}</span>
+        <span className="text-muted-foreground">·</span>
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
           <Loader2 size={10} className="animate-spin" />
           Sending…
         </span>
       </div>
       <div className="mt-1">
-        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">
           {comment.body}
         </p>
       </div>
@@ -575,30 +576,30 @@ interface FailedCommentItemProps {
 /** Renders a reply that failed to publish, with a red indicator and retry/dismiss actions. */
 function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedCommentItemProps) {
   return (
-    <div className="border-l-2 border-red-500 px-3 py-2">
+    <div className="border-l-2 border-destructive px-3 py-2">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-[10px]">
-          <span className="font-medium text-gx-text">@{comment.author}</span>
-          <span className="text-gx-muted">·</span>
-          <span className="inline-flex items-center gap-1 text-red-400">
+          <span className="font-medium text-foreground">@{comment.author}</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="inline-flex items-center gap-1 text-destructive">
             <AlertCircle size={10} />
             Failed
           </span>
         </div>
       </div>
       <div className="mt-1">
-        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground">
           {comment.body}
         </p>
       </div>
       {comment.failureMessage && (
-        <p className="mt-1 text-[10px] text-red-400">{comment.failureMessage}</p>
+        <p className="mt-1 text-[10px] text-destructive">{comment.failureMessage}</p>
       )}
       <div className="mt-1.5 flex items-center gap-2">
         {onRetry && (
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/20"
+            className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary hover:bg-primary/20"
             onClick={() => onRetry(threadId, comment.id)}
             aria-label="Retry sending reply"
           >
@@ -609,7 +610,7 @@ function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedComm
         {onDismiss && (
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => onDismiss(threadId, comment.id)}
             aria-label="Dismiss failed reply"
           >

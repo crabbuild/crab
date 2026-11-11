@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { useEffect, useMemo, useState, useSyncExternalStore, Component, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 import { ChevronDown, ChevronRight, Code2, FileText, Loader2, Pause, Play, Power, RefreshCw, Terminal, Zap } from "lucide-react";
@@ -63,10 +66,10 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
   }, [repoId, path, rev, nativeSessionId, retry, kernelOwner]);
 
   // ---- Early returns (AFTER all hooks) ----
-  if (!nativeSessionId) return <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>;
-  if (err) return <div className="m-4 space-y-3 text-xs"><p role="alert" className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-gx-error">{err}</p><button type="button" className="btn" onClick={() => setRetry(retry + 1)}>Retry notebook</button></div>;
-  if (text == null) return <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Reading notebook…</div>;
-  if (typeof nb === "string") return <div className="m-4 rounded border border-gx-warn/40 bg-gx-warn/10 p-3 text-xs text-gx-warn">Could not parse notebook JSON: {nb}</div>;
+  if (!nativeSessionId) return <p role="status" className="p-4 text-xs text-muted-foreground">Waiting for repository recovery…</p>;
+  if (err) return <div className="m-4 space-y-3 text-xs"><p role="alert" className="rounded border border-destructive/40 bg-destructive/10 p-3 text-destructive">{err}</p><Button variant="outline" type="button" onClick={() => setRetry(retry + 1)}>Retry notebook</Button></div>;
+  if (text == null) return <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Reading notebook…</div>;
+  if (typeof nb === "string") return <div className="m-4 rounded border border-warning/40 bg-warning/10 p-3 text-xs text-warning">Could not parse notebook JSON: {nb}</div>;
 
   // These are safe after early returns since they don't use hooks.
   const kernel = nb.metadata?.kernelspec?.display_name ?? lang;
@@ -90,23 +93,23 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
 
   return (
     <NotebookErrorBoundary>
-    <div className="h-full overflow-auto bg-gx-bg-sub">
+    <div className="h-full overflow-auto bg-background">
       {/* Show hydrate prompt if notebook appears to be a pointer */}
       {looksLikePointer && (
-        <div className="m-6 rounded-lg border border-gx-warn/40 bg-gx-warn/10 p-6 text-center">
-          <div className="mb-2 text-lg font-semibold text-gx-text">Notebook not hydrated</div>
-          <div className="mb-4 text-sm text-gx-muted">
+        <div className="m-6 rounded-lg border border-warning/40 bg-warning/10 p-6 text-center">
+          <div className="mb-2 text-lg font-semibold text-foreground">Notebook not hydrated</div>
+          <div className="mb-4 text-sm text-muted-foreground">
             This file appears to be a Crab pointer. Run <code className="kbd">crab hydrate</code> to download the full notebook content.
           </div>
-          <div className="text-[11px] text-gx-muted">
+          <div className="text-[11px] text-muted-foreground">
             File size: {text?.length ?? 0} bytes · Parsed cells: {cells.length}
           </div>
         </div>
       )}
       {/* Notebook header with kernel controls */}
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gx-border bg-gx-surface px-4 py-2 text-[11px] text-gx-muted">
-        <FileText size={12} className="shrink-0 text-gx-accent" />
-        <span className="min-w-0 truncate font-medium text-gx-text">{path.split("/").pop()}</span>
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-card px-4 py-2 text-[11px] text-muted-foreground">
+        <FileText size={12} className="shrink-0 text-primary" />
+        <span className="min-w-0 truncate font-medium text-foreground">{path.split("/").pop()}</span>
         <span className="chip shrink-0">{kernel}{version ? ` ${version}` : ""}</span>
         <span className="shrink-0">{cells.length} cells</span>
 
@@ -114,15 +117,15 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
         <div className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap">
           {/* Status indicator */}
           <span role="status" aria-label="Kernel status" className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
-            kernelStatus === "idle" ? "bg-gx-success/20 text-gx-success" :
-            kernelStatus === "busy" ? "bg-gx-warn/20 text-gx-warn" :
-            kernelStatus === "disconnected" ? "bg-gx-muted/20 text-gx-muted" :
-            "bg-gx-error/20 text-gx-error"
+            kernelStatus === "idle" ? "bg-success/20 text-success" :
+            kernelStatus === "busy" ? "bg-warning/20 text-warning" :
+            kernelStatus === "disconnected" ? "bg-muted-foreground/20 text-muted-foreground" :
+            "bg-destructive/20 text-destructive"
           }`}>
             <span className={`h-1.5 w-1.5 rounded-full ${
-              kernelStatus === "idle" ? "bg-gx-success" :
-              kernelStatus === "busy" ? "bg-gx-warn animate-pulse" :
-              "bg-gx-muted"
+              kernelStatus === "idle" ? "bg-success" :
+              kernelStatus === "busy" ? "bg-warning animate-pulse" :
+              "bg-muted-foreground"
             }`} />
             {kernelStatus}
           </span>
@@ -136,24 +139,24 @@ export function NotebookView({ repoId, path, rev, nativeSessionId }: Props) {
             />
           ) : (
             <>
-              <button type="button" className="btn text-[10px]" onClick={() => void runAllCells()} disabled={running.size > 0 || kernelStatus === "starting" || kernelStatus === "stopping"}>
+              <Button variant="outline" type="button" className="text-[10px]" onClick={() => void runAllCells()} disabled={running.size > 0 || kernelStatus === "starting" || kernelStatus === "stopping"}>
                 <Play size={10} /> Run All
-              </button>
-              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("interrupt")} title="Interrupt" aria-label="Interrupt kernel">
+              </Button>
+              <Button variant="outline" type="button" className="text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("interrupt")} title="Interrupt" aria-label="Interrupt kernel">
                 <Pause size={10} />
-              </button>
-              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("restart")} title="Restart kernel" aria-label="Restart kernel">
+              </Button>
+              <Button variant="outline" type="button" className="text-[10px]" disabled={kernelStatus === "starting" || kernelStatus === "stopping"} onClick={() => void kernelOwner.control("restart")} title="Restart kernel" aria-label="Restart kernel">
                 <RefreshCw size={10} />
-              </button>
-              <button type="button" className="btn text-[10px]" disabled={kernelStatus === "stopping"} onClick={() => void kernelOwner.control("disconnect")} title={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect"} aria-label={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect kernel"}>
+              </Button>
+              <Button variant="outline" type="button" className="text-[10px]" disabled={kernelStatus === "stopping"} onClick={() => void kernelOwner.control("disconnect")} title={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect"} aria-label={kernelStatus === "starting" ? "Cancel kernel connection" : "Disconnect kernel"}>
                 <Power size={10} />
-              </button>
+              </Button>
             </>
           )}
         </div>
       </div>
 
-      {kernelState.error && <p role="alert" className="m-4 break-words rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{kernelState.error}</p>}
+      {kernelState.error && <p role="alert" className="m-4 break-words rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{kernelState.error}</p>}
       <div className="mx-auto max-w-5xl space-y-1 p-4">
         {cells.map((cell, i) => (
           <CellView
@@ -194,9 +197,9 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
 
   if (cell.cell_type === "markdown") {
     return (
-      <div className="group rounded-lg border border-gx-border/60 bg-gx-surface transition hover:border-gx-border">
-        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-gx-muted">
-          <button type="button" onClick={() => setCollapsed(!collapsed)} className="hover:text-gx-text" aria-label={collapsed ? "Expand cell" : "Collapse cell"}>
+      <div className="group rounded-lg border border-border/60 bg-card transition hover:border-border">
+        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-muted-foreground">
+          <button type="button" onClick={() => setCollapsed(!collapsed)} className="hover:text-foreground" aria-label={collapsed ? "Expand cell" : "Collapse cell"}>
             {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           </button>
           <FileText size={11} />
@@ -204,7 +207,7 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
           <span className="ml-auto">[{index + 1}]</span>
         </div>
         {!collapsed && (
-          <div className="border-t border-gx-border/40 px-4 py-3">
+          <div className="border-t border-border/40 px-4 py-3">
             <Streamdown shikiTheme={["github-light", "github-dark"]}>
               {source}
             </Streamdown>
@@ -216,24 +219,24 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
 
   if (cell.cell_type === "code") {
     return (
-      <div role="group" aria-label={`Notebook cell ${index + 1}`} className="group rounded-lg border border-gx-border/60 bg-gx-surface transition hover:border-gx-border">
+      <div role="group" aria-label={`Notebook cell ${index + 1}`} className="group rounded-lg border border-border/60 bg-card transition hover:border-border">
         {/* Cell header */}
-        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-gx-muted">
-          <button type="button" onClick={() => setCollapsed(!collapsed)} className="hover:text-gx-text" aria-label={collapsed ? "Expand cell" : "Collapse cell"}>
+        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-muted-foreground">
+          <button type="button" onClick={() => setCollapsed(!collapsed)} className="hover:text-foreground" aria-label={collapsed ? "Expand cell" : "Collapse cell"}>
             {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           </button>
-          <Code2 size={11} className="text-gx-accent" />
+          <Code2 size={11} className="text-primary" />
           <span className="font-mono">{language}</span>
           {/* Execution count badge */}
-          <span className="flex items-center gap-1 rounded bg-gx-bg-sub px-1.5 py-[1px] font-mono text-[10px]">
-            <Play size={8} className="text-gx-success" />
+          <span className="flex items-center gap-1 rounded bg-background px-1.5 py-[1px] font-mono text-[10px]">
+            <Play size={8} className="text-success" />
             {executionCount ?? cell.execution_count ?? " "}
           </span>
           <span className="ml-auto flex items-center gap-2 text-[9px]">
             {kernelConnected && (
               <button
                 type="button"
-                className="flex items-center gap-1 rounded bg-gx-success/20 px-1.5 py-0.5 text-gx-success hover:bg-gx-success/30 disabled:opacity-50"
+                className="flex items-center gap-1 rounded bg-success/20 px-1.5 py-0.5 text-success hover:bg-success/30 disabled:opacity-50"
                 onClick={() => onRun(source)}
                 disabled={isRunning || !canRun}
               >
@@ -248,8 +251,8 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
         {!collapsed && (
           <>
             {/* Code block */}
-            <div className="border-t border-gx-border/40 overflow-auto" style={{ maxHeight: 400 }}>
-              <pre className="p-3 font-mono text-[12px] leading-5 text-gx-text whitespace-pre-wrap">
+            <div className="border-t border-border/40 overflow-auto" style={{ maxHeight: 400 }}>
+              <pre className="p-3 font-mono text-[12px] leading-5 text-foreground whitespace-pre-wrap">
                 <code>{source}</code>
               </pre>
             </div>
@@ -260,10 +263,10 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
               const hasOutputs = outputs && outputs.length > 0;
               if (!hasOutputs) return null;
               return (
-                <div role="region" aria-label={`Cell ${index + 1} output`} className="border-t border-gx-border/40 bg-gx-bg-sub p-3">
-                  <div className="mb-1 flex items-center gap-1 text-[9px] uppercase tracking-wider text-gx-muted">
+                <div role="region" aria-label={`Cell ${index + 1} output`} className="border-t border-border/40 bg-background p-3">
+                  <div className="mb-1 flex items-center gap-1 text-[9px] uppercase tracking-wider text-muted-foreground">
                     <Terminal size={9} /> Output
-                    {liveOutputs !== undefined && <span className="text-gx-success">(live)</span>}
+                    {liveOutputs !== undefined && <span className="text-success">(live)</span>}
                   </div>
                   <div className="space-y-2">
                     {outputs!.map((o, i) => (
@@ -282,9 +285,9 @@ function CellView({ cell, index, language, kernelConnected, canRun, isRunning, e
   // Raw cell.
   if (cell.cell_type === "raw") {
     return (
-      <div className="rounded-lg border border-gx-border/40 bg-gx-bg-sub p-3">
-        <div className="mb-1 text-[10px] text-gx-muted">Raw [{index + 1}]</div>
-        <pre className="font-mono text-[12px] text-gx-text">{source}</pre>
+      <div className="rounded-lg border border-border/40 bg-background p-3">
+        <div className="mb-1 text-[10px] text-muted-foreground">Raw [{index + 1}]</div>
+        <pre className="font-mono text-[12px] text-foreground">{source}</pre>
       </div>
     );
   }
@@ -299,11 +302,11 @@ function OutputView({ output }: { output: IpynbOutput }) {
     // Strip ANSI codes for display.
     const clean = tb.replace(/\x1b\[[0-9;]*m/g, "");
     return (
-      <div className="rounded border border-gx-error/30 bg-gx-error/5 p-2">
-        <div className="mb-1 font-mono text-[11px] font-bold text-gx-error">
+      <div className="rounded border border-destructive/30 bg-destructive/5 p-2">
+        <div className="mb-1 font-mono text-[11px] font-bold text-destructive">
           {output.ename}: {output.evalue}
         </div>
-        <pre className="max-h-[200px] overflow-auto font-mono text-[11px] text-gx-error/80">{clean}</pre>
+        <pre className="max-h-[200px] overflow-auto font-mono text-[11px] text-destructive/80">{clean}</pre>
       </div>
     );
   }
@@ -313,7 +316,7 @@ function OutputView({ output }: { output: IpynbOutput }) {
     const text = Array.isArray(output.text) ? output.text.join("") : output.text ?? "";
     const isErr = output.name === "stderr";
     return (
-      <pre className={`max-h-[300px] overflow-auto font-mono text-[12px] ${isErr ? "text-gx-warn" : "text-gx-text"}`}>
+      <pre className={`max-h-[300px] overflow-auto font-mono text-[12px] ${isErr ? "text-warning" : "text-foreground"}`}>
         {text}
       </pre>
     );
@@ -323,7 +326,7 @@ function OutputView({ output }: { output: IpynbOutput }) {
   const data = output.data;
   if (!data) {
     const text = Array.isArray(output.text) ? output.text.join("") : output.text;
-    if (text) return <pre className="font-mono text-[12px] text-gx-text">{text}</pre>;
+    if (text) return <pre className="font-mono text-[12px] text-foreground">{text}</pre>;
     return null;
   }
 
@@ -346,10 +349,10 @@ function OutputView({ output }: { output: IpynbOutput }) {
         <NotebookRichOutput kind="HTML" content={html} />
       )}
       {latex && !html && !png && !svg && (
-        <div className="font-mono text-[12px] text-gx-text">{latex}</div>
+        <div className="font-mono text-[12px] text-foreground">{latex}</div>
       )}
       {plain && !png && !jpeg && !svg && !html && (
-        <pre className="max-h-[300px] overflow-auto font-mono text-[12px] text-gx-text">{plain}</pre>
+        <pre className="max-h-[300px] overflow-auto font-mono text-[12px] text-foreground">{plain}</pre>
       )}
     </div>
   );
@@ -360,7 +363,7 @@ function NotebookRichOutput({ kind, content }: { kind: "HTML" | "SVG"; content: 
   // Saved/live markup is data, not code for the privileged renderer. Keep
   // script and same-origin exemptions absent so it cannot reach window.crab.
   const source = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'"><meta name="color-scheme" content="${theme}"><style>:root{color-scheme:${theme}}body{margin:0;color:CanvasText;background:Canvas;font:13px/1.5 system-ui;overflow-wrap:anywhere}img,svg{max-width:100%}svg{fill:currentColor}table{border-collapse:collapse}th,td{padding:.25rem .5rem;text-align:start}</style></head><body>${content}</body></html>`;
-  return <iframe title={`Notebook ${kind} output`} sandbox="" referrerPolicy="no-referrer" srcDoc={source} className="h-48 min-h-24 w-full resize-y rounded border-0 bg-gx-bg-sub" />;
+  return <iframe title={`Notebook ${kind} output`} sandbox="" referrerPolicy="no-referrer" srcDoc={source} className="h-48 min-h-24 w-full resize-y rounded border-0 bg-background" />;
 }
 
 function joinData(d: string | string[] | undefined): string | null {
@@ -408,33 +411,33 @@ function KernelConnectButton({ status, language, onConnect, onRemoteConnect }: {
     finally { setInstalling(false); }
   };
 
-  if (!showPanel) return <button type="button" className="btn btn-primary text-[10px]" onClick={() => { setShowPanel(true); void check(); }} disabled={status === "starting"}><Zap size={10} /> Connect Kernel</button>;
+  if (!showPanel) return <Button variant="default" type="button" className="text-[10px]" onClick={() => { setShowPanel(true); void check(); }} disabled={status === "starting"}><Zap size={10} /> Connect Kernel</Button>;
   return (
-    <div role="dialog" aria-label="Connect to kernel" className="absolute right-4 top-10 z-20 w-80 space-y-3 rounded-lg border border-gx-border bg-gx-surface p-4 shadow-2xl">
+    <div role="dialog" aria-label="Connect to kernel" className="absolute right-4 top-10 z-20 w-80 space-y-3 rounded-lg border border-border bg-card p-4 shadow-2xl">
       <div className="flex items-center justify-between">
-        <span className="text-[12px] font-semibold text-gx-text">Connect to kernel</span>
-        <button type="button" onClick={() => setShowPanel(false)} className="text-gx-muted hover:text-gx-text text-[11px]" aria-label="Close panel">✕</button>
+        <span className="text-[12px] font-semibold text-foreground">Connect to kernel</span>
+        <button type="button" onClick={() => setShowPanel(false)} className="text-muted-foreground hover:text-foreground text-[11px]" aria-label="Close panel">✕</button>
       </div>
       <label className="block space-y-1 text-[11px]">Python executable
-        <input className="input w-full" value={pythonPath} placeholder="Python executable or virtual environment path" onChange={event => { setPythonPath(event.target.value); setRuntime(null); }} />
+        <Input className="input w-full" value={pythonPath} placeholder="Python executable or virtual environment path" onChange={event => { setPythonPath(event.target.value); setRuntime(null); }} />
       </label>
-      <button type="button" className="btn text-[11px]" disabled={checking || installing} onClick={() => { void check(pythonPath || undefined); }}>{checking ? "Checking runtime…" : "Check runtime"}</button>
-      {error && <p role="alert" className="break-words text-[11px] text-gx-error">{error}</p>}
+      <Button variant="outline" type="button" className="text-[11px]" disabled={checking || installing} onClick={() => { void check(pythonPath || undefined); }}>{checking ? "Checking runtime…" : "Check runtime"}</Button>
+      {error && <p role="alert" className="break-words text-[11px] text-destructive">{error}</p>}
       {runtime?.pythonPath && !runtime.available && <div className="space-y-2 text-[11px]">
         <p>Jupyter Client is not installed in this Python environment.</p>
-        <button type="button" className="btn w-full" disabled={installing} onClick={() => { void install(); }}>{installing ? "Installing…" : "Install Jupyter Client + ipykernel"}</button>
+        <Button variant="outline" type="button" className="w-full" disabled={installing} onClick={() => { void install(); }}>{installing ? "Installing…" : "Install Jupyter Client + ipykernel"}</Button>
       </div>}
       {runtime?.available && specs.length > 0 && <div className="space-y-2">
         <label className="block text-[11px]">Kernel
-          <select className="input w-full" value={selected} onChange={event => setSelected(event.target.value)}>{specs.map(spec => <option key={spec.name} value={spec.name}>{spec.displayName}</option>)}</select>
+          <NativeSelect className="input w-full" value={selected} onChange={event => setSelected(event.target.value)}>{specs.map(spec => <option key={spec.name} value={spec.name}>{spec.displayName}</option>)}</NativeSelect>
         </label>
-        <button type="button" className="btn btn-primary w-full text-[11px]" onClick={() => { if (!runtime.pythonPath) return; setShowPanel(false); onConnect(selected, runtime.pythonPath); }}><Play size={10} /> Start Local Kernel</button>
+        <Button variant="default" type="button" className="w-full text-[11px]" onClick={() => { if (!runtime.pythonPath) return; setShowPanel(false); onConnect(selected, runtime.pythonPath); }}><Play size={10} /> Start Local Kernel</Button>
       </div>}
-      {runtime?.available && !checking && !specs.length && !error && <p className="text-[11px] text-gx-warn">No kernels are installed in this environment.</p>}
+      {runtime?.available && !checking && !specs.length && !error && <p className="text-[11px] text-warning">No kernels are installed in this environment.</p>}
 
-      <div className="space-y-2 border-t border-gx-border pt-3 text-[11px]">
+      <div className="space-y-2 border-t border-border pt-3 text-[11px]">
         <label className="block space-y-1">Jupyter server URL
-          <input
+          <Input
             className="input w-full"
             type="password"
             autoComplete="off"
@@ -444,16 +447,16 @@ function KernelConnectButton({ status, language, onConnect, onRemoteConnect }: {
           />
         </label>
         <label className="block space-y-1">Remote kernel name
-          <input className="input w-full" placeholder="Server default" value={remoteName} onChange={event => setRemoteName(event.target.value)} />
+          <Input className="input w-full" placeholder="Server default" value={remoteName} onChange={event => setRemoteName(event.target.value)} />
         </label>
-        <p className="text-gx-muted">Code runs on the server. Place any required files there before running cells.</p>
-        <button type="button" className="btn" disabled={!remoteUrl.trim() || !runtime?.available || checking || installing} onClick={() => {
+        <p className="text-muted-foreground">Code runs on the server. Place any required files there before running cells.</p>
+        <Button variant="outline" type="button" disabled={!remoteUrl.trim() || !runtime?.available || checking || installing} onClick={() => {
           if (!runtime?.pythonPath) return;
           const url = remoteUrl.trim();
           setRemoteUrl("");
           setShowPanel(false);
           onRemoteConnect(url, remoteName.trim(), runtime.pythonPath);
-        }}>Connect to server</button>
+        }}>Connect to server</Button>
       </div>
     </div>
   );
@@ -466,16 +469,16 @@ class NotebookErrorBoundary extends Component<{ children: ReactNode }, { error: 
   render() {
     if (this.state.error) {
       return (
-        <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-4 text-xs text-gx-error">
+        <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-4 text-xs text-destructive">
           <div className="mb-2 font-semibold">Notebook rendering error</div>
           <pre className="whitespace-pre-wrap">{this.state.error.message}</pre>
-          <button
+          <Button variant="outline"
             type="button"
-            className="btn mt-3 text-xs"
+            className="mt-3 text-xs"
             onClick={() => this.setState({ error: null })}
           >
             Retry
-          </button>
+          </Button>
         </div>
       );
     }

@@ -112,7 +112,7 @@ export function TaskList({
             <button
               type="button"
               onClick={() => setCollapsedBranches((prev) => ({ ...prev, [task.id]: !branchCollapsed }))}
-              className="mt-2 h-5 w-4 shrink-0 rounded text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+              className="mt-2 h-5 w-4 shrink-0 rounded text-muted-foreground transition hover:bg-accent hover:text-foreground"
               aria-label={branchCollapsed ? "Expand child chats" : "Collapse child chats"}
               aria-expanded={!branchCollapsed}
             >
@@ -136,7 +136,7 @@ export function TaskList({
           </div>
         </div>
         {!branchCollapsed && hasChildren && (
-          <div className="space-y-1 border-l border-gx-border/70 pl-2 ml-2">
+          <div className="space-y-1 border-l border-border/70 pl-2 ml-2">
             {children.map((child) => renderTaskTree(child, depth + 1))}
           </div>
         )}
@@ -225,13 +225,13 @@ export function TaskList({
         <button
           type="button"
           onClick={() => toggleGroup(id)}
-          className="flex w-full items-center gap-1.5 px-1 py-1 text-[10px] font-medium uppercase tracking-wide text-gx-muted transition hover:text-gx-text"
+          className="flex w-full items-center gap-1.5 px-1 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground transition hover:text-foreground"
           aria-expanded={!isCollapsed}
         >
           {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
           {icon}
           <span>{label}</span>
-          <span className="text-gx-muted/70">({sectionTasks.length})</span>
+          <span className="text-muted-foreground/70">({sectionTasks.length})</span>
         </button>
         {!isCollapsed && <div className="space-y-1.5">{sectionTasks.map((task) => renderTaskTree(task))}</div>}
       </section>
@@ -240,14 +240,14 @@ export function TaskList({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gx-border px-2 py-2">
-        {!compact && <span className="text-xs font-medium text-gx-text">Chats</span>}
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-2">
+        {!compact && <span className="text-xs font-medium text-foreground">Chats</span>}
         <div className="flex-1" />
         {onToggleCollapsed && (
           <button
             type="button"
             onClick={onToggleCollapsed}
-            className="rounded p-1 text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
             aria-label={collapsed ? "Expand chat sidebar" : "Collapse chat sidebar"}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
@@ -267,15 +267,15 @@ export function TaskList({
         onKeyDown={handleKeyDown}
       >
         {compact && (
-          <div className="mb-1 flex justify-center text-[10px] font-medium text-gx-muted" title={`${model.activeTasks.length} active chats`}>
+          <div className="mb-1 flex justify-center text-[10px] font-medium text-muted-foreground" title={`${model.activeTasks.length} active chats`}>
             {model.activeTasks.length}
           </div>
         )}
-        {renderSection("pinned", "Pinned", model.pinnedTasks, <Pin size={10} className="fill-gx-accent text-gx-accent" />)}
+        {renderSection("pinned", "Pinned", model.pinnedTasks, <Pin size={10} className="fill-primary text-primary" />)}
         {model.collectionGroups.map(([group, groupTasks]) =>
-          renderSection(`collection:${group}`, group, groupTasks, <Folder size={10} className="text-gx-info" />),
+          renderSection(`collection:${group}`, group, groupTasks, <Folder size={10} className="text-info" />),
         )}
-        {renderSection("active", "Active", model.activeTasks, <Radio size={10} className="text-gx-success" />)}
+        {renderSection("active", "Active", model.activeTasks, <Radio size={10} className="text-success" />)}
         {RECENT_BUCKET_ORDER.map((bucket) =>
           renderSection(`recent:${bucket}`, bucket, model.recentTasksByDate[bucket]),
         )}
@@ -286,7 +286,7 @@ export function TaskList({
             <button
               type="button"
               onClick={() => setArchivedExpanded(!archivedExpanded)}
-              className="flex w-full items-center gap-1.5 px-1 py-1 text-[10px] text-gx-muted hover:text-gx-text transition"
+              className="flex w-full items-center gap-1.5 px-1 py-1 text-[10px] text-muted-foreground hover:text-foreground transition"
               aria-expanded={archivedExpanded}
             >
               {archivedExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
@@ -302,11 +302,11 @@ export function TaskList({
       </div>
 
       {/* New Chat button at the bottom */}
-      <div className="shrink-0 border-t border-gx-border p-2">
+      <div className="shrink-0 border-t border-border p-2">
         <button
           type="button"
           onClick={onNewTask}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-gx-border px-3 py-2 text-xs text-gx-muted transition hover:border-gx-accent hover:text-gx-accent"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground transition hover:border-primary hover:text-primary"
           aria-label="New chat"
         >
           <Plus size={12} />

@@ -57,16 +57,16 @@ export function StatusBarToolbar({
   return (
     <div className="flex items-center gap-2 text-[11px]">
       {/* Branch name + ahead/behind badges */}
-      <span className="flex items-center gap-1 text-gx-text">
+      <span className="flex items-center gap-1 text-foreground">
         <GitBranch size={11} />
         <span className="max-w-[120px] truncate">{currentBranch}</span>
         {ahead > 0 && (
-          <span className="text-gx-accent" title={`${ahead} commit${ahead === 1 ? "" : "s"} ahead`}>
+          <span className="text-primary" title={`${ahead} commit${ahead === 1 ? "" : "s"} ahead`}>
             ↑{ahead}
           </span>
         )}
         {behind > 0 && (
-          <span className="text-gx-warn" title={`${behind} commit${behind === 1 ? "" : "s"} behind`}>
+          <span className="text-warning" title={`${behind} commit${behind === 1 ? "" : "s"} behind`}>
             ↓{behind}
           </span>
         )}
@@ -77,7 +77,7 @@ export function StatusBarToolbar({
         type="button"
         onClick={() => handleClick("fetch")}
         disabled={inflight !== null}
-        className="flex items-center justify-center rounded p-0.5 hover:text-gx-text disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center justify-center rounded p-0.5 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
         title="Fetch"
       >
         {inflight === "fetch" ? (
@@ -92,7 +92,7 @@ export function StatusBarToolbar({
         type="button"
         onClick={() => handleClick("pull")}
         disabled={inflight !== null}
-        className="flex items-center justify-center rounded p-0.5 hover:text-gx-text disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center justify-center rounded p-0.5 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
         title="Pull (⌘⇧L)"
       >
         {inflight === "pull" ? (
@@ -107,7 +107,7 @@ export function StatusBarToolbar({
         type="button"
         onClick={() => handleClick("push")}
         disabled={inflight !== null}
-        className="flex items-center justify-center rounded p-0.5 hover:text-gx-text disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center justify-center rounded p-0.5 hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
         title="Push (⌘⇧K)"
       >
         {inflight === "push" ? (

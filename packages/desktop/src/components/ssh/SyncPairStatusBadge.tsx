@@ -26,18 +26,18 @@ interface SyncPairStatusBadgeProps {
 
 const STATUS_CONFIG: Record<SyncPairStatus, { colorClass: string; dotClass: string; label: string }> = {
   active: {
-    colorClass: "text-green-600 bg-green-500/10 border-green-500/20",
-    dotClass: "bg-green-500",
+    colorClass: "text-success bg-success/10 border-success/20",
+    dotClass: "bg-success",
     label: "Sync active",
   },
   paused: {
-    colorClass: "text-yellow-600 bg-yellow-500/10 border-yellow-500/20",
-    dotClass: "bg-yellow-500",
+    colorClass: "text-warning bg-warning/10 border-warning/20",
+    dotClass: "bg-warning",
     label: "Sync paused",
   },
   error: {
-    colorClass: "text-red-600 bg-red-500/10 border-red-500/20",
-    dotClass: "bg-red-500",
+    colorClass: "text-destructive bg-destructive/10 border-destructive/20",
+    dotClass: "bg-destructive",
     label: "Sync error",
   },
 };
@@ -205,7 +205,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
       >
         {/* Status dot/icon */}
         {pairInfo.status === "active" && (
-          <Circle className="w-2 h-2 fill-green-500 text-green-500" aria-hidden="true" />
+          <Circle className="w-2 h-2 fill-success text-success" aria-hidden="true" />
         )}
         {pairInfo.status === "paused" && (
           <Pause className="w-2.5 h-2.5" aria-hidden="true" />
@@ -225,7 +225,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
             disabled={retrying}
             className={clsx(
               "ml-1 flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium",
-              "bg-red-500/20 hover:bg-red-500/30 text-red-700 border border-red-500/30",
+              "bg-destructive/20 hover:bg-destructive/30 text-destructive border border-destructive/30",
               "transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
             )}
             aria-label="Retry sync"
@@ -241,7 +241,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
         {/* Conflict badge */}
         {conflictCount > 0 && (
           <span
-            className="flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-orange-500 text-white text-[10px] font-bold leading-none"
+            className="flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-warning text-warning-foreground text-[10px] font-bold leading-none"
             title={`${conflictCount} unresolved conflict${conflictCount !== 1 ? "s" : ""}`}
             aria-label={`${conflictCount} unresolved conflicts`}
           >
@@ -253,7 +253,7 @@ export function SyncPairStatusBadge({ profileId, currentPath }: SyncPairStatusBa
       {/* Error message display */}
       {pairInfo.status === "error" && errorMessage && (
         <div
-          className="px-2 py-1 text-[11px] text-red-600 bg-red-500/5 border border-red-500/10 rounded"
+          className="px-2 py-1 text-[11px] text-destructive bg-destructive/5 border border-destructive/10 rounded"
           role="alert"
           aria-live="polite"
         >

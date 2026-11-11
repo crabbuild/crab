@@ -62,14 +62,14 @@ export function TransferBatchBar({
     <div
       className={clsx(
         "flex items-center gap-3 px-3 py-2",
-        "bg-blue-50 dark:bg-blue-900/20",
-        "border-b border-blue-200 dark:border-blue-800",
+        "bg-info/10 bg-info/20",
+        "border-b border-info border-info",
       )}
       role="toolbar"
       aria-label="Batch transfer actions"
     >
       {/* Summary text */}
-      <span className="text-sm font-medium text-blue-700 dark:text-blue-300 whitespace-nowrap">
+      <span className="text-sm font-medium text-info text-info whitespace-nowrap">
         {count} transfers selected ({formatBytes(aggregateSize)} total)
       </span>
 
@@ -105,7 +105,7 @@ export function TransferBatchBar({
       <button
         type="button"
         onClick={onDeselectAll}
-        className="ml-1 p-1 rounded hover:bg-blue-100 dark:hover:bg-blue-800/40 text-blue-500 dark:text-blue-400"
+        className="ml-1 p-1 rounded hover:bg-info/10 hover:bg-info/40 text-info text-info"
         aria-label="Deselect all"
         title="Deselect all"
       >
@@ -128,18 +128,18 @@ interface BatchButtonProps {
 const VARIANT_CLASSES: Record<string, { enabled: string; disabled: string }> = {
   default: {
     enabled:
-      "text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700",
-    disabled: "text-gray-300 dark:text-gray-600 cursor-not-allowed",
+      "text-foreground text-foreground hover:bg-card hover:bg-card",
+    disabled: "text-muted-foreground text-muted-foreground cursor-not-allowed",
   },
   warning: {
     enabled:
-      "text-yellow-700 dark:text-yellow-300 hover:bg-yellow-50 dark:hover:bg-yellow-900/30",
-    disabled: "text-gray-300 dark:text-gray-600 cursor-not-allowed",
+      "text-warning text-warning hover:bg-warning/10 hover:bg-warning/30",
+    disabled: "text-muted-foreground text-muted-foreground cursor-not-allowed",
   },
   danger: {
     enabled:
-      "text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30",
-    disabled: "text-gray-300 dark:text-gray-600 cursor-not-allowed",
+      "text-destructive text-destructive hover:bg-destructive/10 hover:bg-destructive/30",
+    disabled: "text-muted-foreground text-muted-foreground cursor-not-allowed",
   },
 };
 

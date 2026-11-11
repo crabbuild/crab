@@ -66,9 +66,9 @@ export function ResizeHandle({ direction = "horizontal", onResize, className }: 
       className={clsx(
         "group relative flex items-center justify-center transition-colors",
         isHorizontal
-          ? "w-1 cursor-col-resize hover:bg-gx-accent/20"
-          : "h-1 cursor-row-resize hover:bg-gx-accent/20",
-        dragging && "bg-gx-accent/30",
+          ? "w-1 cursor-col-resize hover:bg-primary/20"
+          : "h-1 cursor-row-resize hover:bg-primary/20",
+        dragging && "bg-primary/30",
         className,
       )}
       role="separator"
@@ -77,9 +77,9 @@ export function ResizeHandle({ direction = "horizontal", onResize, className }: 
       {/* Visual indicator line */}
       <div
         className={clsx(
-          "rounded-full bg-gx-border transition-all group-hover:bg-gx-accent/50",
+          "rounded-full bg-border transition-all group-hover:bg-primary/50",
           isHorizontal ? "h-8 w-0.5" : "h-0.5 w-8",
-          dragging && "bg-gx-accent",
+          dragging && "bg-primary",
         )}
       />
     </div>

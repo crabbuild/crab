@@ -31,9 +31,9 @@ export function WorktreeCard({ event, collapsed: collapsedProp, onToggleCollapse
   if (collapsed) {
     const defaultSummary = (
       <>
-        <Icon size={11} className="shrink-0 text-gx-muted" />
-        <span className="font-medium text-gx-text/80">{label}</span>
-        <span className="truncate text-gx-text/70 font-mono">{description}</span>
+        <Icon size={11} className="shrink-0 text-muted-foreground" />
+        <span className="font-medium text-foreground/80">{label}</span>
+        <span className="truncate text-foreground/70 font-mono">{description}</span>
       </>
     );
     return (
@@ -46,21 +46,21 @@ export function WorktreeCard({ event, collapsed: collapsedProp, onToggleCollapse
   }
 
   return (
-    <div className="rounded-md border border-gx-border/40 overflow-hidden">
+    <div className="rounded-md border border-border/40 overflow-hidden">
       <div className="flex items-center gap-2 px-2.5 py-1.5 text-[10px]">
-        <Icon size={11} className="text-gx-muted shrink-0" />
-        <span className="shrink-0 font-medium text-gx-muted">
+        <Icon size={11} className="text-muted-foreground shrink-0" />
+        <span className="shrink-0 font-medium text-muted-foreground">
           {label}
         </span>
-        <span className="min-w-0 flex-1 truncate text-gx-text/80 font-mono">
+        <span className="min-w-0 flex-1 truncate text-foreground/80 font-mono">
           {description}
         </span>
         {path && isEnter && (
-          <span className="shrink-0 text-[9px] text-gx-muted/60 truncate max-w-[120px]">
+          <span className="shrink-0 text-[9px] text-muted-foreground/60 truncate max-w-[120px]">
             {path}
           </span>
         )}
-        <ChevronRight size={10} className="shrink-0 text-gx-muted/40" />
+        <ChevronRight size={10} className="shrink-0 text-muted-foreground/40" />
       </div>
     </div>
   );

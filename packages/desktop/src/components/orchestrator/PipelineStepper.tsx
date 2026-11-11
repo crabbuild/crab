@@ -97,27 +97,27 @@ function StepIcon({ status }: { status: StepStatus }) {
   switch (status) {
     case "done":
       return (
-        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gx-success/20">
-          <Check size={12} className="text-gx-success" />
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-success/20">
+          <Check size={12} className="text-success" />
         </div>
       );
     case "active":
       return (
-        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gx-accent/20">
-          <Loader2 size={12} className="animate-spin text-gx-accent" />
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/20">
+          <Loader2 size={12} className="animate-spin text-primary" />
         </div>
       );
     case "failed":
       return (
-        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gx-error/20">
-          <XCircle size={12} className="text-gx-error" />
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-destructive/20">
+          <XCircle size={12} className="text-destructive" />
         </div>
       );
     case "pending":
     default:
       return (
-        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gx-bg-sub border border-gx-border/60">
-          <Circle size={10} className="text-gx-muted/50" />
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-background border border-border/60">
+          <Circle size={10} className="text-muted-foreground/50" />
         </div>
       );
   }
@@ -134,22 +134,22 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
 
   return (
     <div
-      className="rounded border border-gx-border bg-gx-bg-sub px-4 py-3"
+      className="rounded border border-border bg-background px-4 py-3"
       role="navigation"
       aria-label={`Pipeline: ${pipeline.name}`}
     >
       {/* Pipeline name + status */}
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-gx-muted">
+        <span className="text-[11px] font-medium text-muted-foreground">
           Pipeline: {pipeline.name}
         </span>
         <span
           className={`text-[10px] font-medium uppercase ${
             status === "completed"
-              ? "text-gx-success"
+              ? "text-success"
               : status === "failed" || status === "aborted"
-                ? "text-gx-error"
-                : "text-gx-accent"
+                ? "text-destructive"
+                : "text-primary"
           }`}
         >
           {status}
@@ -180,12 +180,12 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
                 <span
                   className={`text-[9px] ${
                     stepStatus === "active"
-                      ? "font-medium text-gx-accent"
+                      ? "font-medium text-primary"
                       : stepStatus === "done"
-                        ? "text-gx-success"
+                        ? "text-success"
                         : stepStatus === "failed"
-                          ? "text-gx-error"
-                          : "text-gx-muted/60"
+                          ? "text-destructive"
+                          : "text-muted-foreground/60"
                   }`}
                 >
                   {getStageLabel(stage.type)}
@@ -196,7 +196,7 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
               {!isLast && (
                 <div
                   className={`mx-1 h-px w-6 ${
-                    stepStatus === "done" ? "bg-gx-success/50" : "bg-gx-border"
+                    stepStatus === "done" ? "bg-success/50" : "bg-border"
                   }`}
                   aria-hidden="true"
                 />
@@ -208,16 +208,16 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
 
       {/* Approval / abort actions */}
       {(needsApproval || status === "running") && (
-        <div className="mt-3 flex items-center gap-2 border-t border-gx-border/40 pt-2">
+        <div className="mt-3 flex items-center gap-2 border-t border-border/40 pt-2">
           {needsApproval && (
             <>
-              <span className="text-[10px] text-gx-muted">
+              <span className="text-[10px] text-muted-foreground">
                 Waiting for approval: {getStageLabel(currentStage.type)}
               </span>
               <button
                 type="button"
                 onClick={() => onApprove?.(currentStageIndex)}
-                className="rounded bg-gx-accent px-2.5 py-1 text-[10px] font-medium text-white transition hover:bg-gx-accent-hover"
+                className="rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground transition hover:bg-primary-hover"
                 aria-label={`Approve ${getStageLabel(currentStage.type)} stage`}
               >
                 Approve
@@ -228,7 +228,7 @@ export function PipelineStepper({ state, onApprove, onAbort }: Props) {
             <button
               type="button"
               onClick={onAbort}
-              className="ml-auto rounded border border-gx-border px-2.5 py-1 text-[10px] text-gx-muted transition hover:border-gx-error/60 hover:text-gx-error"
+              className="ml-auto rounded border border-border px-2.5 py-1 text-[10px] text-muted-foreground transition hover:border-destructive/60 hover:text-destructive"
               aria-label="Abort pipeline"
             >
               Abort

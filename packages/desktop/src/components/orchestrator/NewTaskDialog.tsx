@@ -1,3 +1,5 @@
+import { Textarea } from "@/components/ui/textarea";
+import { NativeSelect } from "@/components/ui/native-select";
 import { useCallback, useEffect, useState } from "react";
 import { Paperclip, X } from "lucide-react";
 import { IssueSelector, IssueItem, IssueRef } from "./IssueSelector";
@@ -204,46 +206,46 @@ export function NewTaskDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-lg border border-gx-border bg-gx-bg p-5 shadow-xl"
+        className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-4 text-sm font-semibold text-gx-text">New Task</h2>
+        <h2 className="mb-4 text-sm font-semibold text-foreground">New Task</h2>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Source selection */}
           <div>
-            <label className="mb-1.5 block text-[11px] font-medium text-gx-muted">Source</label>
+            <label className="mb-1.5 block text-[11px] font-medium text-muted-foreground">Source</label>
             <div className="flex gap-3">
-              <label className="flex items-center gap-1.5 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="task-source"
                   value="manual"
                   checked={source === "manual"}
                   onChange={() => handleSourceChange("manual")}
-                  className="h-3 w-3 accent-gx-accent"
+                  className="h-3 w-3 accent-primary"
                 />
                 Describe manually
               </label>
-              <label className="flex items-center gap-1.5 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="task-source"
                   value="github"
                   checked={source === "github"}
                   onChange={() => handleSourceChange("github")}
-                  className="h-3 w-3 accent-gx-accent"
+                  className="h-3 w-3 accent-primary"
                 />
                 From GitHub issue
               </label>
-              <label className="flex items-center gap-1.5 text-xs text-gx-text cursor-pointer">
+              <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
                 <input
                   type="radio"
                   name="task-source"
                   value="linear"
                   checked={source === "linear"}
                   onChange={() => handleSourceChange("linear")}
-                  className="h-3 w-3 accent-gx-accent"
+                  className="h-3 w-3 accent-primary"
                 />
                 From Linear issue
               </label>
@@ -261,11 +263,11 @@ export function NewTaskDialog({
 
           {/* Prompt */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
               What should the agent do?
             </label>
-            <textarea
-              className="w-full resize-none rounded-md border border-gx-border bg-gx-bg-sub px-3 py-2 text-xs text-gx-text placeholder:text-gx-muted/60 focus:border-gx-accent focus:outline-none"
+            <Textarea
+              className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary focus:outline-none"
               rows={4}
               placeholder="Describe the task…"
               value={prompt}
@@ -284,8 +286,8 @@ export function NewTaskDialog({
 
           {/* Skills */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">
-              Skills <span className="text-gx-muted/60">(optional)</span>
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
+              Skills <span className="text-muted-foreground/60">(optional)</span>
             </label>
             <SkillPicker
               selected={selectedSkills}
@@ -296,9 +298,9 @@ export function NewTaskDialog({
 
           {/* Agent selector */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">Agent</label>
-            <select
-              className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">Agent</label>
+            <NativeSelect
+              className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none"
               value={agent}
               onChange={(e) => setAgent(e.target.value)}
             >
@@ -313,14 +315,14 @@ export function NewTaskDialog({
                 </option>
               ))}
               {agents.length === 0 && <option value="">No agents detected</option>}
-            </select>
+            </NativeSelect>
           </div>
 
           {/* Base branch */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">Base branch</label>
-            <select
-              className="w-full rounded-md border border-gx-border bg-gx-bg-sub px-3 py-1.5 text-xs text-gx-text focus:border-gx-accent focus:outline-none"
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">Base branch</label>
+            <NativeSelect
+              className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-primary focus:outline-none"
               value={baseBranch}
               onChange={(e) => setBaseBranch(e.target.value)}
             >
@@ -329,7 +331,7 @@ export function NewTaskDialog({
                   {b}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
 
           {/* Plan first toggle */}
@@ -339,28 +341,28 @@ export function NewTaskDialog({
               id="plan-first"
               checked={planFirst}
               onChange={(e) => setPlanFirst(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-gx-border accent-gx-accent"
+              className="h-3.5 w-3.5 rounded border-border accent-primary"
             />
-            <label htmlFor="plan-first" className="text-xs text-gx-text">
+            <label htmlFor="plan-first" className="text-xs text-foreground">
               Plan first (agent proposes plan before coding)
             </label>
           </div>
 
           {/* Context files */}
           <div>
-            <label className="mb-1 block text-[11px] font-medium text-gx-muted">Context files</label>
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">Context files</label>
             <div className="space-y-1">
               {contextFiles.map((f) => (
                 <div
                   key={f}
-                  className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[10px] text-gx-muted"
+                  className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 text-[10px] text-muted-foreground"
                 >
                   <Paperclip size={10} className="shrink-0" />
                   <span className="min-w-0 flex-1 truncate font-mono">{f}</span>
                   <button
                     type="button"
                     onClick={() => removeContextFile(f)}
-                    className="shrink-0 text-gx-muted hover:text-gx-text"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
                     aria-label={`Remove ${f}`}
                   >
                     <X size={10} />
@@ -371,7 +373,7 @@ export function NewTaskDialog({
             <button
               type="button"
               onClick={addContextFile}
-              className="mt-1.5 flex items-center gap-1 text-[11px] text-gx-accent hover:underline"
+              className="mt-1.5 flex items-center gap-1 text-[11px] text-primary hover:underline"
             >
               <Paperclip size={10} /> Add files
             </button>
@@ -382,14 +384,14 @@ export function NewTaskDialog({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-muted hover:text-gx-text transition"
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!prompt.trim() || !agent || (requiresRepoSelection && !targetRepoPath)}
-              className="rounded-md bg-gx-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gx-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Create &amp; Start
             </button>

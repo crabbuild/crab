@@ -36,19 +36,19 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
 
   return (
     <div
-      className="mx-auto my-8 flex max-w-lg flex-col gap-4 rounded-lg border border-gx-border bg-gx-surface p-6 shadow-sm"
+      className="mx-auto my-8 flex max-w-lg flex-col gap-4 rounded-lg border border-border bg-card p-6 shadow-sm"
       role="region"
       aria-label={`${label} conflict notice for ${path}`}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 shrink-0 rounded bg-gx-warn/15 p-2.5 text-gx-warn">
+        <div className="mt-0.5 shrink-0 rounded bg-warning/15 p-2.5 text-warning">
           <FileCode2 size={20} aria-hidden="true" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium text-gx-text">
+          <h3 className="text-sm font-medium text-foreground">
             {label} — cannot merge inline
           </h3>
-          <p className="mt-1.5 text-xs leading-relaxed text-gx-muted">
+          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
             This file is tracked as a {kind === "crab" ? "Crab" : kind === "lfs" ? "Git LFS" : "pointer"}{" "}
             pointer. The merge editor cannot compare binary content.
             Run the hydrate command below to materialise the file, then
@@ -58,21 +58,21 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
       </div>
 
       {/* Hydrate command block */}
-      <div className="flex items-center gap-2 rounded border border-gx-border bg-gx-bg-sub px-3 py-2">
-        <code className="flex-1 select-all font-mono text-xs text-gx-text">
+      <div className="flex items-center gap-2 rounded border border-border bg-background px-3 py-2">
+        <code className="flex-1 select-all font-mono text-xs text-foreground">
           {hydrateCommand}
         </code>
         <button
           type="button"
           onClick={handleCopy}
-          className="flex shrink-0 items-center gap-1.5 rounded border border-gx-border px-2 py-1 text-[11px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text"
+          className="flex shrink-0 items-center gap-1.5 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
           aria-label="Copy hydrate command"
           title="Copy hydrate command"
         >
           {copied ? (
             <>
-              <Check size={12} className="text-gx-success" />
-              <span className="text-gx-success">Copied</span>
+              <Check size={12} className="text-success" />
+              <span className="text-success">Copied</span>
             </>
           ) : (
             <>
@@ -83,9 +83,9 @@ export function PointerConflictCard({ path, kind }: PointerConflictCardProps) {
         </button>
       </div>
 
-      <p className="text-[11px] leading-relaxed text-gx-muted">
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
         After resolving, paste the final content into the result pane below
-        and click <strong className="text-gx-text">Save Resolution</strong>.
+        and click <strong className="text-foreground">Save Resolution</strong>.
       </p>
     </div>
   );

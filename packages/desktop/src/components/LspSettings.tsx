@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 /**
  * LspSettings — "Language Servers" section for the Settings view.
  *
@@ -165,7 +167,7 @@ export function LspSettings({ config, onConfigChange }: Props) {
 
   return (
     <section className="space-y-4">
-      <h3 className="text-sm font-medium text-gx-text">Language Servers</h3>
+      <h3 className="text-sm font-medium text-foreground">Language Servers</h3>
 
       {/* Server list */}
       <div className="space-y-1">
@@ -177,19 +179,19 @@ export function LspSettings({ config, onConfigChange }: Props) {
           const isExpanded = expandedServer === language;
 
           return (
-            <div key={language} className="rounded border border-gx-border bg-gx-bg-sub">
+            <div key={language} className="rounded border border-border bg-background">
               {/* Server row */}
               <div className="flex items-center gap-2 px-3 py-2">
                 <button
                   type="button"
-                  className="shrink-0 text-gx-muted hover:text-gx-text"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
                   onClick={() => setExpandedServer(isExpanded ? null : language)}
                   aria-label={isExpanded ? "Collapse" : "Expand"}
                 >
                   {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </button>
 
-                <span className="text-xs font-medium text-gx-text capitalize flex-1">
+                <span className="text-xs font-medium text-foreground capitalize flex-1">
                   {language}
                 </span>
 
@@ -201,7 +203,7 @@ export function LspSettings({ config, onConfigChange }: Props) {
                   type="button"
                   onClick={() => toggleServer(language)}
                   className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition ${
-                    enabled ? "bg-gx-accent" : "bg-gx-border"
+                    enabled ? "bg-primary" : "bg-border"
                   }`}
                   role="switch"
                   aria-checked={enabled}
@@ -231,20 +233,20 @@ export function LspSettings({ config, onConfigChange }: Props) {
 
       {/* Format on Save */}
       <div className="space-y-2">
-        <h4 className="text-xs font-medium text-gx-muted uppercase tracking-wide">
+        <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Format on Save
         </h4>
         <div className="space-y-1">
           {allLanguages.map((language) => (
             <label
               key={language}
-              className="flex items-center gap-2 px-3 py-1 text-xs text-gx-text cursor-pointer hover:bg-gx-surface-hover rounded"
+              className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded"
             >
               <input
                 type="checkbox"
                 checked={config.formatOnSave[language] ?? false}
                 onChange={() => toggleFormatOnSave(language)}
-                className="rounded border-gx-border text-gx-accent focus:ring-gx-accent h-3 w-3"
+                className="rounded border-border text-primary focus:ring-primary h-3 w-3"
               />
               <span className="capitalize">{language}</span>
             </label>
@@ -254,24 +256,24 @@ export function LspSettings({ config, onConfigChange }: Props) {
 
       {/* Diagnostic display toggles */}
       <div className="space-y-2">
-        <h4 className="text-xs font-medium text-gx-muted uppercase tracking-wide">
+        <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Diagnostic Display
         </h4>
-        <label className="flex items-center gap-2 px-3 py-1 text-xs text-gx-text cursor-pointer hover:bg-gx-surface-hover rounded">
+        <label className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded">
           <input
             type="checkbox"
             checked={config.diagnostics.showInFileTree}
             onChange={() => toggleDiagnosticDisplay("showInFileTree")}
-            className="rounded border-gx-border text-gx-accent focus:ring-gx-accent h-3 w-3"
+            className="rounded border-border text-primary focus:ring-primary h-3 w-3"
           />
           Show diagnostics in file tree
         </label>
-        <label className="flex items-center gap-2 px-3 py-1 text-xs text-gx-text cursor-pointer hover:bg-gx-surface-hover rounded">
+        <label className="flex items-center gap-2 px-3 py-1 text-xs text-foreground cursor-pointer hover:bg-accent rounded">
           <input
             type="checkbox"
             checked={config.diagnostics.showInTabs}
             onChange={() => toggleDiagnosticDisplay("showInTabs")}
-            className="rounded border-gx-border text-gx-accent focus:ring-gx-accent h-3 w-3"
+            className="rounded border-border text-primary focus:ring-primary h-3 w-3"
           />
           Show diagnostics in editor tabs
         </label>
@@ -291,7 +293,7 @@ function ServerStatusChip({
 }) {
   if (!found && !status) {
     return (
-      <span className="flex items-center gap-1 text-[10px] text-gx-muted">
+      <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
         <Minus size={9} />
         Not found
       </span>
@@ -303,35 +305,35 @@ function ServerStatusChip({
   switch (state) {
     case "running":
       return (
-        <span className="flex items-center gap-1 text-[10px] text-gx-success">
+        <span className="flex items-center gap-1 text-[10px] text-success">
           <Check size={9} />
           Running
         </span>
       );
     case "restarting":
       return (
-        <span className="flex items-center gap-1 text-[10px] text-gx-warn">
+        <span className="flex items-center gap-1 text-[10px] text-warning">
           <Loader2 size={9} className="animate-spin" />
           Starting
         </span>
       );
     case "error":
       return (
-        <span className="flex items-center gap-1 text-[10px] text-gx-error">
+        <span className="flex items-center gap-1 text-[10px] text-destructive">
           <X size={9} />
           Error
         </span>
       );
     case "stopped":
       return (
-        <span className="flex items-center gap-1 text-[10px] text-gx-muted">
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
           <Minus size={9} />
           Stopped
         </span>
       );
     default:
       return (
-        <span className="flex items-center gap-1 text-[10px] text-gx-muted">
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
           <Minus size={9} />
           Discovered
         </span>
@@ -356,44 +358,44 @@ function ServerConfigEditor({
   const guide = INSTALL_GUIDES[language];
 
   return (
-    <div className="border-t border-gx-border px-3 py-2 space-y-2">
+    <div className="border-t border-border px-3 py-2 space-y-2">
       {/* Command */}
       <div>
-        <label className="block text-[10px] text-gx-muted mb-0.5">Command</label>
-        <input
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Command</label>
+        <Input
           type="text"
           value={command}
           onChange={(e) => onUpdate({ command: e.target.value })}
           placeholder={discovered?.command ?? "path/to/server"}
-          className="w-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+          className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
         />
       </div>
 
       {/* Args */}
       <div>
-        <label className="block text-[10px] text-gx-muted mb-0.5">Arguments</label>
-        <input
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Arguments</label>
+        <Input
           type="text"
           value={args.join(" ")}
           onChange={(e) =>
             onUpdate({ args: e.target.value.split(" ").filter(Boolean) })
           }
           placeholder="--stdio"
-          className="w-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none"
+          className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
         />
       </div>
 
       {/* Initialization Options */}
       <div>
-        <label className="block text-[10px] text-gx-muted mb-0.5">
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
           Initialization Options (JSON)
         </label>
-        <textarea
+        <Textarea
           value={initOpts}
           onChange={(e) => onUpdate({ initializationOptions: e.target.value })}
           placeholder="{}"
           rows={3}
-          className="w-full rounded border border-gx-border bg-gx-surface px-2 py-1 text-xs text-gx-text font-mono placeholder:text-gx-muted/50 focus:border-gx-accent focus:outline-none resize-y"
+          className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground font-mono placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none resize-y"
         />
       </div>
 
@@ -408,7 +410,7 @@ function ServerConfigEditor({
               window.open(guide.url, "_blank");
             }
           }}
-          className="flex items-center gap-1 text-[11px] text-gx-accent hover:underline"
+          className="flex items-center gap-1 text-[11px] text-primary hover:underline"
         >
           <ExternalLink size={10} />
           Install {guide.label}
@@ -417,7 +419,7 @@ function ServerConfigEditor({
 
       {/* Version info */}
       {discovered?.version && (
-        <p className="text-[10px] text-gx-muted">
+        <p className="text-[10px] text-muted-foreground">
           Version: {discovered.version}
         </p>
       )}

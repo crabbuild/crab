@@ -27,11 +27,11 @@ export function BatchActionBar({
 
   return (
     <div
-      className="flex items-center gap-2 border-b border-gx-accent/30 bg-gx-accent/10 px-3 py-1.5"
+      className="flex items-center gap-2 border-b border-primary/30 bg-primary/10 px-3 py-1.5"
       role="toolbar"
       aria-label="Batch file actions"
     >
-      <span className="text-[11px] font-medium text-gx-text">
+      <span className="text-[11px] font-medium text-foreground">
         {count} files selected
       </span>
 
@@ -40,7 +40,7 @@ export function BatchActionBar({
           type="button"
           onClick={onStage}
           disabled={busy}
-          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-gx-success hover:bg-gx-success/10 disabled:opacity-50 transition"
+          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-success hover:bg-success/10 disabled:opacity-50 transition"
           title="Stage selected files (S)"
         >
           <Plus size={12} />
@@ -50,7 +50,7 @@ export function BatchActionBar({
           type="button"
           onClick={onUnstage}
           disabled={busy}
-          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-gx-warn hover:bg-gx-warn/10 disabled:opacity-50 transition"
+          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-warning hover:bg-warning/10 disabled:opacity-50 transition"
           title="Unstage selected files (U)"
         >
           <Minus size={12} />
@@ -60,7 +60,7 @@ export function BatchActionBar({
           type="button"
           onClick={onDiscard}
           disabled={busy || !onDiscard}
-          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-gx-error hover:bg-gx-error/10 disabled:opacity-50 transition"
+          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 disabled:opacity-50 transition"
           title="Discard selected files (Delete)"
         >
           <Trash2 size={12} />
@@ -69,7 +69,7 @@ export function BatchActionBar({
         <button
           type="button"
           onClick={onClear}
-          className="ml-1 flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text transition"
+          className="ml-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground transition"
           title="Clear selection (Escape)"
           aria-label="Clear selection"
         >

@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 /**
  * ContextPicker — unified context attachment dialog for the chat composer.
  *
@@ -157,11 +159,11 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
       aria-label="Add context"
     >
       <div
-        className="flex h-[78vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-lg border border-gx-border bg-gx-bg shadow-2xl"
+        className="flex h-[78vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Kind tabs */}
-        <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-gx-border px-2 py-1">
+        <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border px-2 py-1">
           {KINDS.map((k) => {
             const active = k.kind === kind;
             return (
@@ -175,8 +177,8 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
                 className={clsx(
                   "flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition",
                   active
-                    ? "bg-gx-accent/15 text-gx-text"
-                    : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                    ? "bg-primary/15 text-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
                 )}
                 title={k.description}
                 aria-pressed={active}
@@ -190,7 +192,7 @@ export function ContextPicker({ open, initialKind = "instruction", initialQuery 
           <button
             type="button"
             onClick={onClose}
-            className="rounded p-1 text-gx-muted hover:text-gx-text"
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
             <X size={14} />
@@ -448,9 +450,9 @@ function LoadMoreRow({
   return (
     <div
       ref={sentinelRef}
-      className="flex items-center justify-center gap-2 px-3 py-3 text-[10px] text-gx-muted"
+      className="flex items-center justify-center gap-2 px-3 py-3 text-[10px] text-muted-foreground"
     >
-      <span className="h-1 w-1 animate-pulse rounded-full bg-gx-muted" />
+      <span className="h-1 w-1 animate-pulse rounded-full bg-muted-foreground" />
       {label}
     </div>
   );
@@ -470,15 +472,15 @@ function SearchBar({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-gx-border px-3 py-2">
-      <Search size={12} className="text-gx-muted" />
-      <input
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2">
+      <Search size={12} className="text-muted-foreground" />
+      <Input
         ref={inputRef}
         type="text"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={placeholder}
-        className="flex-1 bg-transparent text-xs text-gx-text placeholder:text-gx-muted focus:outline-none"
+        className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
         aria-label={placeholder}
       />
       {right}
@@ -508,20 +510,20 @@ function ListItem({ active, onMouseEnter, onClick, leading, primary, badge, seco
       onClick={onClick}
       className={clsx(
         "group flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition",
-        active ? "bg-gx-accent/15 text-gx-text" : "text-gx-text hover:bg-gx-surface-hover",
+        active ? "bg-primary/15 text-foreground" : "text-foreground hover:bg-accent",
       )}
     >
-      {leading && <span className="shrink-0 text-gx-accent">{leading}</span>}
+      {leading && <span className="shrink-0 text-primary">{leading}</span>}
       <span className="min-w-0 flex-1 flex items-center gap-1.5 truncate">
         <span className="truncate">{primary}</span>
         {badge && (
-          <span className="shrink-0 rounded-full bg-gx-surface-hover px-1.5 py-0.5 text-[10px] text-gx-muted">
+          <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">
             {badge}
           </span>
         )}
       </span>
       {secondary && (
-        <span className="shrink-0 truncate text-[10px] text-gx-muted max-w-[40%]">{secondary}</span>
+        <span className="shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">{secondary}</span>
       )}
       {trailing && <span className="shrink-0">{trailing}</span>}
     </button>
@@ -586,7 +588,7 @@ function InstructionPanel({
           <button
             type="button"
             onClick={() => setCreating(true)}
-            className="flex items-center gap-1 rounded border border-gx-border bg-gx-surface px-2 py-0.5 text-[10px] text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
           >
             <Plus size={10} /> New
           </button>
@@ -613,7 +615,7 @@ function InstructionPanel({
               active={i === sel}
               onMouseEnter={() => setSel(i)}
               onClick={() => onPick(ins)}
-              leading={ins.pinned ? <Pin size={12} className="text-gx-accent" /> : <Sparkles size={12} />}
+              leading={ins.pinned ? <Pin size={12} className="text-primary" /> : <Sparkles size={12} />}
               primary={ins.title}
               badge={ins.category}
             />
@@ -682,48 +684,48 @@ function InstructionEditor({
   const canSave = title.trim().length > 0 && body.trim().length > 0;
 
   return (
-    <div className="shrink-0 border-t border-gx-border bg-gx-bg-sub p-3 space-y-2">
+    <div className="shrink-0 border-t border-border bg-background p-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-semibold text-gx-text">
+        <span className="text-[11px] font-semibold text-foreground">
           {initial ? "Edit instruction" : "New instruction"}
         </span>
         <button
           type="button"
           onClick={onCancel}
-          className="rounded p-0.5 text-gx-muted hover:text-gx-text"
+          className="rounded p-0.5 text-muted-foreground hover:text-foreground"
           aria-label="Cancel"
         >
           <X size={12} />
         </button>
       </div>
       <div className="flex gap-2">
-        <input
+        <Input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Title"
-          className="flex-1 rounded border border-gx-border bg-gx-bg px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+          className="flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
         />
-        <input
+        <Input
           value={category}
           onChange={(e) => setCategory(e.target.value)}
           placeholder="Category (optional)"
-          className="w-36 rounded border border-gx-border bg-gx-bg px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+          className="w-36 rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
         />
       </div>
-      <textarea
+      <Textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Prompt body — what should the agent do?"
         rows={5}
-        className="w-full resize-none rounded border border-gx-border bg-gx-bg px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus:outline-none"
+        className="w-full resize-none rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
       />
       <div className="flex items-center justify-between">
-        <label className="flex items-center gap-1.5 text-[11px] text-gx-text">
+        <label className="flex items-center gap-1.5 text-[11px] text-foreground">
           <input
             type="checkbox"
             checked={pinned}
             onChange={(e) => setPinned(e.target.checked)}
-            className="h-3 w-3 accent-gx-accent"
+            className="h-3 w-3 accent-primary"
           />
           Pin to top
         </label>
@@ -731,7 +733,7 @@ function InstructionEditor({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded px-3 py-1 text-[11px] text-gx-muted hover:text-gx-text"
+            className="rounded px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground"
           >
             Cancel
           </button>
@@ -739,7 +741,7 @@ function InstructionEditor({
             type="button"
             disabled={!canSave}
             onClick={() => onSave({ title: title.trim(), body: body.trim(), category: category.trim() || undefined, pinned })}
-            className="rounded bg-gx-accent px-3 py-1 text-[11px] font-medium text-white hover:bg-gx-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {initial ? "Save" : "Create"}
           </button>
@@ -824,10 +826,10 @@ function FileOrFolderPanel({
             body="Open a repo to browse its files and folders."
           />
         )}
-        {loading && <div className="p-6 text-center text-xs text-gx-muted">Loading…</div>}
-        {error && <div className="p-6 text-center text-xs text-gx-error">{error}</div>}
+        {loading && <div className="p-6 text-center text-xs text-muted-foreground">Loading…</div>}
+        {error && <div className="p-6 text-center text-xs text-destructive">{error}</div>}
         {!loading && !error && repoId && filtered.length === 0 && (
-          <div className="p-6 text-center text-xs text-gx-muted">No matches</div>
+          <div className="p-6 text-center text-xs text-muted-foreground">No matches</div>
         )}
         {visible.map((entry, i) => (
           <ListItem
@@ -842,7 +844,7 @@ function FileOrFolderPanel({
         ))}
         {hasMore && <LoadMoreRow sentinelRef={sentinelRef} />}
         {!hasMore && filtered.length > 0 && (
-          <div className="px-3 py-2 text-center text-[10px] text-gx-muted">
+          <div className="px-3 py-2 text-center text-[10px] text-muted-foreground">
             {filtered.length} {mode === "folder" ? "folders" : "files"}
           </div>
         )}
@@ -876,9 +878,9 @@ function UrlPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-gx-border px-3 py-2">
-        <Link2 size={12} className="text-gx-muted" />
-        <input
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2">
+        <Link2 size={12} className="text-muted-foreground" />
+        <Input
           ref={inputRef}
           type="url"
           inputMode="url"
@@ -888,32 +890,32 @@ function UrlPanel({
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
           placeholder="https://example.com/docs/page"
-          className="flex-1 bg-transparent text-xs text-gx-text placeholder:text-gx-muted focus:outline-none"
+          className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
           aria-label="URL"
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <div className="rounded-md border border-gx-border bg-gx-surface p-3">
-          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-gx-text">
-            <Link2 size={11} className="text-gx-accent" />
+        <div className="rounded-md border border-border bg-card p-3">
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+            <Link2 size={11} className="text-primary" />
             Attach a web URL
           </div>
-          <p className="text-[11px] text-gx-muted">
+          <p className="text-[11px] text-muted-foreground">
             The agent will fetch and read the page when it works on this message. Handy for docs, API references, blog posts, and issue trackers.
           </p>
           {query.trim() && (
-            <div className="mt-2 rounded border border-gx-border bg-gx-bg px-2 py-1 text-[11px] text-gx-muted font-mono break-all">
+            <div className="mt-2 rounded border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground font-mono break-all">
               {looksValid ? query.trim() : `https://${query.trim()}`}
             </div>
           )}
         </div>
       </div>
-      <div className="flex shrink-0 justify-end gap-2 border-t border-gx-border p-2">
+      <div className="flex shrink-0 justify-end gap-2 border-t border-border p-2">
         <button
           type="button"
           onClick={submit}
           disabled={!query.trim()}
-          className="rounded bg-gx-accent px-3 py-1 text-[11px] font-medium text-white hover:bg-gx-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+          className="rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Attach URL
         </button>
@@ -1033,10 +1035,10 @@ function CommitPanel({
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {!repoId && <EmptyState icon={<GitCommit size={18} />} title="No repository open" body="Open a repo to browse its commits." />}
-        {loading && <div className="p-6 text-center text-xs text-gx-muted">Loading commits…</div>}
-        {error && <div className="p-6 text-center text-xs text-gx-error">{error}</div>}
+        {loading && <div className="p-6 text-center text-xs text-muted-foreground">Loading commits…</div>}
+        {error && <div className="p-6 text-center text-xs text-destructive">{error}</div>}
         {!loading && !error && repoId && filtered.length === 0 && (
-          <div className="p-6 text-center text-xs text-gx-muted">No matches</div>
+          <div className="p-6 text-center text-xs text-muted-foreground">No matches</div>
         )}
         {visible.map((c, i) => (
           <ListItem
@@ -1056,7 +1058,7 @@ function CommitPanel({
           />
         )}
         {!hasMore && !paginating && exhausted && commits.length > 0 && (
-          <div className="px-3 py-2 text-center text-[10px] text-gx-muted">
+          <div className="px-3 py-2 text-center text-[10px] text-muted-foreground">
             {commits.length} commits · end of history
           </div>
         )}
@@ -1123,14 +1125,14 @@ function TerminalPanel({
               active={i === sel}
               onMouseEnter={() => setSel(i)}
               onClick={() => onPick(s)}
-              leading={<Terminal size={12} className={s.active ? "text-gx-success" : "text-gx-muted"} />}
+              leading={<Terminal size={12} className={s.active ? "text-success" : "text-muted-foreground"} />}
               primary={s.label}
               secondary={s.active ? `${humanBytes(s.buffer.length)} · live` : `${humanBytes(s.buffer.length)} · closed`}
             />
             {onPickFullLog && (
               <button
                 onClick={(e) => { e.stopPropagation(); onPickFullLog(s); }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-[#2a2e38] hover:bg-[#3a3f4b] text-[#8b8fa7] hover:text-[#e7eaf1] transition-colors"
+                className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-secondary hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                 title="Attach full session log from disk"
               >
                 <FileText size={10} />
@@ -1201,7 +1203,7 @@ function SkillPanel({
           <button
             type="button"
             onClick={() => setShowInstaller((v) => !v)}
-            className="flex items-center gap-1 rounded border border-gx-border bg-gx-surface px-2 py-0.5 text-[10px] text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded border border-border bg-card px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
           >
             <Plus size={10} /> Install
           </button>
@@ -1209,25 +1211,25 @@ function SkillPanel({
       />
 
       {showInstaller && (
-        <div className="shrink-0 border-b border-gx-border bg-gx-bg-sub p-3 space-y-2">
-          <div className="text-[11px] font-semibold text-gx-text">Install skill from GitHub</div>
-          <input
+        <div className="shrink-0 border-b border-border bg-background p-3 space-y-2">
+          <div className="text-[11px] font-semibold text-foreground">Install skill from GitHub</div>
+          <Input
             value={installUrl}
             onChange={(e) => setInstallUrl(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !installing) { e.preventDefault(); handleInstall(); } }}
             placeholder="https://github.com/owner/repo/blob/main/SKILL.md"
-            className="w-full rounded border border-gx-border bg-gx-bg px-2 py-1 text-xs text-gx-text placeholder:text-gx-muted font-mono focus:border-gx-accent focus:outline-none"
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground font-mono focus:border-primary focus:outline-none"
           />
-          <p className="text-[10px] text-gx-muted">
-            Paste a GitHub URL pointing at a <code className="font-mono text-gx-text">SKILL.md</code> (or any markdown).
+          <p className="text-[10px] text-muted-foreground">
+            Paste a GitHub URL pointing at a <code className="font-mono text-foreground">SKILL.md</code> (or any markdown).
             Also accepts <code className="font-mono">owner/repo/path/SKILL.md</code>.
           </p>
-          {installError && <div className="text-[11px] text-gx-error">{installError}</div>}
+          {installError && <div className="text-[11px] text-destructive">{installError}</div>}
           <div className="flex justify-end gap-2">
             <button
               type="button"
               onClick={() => { setShowInstaller(false); setInstallError(null); }}
-              className="rounded px-2 py-1 text-[10px] text-gx-muted hover:text-gx-text"
+              className="rounded px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
             >
               Cancel
             </button>
@@ -1235,7 +1237,7 @@ function SkillPanel({
               type="button"
               onClick={handleInstall}
               disabled={installing || !installUrl.trim()}
-              className="rounded bg-gx-accent px-3 py-1 text-[10px] font-medium text-white hover:bg-gx-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded bg-primary px-3 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {installing ? "Installing…" : "Install"}
             </button>
@@ -1323,8 +1325,8 @@ function IconAction({
       className={clsx(
         "rounded p-1 transition",
         danger
-          ? "text-gx-muted hover:bg-gx-error/15 hover:text-gx-error"
-          : "text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+          ? "text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >
       {icon}
@@ -1345,14 +1347,14 @@ function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 px-6 py-10 text-center">
-      <div className="text-gx-muted/60">{icon}</div>
-      <div className="text-xs font-medium text-gx-text">{title}</div>
-      {body && <p className="max-w-[320px] text-[11px] leading-relaxed text-gx-muted">{body}</p>}
+      <div className="text-muted-foreground/60">{icon}</div>
+      <div className="text-xs font-medium text-foreground">{title}</div>
+      {body && <p className="max-w-[320px] text-[11px] leading-relaxed text-muted-foreground">{body}</p>}
       {action && (
         <button
           type="button"
           onClick={action.onClick}
-          className="mt-2 rounded bg-gx-accent px-3 py-1 text-[11px] font-medium text-white hover:bg-gx-accent-hover"
+          className="mt-2 rounded bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
         >
           {action.label}
         </button>

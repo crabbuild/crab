@@ -158,7 +158,7 @@ export const TimeMachineView = memo(function TimeMachineView({
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center text-gx-muted">
+      <div className="flex h-full items-center justify-center text-muted-foreground">
         <Loader2 size={16} className="mr-2 animate-spin" />
         Loading file history…
       </div>
@@ -167,7 +167,7 @@ export const TimeMachineView = memo(function TimeMachineView({
 
   if (error) {
     return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-4 text-sm text-gx-error">
+      <div className="m-4 rounded border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
         {error}
       </div>
     );
@@ -175,7 +175,7 @@ export const TimeMachineView = memo(function TimeMachineView({
 
   if (!commits || commits.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-gx-muted text-sm">
+      <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
         No history found for <code className="mx-1 font-mono">{path}</code>
       </div>
     );
@@ -184,8 +184,8 @@ export const TimeMachineView = memo(function TimeMachineView({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header: file path + commit info */}
-      <div className="shrink-0 border-b border-gx-border px-4 py-3">
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
+      <div className="shrink-0 border-b border-border px-4 py-3">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Clock size={12} />
           <span className="font-mono">{path}</span>
           <span className="ml-auto text-[10px]">
@@ -195,15 +195,15 @@ export const TimeMachineView = memo(function TimeMachineView({
 
         {currentCommit && (
           <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
-            <span className="flex items-center gap-1 text-gx-text">
+            <span className="flex items-center gap-1 text-foreground">
               <User size={11} />
               {currentCommit.author}
             </span>
-            <span className="text-gx-muted">{formatDate(currentCommit.date)}</span>
-            <span className="truncate text-gx-text font-medium">
+            <span className="text-muted-foreground">{formatDate(currentCommit.date)}</span>
+            <span className="truncate text-foreground font-medium">
               {currentCommit.subject}
             </span>
-            <code className="ml-auto shrink-0 rounded bg-gx-bg-sub px-1.5 py-0.5 font-mono text-[10px] text-gx-muted">
+            <code className="ml-auto shrink-0 rounded bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
               {currentCommit.sha.slice(0, 8)}
             </code>
           </div>
@@ -217,10 +217,10 @@ export const TimeMachineView = memo(function TimeMachineView({
             max={commits.length - 1}
             value={sliderIndex}
             onChange={handleSliderChange}
-            className="w-full accent-gx-accent"
+            className="w-full accent-primary"
             aria-label="Navigate file history"
           />
-          <div className="mt-1 flex justify-between text-[10px] text-gx-muted">
+          <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
             <span>Oldest</span>
             <span>Newest</span>
           </div>
@@ -229,14 +229,14 @@ export const TimeMachineView = memo(function TimeMachineView({
 
       {/* Blame legend */}
       {authors.length > 0 && (
-        <div className="shrink-0 border-b border-gx-border px-4 py-1.5 flex flex-wrap gap-3">
+        <div className="shrink-0 border-b border-border px-4 py-1.5 flex flex-wrap gap-3">
           {authors.map((a) => (
             <span key={a} className="flex items-center gap-1 text-[10px]">
               <span
                 className="inline-block h-2.5 w-2.5 rounded-sm"
                 style={{ backgroundColor: authorColor(a) }}
               />
-              <span className="text-gx-muted">{a}</span>
+              <span className="text-muted-foreground">{a}</span>
             </span>
           ))}
         </div>
@@ -245,7 +245,7 @@ export const TimeMachineView = memo(function TimeMachineView({
       {/* File content with blame gutter */}
       <div className="min-h-0 flex-1 overflow-auto">
         {contentLoading || blameLoading ? (
-          <div className="flex items-center gap-2 p-4 text-xs text-gx-muted">
+          <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
             <Loader2 size={12} className="animate-spin" />
             Loading revision…
           </div>
@@ -259,12 +259,12 @@ export const TimeMachineView = memo(function TimeMachineView({
               return (
                 <div
                   key={idx}
-                  className="flex hover:bg-gx-surface-hover/50"
+                  className="flex hover:bg-accent/50"
                   style={bgColor ? { backgroundColor: bgColor } : undefined}
                 >
                   {/* Blame gutter */}
                   <div
-                    className="shrink-0 w-[180px] truncate border-r border-gx-border px-2 py-px text-[10px] text-gx-muted select-none"
+                    className="shrink-0 w-[180px] truncate border-r border-border px-2 py-px text-[10px] text-muted-foreground select-none"
                     title={blame ? `${blame.author} (${blame.sha.slice(0, 7)})` : undefined}
                   >
                     {blame && (
@@ -278,7 +278,7 @@ export const TimeMachineView = memo(function TimeMachineView({
                     )}
                   </div>
                   {/* Line number */}
-                  <div className="shrink-0 w-10 text-right pr-2 py-px text-gx-muted select-none">
+                  <div className="shrink-0 w-10 text-right pr-2 py-px text-muted-foreground select-none">
                     {idx + 1}
                   </div>
                   {/* Content */}
@@ -290,7 +290,7 @@ export const TimeMachineView = memo(function TimeMachineView({
             })}
           </div>
         ) : (
-          <div className="p-4 text-xs text-gx-muted">
+          <div className="p-4 text-xs text-muted-foreground">
             Unable to load file content at this revision.
           </div>
         )}

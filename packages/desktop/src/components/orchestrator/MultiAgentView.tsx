@@ -54,31 +54,31 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-gx-border px-4 py-2">
-        <Bot size={13} className="text-gx-accent" />
-        <span className="text-xs font-medium text-gx-text">Agents</span>
-        <span className="text-[10px] text-gx-muted">({conversations.length})</span>
+      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+        <Bot size={13} className="text-primary" />
+        <span className="text-xs font-medium text-foreground">Agents</span>
+        <span className="text-[10px] text-muted-foreground">({conversations.length})</span>
         <div className="flex-1" />
         <div className="relative">
           <button
             type="button"
             onClick={() => setShowAddMenu(!showAddMenu)}
-            className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-gx-text hover:bg-gx-surface-hover"
+            className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-foreground hover:bg-accent"
           >
             <Plus size={10} /> Add agent
           </button>
 
           {showAddMenu && (
-            <div className="absolute right-0 top-full z-50 mt-1 w-[200px] rounded-md border border-gx-border bg-gx-surface shadow-lg">
+            <div className="absolute right-0 top-full z-50 mt-1 w-[200px] rounded-md border border-border bg-card shadow-lg">
               {PRESET_ROLES.map((preset) => (
                 <button
                   key={preset.role}
                   type="button"
                   onClick={() => handleAddAgent(preset.role)}
-                  className="flex w-full flex-col px-3 py-2 text-left hover:bg-gx-surface-hover"
+                  className="flex w-full flex-col px-3 py-2 text-left hover:bg-accent"
                 >
-                  <span className="text-[11px] font-medium text-gx-text">{preset.label}</span>
-                  <span className="text-[9px] text-gx-muted">{preset.description}</span>
+                  <span className="text-[11px] font-medium text-foreground">{preset.label}</span>
+                  <span className="text-[9px] text-muted-foreground">{preset.description}</span>
                 </button>
               ))}
             </div>
@@ -98,8 +98,8 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
         {daemonSessions.length > 0 && (
           <div className="mt-4">
             <div className="mb-2 flex items-center gap-1.5">
-              <Activity size={11} className="text-gx-accent" />
-              <span className="text-[10px] font-medium text-gx-muted uppercase tracking-wide">
+              <Activity size={11} className="text-primary" />
+              <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
                 Daemon Sessions
               </span>
             </div>
@@ -113,19 +113,19 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
 
         {/* Merge prompt when all agents are done */}
         {hasMultiple && allDone && (
-          <div className="mt-4 rounded-md border border-gx-accent/30 bg-gx-accent/5 p-3">
+          <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 p-3">
             <div className="flex items-center gap-2">
-              <GitMerge size={14} className="text-gx-accent" />
-              <span className="text-xs font-medium text-gx-text">All agents finished</span>
+              <GitMerge size={14} className="text-primary" />
+              <span className="text-xs font-medium text-foreground">All agents finished</span>
             </div>
-            <p className="mt-1 text-[10px] text-gx-muted">
+            <p className="mt-1 text-[10px] text-muted-foreground">
               Multiple agents worked on this task. Their changes are in the same worktree.
               Review the diff to check for conflicts.
             </p>
             <button
               type="button"
               onClick={onReviewChanges}
-              className="mt-2 flex items-center gap-1.5 rounded bg-gx-accent px-3 py-1.5 text-[11px] font-medium text-white hover:bg-gx-accent/80 disabled:opacity-50"
+              className="mt-2 flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
             >
               <GitMerge size={11} />
               Review changes
@@ -142,10 +142,10 @@ export function MultiAgentView({ task, childTasks, onOpenChat, onReviewChanges, 
 function AgentLaneRow({ task, primary, onOpenChat }: { task: OrchestratorTask; primary: boolean; onOpenChat: (taskId: string) => void }) {
   const running = task.status === "running" || task.status === "iterating";
   return (
-    <div className="flex items-center gap-3 rounded-md border border-gx-border bg-gx-bg-sub px-3 py-2">
+    <div className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2">
       <div className={clsx(
         "h-2.5 w-2.5 shrink-0 rounded-full",
-        running ? "bg-gx-success animate-pulse" : task.status === "failed" ? "bg-gx-error" : "bg-gx-muted/40",
+        running ? "bg-success animate-pulse" : task.status === "failed" ? "bg-destructive" : "bg-muted-foreground/40",
       )} />
 
       {/* Provider icon */}
@@ -162,20 +162,20 @@ function AgentLaneRow({ task, primary, onOpenChat }: { task: OrchestratorTask; p
       {/* Agent info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[11px] font-medium text-gx-text capitalize">
+          <span className="text-[11px] font-medium text-foreground capitalize">
             {primary ? "primary" : task.spawnedRole ?? task.title}
           </span>
-          <span className="text-[9px] text-gx-muted">{task.agentName}</span>
+          <span className="text-[9px] text-muted-foreground">{task.agentName}</span>
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1 text-[11px] capitalize text-gx-muted" role="status">
+      <div className="flex shrink-0 items-center gap-1 text-[11px] capitalize text-muted-foreground" role="status">
         {running && <Loader2 size={10} className="animate-spin" />}
         {task.status}
       </div>
       <button type="button" onClick={() => onOpenChat(task.id)}
         aria-label={`Open ${primary ? "primary" : task.spawnedRole ?? task.title} chat`}
-        className="shrink-0 rounded px-2 py-1 text-xs text-gx-accent hover:bg-gx-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-gx-accent">
+        className="shrink-0 rounded px-2 py-1 text-xs text-primary hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
         Open chat
       </button>
     </div>
@@ -200,25 +200,25 @@ function DaemonSessionRow({ session }: { session: AgentSessionInfo }) {
   const state = session.state as "working" | "waiting" | "idle" | "exited" | string;
 
   return (
-    <div className="flex items-center gap-2.5 rounded border border-gx-border bg-gx-bg-sub px-2.5 py-1.5">
+    <div className="flex items-center gap-2.5 rounded border border-border bg-background px-2.5 py-1.5">
       {/* State dot */}
       <div
         className={clsx(
           "h-2 w-2 shrink-0 rounded-full",
-          state === "working" && "bg-gx-success animate-pulse",
-          state === "waiting" && "bg-yellow-400",
-          state === "idle" && "bg-gx-muted/40",
-          state === "exited" && "bg-gx-muted/20",
+          state === "working" && "bg-success animate-pulse",
+          state === "waiting" && "bg-warning",
+          state === "idle" && "bg-muted-foreground/40",
+          state === "exited" && "bg-muted-foreground/20",
         )}
       />
 
       {/* Agent type + session id */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-medium text-gx-text capitalize">
+          <span className="text-[10px] font-medium text-foreground capitalize">
             {session.agentType}
           </span>
-          <span className="truncate text-[9px] text-gx-muted font-mono">
+          <span className="truncate text-[9px] text-muted-foreground font-mono">
             {session.sessionId.slice(0, 8)}
           </span>
         </div>
@@ -228,10 +228,10 @@ function DaemonSessionRow({ session }: { session: AgentSessionInfo }) {
       <span
         className={clsx(
           "shrink-0 text-[9px] font-medium capitalize",
-          state === "working" && "text-gx-success",
-          state === "waiting" && "text-yellow-400",
-          state === "idle" && "text-gx-muted",
-          state === "exited" && "text-gx-muted/60",
+          state === "working" && "text-success",
+          state === "waiting" && "text-warning",
+          state === "idle" && "text-muted-foreground",
+          state === "exited" && "text-muted-foreground/60",
         )}
       >
         {state}
@@ -239,7 +239,7 @@ function DaemonSessionRow({ session }: { session: AgentSessionInfo }) {
 
       {/* Elapsed working time — only shown when there has been working time */}
       {session.elapsedWorkingMs > 0 && (
-        <span className="shrink-0 text-[9px] text-gx-muted tabular-nums">
+        <span className="shrink-0 text-[9px] text-muted-foreground tabular-nums">
           {formatElapsed(session.elapsedWorkingMs)}
         </span>
       )}

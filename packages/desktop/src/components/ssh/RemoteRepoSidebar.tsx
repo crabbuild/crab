@@ -90,15 +90,15 @@ export function RemoteRepoSidebar({
   if (remoteRepos.length === 0) return null;
 
   return (
-    <div className="border-t border-gray-200 dark:border-gray-700 pt-1">
-      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+    <div className="border-t border-border border-border pt-1">
+      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground text-muted-foreground">
         Remote
       </div>
 
       {groupByConnection && grouped ? (
         Array.from(grouped.entries()).map(([profileId, repos]) => (
           <div key={profileId}>
-            <div className="px-3 py-0.5 text-[10px] text-gray-400 dark:text-gray-500">
+            <div className="px-3 py-0.5 text-[10px] text-muted-foreground text-muted-foreground">
               {repos[0]?.profileLabel ?? profileId}
             </div>
             {repos.map((repo) => (
@@ -165,8 +165,8 @@ function RemoteRepoRow({
     <div
       className={clsx(
         "group flex items-center gap-1.5 px-3 py-1 cursor-pointer",
-        "hover:bg-gray-50 dark:hover:bg-gray-800/50",
-        isActive && "bg-blue-50 dark:bg-blue-900/20 border-l-2 border-blue-500",
+        "hover:bg-background hover:bg-card/50",
+        isActive && "bg-info/10 bg-info/20 border-l-2 border-info",
       )}
       onClick={handleClick}
       onMouseEnter={() => setHovered(true)}
@@ -177,12 +177,12 @@ function RemoteRepoRow({
     >
       {/* Status indicator */}
       {repo.connecting ? (
-        <Loader2 className="w-3 h-3 animate-spin text-yellow-500 shrink-0" />
+        <Loader2 className="w-3 h-3 animate-spin text-warning shrink-0" />
       ) : (
         <FolderGit2
           className={clsx(
             "w-3.5 h-3.5 shrink-0",
-            repo.connected ? "text-blue-500" : "text-gray-400",
+            repo.connected ? "text-info" : "text-muted-foreground",
           )}
         />
       )}
@@ -203,7 +203,7 @@ function RemoteRepoRow({
         <div className="flex items-center gap-0.5">
           <button
             onClick={(e) => { e.stopPropagation(); onOpenTerminal(); }}
-            className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="p-0.5 rounded hover:bg-card hover:bg-card"
             title="Open Terminal"
             aria-label="Open terminal at repo root"
           >
@@ -211,7 +211,7 @@ function RemoteRepoRow({
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}
-            className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="p-0.5 rounded hover:bg-card hover:bg-card"
             title="Close"
             aria-label="Close remote repo"
           >
@@ -224,11 +224,11 @@ function RemoteRepoRow({
       {!repo.connected && !repo.connecting && hovered && (
         <button
           onClick={(e) => { e.stopPropagation(); onConnect(); }}
-          className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+          className="p-0.5 rounded hover:bg-card hover:bg-card"
           title="Connect"
           aria-label="Connect to remote server"
         >
-          <Plug className="w-3 h-3 text-gray-400" />
+          <Plug className="w-3 h-3 text-muted-foreground" />
         </button>
       )}
     </div>

@@ -213,7 +213,7 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
       <div className="space-y-2">
         {turn.userMessage && (
           <div className="flex justify-end py-1">
-            <div className="max-w-[85%] rounded-lg bg-gx-accent/10 border border-gx-accent/20 px-3 py-2 text-sm text-gx-text">
+            <div className="max-w-[85%] rounded-lg bg-primary/10 border border-primary/20 px-3 py-2 text-sm text-foreground">
               {turn.userMessage}
             </div>
           </div>
@@ -229,7 +229,7 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
       {/* User message (if this isn't the first turn) */}
       {turn.userMessage && (
         <div className="flex justify-end py-1">
-          <div className="max-w-[85%] rounded-lg bg-gx-accent/10 border border-gx-accent/20 px-3 py-2 text-sm text-gx-text">
+          <div className="max-w-[85%] rounded-lg bg-primary/10 border border-primary/20 px-3 py-2 text-sm text-foreground">
             {turn.userMessage}
           </div>
         </div>
@@ -237,7 +237,7 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
 
       {/* Light divider between user message and AI response */}
       {turn.userMessage && (turn.complete || bodySegments.length > 0) && (
-        <div className="border-t border-gx-border/20" />
+        <div className="border-t border-border/20" />
       )}
 
       {/* Turn header — only shown for COMPLETED turns. While running,
@@ -264,7 +264,7 @@ export const Turn = memo(function Turn({ turn, taskId, onReview }: TurnProps) {
 
       {/* Final summary text — always visible outside the collapse (Codex pattern) */}
       {summarySegment && (
-        <div className="prose prose-sm prose-invert max-w-none text-sm text-gx-text">
+        <div className="prose prose-sm prose-invert max-w-none text-sm text-foreground">
           <Streamdown shikiTheme={["github-light", "github-dark"]}>
             {summarySegment.content}
           </Streamdown>
@@ -292,14 +292,14 @@ function renderSegment(
   switch (segment.kind) {
     case "user":
       return <div key={`user-${idx}`} className="flex justify-end py-1">
-        <div className="max-w-[85%] rounded-lg border border-gx-accent/20 bg-gx-accent/10 px-3 py-2 text-sm text-gx-text">{segment.content}</div>
+        <div className="max-w-[85%] rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-sm text-foreground">{segment.content}</div>
       </div>;
     case "text": {
       const isLastTextSegment =
         !turn.complete &&
         allSegments.slice(idx + 1).every((s) => s.kind !== "text");
       return (
-        <div key={`text-${idx}`} className="prose prose-sm prose-invert max-w-none text-sm text-gx-text">
+        <div key={`text-${idx}`} className="prose prose-sm prose-invert max-w-none text-sm text-foreground">
           <Streamdown shikiTheme={["github-light", "github-dark"]}>
             {segment.content}
           </Streamdown>
@@ -312,7 +312,7 @@ function renderSegment(
 
     case "thinking":
       return (
-        <div key={`thinking-${idx}`} className="text-xs text-gx-muted/70 italic border-l-2 border-gx-thinking/40 pl-2">
+        <div key={`thinking-${idx}`} className="text-xs text-muted-foreground/70 italic border-l-2 border-thinking/40 pl-2">
           <Streamdown shikiTheme={["github-light", "github-dark"]}>
             {segment.content}
           </Streamdown>
@@ -337,7 +337,7 @@ function renderSegment(
 
     case "error":
       return (
-        <div key={`error-${idx}`} className="rounded-md border border-gx-error/30 bg-gx-error/5 px-3 py-2 text-xs text-gx-error">
+        <div key={`error-${idx}`} className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {segment.content}
         </div>
       );

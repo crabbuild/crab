@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
@@ -130,9 +132,9 @@ export function ProgressDrawer({ open, onClose }: Props) {
         open ? "translate-y-0" : "translate-y-full",
       )}
     >
-      <div className="mx-auto w-full border-t border-gx-border bg-gx-surface shadow-2xl">
+      <div className="mx-auto w-full border-t border-border bg-card shadow-2xl">
         {/* Header */}
-        <div className="flex h-9 items-center justify-between border-b border-gx-border px-3 text-xs">
+        <div className="flex h-9 items-center justify-between border-b border-border px-3 text-xs">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 font-semibold">
               <Activity size={12} />
@@ -140,69 +142,69 @@ export function ProgressDrawer({ open, onClose }: Props) {
             </span>
             <div className="flex items-center gap-2 text-[10px]">
               {runningCount > 0 && (
-                <span className="flex items-center gap-1 rounded bg-gx-warn/15 px-1.5 py-0.5 text-gx-warn">
+                <span className="flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-warning">
                   <Loader2 size={9} className="animate-spin" />
                   {runningCount} running
                 </span>
               )}
               {doneCount > 0 && (
-                <span className="flex items-center gap-1 rounded bg-gx-success/15 px-1.5 py-0.5 text-gx-success">
+                <span className="flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-success">
                   <CheckCircle2 size={9} />
                   {doneCount} done
                 </span>
               )}
               {failedCount > 0 && (
-                <span className="flex items-center gap-1 rounded bg-gx-error/15 px-1.5 py-0.5 text-gx-error">
+                <span className="flex items-center gap-1 rounded bg-destructive/15 px-1.5 py-0.5 text-destructive">
                   <XCircle size={9} />
                   {failedCount} failed
                 </span>
               )}
-              {cancelledCount > 0 && <span className="text-gx-muted">{cancelledCount} cancelled</span>}
-              <span className="text-gx-muted">
+              {cancelledCount > 0 && <span className="text-muted-foreground">{cancelledCount} cancelled</span>}
+              <span className="text-muted-foreground">
                 {filteredLogs.length} line{filteredLogs.length === 1 ? "" : "s"}
               </span>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             {/* Search toggle */}
-            <button
+            <Button size="icon" variant="ghost"
               type="button"
-              className={clsx("btn-icon", showSearch && "text-gx-accent")}
+              className={clsx("", showSearch && "text-primary")}
               onClick={() => setShowSearch((v) => !v)}
               title="Search logs"
             >
               <Search size={12} />
-            </button>
+            </Button>
             {/* Clear */}
-            <button type="button" className="btn-icon" onClick={clearLogs} title="Clear all logs">
+            <Button size="icon" variant="ghost" type="button" onClick={clearLogs} title="Clear all logs">
               <Trash2 size={12} />
-            </button>
+            </Button>
             {/* Close */}
-            <button type="button" className="btn-icon" onClick={onClose} aria-label="Close activity drawer">
+            <Button size="icon" variant="ghost" type="button" onClick={onClose} aria-label="Close activity drawer">
               <X size={12} />
-            </button>
+            </Button>
           </div>
         </div>
 
-        {state.activityError && <div role="alert" className="flex items-center gap-3 border-b border-gx-error/30 bg-gx-error/10 px-3 py-2 text-xs text-gx-error">
+        {state.activityError && <div role="alert" className="flex items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <span className="min-w-0 flex-1 break-words">{state.activityError}</span>
-          <button type="button" className="btn text-xs" disabled={reloading} onClick={() => void reloadActivity()}>{reloading ? "Reloading…" : "Reload Activity"}</button>
+          <Button variant="outline" type="button" className="text-xs" disabled={reloading} onClick={() => void reloadActivity()}>{reloading ? "Reloading…" : "Reload Activity"}</Button>
         </div>}
 
         {/* Search bar (conditional) */}
         {showSearch && (
-          <div className="flex items-center gap-2 border-b border-gx-border bg-gx-bg-sub px-3 py-1.5">
-            <Search size={11} className="text-gx-muted" />
-            <input
+          <div className="flex items-center gap-2 border-b border-border bg-background px-3 py-1.5">
+            <Search size={11} className="text-muted-foreground" />
+            <Input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Filter log output…"
-              className="flex-1 bg-transparent text-[11px] text-gx-text placeholder:text-gx-muted/60 focus:outline-none"
+              className="flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
               autoFocus
             />
             {searchQuery && (
-              <button type="button" onClick={() => setSearchQuery("")} className="text-gx-muted hover:text-gx-text">
+              <button type="button" onClick={() => setSearchQuery("")} className="text-muted-foreground hover:text-foreground">
                 <X size={11} />
               </button>
             )}
@@ -211,16 +213,16 @@ export function ProgressDrawer({ open, onClose }: Props) {
 
         {/* Filter chips */}
         {opTypes.length > 1 && (
-          <div className="flex items-center gap-1.5 border-b border-gx-border bg-gx-bg-sub px-3 py-1">
-            <Filter size={10} className="text-gx-muted" />
+          <div className="flex items-center gap-1.5 border-b border-border bg-background px-3 py-1">
+            <Filter size={10} className="text-muted-foreground" />
             <button
               type="button"
               onClick={() => setFilterOp("all")}
               className={clsx(
                 "rounded px-1.5 py-0.5 text-[10px] transition",
                 filterOp === "all"
-                  ? "bg-gx-accent/20 text-gx-accent"
-                  : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                  ? "bg-primary/20 text-primary"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
             >
               All
@@ -233,8 +235,8 @@ export function ProgressDrawer({ open, onClose }: Props) {
                 className={clsx(
                   "rounded px-1.5 py-0.5 text-[10px] font-mono transition",
                   filterOp === op
-                    ? "bg-gx-accent/20 text-gx-accent"
-                    : "text-gx-muted hover:text-gx-text hover:bg-gx-surface-hover",
+                    ? "bg-primary/20 text-primary"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent",
                 )}
               >
                 {op}
@@ -247,8 +249,8 @@ export function ProgressDrawer({ open, onClose }: Props) {
         <div className="flex h-64">
           {/* Job cards sidebar */}
           {jobEntries.length > 0 && (
-            <div className="w-56 shrink-0 overflow-auto border-r border-gx-border bg-gx-bg-sub p-2">
-              <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-gx-muted">
+            <div className="w-56 shrink-0 overflow-auto border-r border-border bg-background p-2">
+              <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
                 Jobs
               </div>
               {jobEntries.map(([id, job]) => (
@@ -267,11 +269,11 @@ export function ProgressDrawer({ open, onClose }: Props) {
           {/* Log output */}
           <div
             ref={scrollRef}
-            className="min-w-0 flex-1 overflow-auto bg-gx-bg-sub p-3 font-mono text-[11px] leading-5"
+            className="min-w-0 flex-1 overflow-auto bg-background p-3 font-mono text-[11px] leading-5"
             onScroll={handleScroll}
           >
             {filteredLogs.length === 0 && (
-              <div className="flex h-full items-center justify-center text-gx-muted text-[12px]">
+              <div className="flex h-full items-center justify-center text-muted-foreground text-[12px]">
                 {state.logs.length === 0
                   ? jobEntries.length > 0
                     ? "No command output. Transfer progress is shown with each job."
@@ -280,20 +282,20 @@ export function ProgressDrawer({ open, onClose }: Props) {
               </div>
             )}
             {filteredLogs.map((line, i) => (
-              <div key={i} className="flex gap-2 hover:bg-gx-surface-hover/30 rounded px-1 -mx-1">
-                <span className="shrink-0 select-none text-gx-muted/50 tabular-nums w-[60px]">
+              <div key={i} className="flex gap-2 hover:bg-accent/30 rounded px-1 -mx-1">
+                <span className="shrink-0 select-none text-muted-foreground/50 tabular-nums w-[60px]">
                   {formatTime(Date.now())}
                 </span>
-                <span className="shrink-0 rounded bg-gx-accent/10 px-1 text-[10px] text-gx-accent">
+                <span className="shrink-0 rounded bg-primary/10 px-1 text-[10px] text-primary">
                   {line.op}
                 </span>
-                <span className="shrink-0 text-gx-muted/40 font-mono text-[10px]">
+                <span className="shrink-0 text-muted-foreground/40 font-mono text-[10px]">
                   {line.job_id.slice(-6)}
                 </span>
                 <span
                   className={clsx(
                     "min-w-0 whitespace-pre-wrap break-words",
-                    line.stream === "stderr" && "text-gx-warn",
+                    line.stream === "stderr" && "text-warning",
                   )}
                 >
                   {line.line}
@@ -304,7 +306,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
             {!autoScroll && filteredLogs.length > 0 && (
               <button
                 type="button"
-                className="sticky bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-gx-accent/90 px-3 py-1 text-[10px] text-white shadow-lg hover:bg-gx-accent"
+                className="sticky bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-primary/90 px-3 py-1 text-[10px] text-foreground shadow-lg hover:bg-primary"
                 onClick={() => {
                   setAutoScroll(true);
                   scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -407,10 +409,10 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
       className={clsx(
         "mb-1 rounded border transition",
         job.status === "running"
-          ? "border-gx-warn/30 bg-gx-warn/5"
+          ? "border-warning/30 bg-warning/5"
           : job.status === "failed"
-            ? "border-gx-error/30 bg-gx-error/5"
-            : "border-gx-border/50 bg-gx-surface/50",
+            ? "border-destructive/30 bg-destructive/5"
+            : "border-border/50 bg-card/50",
       )}
     >
       <button
@@ -419,20 +421,20 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
         onClick={onToggle}
       >
         {job.status === "running" ? (
-          <Loader2 size={10} className="shrink-0 animate-spin text-gx-warn" />
+          <Loader2 size={10} className="shrink-0 animate-spin text-warning" />
         ) : job.status === "failed" ? (
-          <XCircle size={10} className="shrink-0 text-gx-error" />
+          <XCircle size={10} className="shrink-0 text-destructive" />
         ) : job.status === "cancelled" || job.status === "interrupted" ? (
-          <Ban size={10} className="shrink-0 text-gx-muted" />
+          <Ban size={10} className="shrink-0 text-muted-foreground" />
         ) : (
-          <CheckCircle2 size={10} className="shrink-0 text-gx-success" />
+          <CheckCircle2 size={10} className="shrink-0 text-success" />
         )}
-        <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-gx-text">
+        <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-foreground">
           {job.op}{job.intent ? ` · ${localPathName(job.intent.repository)}` : ""}
         </span>
-        {expanded ? <ChevronDown size={9} className="text-gx-muted" /> : <ChevronRight size={9} className="text-gx-muted" />}
+        {expanded ? <ChevronDown size={9} className="text-muted-foreground" /> : <ChevronRight size={9} className="text-muted-foreground" />}
       </button>
-      {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
+      {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-muted-foreground">
         {job.status === "interrupted" && <p>Last recorded progress</p>}
         <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
         <p className="tabular-nums" title="Consumed storage response bodies, including metadata and repeated reads. Connection setup and external commands are excluded.">{transfer.received_bytes == null ? "Storage received: not recorded" : `${formatBytes(transfer.received_bytes)} received from storage`}</p>
@@ -445,19 +447,19 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
         </> : <p>{outcome}</p>}
 
       </div>}
-      {job.status === "running" && job.intent && <div className="px-2 pb-2 text-[10px] text-gx-muted">
+      {job.status === "running" && job.intent && <div className="px-2 pb-2 text-[10px] text-muted-foreground">
         {!transfer && <p>Waiting for native admission…</p>}
-        <button type="button" className="btn text-[10px]" disabled={cancelRequested || job.cancelRequested || !job.nativeSessionId} onClick={() => void cancel()}>{cancelRequested || job.cancelRequested ? "Cancellation requested…" : `Cancel ${activity}`}</button>
+        <Button variant="outline" type="button" className="text-[10px]" disabled={cancelRequested || job.cancelRequested || !job.nativeSessionId} onClick={() => void cancel()}>{cancelRequested || job.cancelRequested ? "Cancellation requested…" : `Cancel ${activity}`}</Button>
       </div>}
       {job.intent && job.status !== "running" && job.status !== "done" && <div className="px-2 pb-2">
-        <button type="button" className="btn text-[10px]" disabled={retrying || !!state.activityError} onClick={() => void retry()}>{retrying ? "Preparing retry…" : "Retry transfer"}</button>
+        <Button variant="outline" type="button" className="text-[10px]" disabled={retrying || !!state.activityError} onClick={() => void retry()}>{retrying ? "Preparing retry…" : "Retry transfer"}</Button>
       </div>}
-      {retryMessage && <p role="status" className="break-words px-2 pb-2 text-[10px] text-gx-muted">{retryMessage}</p>}
-      {!transfer && job.intent && job.status !== "running" && <p className="px-2 pb-2 text-[10px] text-gx-muted">{outcome}</p>}
-      {cancelError && <p role="alert" className="break-words px-2 pb-2 text-[10px] text-gx-error">{cancelError}</p>}
-      {job.interruption && <p className="break-words px-2 pb-2 text-[10px] text-gx-warn">{job.interruption}</p>}
+      {retryMessage && <p role="status" className="break-words px-2 pb-2 text-[10px] text-muted-foreground">{retryMessage}</p>}
+      {!transfer && job.intent && job.status !== "running" && <p className="px-2 pb-2 text-[10px] text-muted-foreground">{outcome}</p>}
+      {cancelError && <p role="alert" className="break-words px-2 pb-2 text-[10px] text-destructive">{cancelError}</p>}
+      {job.interruption && <p className="break-words px-2 pb-2 text-[10px] text-warning">{job.interruption}</p>}
       {expanded && (
-        <div className="border-t border-gx-border/30 px-2 py-1 text-[9px] text-gx-muted">
+        <div className="border-t border-border/30 px-2 py-1 text-[9px] text-muted-foreground">
           <div className="flex items-center gap-1">
             <Clock size={8} />
             <span>{formatElapsed(elapsed)}</span>
@@ -482,16 +484,16 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
               </li>;
             })}</ul>
             {job.intent.paths.length > 50 && <div className="flex gap-2">
-              <button type="button" className="btn text-[9px]" disabled={pathPage === 0} onClick={() => setPathPage(page => page - 1)}>Previous paths</button>
-              <button type="button" className="btn text-[9px]" disabled={(pathPage + 1) * 50 >= job.intent.paths.length} onClick={() => setPathPage(page => page + 1)}>Next paths</button>
+              <Button variant="outline" type="button" className="text-[9px]" disabled={pathPage === 0} onClick={() => setPathPage(page => page - 1)}>Previous paths</Button>
+              <Button variant="outline" type="button" className="text-[9px]" disabled={(pathPage + 1) * 50 >= job.intent.paths.length} onClick={() => setPathPage(page => page + 1)}>Next paths</Button>
             </div>}
           </div>}
           {job.status === "failed" && job.exitCode !== undefined && (
-            <div className="mt-0.5 text-gx-error">Exit code: {job.exitCode}</div>
+            <div className="mt-0.5 text-destructive">Exit code: {job.exitCode}</div>
           )}
           <button
             type="button"
-            className="mt-1 text-[9px] text-gx-accent hover:underline"
+            className="mt-1 text-[9px] text-primary hover:underline"
             onClick={(e) => { e.stopPropagation(); onFilter(); }}
           >
             Filter to this op →

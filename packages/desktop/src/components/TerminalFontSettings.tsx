@@ -1,3 +1,4 @@
+import { NativeSelect } from "@/components/ui/native-select";
 /**
  * Font configuration settings menu for the terminal.
  *
@@ -89,14 +90,14 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
     <div
       role="dialog"
       aria-label="Terminal font settings"
-      className="absolute left-0 top-full z-50 mt-1 w-[300px] rounded border border-gx-border bg-gx-surface p-3 shadow-xl"
+      className="absolute left-0 top-full z-50 mt-1 w-[300px] rounded border border-border bg-card p-3 shadow-xl"
     >
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-gx-text">Font Settings</span>
+        <span className="text-[11px] font-medium text-foreground">Font Settings</span>
         <button
           type="button"
           onClick={reset}
-          className="text-[9px] text-gx-muted hover:text-gx-accent"
+          className="text-[9px] text-muted-foreground hover:text-primary"
         >
           Reset
         </button>
@@ -104,18 +105,18 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
 
       {/* Font family — only installed fonts shown. */}
       <div className="mb-2">
-        <label className="mb-1 block text-[10px] text-gx-muted">
+        <label className="mb-1 block text-[10px] text-muted-foreground">
           Font Family
           {installedFonts && (
-            <span className="ml-1 text-gx-muted/70">
+            <span className="ml-1 text-muted-foreground/70">
               ({installedFonts.length} installed)
             </span>
           )}
         </label>
-        <select
+        <NativeSelect
           value={config.fontFamily}
           onChange={(e) => update({ fontFamily: e.target.value })}
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-[11px] text-gx-text focus:border-gx-accent focus-visible:outline-none"
+          className="w-full rounded border border-border bg-background px-2 py-1 text-[11px] text-foreground focus:border-primary focus-visible:outline-none"
         >
           {/* If current font isn't in the installed list, show it at top
               with a warning suffix so the user knows. */}
@@ -129,9 +130,9 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
             : installedFonts.map((f) => (
                 <option key={f} value={f}>{f}</option>
               ))}
-        </select>
+        </NativeSelect>
         {!currentFontInstalled && (
-          <div className="mt-1 text-[9px] text-gx-warn">
+          <div className="mt-1 text-[9px] text-warning">
             This font isn't installed — terminal will fall back to Menlo.
           </div>
         )}
@@ -139,9 +140,9 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
 
       {/* Font size */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Size</span>
-          <span className="font-mono text-gx-text">{config.fontSize}px</span>
+          <span className="font-mono text-foreground">{config.fontSize}px</span>
         </label>
         <input
           type="range"
@@ -150,15 +151,15 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
           step={1}
           value={config.fontSize}
           onChange={(e) => update({ fontSize: Number(e.target.value) })}
-          className="w-full accent-gx-accent"
+          className="w-full accent-primary"
         />
       </div>
 
       {/* Font weight */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Weight</span>
-          <span className="font-mono text-gx-text">{config.fontWeight}</span>
+          <span className="font-mono text-foreground">{config.fontWeight}</span>
         </label>
         <input
           type="range"
@@ -172,15 +173,15 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
             const bold = Math.max(w + 200, config.fontWeightBold);
             update({ fontWeight: w, fontWeightBold: Math.min(900, bold) });
           }}
-          className="w-full accent-gx-accent"
+          className="w-full accent-primary"
         />
       </div>
 
       {/* Line height */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Line Height</span>
-          <span className="font-mono text-gx-text">{config.lineHeight.toFixed(2)}</span>
+          <span className="font-mono text-foreground">{config.lineHeight.toFixed(2)}</span>
         </label>
         <input
           type="range"
@@ -189,15 +190,15 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
           step={0.05}
           value={config.lineHeight}
           onChange={(e) => update({ lineHeight: Number(e.target.value) })}
-          className="w-full accent-gx-accent"
+          className="w-full accent-primary"
         />
       </div>
 
       {/* Letter spacing */}
       <div className="mb-2">
-        <label className="mb-1 flex items-center justify-between text-[10px] text-gx-muted">
+        <label className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
           <span>Letter Spacing</span>
-          <span className="font-mono text-gx-text">{config.letterSpacing}px</span>
+          <span className="font-mono text-foreground">{config.letterSpacing}px</span>
         </label>
         <input
           type="range"
@@ -206,21 +207,21 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
           step={0.5}
           value={config.letterSpacing}
           onChange={(e) => update({ letterSpacing: Number(e.target.value) })}
-          className="w-full accent-gx-accent"
+          className="w-full accent-primary"
         />
       </div>
 
       {/* Ligatures toggle */}
       <label className="flex cursor-pointer items-center justify-between">
-        <span className="text-[11px] text-gx-text">Font Ligatures</span>
+        <span className="text-[11px] text-foreground">Font Ligatures</span>
         <input
           type="checkbox"
           checked={config.ligatures}
           onChange={(e) => update({ ligatures: e.target.checked })}
-          className="h-4 w-4 rounded border-gx-border accent-gx-accent"
+          className="h-4 w-4 rounded border-border accent-primary"
         />
       </label>
-      <div className="mt-1 text-[9px] text-gx-muted">
+      <div className="mt-1 text-[9px] text-muted-foreground">
         {fontHasKnownLigatures(config.fontFamily)
           ? "Auto-enabled for this font."
           : "Enable ligatures for fonts like Fira Code or JetBrains Mono."}
@@ -228,7 +229,7 @@ export function TerminalFontSettings({ onClose, onChange }: Props) {
 
       {/* Preview */}
       <div
-        className="mt-3 rounded border border-gx-border bg-gx-bg-sub p-2 text-gx-text"
+        className="mt-3 rounded border border-border bg-background p-2 text-foreground"
         style={{
           fontFamily: previewFontFamily,
           fontSize: `${config.fontSize}px`,

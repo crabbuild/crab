@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useCallback, useRef, useState } from "react";
 import { Check, GitCommitHorizontal, Loader2, X } from "lucide-react";
 import clsx from "clsx";
@@ -102,7 +103,7 @@ export function DiffInlineCommit({
 
   return (
     <div
-      className="flex items-center gap-2 border-b border-gx-border bg-gx-surface px-2 py-1"
+      className="flex items-center gap-2 border-b border-border bg-card px-2 py-1"
       role="toolbar"
       aria-label="Inline commit"
     >
@@ -112,8 +113,8 @@ export function DiffInlineCommit({
             type="button"
             onClick={() => handleCommitClick("file")}
             className={clsx(
-              "flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium text-gx-secondary transition-colors",
-              "hover:bg-gx-accent/15 hover:text-gx-primary",
+              "flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors",
+              "hover:bg-primary/15 hover:text-foreground",
             )}
             title="Commit this file"
             aria-label="Commit this file"
@@ -127,8 +128,8 @@ export function DiffInlineCommit({
               type="button"
               onClick={() => handleCommitClick("hunks")}
               className={clsx(
-                "flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium text-gx-secondary transition-colors",
-                "hover:bg-gx-accent/15 hover:text-gx-primary",
+                "flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors",
+                "hover:bg-primary/15 hover:text-foreground",
               )}
               title="Commit selected hunks"
               aria-label="Commit selected hunks"
@@ -140,8 +141,8 @@ export function DiffInlineCommit({
         </>
       ) : (
         <div className="flex flex-1 items-center gap-2">
-          <GitCommitHorizontal size={12} className="shrink-0 text-gx-accent" />
-          <input
+          <GitCommitHorizontal size={12} className="shrink-0 text-primary" />
+          <Input
             ref={inputRef}
             type="text"
             value={message}
@@ -154,8 +155,8 @@ export function DiffInlineCommit({
             }
             disabled={loading}
             className={clsx(
-              "flex-1 rounded border border-gx-border bg-gx-bg-sub px-2 py-0.5 text-[11px] text-gx-primary",
-              "placeholder:text-gx-muted focus:border-gx-accent focus:outline-none",
+              "flex-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] text-foreground",
+              "placeholder:text-muted-foreground focus:border-primary focus:outline-none",
               loading && "opacity-50",
             )}
             aria-label="Commit message"
@@ -167,8 +168,8 @@ export function DiffInlineCommit({
             title="Confirm commit (Enter)"
             aria-label="Confirm commit"
             className={clsx(
-              "flex h-5 w-5 items-center justify-center rounded text-gx-success transition-colors",
-              "hover:bg-gx-success/15",
+              "flex h-5 w-5 items-center justify-center rounded text-success transition-colors",
+              "hover:bg-success/15",
               (!message.trim() || loading) && "cursor-not-allowed opacity-40",
             )}
           >
@@ -185,8 +186,8 @@ export function DiffInlineCommit({
             title="Cancel (Escape)"
             aria-label="Cancel commit"
             className={clsx(
-              "flex h-5 w-5 items-center justify-center rounded text-gx-muted transition-colors",
-              "hover:bg-gx-error/15 hover:text-gx-error",
+              "flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors",
+              "hover:bg-destructive/15 hover:text-destructive",
               loading && "cursor-not-allowed opacity-40",
             )}
           >

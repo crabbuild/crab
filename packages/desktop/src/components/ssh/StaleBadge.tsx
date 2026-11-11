@@ -26,7 +26,7 @@ export function StaleBadge({
     <span
       className={clsx(
         "inline-flex items-center gap-1 rounded font-medium leading-none",
-        "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
+        "bg-warning/10 text-warning bg-warning/30 text-warning",
         compact ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-0.5 text-[10px]",
         className,
       )}

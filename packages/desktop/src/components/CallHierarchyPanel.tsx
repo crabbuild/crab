@@ -177,17 +177,17 @@ export function CallHierarchyPanel({
   }, [roots, direction]);
 
   return (
-    <div className="flex flex-col border-t border-gx-border bg-gx-surface max-h-[320px]">
+    <div className="flex flex-col border-t border-border bg-card max-h-[320px]">
       {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-gx-border px-3 py-1.5">
-        <span className="truncate text-[11px] font-medium text-gx-text" title={title}>
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+        <span className="truncate text-[11px] font-medium text-foreground" title={title}>
           {title}
         </span>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => onDirectionChange(direction === "incoming" ? "outgoing" : "incoming")}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             title={`Switch to ${direction === "incoming" ? "outgoing" : "incoming"} calls`}
           >
             {direction === "incoming" ? (
@@ -200,7 +200,7 @@ export function CallHierarchyPanel({
           <button
             type="button"
             onClick={onClose}
-            className="rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             aria-label="Close call hierarchy panel"
           >
             <X size={12} />
@@ -211,7 +211,7 @@ export function CallHierarchyPanel({
       {/* Tree */}
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         {nodes.length === 0 ? (
-          <div className="px-3 py-4 text-xs text-gx-muted">No results.</div>
+          <div className="px-3 py-4 text-xs text-muted-foreground">No results.</div>
         ) : (
           <TreeNodes
             nodes={nodes}
@@ -287,10 +287,10 @@ function TreeNode({
           }
         }}
         onDoubleClick={() => onNavigate(item.uri, item.selectionRange.start.line + 1, item.selectionRange.start.character + 1)}
-        className="flex w-full items-center gap-1 px-3 py-1 text-left text-xs hover:bg-gx-surface-hover"
+        className="flex w-full items-center gap-1 px-3 py-1 text-left text-xs hover:bg-accent"
         style={{ paddingLeft: `${12 + depth * 12}px` }}
       >
-        <span className="shrink-0 text-gx-muted">
+        <span className="shrink-0 text-muted-foreground">
           {loading ? (
             <Loader2 size={10} className="animate-spin" />
           ) : expanded ? (
@@ -302,11 +302,11 @@ function TreeNode({
           )}
         </span>
         <SymbolKindIcon kind={lspSymbolKindToSymbolKind(item.kind)} size={11} />
-        <span className="truncate font-medium text-gx-text">{item.name}</span>
+        <span className="truncate font-medium text-foreground">{item.name}</span>
         {item.detail && (
-          <span className="shrink-0 truncate text-[10px] text-gx-muted">{item.detail}</span>
+          <span className="shrink-0 truncate text-[10px] text-muted-foreground">{item.detail}</span>
         )}
-        <span className="ml-auto shrink-0 truncate text-[10px] text-gx-muted/70">
+        <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
           {displayPath(item.uri)}
         </span>
       </button>
@@ -322,7 +322,7 @@ function TreeNode({
                 onNavigate(item.uri, site.startLine + 1, site.startChar + 1)
               }
               className={clsx(
-                "flex w-full items-center gap-1 py-0.5 text-left text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text",
+                "flex w-full items-center gap-1 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               style={{ paddingLeft: `${36 + depth * 12}px` }}
             >
