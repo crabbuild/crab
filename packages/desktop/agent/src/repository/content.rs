@@ -89,7 +89,7 @@ impl ReadScope {
         }
     }
 
-    pub(super) fn options(&self) -> Options {
+    pub(crate) fn options(&self) -> Options {
         Options::default().with_cancellation(self.sdk.clone())
     }
 

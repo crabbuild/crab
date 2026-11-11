@@ -225,13 +225,14 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-pulled-edit.png") });
 
     const beforeRenameXorbs = xorbs();
-    const renamed = "renamed model[2].bin";
+    const renamed = "models/archive/renamed model[2].bin";
+    mkdirSync(path.dirname(path.join(source, renamed)), { recursive: true });
     renameSync(path.join(source, files[0]), path.join(source, renamed));
     rmSync(path.join(source, files[1]));
     await openSource();
     await primary().getByRole("button", { name: "Large Files", exact: true }).click();
     await page.getByRole("button", { name: "Track & Stage", exact: true }).click();
-    await page.getByText(renamed, { exact: true }).and(page.locator(":visible")).locator("../..").getByRole("checkbox").check();
+    await page.getByText(path.basename(renamed), { exact: true }).and(page.locator(":visible")).locator("../..").getByRole("checkbox").check();
     await page.getByRole("button", { name: "Track 1 file", exact: true }).click();
     await page.getByRole("button", { name: "Track 1 file", exact: true }).click();
     await expect(page.getByText("Ready to commit", { exact: true })).toBeVisible();
@@ -279,14 +280,36 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     await expect.poll(() => git(clone, ["rev-parse", "HEAD"]).toString().trim(), { timeout: 30_000 }).toBe(third);
     for (const file of files) expect(existsSync(path.join(clone, file))).toBe(false);
     expect(readFileSync(path.join(clone, renamed))).toEqual(git(source, ["show", `HEAD:${renamed}`]));
+    const renamedIndex = git(clone, ["ls-files", "--stage", "-z"]);
+    rmSync(path.join(clone, "models"), { recursive: true });
     await primary().getByRole("button", { name: "Large Files", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
     await expect(page.getByRole("button", { name: /^Hydrate 1 file/ })).toBeEnabled();
     await page.getByRole("button", { name: /^Hydrate 1 file/ }).click();
-    await expect.poll(() => digest(readFileSync(path.join(clone, renamed))), { timeout: 40_000 }).toBe(digest(edited));
+    await expect(page.getByRole("main").getByText(`Hydrated ${renamed}`, { exact: true })).toBeVisible({ timeout: 40_000 });
+    expect(digest(readFileSync(path.join(clone, renamed)))).toBe(digest(edited));
     expect(git(clone, ["status", "--porcelain", "--", ...files, renamed]).length).toBe(0);
+    expect(git(clone, ["ls-files", "--stage", "-z"])).toEqual(renamedIndex);
     expect(git(source, ["ls-files", "--stage", "-z", "--", "other.txt"])).toEqual(unrelated);
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-renamed-and-removed.png") });
+
+    // Restore a staged LFS pointer into another absent directory tree. The
+    // deleted original remains absent, and hydration must preserve this index.
+    const stagedLfs = "restore/deep/previous-lfs.bin";
+    const previousLfs = git(clone, ["rev-parse", `${second}:${files[1]}`]).toString().trim();
+    writeFileSync(path.join(clone, ".gitattributes"), `${stagedLfs} filter=lfs -text\n`, { flag: "a" });
+    git(clone, ["add", "--", ".gitattributes"]);
+    git(clone, ["update-index", "--add", "--cacheinfo", "100644", previousLfs, stagedLfs]);
+    const stagedIndex = git(clone, ["ls-files", "--stage", "-z"]);
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await expect(page.getByRole("button", { name: /^Hydrate 1 file/ })).toBeEnabled();
+    await page.getByRole("button", { name: /^Hydrate 1 file/ }).click();
+    await expect(page.getByRole("main").getByText(`Hydrated ${stagedLfs}`, { exact: true })).toBeVisible({ timeout: 40_000 });
+    expect(digest(readFileSync(path.join(clone, stagedLfs)))).toBe(digest(edited));
+    expect(git(clone, ["ls-files", "--stage", "-z"])).toEqual(stagedIndex);
+    git(clone, ["diff", "--exit-code", "--", stagedLfs]);
+    for (const file of files) expect(existsSync(path.join(clone, file))).toBe(false);
+    await page.screenshot({ path: test.info().outputPath("ui-lifecycle-missing-parent-restored.png") });
   } catch (error) {
     failed = true;
     if (application) {

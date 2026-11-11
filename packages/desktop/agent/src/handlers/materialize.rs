@@ -273,6 +273,12 @@ impl Materialization<'_> {
                 error = scope.cancelled() => return Err(error),
             };
             scope.check()?;
+            let root = repo
+                .work_dir
+                .as_deref()
+                .ok_or_else(|| AgentError::Other("File transfers require a working tree".into()))?;
+            super::local_filters::configure(root, scope.options()).await?;
+            scope.check()?;
             work.await
         };
         let signal = state.cancel_registry.register(self.op_id.to_owned()).await;

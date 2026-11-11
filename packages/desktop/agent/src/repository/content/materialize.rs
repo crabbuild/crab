@@ -287,10 +287,11 @@ impl WorkingPointer {
 
     fn check(&self) -> Result<Option<std::fs::Permissions>> {
         let Some(original) = &self.original else {
-            let parent = self.requested.parent().ok_or_else(changed)?;
-            if std::fs::canonicalize(parent)?.join(self.requested.file_name().ok_or_else(changed)?)
-                != self.path
-            {
+            let relative = self
+                .requested
+                .strip_prefix(&self.root)
+                .map_err(std::io::Error::other)?;
+            if missing_destination(&self.root, relative)?.0 != self.path {
                 return Err(changed());
             }
             return match std::fs::symlink_metadata(&self.requested) {
@@ -356,16 +357,16 @@ impl FileSource {
                         "Missing file has no index pointer".into(),
                     ));
                 };
-                let parent =
-                    tokio::fs::canonicalize(requested.parent().ok_or_else(changed)?).await?;
-                if !parent.starts_with(tokio::fs::canonicalize(root).await?) {
-                    return Err(AgentError::Other(
-                        "File resolves outside the repository".into(),
-                    ));
-                }
+                let boundary = root.to_path_buf();
+                let relative = PathBuf::from(path);
+                let (destination, _) =
+                    tokio::task::spawn_blocking(move || missing_destination(&boundary, &relative))
+                        .await
+                        .map_err(std::io::Error::other)??;
+                source.scope.check()?;
                 *target = Some(WorkingPointer {
                     root: root.into(),
-                    path: parent.join(requested.file_name().ok_or_else(changed)?),
+                    path: destination,
                     requested,
                     original: None,
                     bytes,
@@ -410,7 +411,19 @@ impl FileSource {
                 .path
                 .parent()
                 .ok_or_else(|| AgentError::Other("file has no parent directory".into()))?;
-            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+            let temporary_parent = if target.original.is_none() {
+                let relative = target
+                    .requested
+                    .strip_prefix(&target.root)
+                    .map_err(std::io::Error::other)?;
+                missing_destination(&target.root, relative)?.1
+            } else {
+                parent.into()
+            };
+            let mut parents = ParentDirectories::default();
+            // Reconstruct beside the nearest existing ancestor. Missing
+            // directories stay absent until all content has been verified.
+            let mut temporary = tempfile::NamedTempFile::new_in(temporary_parent)?;
             let prepared = (|| {
                 let mut hasher = identity.hasher();
                 let mut written = 0;
@@ -461,10 +474,20 @@ impl FileSource {
                     &target.bytes,
                 )
                 .map_err(std::io::Error::other)?;
+                if target.original.is_none() {
+                    parents.prepare(&target.root, parent)?;
+                }
+                parents.check()?;
+                target.check()?;
+                self.scope.check()?;
                 Ok::<_, AgentError>((written, update))
             })();
-            let (written, update) =
-                publish(temporary, &target.path, target.original.is_some(), prepared)?;
+            let (written, update) = parents.finish(publish(
+                temporary,
+                &target.path,
+                target.original.is_some(),
+                prepared,
+            ))?;
             refresh_stat_cache(&target.root, update);
             Ok(written)
         })
@@ -472,6 +495,141 @@ impl FileSource {
         .map_err(std::io::Error::other)?;
         result.map_err(|error| scope.record(error))
     }
+}
+
+// Missing worktree paths are literal paths beneath the canonical repository.
+// Reject links before any mkdir; otherwise a dangling or replaced parent could
+// redirect publication outside the captured working tree.
+fn missing_destination(root: &Path, relative: &Path) -> Result<(PathBuf, PathBuf)> {
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(changed());
+    }
+    let root = std::fs::canonicalize(root)?;
+    let destination = root.join(relative);
+    let mut parent = destination.parent().ok_or_else(changed)?;
+    loop {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => {
+                if std::fs::canonicalize(parent)? != parent {
+                    return Err(changed());
+                }
+                let existing = parent.to_owned();
+                return Ok((destination, existing));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                parent = parent
+                    .parent()
+                    .filter(|path| path.starts_with(&root))
+                    .ok_or_else(changed)?;
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(changed()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ParentDirectories {
+    entries: Vec<(PathBuf, std::fs::Metadata, bool)>,
+}
+
+impl ParentDirectories {
+    fn prepare(&mut self, root: &Path, parent: &Path) -> Result<()> {
+        let root = std::fs::canonicalize(root)?;
+        let relative = parent.strip_prefix(&root).map_err(std::io::Error::other)?;
+        let mut path = root.clone();
+        self.entries
+            .push((root.clone(), std::fs::symlink_metadata(&root)?, false));
+        for component in relative.components() {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(changed());
+            }
+            self.check()?;
+            path.push(component);
+            let created = match std::fs::create_dir(&path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(error.into()),
+            };
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.is_dir() || metadata.is_symlink() || std::fs::canonicalize(&path)? != path
+            {
+                return Err(changed());
+            }
+            self.entries.push((path.clone(), metadata, created));
+        }
+        Ok(())
+    }
+
+    fn check(&self) -> Result<()> {
+        for (path, before, _) in &self.entries {
+            if !same_directory(before, &std::fs::symlink_metadata(path)?)
+                || std::fs::canonicalize(path)? != *path
+            {
+                return Err(changed());
+            }
+        }
+        Ok(())
+    }
+
+    fn finish<T>(self, result: Result<T>) -> Result<T> {
+        let Err(mut operation) = result else {
+            return result;
+        };
+        // Remove only empty directories created by this operation, in reverse
+        // order. A replaced directory or another writer's content belongs to
+        // that writer and must survive cancellation/failure cleanup.
+        for (path, before, created) in self.entries.into_iter().rev() {
+            if !created {
+                continue;
+            }
+            let cleanup = (|| -> Result<()> {
+                let current = match std::fs::symlink_metadata(&path) {
+                    Ok(current) => current,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error.into()),
+                };
+                if !same_directory(&before, &current) || std::fs::canonicalize(&path)? != path {
+                    return Ok(());
+                }
+                match std::fs::remove_dir(&path) {
+                    Ok(()) => Ok(()),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            })();
+            if let Err(cleanup) = cleanup {
+                operation = AgentError::Cleanup {
+                    operation: Box::new(operation),
+                    cleanup: Box::new(cleanup),
+                };
+            }
+        }
+        Err(operation)
+    }
+}
+
+fn same_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    if !after.is_dir() || after.is_symlink() || before.created().ok() != after.created().ok() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() == after.dev() && before.ino() == after.ino()
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 fn refresh_stat_cache(root: &Path, update: crab_git::index_stat::IndexStatUpdate) {
@@ -511,3 +669,6 @@ fn publish<T>(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests;

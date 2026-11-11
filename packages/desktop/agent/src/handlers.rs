@@ -24,6 +24,7 @@ use crate::{
 
 mod file_write;
 mod lifecycle;
+mod local_filters;
 mod materialize;
 mod track;
 

@@ -15,11 +15,11 @@ record historical evidence rather than separate work queues.
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
-| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. A continuous packaged macOS Crab/LFS track, stage, commit, push, lazy-clone, cold-hydrate, small-edit, fetch/pull, literal-path rename and removal sequence is qualified against writable RustFS. Safe binary discard, missing directory trees and extensions/profiles remain open. |
+| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. A continuous packaged macOS Crab/LFS track, stage, commit, push, lazy-clone, cold-hydrate, small-edit, fetch/pull, literal-path rename and removal sequence is qualified against writable RustFS. Nested missing-parent restoration now has packaged macOS local/SSH Crab/LFS proof. Safe binary discard and extensions/profiles remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
-| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Safe discard, missing directory trees, cold interruption/restart and cross-platform/provider evidence remain required. |
+| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Safe discard, cold interruption/restart and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
 
@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Close remaining working-tree lifecycle gaps | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | The continuous edit/publish/synchronize sequence now proves exact Crab/LFS bytes, cold reconstruction, small-edit Crab deduplication and unrelated-index preservation against writable storage. Rename/removal now also preserve exact bytes, clean clone status and unrelated staging, with no additional Crab xorbs for the rename/delete push. Next qualify safe whole-file binary discard/restore and missing parent directories. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
+| P0 | Close remaining working-tree lifecycle gaps | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | The continuous edit/publish/synchronize sequence now proves exact Crab/LFS bytes, cold reconstruction, small-edit Crab deduplication and unrelated-index preservation against writable storage. Rename/removal now also preserve exact bytes, clean clone status and unrelated staging, with no additional Crab xorbs for the rename/delete push. Missing parent trees now have packaged macOS Crab/LFS restoration proof. Next qualify safe whole-file binary discard/restore. Discard must capture the raw working identity and immutable index source, verify reconstruction, and reject concurrent edits before publication; pointer-card text hunks and blind checkout do not establish that contract. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
 | P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -48,11 +48,58 @@ and the cross-OS/provider matrix remain release gates for the whole feature.
 Consolidate each opportunity at its existing owner: keep selection and file
 details in Files, transfer outcomes and retry in Activity, and credentials,
 offline retention and budgets in Settings. The continuous lifecycle test reuses
-the writable RustFS qualification fixture. Extend it with safe discard, missing
-directory trees and transfer interruption/restart; keep the read-only two-store proxy for identity
+the writable RustFS qualification fixture. Extend it with safe discard and transfer interruption/restart; keep the read-only two-store proxy for identity
 isolation. This keeps one ordered queue instead of separate feature, UI and
 platform backlogs. P1 work can reuse that fixture once its own P0 owner and
 failure behavior are qualified.
+
+## Missing-directory hydration checkpoint
+
+Missing-file hydration now captures a resolved index pointer even when its
+parent tree is absent. It reconstructs into a private file beside the nearest
+existing ancestor, verifies the full content, rechecks the pointer identity and
+only then creates the required directories. Publication refuses to overwrite a
+new file. Index modes and unrelated staging remain unchanged. Existing-directory
+and single-file callers retain the same reconstruction/publication owner.
+
+Every created directory has a cleanup owner. Failure removes only empty owned
+directories whose observed identity still matches; concurrent content and
+replacement directories are retained. Parent links and redirected paths are
+rejected. Existing files continue using their captured pointer/metadata checks.
+The existing SDK filter installer now belongs to one native owner shared by
+tracking and both single-file/bulk transfer directions. Transfers pass their
+SDK cancellation scope and drain the configuration client. This repairs plain
+Git clones before publication: hydrated bytes must clean back to their indexed
+Crab/LFS pointer even after stat-cache invalidation. No new configuration option,
+dependency, public API or second reconstruction path is introduced.
+
+All 24 focused native content/diff/publication cases pass, including real Crab
+and LFS reconstruction, executable modes, cancellation, concurrent creation,
+index replacement and symlink redirection. The packaged writable-store workflow also passes: it removes the clone's nested
+parent tree after synchronizing the Crab rename and restores its exact edited
+bytes. It then restores a staged LFS pointer into another absent tree, retaining
+the staged index and clean working content. Both actions wait for visible
+completion before checking filesystem bytes. The packaged two-store SSH case
+also restores staged Crab/LFS pointers into a shared missing tree, verifies exact
+bytes and index preservation, invalidates stat shortcuts, and proves fresh Git
+comparisons clean both formats through the selected identity. The same case
+continues through tracking/commit, identity replacement/removal and cold restart.
+Other targets and network filesystems remain unqualified.
+
+The SDK filter-configuration cancellation regression also passes without changing
+Git settings. The production Clippy `unwrap_used` gate, strict touched smoke
+types, native/renderer/Electron builds, packaging and 853 asset checks pass.
+Evidence is in `missing-tree-native-final-tests.log`,
+`missing-tree-filter-cancellation.log`, `missing-tree-configured-lifecycle.log`,
+`missing-tree-configured-two-store.log`,
+`missing-tree-configured-ssh-storage-final.log` and the corresponding external
+package/proof directories. The packaged SSH bootstrap/read/materialization and
+acknowledged-cancellation case also passes on this runtime pair.
+
+The desktop CI consumer now downloads the producer's POSIX release-runtime
+artifact as well as its native payload; the SSH fixtures require those exact
+hashed files. Earlier wiring uploaded them but did not supply them to the
+desktop job. No public-release download availability is claimed by these fixtures.
 
 ## Current qualified boundary
 
@@ -113,7 +160,7 @@ and broad test-tsconfig errors and the cross-platform/provider matrix are not
 qualified. Local packages are unsigned and credential fixtures use Electron's
 test keychain. These bounded results do not establish full completion.
 
-Resume the ordered P0 queue: safe discard/missing directories, durable Activity
+Resume the ordered P0 queue: safe discard, durable Activity
 recovery and budgets, then remaining recovery parity. New formats and providers
 reuse those owners and their error/cleanup contract. Evidence is recorded in
 `lifecycle-qualified-lifecycle.log`, `desktop-lifecycle-proof/`,

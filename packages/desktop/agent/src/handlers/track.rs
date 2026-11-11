@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -21,7 +21,7 @@ pub(super) async fn run(root: &Path, params: Params) -> Result<Value> {
             "Select at least one file to track".into(),
         ));
     }
-    configure_filters(root).await?;
+    super::local_filters::configure(root, crab_sdk::operation::Options::default()).await?;
     let mut seen = HashSet::new();
     let mut patterns = Vec::new();
     let mut files = Vec::new();
@@ -74,62 +74,6 @@ pub(super) async fn run(root: &Path, params: Params) -> Result<Value> {
         "files_tracked": files.iter().map(|path| json!({ "path": path, "status": "ok" })).collect::<Vec<_>>(),
         "commit_paths": commit_paths, "errors": errors, "commit_sha": commit_sha,
     }))
-}
-
-async fn configure_filters(root: &Path) -> Result<()> {
-    let git_name = if cfg!(windows) { "git.exe" } else { "git" };
-    let git = executable(root, Path::new(git_name))?;
-    let selected_crab = shellout::resolve_crab_bin();
-    let crab = executable(root, &selected_crab)?;
-    let tools = crab_sdk::local::Tools::new(git, crab)?;
-    let local = crab_sdk::local::Options::new(tools);
-    let token_cache = crate::repository::token_cache_directory()?;
-    let managed = crab_sdk::managed::Options::new(token_cache)?;
-    let client = crab_sdk::Client::builder()
-        .managed(managed)
-        .local(local)
-        .build()?;
-    // A plain Git clone has no drivers. The existing SDK owner installs the
-    // paired CLI, preserving attribute routing and avoiding raw blobs in Git.
-    let operation = client
-        .configure_local(root)
-        .await
-        .map(drop)
-        .map_err(AgentError::from);
-    let cleanup = client.close().await.map_err(AgentError::from);
-    match (operation, cleanup) {
-        (Err(operation), Err(cleanup)) => Err(AgentError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        }),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
-}
-
-fn executable(root: &Path, program: &Path) -> Result<PathBuf> {
-    if program.is_absolute() || program.components().count() > 1 {
-        return Ok(root.join(program));
-    }
-    let search = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&search)
-        .map(|directory| root.join(directory).join(program))
-        .find(|candidate| {
-            let Ok(metadata) = candidate.metadata() else {
-                return false;
-            };
-            if !metadata.is_file() {
-                return false;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
-            }
-            #[cfg(not(unix))]
-            true
-        })
-        .ok_or_else(|| AgentError::Other(format!("{} is unavailable on PATH", program.display())))
 }
 
 async fn track(root: &Path, path: &str, patterns: &mut Vec<String>) -> Result<()> {

@@ -207,6 +207,33 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     expect(remote.requests.some(request => request.method === "files_dehydrate" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-bulk-dehydration.png") });
+
+    const nested = bulkPaths.map(file => `restore/deep/${file}`);
+    expect(existsSync(path.join(directories[0], "restore"))).toBe(false);
+    for (const [index, file] of bulkPaths.entries()) {
+      const oid = git(directories[0], ["rev-parse", `:${file}`]).toString().trim();
+      git(directories[0], ["update-index", "--add", "--cacheinfo", "100644", oid, nested[index]]);
+    }
+    const nestedIndex = git(directories[0], ["ls-files", "--stage", "-z"]);
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    for (const file of nested) await page.getByRole("checkbox", { name: new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).check();
+    await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
+    await expect(page.getByRole("main").getByText(`Hydrated ${nested[1]}`, { exact: true })).toBeVisible();
+    for (const file of nested) expect(sha(readFileSync(path.join(directories[0], file)))).toBe(source.payloads[0].sha256);
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(nestedIndex);
+    for (const file of nested) {
+      // Invalidate stat shortcuts so a fresh Git comparison must use the
+      // selected connection's clean filters, not trust publication metadata.
+      const oid = git(directories[0], ["rev-parse", `:${file}`]).toString().trim();
+      git(directories[0], ["update-index", "--cacheinfo", "100644", oid, file]);
+      const diff = await call(page, "git_diff_index_patch", { repo_id: alphaId, path: file, native_session_id: epoch(alphaId) });
+      expect(diff.patch).toBe("");
+    }
+    await page.screenshot({ path: test.info().outputPath("ssh-missing-parent-hydration.png") });
+    git(directories[0], ["update-index", "--force-remove", "--", ...nested]);
+    rmSync(path.join(directories[0], "restore"), { recursive: true });
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
     const trackedPaths = ["selected[1].bin", "selected-lfs.bin"];
     const trackedContent = Buffer.alloc(2 * 1024 * 1024, 72);
     for (const file of [...trackedPaths, "selected1.bin"]) writeFileSync(path.join(directories[0], file), trackedContent);
@@ -231,7 +258,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     const beforeCommit = git(directories[0], ["rev-parse", "HEAD"]).toString();
     await page.getByRole("button", { name: "Commit", exact: true }).click();
     await expect.poll(() => git(directories[0], ["rev-parse", "HEAD"]).toString(), { timeout: 30_000 }).not.toBe(beforeCommit);
-    await expect(page.getByText("Committed", { exact: false })).toBeVisible();
+    await expect(page.getByText(/^Committed/)).toBeVisible();
     expect(git(directories[0], ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"]).toString().split("\0").filter(Boolean).sort()).toEqual([".gitattributes", ...trackedPaths].sort());
     expect(git(directories[0], ["ls-files", "--stage", "-z", "--", "unrelated.txt"])).toEqual(unrelatedIndex);
     expect(git(directories[0], ["check-attr", "filter", "--", "selected1.bin"]).toString()).toContain("unspecified");

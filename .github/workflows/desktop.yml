@@ -149,6 +149,11 @@ jobs:
         with:
           name: Crab-native-${{ matrix.target }}
           path: packages/desktop/resources/native/${{ matrix.target }}/
+      - uses: actions/download-artifact@v4
+        if: runner.os != 'Windows'
+        with:
+          name: Crab-remote-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: packages/desktop/release/remote-runtime/
       - name: Restore native executable permissions
         if: runner.os != 'Windows'
         run: chmod +x resources/native/${{ matrix.target }}/{crab,crab-nfs-mount,crab-desktop-agent,git-remote-crab}
