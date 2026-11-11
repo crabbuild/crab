@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { utils } from "ssh2";
-import { KnownHostsManager } from "../electron/ssh-known-hosts";
+import { KnownHostsManager, hostKeyFingerprint } from "../electron/ssh-known-hosts";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
 const parsed = utils.parseKey(pem);
@@ -58,6 +58,6 @@ describe("SSH trust policy", () => {
     expect(() => manager().verify("example.invalid", 22, key)).toThrow();
   });
   it("formats fingerprints the same way as OpenSSH", () => {
-    expect(manager().computeFingerprint(key)).toBe(`SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`);
+    expect(hostKeyFingerprint(key)).toBe(`SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`);
   });
 });

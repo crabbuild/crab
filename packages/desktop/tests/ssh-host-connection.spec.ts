@@ -11,7 +11,7 @@ import { registerSshIpcHandlers } from "../electron/ssh-ipc";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Server, utils, type Connection } from "ssh2";
-import { KnownHostsManager, createHostKeyVerifier, type HostKeyInspection } from "../electron/ssh-known-hosts";
+import { KnownHostsManager, createHostKeyVerifier, hostKeyFingerprint, type HostKeyInspection } from "../electron/ssh-known-hosts";
 import { SshSessionManager, type SshProfile } from "../electron/ssh-manager";
 
 function identity() {
@@ -104,7 +104,7 @@ describe("real SSH host verification", () => {
     const remote = await server(second.pem); hosts.accept("127.0.0.1", remote.port, first.key); let request: HostKeyInspection | undefined;
     const owner = manager(async presented => { request = presented; return false; });
     await expect(owner.connect(profile(remote.port))).rejects.toMatchObject({ code: "SSH_HOST_KEY_REJECTED" });
-    expect({ status: request?.status, previous: request?.previousFingerprints, authentications: remote.authentications() }).toEqual({ status: "changed", previous: [hosts.computeFingerprint(first.key)], authentications: 0 });
+    expect({ status: request?.status, previous: request?.previousFingerprints, authentications: remote.authentications() }).toEqual({ status: "changed", previous: [hostKeyFingerprint(first.key)], authentications: 0 });
   });
   it("refuses a revoked key without presenting an approval prompt", async () => {
     const remote = await server(); let prompts = 0;

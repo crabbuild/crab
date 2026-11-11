@@ -2506,3 +2506,16 @@ two calls to the retired `KnownHostsManager.computeFingerprint` method.
 macOS ARM64 additionally fails the small derive-turns timing ratio. Windows
 and macOS Intel are still running. These failures require investigation;
 the release matrix is not green.
+
+### Current fixture contracts
+
+The nine shared broad-suite failures reproduce locally. Persistence fixtures
+now create tasks through the real Git branch reader in an owned repository,
+use primary-workspace mode, and close every SQLite owner before cleanup.
+This removes the incomplete worktree, child-process, adapter and promisify
+mocks. SSH fixtures call the canonical `hostKeyFingerprint` function already
+used by the session manager; the retired instance method is not restored.
+Assertions remain intact. All 47 enabled persistence/trust/real-SSH checks
+pass; the separate browser connection case is skipped without its live root.
+Evidence: `ci-shared-failures-before.json` and
+`ci-shared-fixtures-after.json`. Cross-platform broad-suite proof is pending.
