@@ -412,6 +412,7 @@ describe("RpcRouter — notification forwarding", () => {
     { method: "list", params: { op_id: "owned" }, event: "progress/partial", data: { op_id: "owned", kind: "list_entry", chunk: { path: "data.bin" } } },
     { method: "crab_push_structured", params: { job_id: "owned" }, event: "crab/push_progress", data: { job_id: "owned", event: "upload_progress", data: { bytes_uploaded: 1024 } } },
     { method: "file_materialize", params: { op_id: "owned" }, event: "progress/source", data: { job_id: "owned", position: 0, source: { kind: "lfs", hash: "a".repeat(64), size: 4096, mode: null } } },
+    { method: "file_materialize", params: { op_id: "owned" }, event: "progress/read", data: { job_id: "owned", received_bytes: 4096 } },
   ])("preserves $event notifications under their native operation identity", async ({ method, params, event, data }) => {
     const sm = new MockSessionManager(), channel = new MockChannel();
     sm.setStatus("server", "connected"); sm.setConnection("server", channel);
@@ -427,7 +428,7 @@ describe("RpcRouter — notification forwarding", () => {
     expect(progress).toEqual([{ method: event, params: { ...data, repo_id } }]);
   });
 
-  it.each(["progress/complete", "progress/source"])("scopes %s to the pending request and drops unrelated or late jobs", async method => {
+  it.each(["progress/complete", "progress/source", "progress/read"])("scopes %s to the pending request and drops unrelated or late jobs", async method => {
     const sm = new MockSessionManager(), channel = new MockChannel();
     sm.setStatus("server", "connected"); sm.setConnection("server", channel);
     const { router } = createRouter(sm);

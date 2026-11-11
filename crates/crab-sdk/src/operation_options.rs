@@ -31,12 +31,50 @@ impl Cancellation {
 pub struct OperationOptions {
     pub(crate) cancellation: Cancellation,
     pub(crate) progress: Option<crate::Progress>,
+    pub(crate) read_progress: Option<crab_storage::ReadProgress>,
     pub(crate) deadline: Option<Instant>,
     limits: ReadLimits,
     timeout: Option<Duration>,
 }
 
 impl OperationOptions {
+    /// Share cumulative origin response-body observations across related reads.
+    ///
+    /// Counts physical body chunks, including retries and later-rejected bytes;
+    /// cache copies and logical output do not contribute to this counter.
+    #[must_use]
+    pub fn with_read_progress(mut self, progress: crab_storage::ReadProgress) -> Self {
+        self.read_progress = Some(progress);
+        self
+    }
+
+    pub(crate) fn observe_admission(
+        &self,
+        admission: std::sync::Arc<dyn crab_storage::ReadAdmission>,
+    ) -> std::sync::Arc<dyn crab_storage::ReadAdmission> {
+        match &self.read_progress {
+            Some(progress) => progress.admission(admission),
+            None => admission,
+        }
+    }
+
+    pub(crate) async fn open_read(
+        &self,
+        repository: &crab_remote_git::RemoteGitRepository,
+        kind: crab_remote_git::OperationKind,
+        cancel: &CancellationToken,
+        limits: crab_remote_git::OperationLimits,
+    ) -> crab_remote_git::Result<crab_remote_git::OperationContext> {
+        match &self.read_progress {
+            Some(progress) => {
+                repository
+                    .operation_with_read_progress(kind, cancel, limits, progress.clone())
+                    .await
+            }
+            None => repository.operation_with_limits(kind, cancel, limits).await,
+        }
+    }
+
     /// Send bounded, coalescing observations without routing terminal results to progress.
     #[must_use]
     pub fn with_progress(mut self, progress: crate::Progress) -> Self {

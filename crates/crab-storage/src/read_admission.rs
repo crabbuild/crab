@@ -28,6 +28,14 @@ pub trait ReadAdmission: Send + Sync {
     async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     /// Reserve the advertised response body length.
     async fn bytes(&self, bytes: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Observe body bytes consumed at the origin transport before admission.
+    ///
+    /// Includes failed attempts and bytes subsequently rejected by a budget.
+    /// Header reservations, cache hits and local reads do not emit this event.
+    /// Implementations must finish promptly without I/O; cancellation drains an
+    /// observation for an already consumed frame before reporting its outcome.
+    async fn received(&self, _bytes: u64) {}
 }
 
 pub(crate) struct AdmittedStore {

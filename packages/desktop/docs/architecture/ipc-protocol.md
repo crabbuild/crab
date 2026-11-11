@@ -231,6 +231,19 @@ Batch progress includes `files_published` and `files_total`.
 Dehydration reports `checked_bytes` for the two full verification passes.
 Its `written_bytes` result counts the pointer bytes published. These checks use
 bounded ranges and apply the same cancellation and cleanup ownership as hydrate.
+
+`progress/read {job_id, repo_id, received_bytes}` independently reports cumulative
+consumed storage response-body bytes for the attempt. It includes metadata,
+partial failures and repeated bytes in resumed ranges; local reads, cache copies,
+connection setup and external commands do not contribute. Native SDK operations
+and the bundled pointer reader feed the same attempt-owned counter. Pointer
+reader frames identify their query ordinal, so concurrent previews and later
+transfers cannot inherit another query's traffic. SSH forwards these frames only
+to the pending owner. Main accepts monotonic safe-integer receipts and persists
+them independently of logical progress. An interrupted job shows its last recorded
+value; missing older receipts remain **Storage received: not recorded**. A retry
+starts a new counter and preserves the original attempt.
+
 `progress/complete` includes `outcome` for materialization: `completed`, `failed`
 or `cancelled`. Activity owns progress and cancellation across view changes.
 A transport error without a terminal result leaves the outcome unknown;

@@ -95,9 +95,14 @@ impl Reader {
     }
 
     fn next(&mut self) -> Response {
-        let mut line = String::new();
-        assert!(self.output.read_line(&mut line).unwrap() > 0);
-        serde_json::from_str(&line).unwrap()
+        loop {
+            let mut line = String::new();
+            assert!(self.output.read_line(&mut line).unwrap() > 0);
+            let response = serde_json::from_str(&line).unwrap();
+            if !matches!(response, Response::ReadProgress { .. }) {
+                return response;
+            }
+        }
     }
 
     fn range(&mut self, offset: u64, length: u32) -> Vec<u8> {

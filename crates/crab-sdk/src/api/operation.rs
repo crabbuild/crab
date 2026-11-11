@@ -6,3 +6,4 @@ pub use crate::operation_options::{Cancellation, OperationOptions as Options};
 pub use crate::progress::{Progress, ProgressEvent, ProgressReceiver, ProgressUpdate};
 pub use crate::read_limits::ReadLimits;
 pub use crate::request::Request;
+pub use crab_storage::{ReadProgress, ReadProgressReceiver};

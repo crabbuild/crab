@@ -153,6 +153,9 @@ impl TransportReadReceipt {
     /// Charge bytes returned by this physical request.
     pub async fn bytes(&self, bytes: u64) -> object_store::Result<()> {
         for context in &self.contexts {
+            context.admission.received(bytes).await;
+        }
+        for context in &self.contexts {
             context.admit_bytes(bytes).await.map_err(object_rejected)?;
         }
         Ok(())
@@ -291,10 +294,9 @@ impl Body for AdmissionBody {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.cancellation.poll_unpin(context).is_ready() {
-            return Poll::Ready(Some(Err(cancelled())));
-        }
         loop {
+            // A pending frame was already consumed from the transport. Drain
+            // its observation before cancellation can discard that receipt.
             if let Some(mut pending) = state.pending.take() {
                 match pending.poll_unpin(context) {
                     Poll::Ready(result) => return Poll::Ready(Some(result)),
@@ -304,12 +306,18 @@ impl Body for AdmissionBody {
                     }
                 }
             }
+            if state.cancellation.poll_unpin(context).is_ready() {
+                return Poll::Ready(Some(Err(cancelled())));
+            }
             match state.inner.as_mut().poll_frame(context) {
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(bytes) => {
                         let contexts = state.contexts.clone();
                         state.pending = Some(
                             async move {
+                                for context in &contexts {
+                                    context.admission.received(bytes.len() as u64).await;
+                                }
                                 for context in contexts {
                                     context.admit_bytes(bytes.len() as u64).await?;
                                 }
@@ -348,368 +356,4 @@ impl Body for AdmissionBody {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions")]
-mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use bytes::Bytes;
-    use futures_util::{TryStreamExt as _, stream::BoxStream};
-    use object_store::client::HttpRequestBody;
-    use object_store::path::Path;
-    use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    };
-    use tokio_util::sync::CancellationToken;
-
-    use super::*;
-
-    #[derive(Default)]
-    struct CountingAdmission {
-        requests: AtomicU64,
-        bytes: AtomicU64,
-        cancellation: CancellationToken,
-    }
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("request limit exhausted")]
-    struct Exhausted;
-
-    struct RequestLimit {
-        remaining: AtomicU64,
-        cancellation: CancellationToken,
-    }
-
-    struct ByteRejection {
-        requests: AtomicU64,
-        cancellation: CancellationToken,
-    }
-
-    #[async_trait::async_trait]
-    impl ReadAdmission for RequestLimit {
-        fn cancellation(&self) -> &CancellationToken {
-            &self.cancellation
-        }
-
-        async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.remaining
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .map(|_| ())
-                .map_err(|_| Box::new(Exhausted) as _)
-        }
-
-        async fn bytes(&self, _bytes: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ReadAdmission for ByteRejection {
-        fn cancellation(&self) -> &CancellationToken {
-            &self.cancellation
-        }
-
-        async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.requests.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        async fn bytes(&self, _bytes: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            Err(Box::new(Exhausted))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ReadAdmission for CountingAdmission {
-        fn cancellation(&self) -> &CancellationToken {
-            &self.cancellation
-        }
-
-        async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.requests.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        async fn bytes(&self, bytes: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.bytes.fetch_add(bytes, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn response_rejection_stops_retry_admission() {
-        let admission = Arc::new(ByteRejection {
-            requests: AtomicU64::new(0),
-            cancellation: CancellationToken::new(),
-        });
-        let context = TransportReadContext::new(admission.clone());
-
-        let first = context.admit_bytes(4).await.expect_err("body rejection");
-        let retry = context
-            .admit_request()
-            .await
-            .expect_err("latched rejection");
-
-        assert!(crate::read_rejection(&object_rejected(first)).is_some());
-        assert!(crate::read_rejection(&object_rejected(retry)).is_some());
-        assert_eq!(admission.requests.load(Ordering::Relaxed), 0);
-    }
-
-    #[derive(Debug)]
-    struct StaticService {
-        calls: Arc<AtomicU64>,
-    }
-
-    #[async_trait::async_trait]
-    impl HttpService for StaticService {
-        async fn call(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(HttpResponse::new(Bytes::from_static(b"body").into()))
-        }
-    }
-
-    fn request() -> HttpRequest {
-        let mut request = HttpRequest::new(HttpRequestBody::empty());
-        *request.uri_mut() = "https://storage.invalid/object".parse().unwrap();
-        request
-    }
-
-    fn object_store_error(error: HttpError) -> object_store::Error {
-        object_store::Error::Generic {
-            store: "transport admission test",
-            source: Box::new(error),
-        }
-    }
-
-    #[derive(Debug)]
-    struct ConnectorBackedStore {
-        inner: object_store::memory::InMemory,
-        client: HttpClient,
-        list_entries: Vec<ObjectMeta>,
-    }
-
-    impl std::fmt::Display for ConnectorBackedStore {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("ConnectorBackedStore")
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for ConnectorBackedStore {
-        async fn get_opts(
-            &self,
-            path: &Path,
-            options: GetOptions,
-        ) -> object_store::Result<GetResult> {
-            let response = self
-                .client
-                .execute(request())
-                .await
-                .map_err(object_store_error)?;
-            let (parts, body) = response.into_parts();
-            body.bytes().await.map_err(object_store_error)?;
-            let mut result = self.inner.get_opts(path, options).await?;
-            result.extensions = parts.extensions;
-            Ok(result)
-        }
-
-        async fn put_opts(
-            &self,
-            path: &Path,
-            payload: PutPayload,
-            options: PutOptions,
-        ) -> object_store::Result<PutResult> {
-            self.inner.put_opts(path, payload, options).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            path: &Path,
-            options: PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(path, options).await
-        }
-
-        fn delete_stream(
-            &self,
-            paths: BoxStream<'static, object_store::Result<Path>>,
-        ) -> BoxStream<'static, object_store::Result<Path>> {
-            self.inner.delete_stream(paths)
-        }
-
-        fn list(
-            &self,
-            _prefix: Option<&Path>,
-        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-            let entries = self.list_entries.clone();
-            let client = self.client.clone();
-            futures_util::stream::try_unfold(
-                (0_usize, entries, client),
-                |(index, entries, client)| async move {
-                    let Some(entry) = entries.get(index).cloned() else {
-                        return Ok(None);
-                    };
-                    let response = client
-                        .execute(request())
-                        .await
-                        .map_err(object_store_error)?;
-                    response
-                        .into_body()
-                        .bytes()
-                        .await
-                        .map_err(object_store_error)?;
-                    Ok(Some((entry, (index + 1, entries, client))))
-                },
-            )
-            .boxed()
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> object_store::Result<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &Path,
-            to: &Path,
-            options: CopyOptions,
-        ) -> object_store::Result<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    #[tokio::test]
-    async fn connector_consumes_prepaid_request_then_charges_retries_and_response_bytes() {
-        let admission = Arc::new(CountingAdmission::default());
-        admission.request().await.unwrap();
-        let context = TransportReadContext::new(admission.clone());
-        let calls = Arc::new(AtomicU64::new(0));
-        let service = ReadAdmissionService(HttpClient::new(StaticService {
-            calls: calls.clone(),
-        }));
-
-        let first = scope(context.clone(), service.call(request()))
-            .await
-            .unwrap();
-        assert!(first.extensions().get::<TransportReadAccounted>().is_some());
-        assert_eq!(first.into_body().bytes().await.unwrap(), "body");
-        let second = scope(context, service.call(request())).await.unwrap();
-        assert_eq!(second.into_body().bytes().await.unwrap(), "body");
-
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-        assert_eq!(admission.requests.load(Ordering::Relaxed), 2);
-        assert_eq!(admission.bytes.load(Ordering::Relaxed), 8);
-    }
-
-    #[tokio::test]
-    async fn nested_contexts_charge_every_policy_without_double_charging_first_request() {
-        let outer = Arc::new(CountingAdmission::default());
-        let inner = Arc::new(CountingAdmission::default());
-        outer.request().await.unwrap();
-        inner.request().await.unwrap();
-        let outer_context = TransportReadContext::new(outer.clone());
-        let inner_context = TransportReadContext::new(inner.clone());
-        let service = ReadAdmissionService(HttpClient::new(StaticService {
-            calls: Arc::new(AtomicU64::new(0)),
-        }));
-
-        let response = scope(outer_context, scope(inner_context, service.call(request())))
-            .await
-            .unwrap();
-        assert_eq!(response.into_body().bytes().await.unwrap(), "body");
-
-        assert_eq!(outer.requests.load(Ordering::Relaxed), 1);
-        assert_eq!(inner.requests.load(Ordering::Relaxed), 1);
-        assert_eq!(outer.bytes.load(Ordering::Relaxed), 4);
-        assert_eq!(inner.bytes.load(Ordering::Relaxed), 4);
-    }
-
-    #[tokio::test]
-    async fn admitted_store_counts_connector_gets_and_each_listing_page() {
-        let inner = object_store::memory::InMemory::new();
-        for path in ["first", "second"] {
-            inner
-                .put(&Path::from(path), Bytes::from_static(b"body").into())
-                .await
-                .unwrap();
-        }
-        let list_entries = inner.list(None).try_collect::<Vec<_>>().await.unwrap();
-        let calls = Arc::new(AtomicU64::new(0));
-        let service = ReadAdmissionService(HttpClient::new(StaticService {
-            calls: calls.clone(),
-        }));
-        let admission = Arc::new(CountingAdmission::default());
-        let store = crate::Store::new(Arc::new(ConnectorBackedStore {
-            inner,
-            client: HttpClient::new(service),
-            list_entries,
-        }))
-        .with_read_admission(admission.clone());
-
-        assert_eq!(
-            store
-                .inner()
-                .get(&Path::from("first"))
-                .await
-                .unwrap()
-                .bytes()
-                .await
-                .unwrap(),
-            "body"
-        );
-        assert_eq!(
-            store
-                .inner()
-                .list(None)
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
-        assert_eq!(admission.requests.load(Ordering::Relaxed), 3);
-        assert_eq!(admission.bytes.load(Ordering::Relaxed), 12);
-    }
-
-    #[tokio::test]
-    async fn listing_page_rejection_stops_before_the_next_http_request() {
-        let inner = object_store::memory::InMemory::new();
-        for path in ["first", "second"] {
-            inner
-                .put(&Path::from(path), Bytes::from_static(b"body").into())
-                .await
-                .unwrap();
-        }
-        let list_entries = inner.list(None).try_collect::<Vec<_>>().await.unwrap();
-        let calls = Arc::new(AtomicU64::new(0));
-        let service = ReadAdmissionService(HttpClient::new(StaticService {
-            calls: calls.clone(),
-        }));
-        let admission = Arc::new(RequestLimit {
-            remaining: AtomicU64::new(1),
-            cancellation: CancellationToken::new(),
-        });
-        let store = crate::Store::new(Arc::new(ConnectorBackedStore {
-            inner,
-            client: HttpClient::new(service),
-            list_entries,
-        }))
-        .with_read_admission(admission);
-
-        let error = store
-            .inner()
-            .list(None)
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap_err();
-
-        assert!(crate::read_rejection(&error).is_some());
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
-}
+mod tests;

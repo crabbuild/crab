@@ -253,6 +253,15 @@ All asynchronous SDK operations return lazy `operation::Request` values. Use
 `Request::with_options` before awaiting to apply a timeout, deadline,
 cancellation token, progress receiver, or read limits.
 
+Use `operation::Options::with_read_progress` with a caller-owned
+`operation::ReadProgress` to observe consumed origin response-body bytes across
+related native reads. `received_bytes()` remains available when a receiver
+coalesces updates. These bytes include failed attempts, metadata and repeated
+range reads; logical `ProgressUpdate::Delivered`, local files and cache copies
+do not increase this counter. Coalesced Git fetches credit their earliest live
+participant once, without replaying earlier traffic to late joiners. Authentication,
+connection setup and external tool traffic are outside this measurement.
+
 Prepared remote mutations and local pushes can finish after a caller loses the
 response. Persist their family-specific recovery tokens and recover with:
 

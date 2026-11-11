@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crab_sdk::operation::{Cancellation, Options, ReadOptions};
+use crab_sdk::operation::{Cancellation, Options, ReadOptions, ReadProgress};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -35,6 +35,7 @@ pub(crate) struct ReadScope {
     id: String,
     failure: Arc<std::sync::OnceLock<Arc<AgentError>>>,
     cancelled_read: Arc<std::sync::atomic::AtomicBool>,
+    read_progress: ReadProgress,
 }
 
 impl Default for ReadScope {
@@ -45,12 +46,20 @@ impl Default for ReadScope {
 
 impl ReadScope {
     pub(super) fn new(stop: tokio_util::sync::CancellationToken) -> Self {
+        Self::with_read_progress(stop, ReadProgress::channel().0)
+    }
+
+    fn with_read_progress(
+        stop: tokio_util::sync::CancellationToken,
+        read_progress: ReadProgress,
+    ) -> Self {
         Self {
             sdk: Cancellation::default(),
             stop,
             id: uuid::Uuid::new_v4().to_string(),
             failure: Arc::new(std::sync::OnceLock::new()),
             cancelled_read: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            read_progress,
         }
     }
 
@@ -64,7 +73,13 @@ impl ReadScope {
     }
 
     pub(crate) fn child(&self) -> Self {
-        Self::new(self.stop.child_token())
+        // Cancellation stays independent while selected files and query
+        // workers contribute to the same caller-owned traffic counter.
+        Self::with_read_progress(self.stop.child_token(), self.read_progress.clone())
+    }
+
+    pub(crate) fn read_progress(&self) -> &ReadProgress {
+        &self.read_progress
     }
 
     pub(crate) async fn cancelled(&self) -> AgentError {
@@ -96,7 +111,9 @@ impl ReadScope {
     }
 
     pub(crate) fn options(&self) -> Options {
-        Options::default().with_cancellation(self.sdk.clone())
+        Options::default()
+            .with_cancellation(self.sdk.clone())
+            .with_read_progress(self.read_progress.clone())
     }
 
     fn record(&self, error: AgentError) -> AgentError {
@@ -325,7 +342,13 @@ impl FileSource {
         target: Option<MaterializationTarget>,
         scope: ReadScope,
     ) -> Result<Self> {
-        let source = repo.readers.capture(root, bytes, size, scope.id.clone())?;
+        let source = repo.readers.capture(
+            root,
+            bytes,
+            size,
+            scope.id.clone(),
+            scope.read_progress.clone(),
+        )?;
         Ok(Self {
             scope,
             size,
@@ -447,7 +470,7 @@ impl FileSource {
                 reader
                     .open(&self.scope.stop)
                     .await?
-                    .chunks(start, limit, &self.scope.stop)
+                    .chunks(start, limit, &self.scope.stop, &self.scope.read_progress)
                     .await?
             }
             Source::Remote { snapshot, path, .. } => {
@@ -546,7 +569,12 @@ impl FileSource {
                 reader
                     .open(&self.scope.stop)
                     .await?
-                    .read(start, length as u32, &self.scope.stop)
+                    .read(
+                        start,
+                        length as u32,
+                        &self.scope.stop,
+                        &self.scope.read_progress,
+                    )
                     .await?
             }
             Source::Remote { snapshot, path, .. } => {
