@@ -1,104 +1,11 @@
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock, Weak};
 
 use tempfile::NamedTempFile;
 
 use crate::Result;
-
-#[derive(Default)]
-struct Publications {
-    active: HashSet<PathBuf>,
-    snapshots: Vec<Weak<tokio::sync::Mutex<HashSet<PathBuf>>>>,
-}
-
-type Registry = Arc<tokio::sync::Mutex<Publications>>;
-
-static REGISTRIES: LazyLock<
-    tokio::sync::Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<Publications>>>>,
-> = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
-
-async fn registry(root: &Path) -> Registry {
-    let mut roots = REGISTRIES.lock().await;
-    roots.retain(|_, registry| registry.strong_count() > 0);
-    if let Some(registry) = roots.get(root).and_then(Weak::upgrade) {
-        return registry;
-    }
-    let registry = Arc::new(tokio::sync::Mutex::new(Publications::default()));
-    roots.insert(root.to_owned(), Arc::downgrade(&registry));
-    registry
-}
-
-pub(super) struct StatusSnapshot {
-    registry: Registry,
-    paths: Arc<tokio::sync::Mutex<HashSet<PathBuf>>>,
-}
-
-pub(super) async fn status_snapshot(root: &Path) -> StatusSnapshot {
-    let registry = registry(root).await;
-    let paths = {
-        let mut publications = registry.lock().await;
-        let paths = Arc::new(tokio::sync::Mutex::new(publications.active.clone()));
-        publications
-            .snapshots
-            .retain(|snapshot| snapshot.strong_count() > 0);
-        publications.snapshots.push(Arc::downgrade(&paths));
-        paths
-    };
-    StatusSnapshot { registry, paths }
-}
-
-impl StatusSnapshot {
-    pub(super) async fn finish(self) -> HashSet<PathBuf> {
-        // Creation and registration share this lock. A status scan cannot
-        // finish in the gap after exclusive creation but before ownership.
-        let _publications = self.registry.lock().await;
-        self.paths.lock().await.clone()
-    }
-}
-
-struct Publication {
-    registry: Registry,
-    path: PathBuf,
-}
-
-impl Drop for Publication {
-    fn drop(&mut self) {
-        // The guard lives only in the blocking publication owner, including
-        // cleanup. An async caller dropping its request cannot release it early.
-        self.registry.blocking_lock().active.remove(&self.path);
-    }
-}
-
-fn owned_temporary(
-    registry: &Registry,
-    builder: &tempfile::Builder<'_, '_>,
-    parent: &Path,
-) -> io::Result<(NamedTempFile, Publication)> {
-    // Only this physical worktree is held during acquisition. A blocked
-    // filesystem must not stall status reads for an unrelated repository.
-    let mut publications = registry.blocking_lock();
-    let temporary = builder.tempfile_in(parent)?;
-    let path = temporary.path().to_owned();
-    publications.active.insert(path.clone());
-    publications.snapshots.retain(|snapshot| {
-        if let Some(paths) = snapshot.upgrade() {
-            paths.blocking_lock().insert(path.clone());
-            true
-        } else {
-            false
-        }
-    });
-    Ok((
-        temporary,
-        Publication {
-            registry: registry.clone(),
-            path,
-        },
-    ))
-}
+use crate::file_publications::{Registry, owned_temporary, registry};
 
 pub(super) async fn write(root: PathBuf, path: String, bytes: Vec<u8>) -> Result<usize> {
     let root = tokio::fs::canonicalize(root).await?;
@@ -225,6 +132,7 @@ fn cleanup(file: NamedTempFile, failure: io::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_publications::status_snapshot;
 
     #[test]
     fn a_held_publication_registry_does_not_block_another_worktree() -> io::Result<()> {
@@ -234,11 +142,14 @@ mod tests {
         let first = PathBuf::from("held-worktree");
         let other = PathBuf::from("independent-worktree");
         let registry = runtime.block_on(registry(&first));
-        let held = registry.blocking_lock();
+        let held = registry.creating.blocking_lock();
         runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(1), status_snapshot(&other))
-                .await
-                .map_err(io::Error::other)
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                crate::file_publications::status_snapshot(&other),
+            )
+            .await
+            .map_err(io::Error::other)
         })?;
         drop(held);
         Ok(())

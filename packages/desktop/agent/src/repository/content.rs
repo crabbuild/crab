@@ -11,6 +11,7 @@ pub(crate) mod diff;
 mod materialize;
 mod publication;
 mod restore;
+mod workspace;
 pub(crate) use restore::Restoration;
 mod sqlite;
 pub(crate) use materialize::Dehydration;

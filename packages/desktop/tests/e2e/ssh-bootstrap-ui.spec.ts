@@ -94,7 +94,7 @@ test("desktop SSH connection opens and reads a real logical large file through t
     expect(readFileSync(path.join(source, file))).toEqual(content);
     expect(git(["show", `:${file}`])).toEqual(pointer);
     await page.screenshot({ path: test.info().outputPath("ssh-large-file-materialized.png") });
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and materialized", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Back to preview", exact: true }).click();
     await page.locator(`[role="treeitem"][data-item-path="${cancelledFile}"]`).click();

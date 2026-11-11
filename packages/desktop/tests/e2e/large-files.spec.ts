@@ -307,7 +307,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(git(["show", ":lfs.safetensors"])).toEqual(pointers.get("lfs.safetensors"));
     git(["diff", "--exit-code", "--", "staged.safetensors", "lfs.safetensors"]);
     await expect(page.getByText("2 hydrated", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(2);
     await expect(page.getByText("Verified and materialized", { exact: true }).first()).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("materialized-lfs-and-crab.png") });
@@ -358,7 +358,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     if (process.platform !== "win32") expect(statSync(path.join(source, "lfs.safetensors")).mode & 0o100).toBe(0o100);
     expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(untouched);
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(3);
     await expect(page.getByText("3 of 3 files materialized", { exact: true })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("bulk-crab-lfs-hydration.png") });
@@ -373,7 +373,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     const partial = page.getByText("1 of 2 files materialized", { exact: true });
     await expect(partial.locator("..").getByText("Materialization failed", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
@@ -409,7 +409,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyPointer);
     expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
     expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     const stopped = page.getByText("1 of 3 files dehydrated", { exact: true });
     await expect(stopped.locator("..").getByText("Dehydration failed", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();

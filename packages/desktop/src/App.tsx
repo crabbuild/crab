@@ -560,6 +560,8 @@ function Shell() {
         onShowOverview={() => window.dispatchEvent(new CustomEvent("crab:show-repository-overview"))}
         terminalActive={terminalActive}
         onOpenTerminal={openTerminal}
+        activityDrawerOpen={drawerOpen}
+        onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
         onSpawnAgentTerminal={handleSpawnAgentTerminal}
         workspaceName={workspaceActive ? (getActiveWorkspace(state)?.name ?? null) : null}
         workspaceRepos={workspaceActive ? activeWorkspaceRepos : undefined}
@@ -581,8 +583,6 @@ function Shell() {
               repo={active}
               restoreEntry={nav.restoreEntry}
               onNavigate={handleViewChanged}
-              activityDrawerOpen={drawerOpen}
-              onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
             />
           ) : nav.current?.view === "settings" ? (
             <SettingsView />

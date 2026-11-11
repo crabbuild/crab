@@ -215,6 +215,7 @@ impl From<crate::AgentError> for RpcError {
             | E::Yaml(_)
             | E::Shared(_)
             | E::Cleanup { .. }
+            | E::PublicationCleanup { .. }
             | E::Preview { .. }
             | E::Other(_) => (1000, None),
             #[cfg(unix)]

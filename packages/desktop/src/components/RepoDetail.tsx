@@ -44,10 +44,6 @@ interface RepoDetailProps {
   repo: OpenRepo;
   restoreEntry?: NavEntry;
   onNavigate?: (entry: NavEntry) => void;
-  /** Whether the activity drawer is open. */
-  activityDrawerOpen?: boolean;
-  /** Toggle the activity drawer. */
-  onToggleActivityDrawer?: () => void;
 }
 
 /**
@@ -59,7 +55,7 @@ interface RepoDetailProps {
  * render editor tabs (path+rev) and diff tabs (path+base/head) side
  * by side. That mirrors VS Code's mixed "editor group" behaviour.
  */
-export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
+export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) {
   const sessionManager = useSession();
   const sessionKey = repositoryKey(repo);
   const defaultView = isStorageRepositoryUrl(repo.path ?? repo.url) ? "explorer" : "dashboard";
@@ -1030,8 +1026,6 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
             upstream: branchInfo.upstream,
           } : null}
           onCommandExecuted={handleCommandExecuted}
-          activityDrawerOpen={activityDrawerOpen}
-          onToggleActivityDrawer={onToggleActivityDrawer}
         />
       </div>
       <QuickOpen

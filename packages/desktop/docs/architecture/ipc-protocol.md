@@ -177,7 +177,7 @@ Closing a file while its reader is opening drains that admission before the
 helper acknowledges `Closed`, including when `Ready` has not yet been emitted.
 
 `file_materialize {repo_id, file_id, op_id}` writes a captured working Crab or
-LFS pointer through 1 MiB ranges to a same-directory temporary file. It verifies
+LFS pointer through 1 MiB ranges to a temporary file on the target filesystem. It verifies
 the complete content identity and rechecks the working pointer before atomic
 replacement, preserving permissions and indexed pointer identities. Historical, remote and
 symlink captures cannot be materialized. The result contains `written_bytes`
@@ -190,6 +190,17 @@ missing path with an existing parent, it captures a resolved index pointer and
 rechecks the index before a no-clobber publication. A batch can publish some
 files before a cancellation or error stops it. Activity retains the count
 already published.
+
+Hydration, dehydration and index restoration share a per-worktree publication
+workspace. A native filesystem lease serializes owners across app profiles. Its
+Git-control SQLite journal uses WAL/FULL and records filesystem identities before
+payload writes. The next admitted publication recovers only exact recorded
+objects; replaced objects and unlisted children remain a visible cleanup failure.
+Cleanup never recursively deletes the workspace. Publication counts survive that
+failure. A workspace's recorded private Git ignore file prevents partial payloads
+from entering ordinary status, Stage All and dirty counts, including after a
+native restart. No global filename-prefix ignore rule is installed. These
+records authorize scratch cleanup, not transfer replay.
 
 `files_dehydrate {repo_id, paths, op_id}` verifies the exact selection before
 replacing each working file with its committed Crab or Git LFS pointer bytes.

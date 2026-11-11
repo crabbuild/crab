@@ -15,6 +15,7 @@ mod cancel;
 mod conflicts;
 mod credential_store;
 mod experiments;
+mod file_publications;
 mod forge;
 #[cfg(unix)]
 mod git_active_apply;
@@ -128,6 +129,13 @@ pub enum AgentError {
         cleanup: Box<AgentError>,
     },
 
+    #[error("published {written_bytes} bytes; cleanup failed: {cleanup}")]
+    PublicationCleanup {
+        written_bytes: u64,
+        #[source]
+        cleanup: Box<AgentError>,
+    },
+
     #[error("{context}: {source}")]
     Preview {
         context: String,
@@ -183,6 +191,15 @@ pub enum AgentError {
 pub type Result<T> = std::result::Result<T, AgentError>;
 
 impl AgentError {
+    pub(crate) fn published_bytes(&self) -> Option<u64> {
+        match self {
+            Self::PublicationCleanup { written_bytes, .. } => Some(*written_bytes),
+            Self::Shared(error) => error.published_bytes(),
+            Self::Cleanup { operation, .. } => operation.published_bytes(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
             Self::OpCancelled { .. } => true,

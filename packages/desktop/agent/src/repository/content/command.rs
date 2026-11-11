@@ -254,23 +254,18 @@ pub(super) async fn index_path(root: &Path, scope: &ReadScope) -> Result<PathBuf
     ))
 }
 
-pub(super) async fn checkout_index(
+pub(super) async fn converted_blob_to_file(
     index: &super::publication::IndexFile,
-    source_index: &Path,
-    directory: &Path,
+    private_index: &Path,
+    mut file: std::fs::File,
     scope: &ReadScope,
     mut progress: impl FnMut(u64) -> Result<()> + Send + 'static,
-) -> Result<PathBuf> {
-    tokio::fs::copy(source_index, directory.join("index")).await?;
-    scope.check()?;
-    // The physical index path comes from native Git, including its Windows
-    // spelling. Keep private checkout files inside that metadata directory.
-    let private_index = directory.join("index");
+) -> Result<()> {
     let mut command = git_command(
         &index.root,
         &["ls-files", "--stage", "-z", "--", &index.path],
     )?;
-    command.env("GIT_INDEX_FILE", &private_index);
+    command.env("GIT_INDEX_FILE", private_index);
     let selected = execute(command, scope, capture, false, None).await?;
     if !selected.status.success() {
         return Err(AgentError::Cli {
@@ -279,40 +274,31 @@ pub(super) async fn checkout_index(
         });
     }
     let entry = file_entry_at(&selected.stdout, &index.path, true)?;
-    if entry.0.as_deref() != Some(index.mode.as_str())
-        || entry.1.as_deref() != Some(index.oid.as_str())
-    {
+    if entry.0.as_deref() != Some(&index.mode) || entry.1.as_deref() != Some(&index.oid) {
         return Err(changed());
     }
-    let prefix = format!("--prefix={}/output/", directory.display());
+    let path = format!(":{}", index.path);
+    // The index expression makes Git load index-backed attributes when working
+    // attributes are absent. A raw OID with --path skips that on supported Git.
     let mut command = git_command(
         &index.root,
-        &[
-            "--no-replace-objects",
-            "checkout-index",
-            "--ignore-skip-worktree-bits",
-            &prefix,
-            "--",
-            &index.path,
-        ],
+        &["--no-replace-objects", "cat-file", "--filters", &path],
     )?;
     command.env("GIT_INDEX_FILE", private_index);
-    let output_path = directory.join("output").join(&index.path);
-    let observed = output_path.clone();
-    let observer = move || match std::fs::symlink_metadata(&observed) {
-        Ok(metadata) if metadata.is_file() => progress(metadata.len()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-        Ok(_) => Err(changed()),
+    let observed = file.try_clone()?;
+    let observer = move || progress(observed.metadata()?.len());
+    let read = move |mut stdout: std::process::ChildStdout| {
+        std::io::copy(&mut stdout, &mut file)?;
+        Ok(Vec::new())
     };
-    let output = execute(command, scope, capture, false, Some(Box::new(observer))).await?;
+    let output = execute(command, scope, read, false, Some(Box::new(observer))).await?;
     if !output.status.success() {
         return Err(AgentError::Cli {
             status: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    Ok(output_path)
+    Ok(())
 }
 
 async fn execute(

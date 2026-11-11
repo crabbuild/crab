@@ -25,10 +25,24 @@ pub(super) async fn one(
         let file = repo.files.get(&p.file.file_id).await?;
         let (_guard, source) = file.materialization(scope.clone()).await?;
         let total_bytes = source.size;
-        let written = source
-            .materialize(job.reporter(0, total_bytes, None))
-            .await?;
-        Ok(json!({ "written_bytes": written }))
+        let result = source
+            .materialize(job.reporter(0, total_bytes, Some((0, 1))))
+            .await;
+        let published = match &result {
+            Ok(bytes) => Some(*bytes),
+            Err(error) => error.published_bytes(),
+        };
+        if let Some(bytes) = published
+            && let Err(error) = crate::notify(
+                &job.out,
+                "progress/transfer",
+                job.progress(bytes, total_bytes, Some((1, 1))),
+            )
+            .await
+        {
+            tracing::error!(%error, "file publication receipt delivery failed");
+        }
+        result.map(|written| json!({ "written_bytes": written }))
     };
     job.run(state, &repo, &scope, work).await
 }
@@ -177,10 +191,14 @@ pub(super) async fn many(
                     job.reporter(processed, total, Some((published, count))),
                 )
                 .await;
-            if let Ok(bytes) = &outcome {
-                written = written.saturating_add(*bytes);
+            let published_bytes = match &outcome {
+                Ok(bytes) => Some(*bytes),
+                Err(error) => error.published_bytes(),
+            };
+            if let Some(bytes) = published_bytes {
+                written = written.saturating_add(bytes);
                 let completed_work = if matches!(direction, Direction::Restore) {
-                    *bytes
+                    bytes
                 } else {
                     source.work_bytes()
                 };

@@ -107,12 +107,25 @@ async fn ordinary(
     (directory, repo)
 }
 
-fn scratch(root: &Path) -> Vec<std::ffi::OsString> {
-    let mut names = std::fs::read_dir(root.join(".git"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .filter(|name| name.to_string_lossy().starts_with(".crab-restore-"))
-        .collect::<Vec<_>>();
+fn scratch(root: &Path) -> Vec<PathBuf> {
+    let mut names = Vec::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() && entry.file_name() != ".git" {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".crab-publication-")
+                {
+                    names.push(entry.path());
+                } else {
+                    pending.push(entry.path());
+                }
+            }
+        }
+    }
     names.sort();
     names
 }
@@ -158,7 +171,7 @@ async fn restoration_uses_the_staged_version_and_literal_paths_without_changing_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restoration_keeps_git_checkout_conversions_from_missing_working_attributes() {
-    let name = "models/deep/data[1].txt";
+    let name = "models/deep/data file[1].txt";
     let (directory, repo) = ordinary(name, b"index\ncontent\n", "*.txt text eol=crlf\n").await;
     let root = directory.path();
     let index = git(root, &["ls-files", "--stage", "-z"]);

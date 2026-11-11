@@ -1,7 +1,8 @@
-use std::io::{Read, Write};
+use std::io::Read;
 
 use super::materialize::MaterializationTarget;
-use super::publication::{CheckoutWorkspace, IndexFile, WorkingFile, unchanged_file};
+use super::publication::{IndexFile, WorkingFile};
+use super::workspace::Workspace;
 use super::*;
 
 pub(crate) struct Restoration {
@@ -18,7 +19,6 @@ struct GitRestoration {
     working: WorkingFile,
     size: u64,
     scope: ReadScope,
-    workspace: Mutex<Option<CheckoutWorkspace>>,
 }
 
 impl Restoration {
@@ -70,7 +70,6 @@ impl Restoration {
                 working,
                 size,
                 scope,
-                workspace: Mutex::new(None),
             })),
         })
     }
@@ -85,15 +84,7 @@ impl Restoration {
     pub(crate) async fn release_reader(&self) -> Result<()> {
         match &self.source {
             RestoreSource::Pointer(source) => source.release_reader().await,
-            RestoreSource::Git(source) => {
-                let directory = source.workspace.lock().await.take();
-                if let Some(directory) = directory {
-                    tokio::task::spawn_blocking(move || directory.close())
-                        .await
-                        .map_err(std::io::Error::other)??;
-                }
-                Ok(())
-            }
+            RestoreSource::Git(_) => Ok(()),
         }
     }
 
@@ -118,33 +109,29 @@ impl GitRestoration {
             working,
             size,
             scope,
-            workspace,
         } = self.as_ref();
         scope.check()?;
         working.check_metadata()?;
         let source_index = command::index_path(&index.root, scope).await?;
-        let directory_path = {
-            let mut owner = workspace.lock().await;
-            if owner.is_some() {
-                return Err(AgentError::Other(
-                    "Restore already owns a checkout workspace".into(),
-                ));
-            }
-            let parent = source_index.parent().ok_or_else(changed)?;
-            let directory = CheckoutWorkspace::new(parent)?;
-            let path = directory.path().to_owned();
-            *owner = Some(directory);
-            path
-        };
-        // Cleanup belongs to release_reader, after the job records publication.
-        // A cleanup failure must not erase a file that was actually restored.
-        async {
+        let (workspace, temporary) =
+            Workspace::create(&index.root, working.temporary_parent()?, scope).await?;
+        let (workspace, private_index) = workspace.additional_temporary().await?;
+        let result = async {
             command::verify_blob(&index.root, &index.oid, *size, scope).await?;
-            let path =
-                command::checkout_index(index, &source_index, &directory_path, scope, progress)
-                    .await?;
-            // Native Git owns checkout conversions. Verify its immutable input
-            // again before admitting converted bytes to the working tree.
+            let mut input = tokio::fs::File::open(source_index).await?;
+            let mut output = tokio::fs::File::from_std(private_index.as_file().try_clone()?);
+            tokio::io::copy(&mut input, &mut output).await?;
+            output.flush().await?;
+            command::converted_blob_to_file(
+                index,
+                private_index.path(),
+                temporary.as_file().try_clone()?,
+                scope,
+                progress,
+            )
+            .await?;
+            // Verify the immutable input again before publishing Git's converted
+            // bytes. The recorded temporary stays owned until pipe workers join.
             command::verify_blob(&index.root, &index.oid, *size, scope).await?;
             let runtime = tokio::runtime::Handle::current();
             let captured = self.clone();
@@ -155,38 +142,9 @@ impl GitRestoration {
                     scope,
                     ..
                 } = captured.as_ref();
-                let metadata = std::fs::symlink_metadata(&path)?;
-                if !metadata.is_file() {
-                    return Err(changed());
-                }
-                let mut file = std::fs::File::open(&path)?;
-                let mut temporary = tempfile::NamedTempFile::new_in(working.temporary_parent()?)?;
                 let prepared = (|| {
-                    // The Git directory can be on another volume. Copy through
-                    // a bounded buffer into the publication filesystem; retain
-                    // the private source until both publication and cleanup end.
-                    let mut buffer = [0u8; 64 * 1024];
-                    let mut written = 0u64;
-                    loop {
-                        scope.check()?;
-                        let count = file.read(&mut buffer)?;
-                        if count == 0 {
-                            break;
-                        }
-                        written = written.checked_add(count as u64).ok_or_else(changed)?;
-                        if written > metadata.len() {
-                            return Err(changed());
-                        }
-                        temporary.write_all(&buffer[..count])?;
-                    }
-                    if written != metadata.len()
-                        || !unchanged_file(&metadata, &file.metadata()?)
-                        || !unchanged_file(&metadata, &std::fs::symlink_metadata(&path)?)
-                    {
-                        return Err(changed());
-                    }
-                    temporary.flush()?;
-                    temporary.as_file().sync_data()?;
+                    temporary.as_file().sync_all()?;
+                    let written = temporary.as_file().metadata()?.len();
                     let permissions = working.check(scope)?;
                     index.apply_mode(temporary.as_file(), permissions)?;
                     runtime.block_on(index.check(scope))?;
@@ -198,7 +156,8 @@ impl GitRestoration {
             .await
             .map_err(std::io::Error::other)?
         }
-        .await
+        .await;
+        workspace.finish(result).await
     }
 }
 

@@ -2,6 +2,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use super::publication::{IndexFile, WorkingFile, publish, refresh_stat_cache, unchanged_file};
+use super::workspace::Workspace;
 use super::*;
 
 pub(super) struct MaterializationTarget {
@@ -106,8 +107,11 @@ impl Dehydration {
         let destination = tokio::fs::canonicalize(&self.index.root)
             .await?
             .join(&self.index.path);
+        let parent = destination.parent().ok_or_else(changed)?.to_owned();
+        let (workspace, mut temporary) =
+            Workspace::create(&self.index.root, parent, &scope).await?;
         let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let Source::Local { file, path, .. } = working.source.as_ref() else {
                 return Err(AgentError::Other(
                     "Select a hydrated working file to dehydrate".into(),
@@ -142,8 +146,6 @@ impl Dehydration {
             })?;
             scope.check()?;
 
-            let parent = path.parent().ok_or_else(changed)?;
-            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
             let prepared = (|| {
                 temporary.write_all(&self.bytes)?;
                 temporary.flush()?;
@@ -173,7 +175,9 @@ impl Dehydration {
             Ok(written)
         })
         .await
-        .map_err(std::io::Error::other)?
+        .map_err(|error| AgentError::Io(std::io::Error::other(error)))
+        .and_then(|result| result);
+        workspace.finish(result).await
     }
 }
 
@@ -264,6 +268,21 @@ impl FileSource {
     ) -> Result<u64> {
         let runtime = tokio::runtime::Handle::current();
         let scope = self.scope();
+        let Source::Pointer {
+            target: Some(target),
+            ..
+        } = self.source.as_ref()
+        else {
+            return Err(AgentError::Other(
+                "only a captured working pointer can be materialized".into(),
+            ));
+        };
+        let (workspace, mut temporary) = Workspace::create(
+            &target.working.root,
+            target.working.temporary_parent()?,
+            &scope,
+        )
+        .await?;
         // The blocking owner retains the tempfile, hasher and range source.
         // Cancellation joins it before acknowledging cleanup or releasing pins.
         let result = tokio::task::spawn_blocking(move || {
@@ -280,7 +299,6 @@ impl FileSource {
             let working = &target.working;
             self.scope.check()?;
             working.check_metadata()?;
-            let mut temporary = tempfile::NamedTempFile::new_in(working.temporary_parent()?)?;
             let prepared = (|| {
                 let mut hasher = identity.hasher();
                 let mut written = 0;
@@ -330,8 +348,12 @@ impl FileSource {
             Ok(written)
         })
         .await
-        .map_err(std::io::Error::other)?;
-        result.map_err(|error| scope.record(error))
+        .map_err(|error| AgentError::Io(std::io::Error::other(error)))
+        .and_then(|result| result);
+        workspace
+            .finish(result)
+            .await
+            .map_err(|error| scope.record(error))
     }
 }
 

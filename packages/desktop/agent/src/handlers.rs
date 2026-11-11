@@ -2482,7 +2482,7 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
 async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let physical_root = tokio::fs::canonicalize(&work_dir).await?;
-    let publications = file_write::status_snapshot(&physical_root).await;
+    let publications = crate::file_publications::status_snapshot(&physical_root).await;
     let out = crate::shellout::git_command()?
         .args(["status", "--porcelain=v1", "-z", "-uall"])
         .current_dir(&work_dir)

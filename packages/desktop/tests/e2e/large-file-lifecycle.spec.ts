@@ -95,7 +95,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     expect(readFileSync(path.join(source, "untracked.bin"))).toEqual(dirty);
     expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
     await page.screenshot({ path: test.info().outputPath("whole-file-restore-selected.png") });
-    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     await expect(page.getByText("Verified and restored", { exact: true })).toHaveCount(3);
     await expect(page.getByText("2 of 2 files restored", { exact: true })).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("whole-file-restore-activity.png") });

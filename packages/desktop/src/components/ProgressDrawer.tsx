@@ -123,6 +123,7 @@ export function ProgressDrawer({ open, onClose }: Props) {
 
   return (
     <div
+      id="activity-drawer"
       className={clsx(
         "fixed inset-x-0 bottom-0 z-40 flex transition-transform duration-200",
         open ? "translate-y-0" : "translate-y-full",
@@ -414,6 +415,7 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
         {expanded ? <ChevronDown size={9} className="text-gx-muted" /> : <ChevronRight size={9} className="text-gx-muted" />}
       </button>
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
+        {job.status === "interrupted" && <p>Last recorded progress</p>}
         <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
         {transfer.files_published != null && transfer.files_total != null && (
           <p>{transfer.files_published} of {transfer.files_total} files {completed}</p>

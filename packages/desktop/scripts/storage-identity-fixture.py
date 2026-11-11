@@ -40,10 +40,11 @@ def stop(server: subprocess.Popen) -> None:
 
 
 def proxy(port: int) -> http.server.ThreadingHTTPServer:
-    counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0}
+    counts = {"get": 0, "head": 0, "writes": 0, "blocked": 0, "stream_blocked": 0, "streamed_bytes": 0}
     gate = threading.Event()
     gate.set()
     paused_path = None
+    streaming = False
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -58,10 +59,15 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
         do_PUT = do_POST = do_DELETE = do_PATCH = reject
 
         def forward(self):
-            nonlocal paused_path
-            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_pause_lfs", "/__fixture_release"):
+            nonlocal paused_path, streaming
+            if self.path in ("/__fixture_stats", "/__fixture_pause", "/__fixture_pause_lfs", "/__fixture_stream_lfs", "/__fixture_stream_crab", "/__fixture_release"):
                 if self.path in ("/__fixture_pause", "/__fixture_pause_lfs"):
+                    streaming = False
                     paused_path = "/lfs/objects/" if self.path.endswith("_lfs") else None
+                    gate.clear()
+                elif self.path in ("/__fixture_stream_lfs", "/__fixture_stream_crab"):
+                    streaming = True
+                    paused_path = "/lfs/objects/" if self.path.endswith("_lfs") else "/xorbs/"
                     gate.clear()
                 elif self.path == "/__fixture_release":
                     gate.set()
@@ -72,7 +78,7 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
                 self.wfile.write(body)
                 return
             counts["get" if self.command == "GET" else "head"] += 1
-            if not gate.is_set() and (paused_path is None or paused_path in self.path):
+            if not streaming and not gate.is_set() and (paused_path is None or paused_path in self.path):
                 counts["blocked"] += 1
                 try:
                     deadline = time.monotonic() + 30
@@ -108,7 +114,27 @@ def proxy(port: int) -> http.server.ThreadingHTTPServer:
                 self.send_header("Connection", "close")
                 self.end_headers()
                 if self.command != "HEAD":
-                    self.wfile.write(body)
+                    if streaming and not gate.is_set() and paused_path in self.path and len(body) > 1:
+                        prefix = min(64 * 1024, max(1, len(body) // 2))
+                        self.wfile.write(body[:prefix])
+                        self.wfile.flush()
+                        counts["streamed_bytes"] += prefix
+                        counts["stream_blocked"] += 1
+                        try:
+                            deadline = time.monotonic() + 60
+                            while not gate.wait(0.05):
+                                readable, _, _ = select.select([self.connection], [], [], 0)
+                                if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                                    self.close_connection = True
+                                    return
+                                if time.monotonic() >= deadline:
+                                    self.close_connection = True
+                                    return
+                        finally:
+                            counts["stream_blocked"] -= 1
+                        self.wfile.write(body[prefix:])
+                    else:
+                        self.wfile.write(body)
                 self.close_connection = True
             finally:
                 backend.close()

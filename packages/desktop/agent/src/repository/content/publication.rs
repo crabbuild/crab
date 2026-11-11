@@ -86,67 +86,6 @@ pub(super) struct WorkingFile {
     original: Option<(std::fs::Metadata, blake3::Hash)>,
 }
 
-pub(super) struct CheckoutWorkspace {
-    directory: Option<tempfile::TempDir>,
-    path: PathBuf,
-    canonical: PathBuf,
-    metadata: std::fs::Metadata,
-}
-
-impl CheckoutWorkspace {
-    pub(super) fn new(parent: &Path) -> Result<Self> {
-        let directory = tempfile::Builder::new()
-            .prefix(".crab-restore-")
-            .tempdir_in(parent)?;
-        let path = directory.path().to_owned();
-        let metadata = std::fs::symlink_metadata(&path)?;
-        let canonical = std::fs::canonicalize(&path)?;
-        Ok(Self {
-            directory: Some(directory),
-            path,
-            canonical,
-            metadata,
-        })
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn check(&self) -> Result<()> {
-        if !same_directory(&self.metadata, &std::fs::symlink_metadata(&self.path)?)
-            || std::fs::canonicalize(&self.path)? != self.canonical
-        {
-            return Err(changed());
-        }
-        Ok(())
-    }
-
-    pub(super) fn close(mut self) -> Result<()> {
-        let identity = self.check();
-        if let Some(directory) = self.directory.take() {
-            if let Err(error) = identity {
-                let _ = directory.keep();
-                return Err(error);
-            }
-            directory.close()?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for CheckoutWorkspace {
-    fn drop(&mut self) {
-        if self.directory.is_some() && self.check().is_err() {
-            // A renamed/replaced parent can redirect path-based recursive
-            // cleanup. Retain the workspace instead of deleting another owner.
-            if let Some(directory) = self.directory.take() {
-                let _ = directory.keep();
-            }
-        }
-    }
-}
-
 impl WorkingFile {
     pub(super) fn from_bytes(
         root: PathBuf,
@@ -483,6 +422,16 @@ pub(super) fn publish<T>(
     // A successful same-filesystem publication wins a late cancellation.
     let (operation, temporary) = match prepared {
         Ok(value) => {
+            let identity = check_temporary(&temporary);
+            if let Err(error) = identity {
+                return match close_temporary(temporary) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(AgentError::Cleanup {
+                        operation: Box::new(error),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
             let result = if replace {
                 temporary.persist(path)
             } else {
@@ -504,17 +453,19 @@ pub(super) fn publish<T>(
     }
 }
 
+fn check_temporary(temporary: &tempfile::NamedTempFile) -> Result<()> {
+    let opened = temporary.as_file().metadata()?;
+    let current = std::fs::symlink_metadata(temporary.path())?;
+    if !unchanged_file(&opened, &current)
+        || std::fs::canonicalize(temporary.path())? != temporary.path()
+    {
+        return Err(changed());
+    }
+    Ok(())
+}
+
 fn close_temporary(temporary: tempfile::NamedTempFile) -> Result<()> {
-    let identity = (|| {
-        let opened = temporary.as_file().metadata()?;
-        let current = std::fs::symlink_metadata(temporary.path())?;
-        if !unchanged_file(&opened, &current)
-            || std::fs::canonicalize(temporary.path())? != temporary.path()
-        {
-            return Err(changed());
-        }
-        Ok(())
-    })();
+    let identity = check_temporary(&temporary);
     if let Err(error) = identity {
         let mut path = temporary.into_temp_path();
         path.disable_cleanup(true);
@@ -527,26 +478,6 @@ fn close_temporary(temporary: tempfile::NamedTempFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cleanup_preserves_a_replaced_checkout_workspace() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let workspace = CheckoutWorkspace::new(&root).unwrap();
-        let path = workspace.path().to_owned();
-        std::fs::write(path.join("owned"), b"owned scratch").unwrap();
-        std::fs::rename(&path, root.join("moved")).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("user-file"), b"retain user content").unwrap();
-        assert!(workspace.close().is_err());
-        assert_eq!(
-            (
-                std::fs::read(path.join("user-file")).unwrap(),
-                std::fs::read(root.join("moved/owned")).unwrap()
-            ),
-            (b"retain user content".to_vec(), b"owned scratch".to_vec())
-        );
-    }
 
     #[test]
     fn failed_publication_never_cleans_a_replaced_temporary_file() {

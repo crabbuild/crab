@@ -2,7 +2,8 @@
 
 Open **Large Files** from the activity bar to track, inspect, hydrate and
 dehydrate Crab and Git LFS files. **Files** provides previews and file details;
-**Activity** retains transfer progress and outcomes; **Settings → Storage & Cache**
+**Activity** in the app header retains transfer progress and outcomes, including
+when no repository is open; **Settings → Storage & Cache**
 manages saved storage connections, cache inspection and prefetch presets.
 
 ## Content and pointers
@@ -79,6 +80,15 @@ jobs and every active job. A history-storage error blocks new transfers and offe
 **Reload Activity** after writable storage is restored. Native chunk resume and
 network-byte accounting remain open; bytes written are not a network measurement.
 
+Hydration, dehydration and index restoration record ownership of private scratch
+files before writing payload bytes. After interruption, the next publication
+recovers matching recorded scratch. Recovery preserves foreign or replaced files
+and reports the retained path for inspection. A cleanup failure can occur after
+content was published: Activity retains that published count and reports failure.
+Interrupted counters are labeled **Last recorded progress**; check the actual
+working files before retrying. Recovery does not infer ownership from filenames
+or automatically resume an old download.
+
 ## Discard whole-file changes
 
 In **Git → Changes**, discard a file from its row, its binary/pointer card,
@@ -109,7 +119,7 @@ If repository services fail, use the visible recovery error and **Retry reopenin
 repository**. A healthy sibling repository remains usable. Reader sessions are
 revoked on recovery or storage-identity replacement; reopen details to capture
 fresh content. Cache inspection/cleanup has its own Settings controls. Editable
-cache budgets, offline retention and durable transfers are tracked as remaining
+cache budgets, offline retention and measured network accounting remain
 work, rather than implied by those controls.
 
 ## Qualification boundary
