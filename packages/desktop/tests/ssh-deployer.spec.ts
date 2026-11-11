@@ -33,8 +33,6 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   const connections = new Set<Connection>(); const children = new Set<ChildProcess>(); const descriptors = new Set<number>();
   let commands: string[]; let uploads: number; let acknowledged: number; let corrupt: boolean;
   let verifier: HostKeyVerifier;
-  let traceEnabled = false; let traceStarted = 0;
-  const trace = (event: string, value: unknown = undefined) => { if (traceEnabled) console.log("[DEBUG-intel-sftp]", JSON.stringify({ ms: Math.round(performance.now() - traceStarted), event, value })); };
   let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>; let diagnostics: string[];
   beforeEach(async () => {
     directory = await mkdtemp(path.join(process.env.CRAB_AGENT_LIVE_ROOT ?? tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
@@ -60,10 +58,10 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
         const session = accept();
         session.on("sftp", acceptSftp => bindSftp(acceptSftp()));
         session.on("exec", (acceptCommand, _reject, info) => {
-          const channel = acceptCommand(); channel.on("error", () => {}); commands.push(info.command); trace("exec", info.command.slice(0, 100));
+          const channel = acceptCommand(); channel.on("error", () => {}); commands.push(info.command);
           if (info.command === "uname -s && uname -m") { channel.write(uname); channel.exit(0); channel.end(); return; }
           if (info.command.includes("shasum") && acknowledged !== uploads) throw new Error("Hash attempted before SFTP CLOSE acknowledgement");
-          trace("shell-spawn"); const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8", ...(native ? { AWS_SESSION_TOKEN: "fixture-ambient-token" } : {}) } });
+          const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8", ...(native ? { AWS_SESSION_TOKEN: "fixture-ambient-token" } : {}) } });
           children.add(child); child.stderr.on("data", (chunk: Buffer) => { if (native) diagnostics.push(chunk.toString()); }); channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
           channel.once("close", () => {
             if (!children.has(child)) return;
@@ -72,7 +70,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
             child.once("close", () => clearTimeout(deadline));
           });
           child.once("error", () => { channel.exit(1); channel.end(); });
-          child.once("close", code => { trace("shell-close", { code }); if (native) exits.push(code); children.delete(child); channel.exit(code ?? 1); channel.end(); });
+          child.once("close", code => { if (native) exits.push(code); children.delete(child); channel.exit(code ?? 1); channel.end(); });
         });
       }));
     });
@@ -141,11 +139,11 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   }
   function deployer() {
     const store = new RemoteRuntimeStore({ packaged: false, appPath: path.join(directory, "app"), version: "2.0.0-alpha.1", cacheDirectory: path.join(directory, "cache") });
-    const instance = new AgentDeployer(store.resolve.bind(store)); instance.on("ssh:deploy-progress", event => trace("deploy", event)); return instance;
+    return new AgentDeployer(store.resolve.bind(store));
   }
   async function start(target = client) {
-    trace("ensure-start"); const channel = await deployer().ensureAgent(target, owner.signal); trace("ensure-return");
-    const output = await new Promise<string>((resolve, reject) => { let data = ""; channel.on("data", (chunk: Buffer) => { data += chunk.toString(); trace("output", chunk.length); if (data.split("owned-cli").length === 3) resolve(data); }); channel.once("error", reject); });
+    const channel = await deployer().ensureAgent(target, owner.signal);
+    const output = await new Promise<string>((resolve, reject) => { let data = ""; channel.on("data", (chunk: Buffer) => { data += chunk.toString(); if (data.split("owned-cli").length === 3) resolve(data); }); channel.once("error", reject); });
     return { channel, output };
   }
   it("uploads and starts the matching CLI/sidecar and Git helper in an immutable directory", async () => {
@@ -159,7 +157,6 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     expect({ uploads, outputs: [first.output, second.output] }).toEqual({ uploads: 2, outputs: ["owned-cli\nowned-cli\n", "owned-cli\nowned-cli\n"] }); first.channel.end(); second.channel.end();
   });
   it("streams a multi-megabyte runtime through the normal deployment boundary", async () => {
-    traceEnabled = true; traceStarted = performance.now(); trace("large-start");
     const padding = Buffer.concat([Buffer.from("#"), Buffer.alloc(2 * 1024 * 1024, 120), Buffer.from("\n")]);
     const cli = Buffer.concat([await readFile(path.join(local, "crab")), padding]);
     const agent = Buffer.concat([await readFile(path.join(local, "crab-desktop-agent")), padding]);
@@ -170,11 +167,11 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const manager = new SshSessionManager(verifier);
     try {
       await manager.connect({ id: "large", label: "Owned large runtime", host: "127.0.0.1", port: address.port, username: "fixture", authMethod: { type: "key", keyPath: identity }, forwardAgent: false, compression: false, keepAliveInterval: 15, autoReconnect: false, autoDeployAgent: false, tags: [], portForwards: [], createdAt: Date.now() });
-      trace("connected"); const connection = manager.getConnection("large"); if (!connection) throw new Error("Managed SSH connection missing");
+      const connection = manager.getConnection("large"); if (!connection) throw new Error("Managed SSH connection missing");
       const { channel, output } = await start(connection.client); channel.end();
       expect({ output, uploads, acknowledged }).toEqual({ output: "owned-cli\nowned-cli\n", uploads: 2, acknowledged: 2 });
-    } finally { trace("disconnect-start"); await manager.disconnect("large"); trace("disconnect-done"); traceEnabled = false; }
-  }, 30_000);
+    } finally { await manager.disconnect("large"); }
+  });
   it("does not start a corrupted upload and removes its own staging files", async () => {
     corrupt = true; await expect(deployer().ensureAgent(client, owner.signal)).rejects.toThrow("checksum mismatch");
     expect({ starts: commands.filter(command => command.startsWith("exec env")).length, files: await readdir(path.join(remote, ".crab/desktop/runtimes/2.0.0-alpha.1/darwin-arm64")) }).toEqual({ starts: 0, files: [] });
