@@ -8,9 +8,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   publication:
-    name: Windows publication probe
+    name: Windows restoration and scratch ownership
     runs-on: windows-2022
-    timeout-minutes: 10
+    timeout-minutes: 180
     env:
       CARGO_INCREMENTAL: 0
     defaults:
@@ -19,15 +19,12 @@ jobs:
         working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
-      - name: Set isolated probe directory
-        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-publication-probe-target" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: packages/desktop/.nvmrc
+      - name: Set isolated test directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-restoration-test-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: Prepare probe directory
-        run: mkdir -p "$CARGO_TARGET_DIR"
-      - name: Qualify publication semantics
-        run: node scripts/qualify-publication.mjs
+      - name: Test captured index restoration
+        run: cargo test --release --locked -p crab-desktop-agent repository::content::restore::tests -- --test-threads=1
+      - name: Test publication workspace ownership
+        run: cargo test --release --locked -p crab-desktop-agent repository::content::workspace::tests -- --test-threads=1
