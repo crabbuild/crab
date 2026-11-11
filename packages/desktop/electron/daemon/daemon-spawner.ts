@@ -8,10 +8,13 @@
 
 import * as net from "node:net";
 import * as fs from "node:fs";
+import * as diskFs from "original-fs";
 import * as path from "node:path";
 import { execFile, fork, spawn, type ForkOptions } from "node:child_process";
 import { promisify } from "node:util";
 import { socketAddress } from "./socket-address";
+import { DaemonClient } from "./daemon-client";
+import { normalizePath, readPidFile } from "./path-mismatch-detection";
 
 import {
 PROTOCOL_VERSION,
@@ -21,6 +24,7 @@ type HelloMessage,
 type HelloResponse,
 type DaemonRequest,
 type DaemonResponse,
+type PingResponse,
 } from "./protocol";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +67,7 @@ export class DaemonSpawner {
   private readonly socketDir: string;
   private readonly entryPath: string;
   private readonly protocolVersion: number;
+  private ensurePromise: Promise<void> | null = null;
 
   constructor(opts: DaemonSpawnerOptions) {
     this.socketDir = opts.socketDir;
@@ -333,16 +338,25 @@ export class DaemonSpawner {
    * Flow:
    * 1. probe() — is anything listening?
    * 2. If yes → healthCheck() — is it responsive?
-   * 3. If healthy → reuse (return)
+   * 3. If healthy → retire a missing idle runtime, otherwise reuse
    * 4. If not healthy or not listening → cleanupStaleSocket() → spawn()
    */
   async ensureRunning(): Promise<void> {
+    // Startup, reconnect and new-terminal requests share one retirement/spawn
+    // transaction; otherwise a disconnect can create two competing owners.
+    if (this.ensurePromise) return this.ensurePromise;
+    this.ensurePromise = this.ensureRunningOnce();
+    try { await this.ensurePromise; }
+    finally { this.ensurePromise = null; }
+  }
+
+  private async ensureRunningOnce(): Promise<void> {
     const listening = await this.probe();
 
     if (listening) {
       const healthy = await this.healthCheck();
       if (healthy) {
-        // Daemon is alive and responsive — reuse it
+        if (await this.retireMissingIdleRuntime()) return this.ensureRunningOnce();
         return;
       }
     }
@@ -355,6 +369,37 @@ export class DaemonSpawner {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  private async retireMissingIdleRuntime(): Promise<boolean> {
+    const previous = readPidFile(this.pidPath);
+    if (!previous || normalizePath(previous.entryPath) === normalizePath(this.entryPath)) return false;
+    // Electron can cache virtual ASAR entries after their bundle is deleted.
+    // The physical archive is the availability boundary for packaged runtimes.
+    const archive = previous.entryPath.match(/^(.*?\.asar)(?:[/\\]|$)/)?.[1];
+    if (diskFs.existsSync(archive ?? previous.entryPath)) return false;
+    const client = new DaemonClient({
+      socketDir: this.socketDir,
+      protocolVersion: this.protocolVersion,
+      daemonEntryPath: this.entryPath,
+      onSessionData() {}, onSessionExit() {}, onAgentStateChange() {},
+    });
+    try {
+      const health = await client.request<PingResponse>("ping");
+      // A responsive daemon may still own live PTYs. Pre-capability v2
+      // daemons require an explicit restart; never infer permission to stop them.
+      if (!health.idleShutdownSupported || health.sessions !== 0) return false;
+      const current = readPidFile(this.pidPath);
+      if (current?.pid !== previous.pid) return false;
+      const result = await client.request<{ acknowledged: boolean }>("shutdown", { killSessions: false });
+      if (!result.acknowledged) return false;
+      const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
+      while (isProcessAlive(previous.pid)) {
+        if (Date.now() >= deadline) throw new Error("Terminal service did not finish its idle restart.");
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return true;
+    } finally { client.disconnect(); }
+  }
 
   private async spawnWindows(entry: string, socketPath: string): Promise<void> {
     // libuv inherits Windows handles even with ignored stdio. The system

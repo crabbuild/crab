@@ -25,6 +25,14 @@ Ctrl+` switches between Terminal and the previous view. Navigating away keeps
 its sessions alive; agent chat terminals remain scoped to their tasks.
 Terminal layouts, scrollback, and logs stay inside the app profile. Layouts
 are isolated by repository or task, including when using a separate test profile.
+Markdown uses the editor's single Edit/Preview switch; the rendered preview has
+no nested Rendered/Source toolbar.
+
+Before opening a terminal, Crab checks the durable daemon's recorded runtime.
+If that runtime has been removed, a daemon advertising guarded idle shutdown is
+replaced only when it owns no terminals. Running terminals and older v2 daemons
+without that capability are preserved. Older daemons need one explicit shutdown
+after their terminals finish; subsequent daemons support automatic idle recovery.
 
 The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
 then More actions. Filter repositories by name or path; Escape clears the filter.

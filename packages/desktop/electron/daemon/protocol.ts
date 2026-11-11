@@ -190,6 +190,8 @@ export interface PingResponse {
   memoryUsage: number;
   protocolVersion: number;
   fdCount: number;
+  /** Older v2 daemons omit this; only advertised idle shutdown is safe to automate. */
+  idleShutdownSupported?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,8 @@ function createMockDaemonServer(
     respondToPing?: boolean;
     helloOk?: boolean;
     token?: string;
+    sessions?: number;
+    idleShutdownSupported?: boolean;
   } = {},
 ): net.Server {
   const {
@@ -68,7 +70,8 @@ function createMockDaemonServer(
             ok: true,
             payload: {
               uptime: 100,
-              sessions: 0,
+              sessions: opts.sessions ?? 0,
+              idleShutdownSupported: opts.idleShutdownSupported,
               clients: 1,
               memoryUsage: 50_000_000,
               protocolVersion: PROTOCOL_VERSION,
@@ -467,6 +470,34 @@ describe("DaemonSpawner", () => {
   // -------------------------------------------------------------------------
 
   describe("ensureRunning", () => {
+    it("shares a single spawn between concurrent startup and reconnect requests", async () => {
+      const spawner = new DaemonSpawner({ socketDir: tmpDir, entryPath: "/fake/entry.js" });
+      vi.spyOn(spawner, "probe").mockResolvedValue(false);
+      let finish: () => void = () => {};
+      const spawn = vi.spyOn(spawner, "spawn").mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+      const requests = Promise.all([spawner.ensureRunning(), spawner.ensureRunning(), spawner.ensureRunning()]);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      finish();
+      await requests;
+    });
+
+    it.each([
+      { sessions: 0, idleShutdownSupported: undefined },
+      { sessions: 1, idleShutdownSupported: true },
+    ])("preserves missing runtimes without safe idle retirement: %o", async health => {
+      const socketPath = path.join(tmpDir, `daemon-v${PROTOCOL_VERSION}.sock`);
+      fs.writeFileSync(path.join(tmpDir, `daemon-v${PROTOCOL_VERSION}.token`), "test-token");
+      fs.writeFileSync(path.join(tmpDir, `daemon-v${PROTOCOL_VERSION}.pid`), JSON.stringify({ pid: process.pid, startedAtMs: Date.now(), entryPath: path.join(tmpDir, "removed", "daemon.cjs") }));
+      const server = createMockDaemonServer(socketPath, health);
+      await waitForServer(server);
+      const spawner = new DaemonSpawner({ socketDir: tmpDir, entryPath: path.join(tmpDir, "current", "daemon.cjs") });
+      const spawn = vi.spyOn(spawner, "spawn");
+      try {
+        await spawner.ensureRunning();
+        expect(spawn).not.toHaveBeenCalled();
+      } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+    });
+
     it("reuses existing daemon when probe and healthCheck succeed", async () => {
       const socketPath = path.join(tmpDir, "daemon-v2.sock");
       const tokenPath = path.join(tmpDir, "daemon-v2.token");

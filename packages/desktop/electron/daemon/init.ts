@@ -336,7 +336,11 @@ export async function initializeDaemonSubsystem(
   const wrappedDaemonBridge = {
     ...daemonBridge,
     handleSpawn: (payload: Parameters<typeof daemonBridge.handleSpawn>[0], externalRendererId?: string) =>
-      autoRespawn.withRetryOnDisconnect(() => daemonBridge.handleSpawn(payload, externalRendererId)),
+      autoRespawn.withRetryOnDisconnect(async () => {
+        await daemonSpawner.ensureRunning();
+        await daemonClient.ensureConnected();
+        return daemonBridge.handleSpawn(payload, externalRendererId);
+      }),
     handleWrite: (id: string, data: string) =>
       autoRespawn.withRetryOnDisconnect(() => daemonBridge.handleWrite(id, data)),
     handleResize: (id: string, cols: number, rows: number) =>
@@ -350,8 +354,8 @@ export async function initializeDaemonSubsystem(
   // -------------------------------------------------------------------------
 
   // Detect and handle a path mismatch before spawning. If the PID file
-  // records a different entry path than the current one, the stale daemon
-  // is killed and its files cleaned up so ensureRunning() spawns fresh.
+  // records a different entry path, preserve live terminals. ensureRunning()
+  // can retire a missing runtime only after the daemon atomically accepts idle shutdown.
   let pathMismatchResult: PathMismatchResult;
   try {
     pathMismatchResult = detectAndHandlePathMismatch({
