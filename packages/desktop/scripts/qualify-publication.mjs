@@ -91,6 +91,10 @@ fn copied_private_index_is_visible_to_git() -> io::Result<()> {
     drop(writer);
     drop(file);
     let closed = git(&root, &["ls-files", "--stage", "-z", "--", name], Some(&private))?;
+    let relative = private.strip_prefix(&root).map_err(io::Error::other)?;
+    let selected_relative = git(&root, &["ls-files", "--stage", "-z", "--", name], Some(relative))?;
+    println!("[DEBUG-publication] relative-index={relative:?} selected={selected_relative:?}");
+    assert_eq!(selected_relative, expected, "private index differs through a repository-relative path");
     assert_eq!(closed, expected, "private index differs after closing writers");
     assert_eq!(selected?, expected, "private index differs while writers remain open");
     Ok(())
