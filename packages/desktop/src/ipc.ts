@@ -2106,12 +2106,6 @@ export const rpc = {
   status: (cwd: string, jobId = nextJobId("status")) =>
     call<{ status: number }>("status", { job_id: jobId, cwd }),
 
-  hydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("hydrate"), repo_id?: string) =>
-    call<{ status: number }>("hydrate", { job_id: jobId, cwd, patterns, repo_id }),
-
-  dehydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("dehydrate")) =>
-    call<{ status: number }>("dehydrate", { job_id: jobId, cwd, patterns }),
-
   push: (cwd: string, jobId = nextJobId("push")) =>
     call<{ status: number }>("push", { job_id: jobId, cwd }),
 

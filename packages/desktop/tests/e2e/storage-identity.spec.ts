@@ -208,6 +208,33 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(remote.requests.some(request => request.method === "files_dehydrate" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-bulk-dehydration.png") });
 
+    const paletteFile = async (label: string) => {
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
+      const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
+      await palette.getByRole("combobox").fill(label);
+      await palette.getByRole("option").filter({ hasText: label }).click();
+      await palette.getByRole("combobox").fill("lfs.safetensors");
+      await palette.getByRole("combobox").press("Enter");
+      await expect(palette).toHaveCount(0);
+    };
+    await paletteFile("Crab: Hydrate File");
+    await expect(page.getByText("Hydrated 1 file", { exact: true })).toBeVisible();
+    expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
+    await application!.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+    await paletteFile("Crab: Dehydrate File");
+    await expect(page.getByText("Dehydrated 1 file", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(directories[0], "lfs.safetensors"))).toEqual(git(directories[0], ["show", ":lfs.safetensors"]));
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
+    await page.screenshot({ path: test.info().outputPath("ssh-palette-transfers.png") });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Git", exact: true }).click();
+    await page.getByRole("button", { name: "Worktrees", exact: true }).click();
+    await page.getByRole("button", { name: "View worktree alpha-project", exact: true }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "To browse and transfer this SSH worktree" })).toBeVisible();
+    await expect(page.locator('[role="treeitem"]')).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath("ssh-auxiliary-worktree-boundary.png") });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
+
     const nested = bulkPaths.map(file => `restore/deep/${file}`);
     expect(existsSync(path.join(directories[0], "restore"))).toBe(false);
     for (const [index, file] of bulkPaths.entries()) {

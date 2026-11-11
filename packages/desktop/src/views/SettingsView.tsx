@@ -36,6 +36,7 @@ import { DiagnosticsView } from "./DiagnosticsView";
 import { HealthView } from "./HealthView";
 import { CacheSettings } from "../components/CacheSettings";
 import { useSession } from "../lib/session-context";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 
 const DARK_THEME_OPTIONS = DARK_THEMES.map((t) => ({ value: t.id, label: t.label }));
 const LIGHT_THEME_OPTIONS = LIGHT_THEMES.map((t) => ({ value: t.id, label: t.label }));
@@ -1334,20 +1335,24 @@ function StorageAndCache() {
   const { settings, update } = useSettingsEditor();
   const { profiles, add, remove } = usePrefetchProfiles();
   const activeRepo = useActiveRepo();
+  const transfers = useFileTransfers(activeRepo);
   const [newName, setNewName] = useState("");
   const [newPatterns, setNewPatterns] = useState("");
   const [runningId, setRunningId] = useState<string | null>(null);
   const [prefetchErr, setPrefetchErr] = useState<string | null>(null);
+  const [prefetchResult, setPrefetchResult] = useState<string | null>(null);
 
   async function runProfile(profileId: string, patterns: string[]) {
-    if (!activeRepo?.path) {
-      setPrefetchErr("Open a local repository to run a prefetch profile.");
+    if (!transfers.hydrate) {
+      setPrefetchErr("Open a working repository with verified file transfers to run a prefetch profile.");
       return;
     }
     setRunningId(profileId);
     setPrefetchErr(null);
+    setPrefetchResult(null);
     try {
-      await rpc.hydrate(activeRepo.path, patterns);
+      const count = await transfers.hydrate({ kind: "patterns", patterns });
+      if (count !== null) setPrefetchResult(count === 0 ? "No matching files need hydration." : `Hydrated ${count} ${count === 1 ? "file" : "files"}.`);
     } catch (e) {
       setPrefetchErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1429,6 +1434,7 @@ function StorageAndCache() {
             {prefetchErr}
           </div>
         )}
+        {prefetchResult && <div role="status" className="text-xs text-gx-muted">{prefetchResult}</div>}
 
         {profiles.length === 0 ? (
           <div className="text-xs text-gx-muted">No profiles saved yet.</div>
@@ -1448,11 +1454,11 @@ function StorageAndCache() {
                       type="button"
                       className="btn text-xs"
                       onClick={() => runProfile(p.id, p.patterns)}
-                      disabled={runningId === p.id || !activeRepo?.path}
+                      disabled={runningId !== null || !transfers.hydrate}
                       title={
-                        activeRepo?.path
+                        transfers.hydrate
                           ? "Hydrate using this profile"
-                          : "Open a local repo to run"
+                          : "Verified file transfers are unavailable"
                       }
                     >
                       {runningId === p.id ? (

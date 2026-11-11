@@ -4,7 +4,7 @@ import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { themeToTreeStyles, prepareFileTreeInput } from "@pierre/trees";
 import clsx from "clsx";
 import { Clipboard, ClipboardPaste, Clock, Copy, Download, Edit3, ExternalLink, FileX, FilePlus, FolderOpen, FolderPlus, Scissors, Trash2 } from "lucide-react";
-import { DirEntry, HydrationEntry, mainProcess, rpc } from "../ipc";
+import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
 import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
@@ -21,7 +21,7 @@ interface Props {
   /** Native working-tree transfers. An empty map disables mutation in history. */
   fileTransfers?: Partial<Record<HydrateVerb, (paths: string[]) => Promise<unknown>>>;
   onOpenFile: (path: string, entry: DirEntry) => void;
-  /** Workspace root for filesystem actions and auxiliary-worktree CLI transfers. */
+  /** Workspace root for filesystem actions. */
   workspacePath: string | undefined;
   /** Repo ID passed to file system operations for provider routing. */
   repoId?: string;
@@ -260,19 +260,12 @@ export const FileTree = memo(function FileTree({
     async (paths: string[], verb: HydrateVerb) => {
       setTransferError(null);
       try {
-        if (fileTransfers) {
-          if (verb === "dehydrate" && !await mainProcess.dialogConfirm(`Dehydrate ${paths.length} ${paths.length === 1 ? "file" : "files"}?`)) return;
-          await fileTransfers[verb]?.(paths);
-        } else if (workspacePath && verb === "hydrate") {
-          await rpc.hydrate(workspacePath, paths);
-        } else if (workspacePath) {
-          await rpc.dehydrate(workspacePath, paths);
-        }
+        await fileTransfers?.[verb]?.(paths);
       } catch (error) {
         setTransferError(error instanceof Error ? error.message : String(error));
       }
     },
-    [workspacePath, fileTransfers],
+    [fileTransfers],
   );
 
   // Context menu with full file operations.
@@ -283,13 +276,8 @@ export const FileTree = memo(function FileTree({
     ) => {
       const isDir = item.kind === "directory";
       const entry = entryByPath.get(item.path);
-      const isPointer =
-        entry?.kind === "pointer" ||
-        entry?.kind === "lfs" ||
-        isDir;
       const transferPaths = (verb: HydrateVerb) => {
-        if (!fileTransfers) return isPointer && workspacePath ? [isDir ? `${item.path}/**` : item.path] : [];
-        if (!fileTransfers[verb] || !hydrationByPath) return [];
+        if (!fileTransfers?.[verb] || !hydrationByPath) return [];
         if (isDir) {
           const prefix = `${item.path.replace(/\/$/, "")}/`;
           return Array.from(hydrationByPath.values()).filter(entry => entry.path.startsWith(prefix) && isEligible(entry, verb)).map(entry => entry.path);

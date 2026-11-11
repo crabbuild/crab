@@ -26,6 +26,7 @@ import { useFuzzySwitcherShortcut } from "./hooks/useFuzzySwitcherShortcut";
 import { useNavHistory, NavEntry } from "./hooks/useNavHistory";
 import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
 import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
+import { useFileTransfers } from "./hooks/useFileTransfers";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
 import { dismissToast, publishToast } from "./lib/toasts";
@@ -41,6 +42,7 @@ const LS_REPO_SIDEBAR = "crab.repoSidebarOpen";
 
 function Shell() {
   const active = useActiveRepo();
+  const fileTransfers = useFileTransfers(active);
   const { state, dispatch, addRepo, setMaxLogLines } = useStore();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const maxLogLines = useSetting("maxLogLines");
@@ -360,6 +362,7 @@ function Shell() {
     context: {
       repoId: active?.repo_id ?? "",
       repoPath: active?.path,
+      fileTransfers,
       currentBranch: paletteBranch,
       upstream: null,
       ahead: 0,
@@ -617,6 +620,7 @@ function Shell() {
         context={{
           repoId: active?.repo_id ?? "",
           repoPath: active?.path,
+          fileTransfers,
           currentBranch: paletteBranch,
           upstream: null,
           ahead: 0,

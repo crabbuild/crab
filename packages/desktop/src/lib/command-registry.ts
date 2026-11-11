@@ -4,6 +4,7 @@ import { publishToast } from "./toasts";
 import { recordOperation } from "./operation-history";
 import { pushUndo, executeUndo } from "./undo-stack";
 import { isStaleHunkError } from "../ipc";
+import type { SelectionTransfers } from "../hooks/useFileTransfers";
 
 // --- Types & Interfaces ---
 
@@ -24,6 +25,7 @@ export interface CommandContext {
   repoId: string;
   /** Filesystem path to the repo working directory. May be undefined for remote repos. */
   repoPath?: string;
+  fileTransfers?: SelectionTransfers;
   currentBranch: string;
   upstream: string | null;
   ahead: number;
@@ -37,6 +39,7 @@ export interface CommandContext {
 export interface CommandResult {
   success: boolean;
   message: string;
+  cancelled?: boolean;
 }
 
 export type PromptKind = "branch" | "commit" | "ref" | "choice";
@@ -183,6 +186,8 @@ export async function executeCommand(
     }
   }
 
+  // A dismissed confirmation starts no operation and must not report failure.
+  if (result.cancelled) return result;
   const durationMs = Date.now() - startTime;
 
   // Push undo entry for destructive commands on success

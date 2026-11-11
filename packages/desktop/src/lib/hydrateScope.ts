@@ -18,6 +18,11 @@ import { matchesAny } from "./glob";
 /** Verb governs which files are *eligible* for an action. */
 export type HydrateVerb = "hydrate" | "dehydrate";
 
+/** Confirm disk-heavy hydration and every verified dehydration. */
+export function requiresTransferConfirmation(verb: HydrateVerb, count: number, bytes: number): boolean {
+  return verb === "dehydrate" || bytes >= 1024 ** 3 || count >= 100;
+}
+
 /** Discriminated union of scope modes. */
 export type Scope =
   | { kind: "all" }

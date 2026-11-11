@@ -28,6 +28,7 @@ import {
 import { registerCommand } from "./command-registry";
 import type { Command, CommandContext, CommandResult } from "./command-registry";
 import { rpc } from "../ipc";
+import type { HydrateVerb, Scope } from "./hydrateScope";
 
 // --- Worktree category ---
 
@@ -250,6 +251,15 @@ const conflictCommands: Command[] = [
 
 // --- LargeFile category ---
 
+async function transferSelection(ctx: CommandContext, verb: HydrateVerb, scope?: Scope): Promise<CommandResult> {
+  const transfer = ctx.fileTransfers?.[verb];
+  if (!transfer) return { success: false, message: "Verified file transfers are unavailable for this repository" };
+  const count = await transfer(scope);
+  if (count === null) return { success: false, cancelled: true, message: "File transfer cancelled" };
+  const action = verb === "hydrate" ? "Hydrated" : "Dehydrated";
+  return { success: true, message: count === 0 ? `No selected files need ${verb === "hydrate" ? "hydration" : "dehydration"}` : `${action} ${count} ${count === 1 ? "file" : "files"}` };
+}
+
 const largeFileCommands: Command[] = [
   {
     id: "crab.track",
@@ -271,24 +281,16 @@ const largeFileCommands: Command[] = [
     label: "Crab: Hydrate All",
     category: "LargeFile",
     icon: Download,
-    isEnabled: (ctx: CommandContext) => !!ctx.repoPath,
-    execute: async (ctx: CommandContext): Promise<CommandResult> => {
-      if (!ctx.repoPath) return { success: false, message: "Local repo path required" };
-      await rpc.hydrate(ctx.repoPath, []);
-      return { success: true, message: "Hydrated all tracked files" };
-    },
+    isEnabled: (ctx: CommandContext) => !!ctx.fileTransfers?.hydrate,
+    execute: (ctx: CommandContext) => transferSelection(ctx, "hydrate"),
   },
   {
     id: "crab.dehydrate",
     label: "Crab: Dehydrate All",
     category: "LargeFile",
     icon: Upload,
-    isEnabled: (ctx: CommandContext) => !!ctx.repoPath,
-    execute: async (ctx: CommandContext): Promise<CommandResult> => {
-      if (!ctx.repoPath) return { success: false, message: "Local repo path required" };
-      await rpc.dehydrate(ctx.repoPath, []);
-      return { success: true, message: "Dehydrated all tracked files" };
-    },
+    isEnabled: (ctx: CommandContext) => !!ctx.fileTransfers?.dehydrate,
+    execute: (ctx: CommandContext) => transferSelection(ctx, "dehydrate"),
   },
   {
     id: "crab.push",
@@ -306,14 +308,13 @@ const largeFileCommands: Command[] = [
     label: "Crab: Hydrate File",
     category: "LargeFile",
     icon: Download,
-    isEnabled: (ctx: CommandContext) => !!ctx.repoPath,
+    prompt: { kind: "ref", placeholder: "Exact file path to hydrate…" },
+    isEnabled: (ctx: CommandContext) => !!ctx.fileTransfers?.hydrate,
     execute: async (ctx: CommandContext, input?: string): Promise<CommandResult> => {
       if (!input) {
         return { success: false, message: "File path is required" };
       }
-      if (!ctx.repoPath) return { success: false, message: "Local repo path required" };
-      await rpc.hydrate(ctx.repoPath, [input]);
-      return { success: true, message: `Hydrated ${input}` };
+      return transferSelection(ctx, "hydrate", { kind: "custom", paths: [input] });
     },
   },
   {
@@ -321,14 +322,13 @@ const largeFileCommands: Command[] = [
     label: "Crab: Dehydrate File",
     category: "LargeFile",
     icon: Upload,
-    isEnabled: (ctx: CommandContext) => !!ctx.repoPath,
+    prompt: { kind: "ref", placeholder: "Exact file path to dehydrate…" },
+    isEnabled: (ctx: CommandContext) => !!ctx.fileTransfers?.dehydrate,
     execute: async (ctx: CommandContext, input?: string): Promise<CommandResult> => {
       if (!input) {
         return { success: false, message: "File path is required" };
       }
-      if (!ctx.repoPath) return { success: false, message: "Local repo path required" };
-      await rpc.dehydrate(ctx.repoPath, [input]);
-      return { success: true, message: `Dehydrated ${input}` };
+      return transferSelection(ctx, "dehydrate", { kind: "custom", paths: [input] });
     },
   },
   {

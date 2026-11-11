@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Close remaining working-tree lifecycle gaps | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | The continuous edit/publish/synchronize sequence now proves exact Crab/LFS bytes, cold reconstruction, small-edit Crab deduplication and unrelated-index preservation against writable storage. Rename/removal now also preserve exact bytes, clean clone status and unrelated staging, with no additional Crab xorbs for the rename/delete push. Missing parent trees now have packaged macOS Crab/LFS restoration proof. Next qualify safe whole-file binary discard/restore. Discard must capture the raw working identity and immutable index source, verify reconstruction, and reject concurrent edits before publication; pointer-card text hunks and blind checkout do not establish that contract. Consolidate remaining palette, Settings and auxiliary-worktree transfer callers onto the verified selection owner. |
+| P0 | Safe whole-file discard/restore | Existing provider mutations, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Capture the raw working identity and immutable index source, verify reconstruction, and reject concurrent edits before publication. Cover Crab, LFS and ordinary Git binaries, executable modes, missing paths, literal names, unrelated staging and dirty editor buffers. Route Changes rows, zero-hunk pointer cards and both discard commands through that owner, with confirmation. The current pathspec checkout and pointer-card text reversal do not establish this contract; the command registry also advertises a placeholder Undo and must stop doing so unless a real inverse exists. |
 | P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -52,6 +52,96 @@ the writable RustFS qualification fixture. Extend it with safe discard and trans
 isolation. This keeps one ordered queue instead of separate feature, UI and
 platform backlogs. P1 work can reuse that fixture once its own P0 owner and
 failure behavior are qualified.
+
+### Closure order and proof boundary
+
+1. **Finish discard before widening mutations.** Extend the writable-store
+   lifecycle test with confirmed whole-file restore and a competing writer.
+   Partial text/hunk discard remains a separate anchor-validated operation.
+2. **Make Activity durable, then enforce storage policy.** Retain repository,
+   source/selection and terminal outcomes across restart. A retry must recapture
+   current authority and inventory; it must not replay a stale session or claim
+   rollback of files already published. Separate written/checked/logical work
+   from measured network bytes. Capture repository/session identity at admission
+   so queued/setup work can be cancelled before its first progress frame;
+   Activity currently derives its cancellation route from that frame.
+   Budget eviction must respect active reads,
+   staging references and explicit offline retention.
+3. **Qualify the remaining recovery consumers.** Exercise auxiliary worktrees,
+   Dashboard, Datasets, comparison/editor/media state and shared hydration counts
+   during rebind/reconnect, including background Git and jump-host cancellation.
+   Having a healthy native process is not proof that every repository recovered.
+4. **Expand P1 through those owners.** Database/output budgets, supported LFS
+   migration/locks, truthful inspection and format comparisons share the captured
+   source and operation lifecycle. Repository presets must come from canonical
+   `crab.toml` policy; user Settings presets are a separate explicit scope.
+
+Release qualification runs across these slices rather than becoming another
+feature queue: macOS/Linux/Windows, supported object providers and architectures,
+multi-GiB memory bounds, cold interruption/restart, corrupt/missing objects,
+network filesystems and published matching SSH runtime downloads. Close a row
+only after visible user-action proof; retain platform/provider limits alongside
+the result. Do not infer release completion from the local macOS package.
+
+### Auxiliary transfer consolidation
+
+The palette, Settings prefetch presets, Files/Pointer Map and auxiliary worktree
+menus now resolve current Crab/LFS inventory to exact paths and call the existing
+repository-owned `runFileTransfer`. The renderer's raw CLI hydrate/dehydrate
+wrappers and file-tree fallback are removed. Direction-specific negotiated
+capabilities disable unsupported actions. Selection transfers confirm every
+dehydration and hydration at 1 GiB/100 files; confirmation retains the original native session so
+recovery or a storage rebind cannot adopt the old intent. A dismissed palette
+confirmation reports no failure and creates no fictitious operation.
+
+Local auxiliary worktrees open a dedicated handle with the parent's selected saved
+identity and retire that handle when their panel ends, including late opens.
+The global transfer owner joins admitted work before closing it and rejects late
+intent while it drains. Initial capabilities are queried for the captured
+session: an open event can precede the panel retaining its handle, and a stale
+query cannot enable a replacement. Inventory and native errors remain visible.
+Transfer menus require that handle and its inventory; they cannot silently
+target the parent tree. Settings reports the actual published file count after
+the native terminal reply. This consolidates transfer admission and UI intent;
+durable Activity, whole-file discard and the recovery matrix above remain open.
+The agent chat's Files tab still has no native repository/source owner; its task
+worktree integration remains in advanced-workflow/recovery scope. It receives no
+raw CLI transfer fallback from the shared tree.
+Auxiliary SSH panels must not send a remote path to the local agent or display
+the parent tree as if it were that worktree. They show an explicit limitation;
+the existing **Open worktree as full workspace** action reaches the SSH Files
+workflow. Shared SSH handle leases and task-worktree source ownership remain
+recovery/advanced-workflow priorities, not qualified auxiliary transfer support.
+
+The matching unsigned macOS arm64 package passes three dedicated cases: literal
+staging/unstaging, the complete writable-store lifecycle (including palette
+hydrate/dehydrate, dismissed confirmation, Settings Crab/LFS prefetch and exact
+local auxiliary-worktree hydration), and the real two-store SSH identity/restart
+workflow. The SSH case now exercises literal single-file palette transfers and
+the visible auxiliary-panel limitation before continuing missing-parent restore,
+selected tracking and identity replacement/removal. Auxiliary hydration counts
+are awaited and inspected after publication; bytes and semantic index entries
+remain exact, and the parent tree stays unchanged.
+
+All 53 focused transfer/command/status cases pass, including multi-publisher
+close drain, late-intent rejection, failed publication cleanup, independent
+siblings, literal selection, direction gating, confirmation cancellation and
+captured-session retention. Project types, strict touched test types, production
+builds, Rust formatting, packaging and all 853 packaged asset checks pass. Native
+inputs are unchanged from the preceding qualified reconstruction owner. Evidence:
+`selection-owner-tests.log`, `selection-owner-lifecycle-qualified.log`,
+`selection-owner-ssh-qualified-final.log`, `selection-owner-preflight.json` and
+the accompanying screenshots in the external build directory. The initial GUI
+failure exposed missing auxiliary capability initialization; the long regression
+also required explicitly selecting Changes after visiting Worktrees. Those
+failures remain recorded alongside the passing runs. Cross-platform/provider
+release proof remains open.
+
+Production source grows by 98 lines: the shared selection adapter replaces
+duplicated CLI callers, and the transfer lifetime owner prevents view teardown
+from closing an admitted publisher. No second reconstruction/cache/vault path,
+new setting, dependency, native RPC or SDK API is introduced. Consolidating native
+and command completion toasts remains a UI opportunity within the Activity owner.
 
 ## Missing-directory hydration checkpoint
 

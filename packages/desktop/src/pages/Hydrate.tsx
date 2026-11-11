@@ -9,11 +9,7 @@ import { ConfirmHydrateDialog } from "../components/ConfirmHydrateDialog";
 import { HydrateScopePicker } from "../components/hydrate/HydrateScopePicker";
 import { HydrateScopePreview } from "../components/hydrate/HydrateScopePreview";
 import { formatBytes } from "../lib/format";
-import { HydrateVerb, Scope, resolveScope } from "../lib/hydrateScope";
-
-/** Auto-confirm threshold for hydrate (above this we always show the dialog). */
-const CONFIRM_BYTES_THRESHOLD = 1 * 1024 * 1024 * 1024;
-const CONFIRM_FILES_THRESHOLD = 100;
+import { HydrateVerb, Scope, requiresTransferConfirmation, resolveScope } from "../lib/hydrateScope";
 
 interface Selection {
   verb: HydrateVerb;
@@ -77,10 +73,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
     if (resolved.matched.length === 0) return;
     const selection = { verb, paths: resolved.matched.map(entry => entry.path), bytes: resolved.bytes, nativeSessionId };
-    const heavy =
-      verb === "dehydrate" ||
-      resolved.bytes >= CONFIRM_BYTES_THRESHOLD ||
-      resolved.matched.length >= CONFIRM_FILES_THRESHOLD;
+    const heavy = requiresTransferConfirmation(verb, resolved.matched.length, resolved.bytes);
     if (heavy) {
       setConfirmation(selection);
     } else {

@@ -158,6 +158,17 @@ describe("filterCommands", () => {
 });
 
 describe("executeCommand", () => {
+  it("does not announce failure or record work when confirmation is dismissed", async () => {
+    const { publishToast } = await import("../src/lib/toasts");
+    const { recordOperation } = await import("../src/lib/operation-history");
+    vi.mocked(publishToast).mockClear();
+    vi.mocked(recordOperation).mockClear();
+    registerCommand(makeCommand({ execute: async () => ({ success: false, cancelled: true, message: "Cancelled" }) }));
+    expect(await executeCommand("test.cmd", makeContext())).toEqual({ success: false, cancelled: true, message: "Cancelled" });
+    expect(publishToast).not.toHaveBeenCalled();
+    expect(recordOperation).not.toHaveBeenCalled();
+  });
+
   it("returns error for unknown command id", async () => {
     const result = await executeCommand("nonexistent", makeContext());
     expect(result.success).toBe(false);

@@ -1,4 +1,5 @@
 import { fileBuffers } from "./lib/file-buffer-store";
+import { FileTransferOwner } from "./lib/file-transfer-owner";
 import { retainNotebookRepositories } from "./lib/jupyter-ipc";
 import { invalidateFileQuerySources, retainFileQueryRepositories } from "./lib/file-query";
 import { workspaceDocuments } from "./lib/workspace-settings-store";
@@ -670,6 +671,7 @@ interface Ctx {
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
   runFileTransfer: (repoId: string, selection: FileTransfer, nativeSessionId: string, jobId?: string) => Promise<{ written_bytes: number }>;
+  closeTransferRepo: (repoId: string) => Promise<unknown>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -838,6 +840,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // destructure only actions (e.g. `const { dispatch } = useStore()`) still
   // re-render when state changes due to Context limitations, but the batched
   // progress line dispatch (100ms throttle) keeps the frequency manageable.
+  const transferOwner = useRef<FileTransferOwner>();
+  if (!transferOwner.current) transferOwner.current = new FileTransferOwner(rpc.close);
+  const closeTransferRepo = useCallback((repoId: string) => transferOwner.current!.close(repoId), []);
+
   const value = useMemo<Ctx>(
     () => ({
       state,
@@ -849,7 +855,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
-      runFileTransfer: async (repoId, selection, nativeSessionId, jobId) => {
+      runFileTransfer: (repoId, selection, nativeSessionId, jobId) => transferOwner.current!.run(repoId, async () => {
         const op = "verb" in selection ? selection.verb : "hydrate";
         const job_id = jobId ?? nextJobId(op);
         dispatch({ type: "job-start", job_id, op });
@@ -866,11 +872,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           else dispatch({ type: "job-interrupted", job_id, message: error instanceof Error ? error.message : String(error) });
           throw error;
         }
-      },
+      }),
+      closeTransferRepo,
       setMaxLogLines: (value) => dispatch({ type: "set-max-log-lines", value }),
       clearLogs: () => dispatch({ type: "clear-logs" }),
     }),
-    [state],
+    [state, closeTransferRepo],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

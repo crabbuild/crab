@@ -1,6 +1,6 @@
 // Named prefetch-pattern presets persisted in localStorage. Each
-// profile is just `{ name, patterns[] }`. One-click Hydrate runs
-// `crab hydrate` with the pattern list.
+// profile is just `{ name, patterns[] }`. Hydration resolves these
+// patterns to literal paths through the verified repository transfer owner.
 //
 // Not tied to the Settings object because profiles evolve
 // independently of typed settings — they're pure user data.

@@ -1,13 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { ChevronsDownUp, FilePlus, Filter, FolderPlus, Loader2, RefreshCw, Search } from "lucide-react";
-import { OpenRepo, useStore } from "../state";
+import { OpenRepo } from "../state";
 import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
 import { useSession, useActiveRepoKey } from "../lib/session-context";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 
 interface Props {
   repo: OpenRepo;
@@ -57,14 +58,11 @@ export const ExplorerView = memo(function ExplorerView({
 
   // Capability-based gating for file operations (create/rename/delete).
   const { canEdit } = useRepoCapabilities();
-  const { runFileTransfer } = useStore();
-  const nativeSessionId = repo.native_session_id;
-  const canHydrate = rev === null && repo.capabilities?.canHydrateSelection;
-  const canDehydrate = rev === null && repo.capabilities?.canDehydrateSelection;
+  const transfers = useFileTransfers(repo, rev === null);
   const fileTransfers = useMemo(() => ({
-    hydrate: nativeSessionId && canHydrate ? (paths: string[]) => runFileTransfer(repo.repo_id, { paths, verb: "hydrate" }, nativeSessionId) : undefined,
-    dehydrate: nativeSessionId && canDehydrate ? (paths: string[]) => runFileTransfer(repo.repo_id, { paths, verb: "dehydrate" }, nativeSessionId) : undefined,
-  }), [repo.repo_id, nativeSessionId, canHydrate, canDehydrate, runFileTransfer]);
+    hydrate: transfers.hydrate ? (paths: string[]) => transfers.hydrate!({ kind: "custom", paths }) : undefined,
+    dehydrate: transfers.dehydrate ? (paths: string[]) => transfers.dehydrate!({ kind: "custom", paths }) : undefined,
+  }), [transfers]);
 
   // Resolve the repo root filesystem path for file operations.
   // Local repos use repo.path; remote repos extract the path from repo_id.

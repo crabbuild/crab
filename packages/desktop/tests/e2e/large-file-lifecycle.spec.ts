@@ -146,16 +146,61 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], env: { ...appEnv, CRAB_CACHE_DIR: path.join(root, "cold-clone-cache") } });
     page = await application.firstWindow();
     await expect(page.getByRole("button", { name: "Repository overview", exact: true })).toContainText("clone", { timeout: 30_000 });
-    await primary().getByRole("button", { name: "Large Files", exact: true }).click();
-    await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-    await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
+    const palette = async (label: string) => {
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
+      const dialog = page.getByRole("dialog", { name: "Command palette", exact: true });
+      await dialog.getByRole("combobox").fill(label);
+      await dialog.getByRole("option").filter({ hasText: label }).click();
+      await expect(dialog).toHaveCount(0);
+    };
+    await palette("Crab: Hydrate All");
+    await expect(page.getByText("Hydrated 2 files", { exact: true })).toBeVisible();
     for (const file of files) await expect.poll(() => digest(readFileSync(path.join(clone, file))), { timeout: 40_000 }).toBe(digest(content));
     expect(git(clone, ["status", "--porcelain", "--", ...files]).toString()).toBe("");
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-cold-hydration.png") });
 
+    // Exercise the auxiliary entry points against real stored Crab/LFS content.
+    // Only the native confirmation response is scripted; transfers use the app.
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }); });
+    await palette("Crab: Dehydrate All");
+    for (const file of files) expect(readFileSync(path.join(clone, file))).toEqual(content);
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+    await palette("Crab: Dehydrate All");
+    await expect(page.getByText("Dehydrated 2 files", { exact: true })).toBeVisible();
+    for (let index = 0; index < files.length; index++) expect(readFileSync(path.join(clone, files[index]))).toEqual(pointers[index]);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
+    await page.getByPlaceholder("Name (e.g. training-subset)", { exact: true }).fill("Both large-file formats");
+    await page.getByPlaceholder("data/train/**/*.parquet\nmodels/llama-7b/*.safetensors", { exact: true }).fill("model*.bin");
+    await page.getByRole("button", { name: "Save profile", exact: true }).click();
+    await page.getByRole("button", { name: "Run", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Hydrated 2 files." })).toBeVisible();
+    for (const file of files) expect(readFileSync(path.join(clone, file))).toEqual(content);
+    await page.screenshot({ path: test.info().outputPath("ui-lifecycle-settings-prefetch.png") });
+
+    const auxiliary = path.join(root, "qualification-worktree");
+    git(clone, ["worktree", "add", "--detach", auxiliary, "HEAD"]);
+    for (let index = 0; index < files.length; index++) writeFileSync(path.join(auxiliary, files[index]), pointers[index]);
+    const auxiliaryIndex = git(auxiliary, ["ls-files", "--stage", "-z"]);
+    await primary().getByRole("button", { name: "Git", exact: true }).click();
+    await page.getByRole("button", { name: "Worktrees", exact: true }).click();
+    await page.getByRole("button", { name: "View worktree qualification-worktree", exact: true }).click();
+    for (const file of files) {
+      await page.locator(`[role="treeitem"][data-item-path="${file}"]`).click({ button: "right" });
+      await page.getByRole("button", { name: "Hydrate File", exact: true }).click();
+      await expect.poll(() => readFileSync(path.join(auxiliary, file)).equals(content), { timeout: 30_000 }).toBe(true);
+      expect(readFileSync(path.join(clone, file))).toEqual(content);
+    }
+    expect(git(auxiliary, ["ls-files", "--stage", "-z"])).toEqual(auxiliaryIndex);
+    expect(git(auxiliary, ["status", "--porcelain"]).toString()).toBe("");
+    await expect(page.getByText("2 hydrated", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("ui-lifecycle-auxiliary-worktree.png") });
+    await page.getByTitle("Close detail panel", { exact: true }).click();
+
     for (const file of files) writeFileSync(path.join(source, file), edited);
     await openSource();
     await primary().getByRole("button", { name: "Git", exact: true }).click();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
     for (const file of files) {
       const row = page.getByText(file, { exact: true }).and(page.locator(":visible")).first();
       await row.hover();
@@ -183,6 +228,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     // The Crab staging section commits chunks only. The normal composer owns
     // the remaining staged LFS edit, so explicitly unstage the sibling first.
     await primary().getByRole("button", { name: "Git", exact: true }).click();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
     await page.getByText("other.txt", { exact: true }).and(page.locator(":visible")).first().hover();
     await page.getByRole("button", { name: "Unstage other.txt", exact: true }).click();
     await page.getByRole("textbox", { name: "Commit subject", exact: true }).fill("Publish the LFS edit");
@@ -243,6 +289,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     expect(git(source, ["ls-files", "--stage", "-z", "--", "other.txt"])).toEqual(unrelated);
     await page.getByRole("button", { name: "Skip push — I'll push later", exact: true }).click();
     await primary().getByRole("button", { name: "Git", exact: true }).click();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
     for (const file of files) {
       await page.getByText(file, { exact: true }).and(page.locator(":visible")).first().hover();
       await page.getByRole("button", { name: `Stage ${file}`, exact: true }).click();

@@ -32,10 +32,11 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { OpenRepo, useStore } from "../state";
-import { DirEntry, HydrationEntry, mainProcess, rpc, StagingStats } from "../ipc";
+import { OpenRepo } from "../state";
+import { DirEntry, HydrationEntry, rpc, StagingStats } from "../ipc";
 import { formatBytes } from "../lib/format";
 import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 import { useStagingStats } from "../hooks/useStagingStats";
 import { useCrabStatus } from "../hooks/useCrabStatus";
 import { PushFlowPanel } from "./PushFlowPanel";
@@ -95,7 +96,7 @@ function getFileIcon(path: string) {
 
 export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   const crabStatus = useCrabStatus(repo.repo_id);
-  const { runFileTransfer } = useStore();
+  const fileTransfers = useFileTransfers(repo);
 
   const [tab, setTab] = useState<Tab>("files");
   const [phase, setPhase] = useState<FlowPhase>("browse");
@@ -128,6 +129,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   const commandContext = useMemo<CommandContext>(() => ({
     repoId: repo.repo_id,
     repoPath: repo.path,
+    fileTransfers,
     currentBranch: "main",
     upstream: null,
     ahead: 0,
@@ -136,7 +138,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     hasStagedChanges: false,
     activeOperation: null,
     forgeProvider: null,
-  }), [repo.repo_id, repo.path]);
+  }), [repo.repo_id, repo.path, fileTransfers]);
 
   // Toolbar actions for the Large Files view.
   const toolbarActions = useMemo<ToolbarAction[]>(() => [
@@ -172,16 +174,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     if (!contextMenu) return;
     const path = contextMenu.filePath;
     setContextMenu(null);
-    if (itemId === "crab.hydrate.file" || itemId === "crab.dehydrate.file") {
-      if (!repo.native_session_id) return;
-      const verb = itemId === "crab.dehydrate.file" ? "dehydrate" : "hydrate";
-      if (verb === "dehydrate" && !await mainProcess.dialogConfirm(`Dehydrate ${path}?`)) return;
-      try { await runFileTransfer(repo.repo_id, { verb, paths: [path] }, repo.native_session_id); }
-      catch (error) { setError(error instanceof Error ? error.message : String(error)); }
-      return;
-    }
     await executeCommand(itemId, commandContext, path);
-  }, [contextMenu, commandContext, repo.native_session_id, repo.repo_id, runFileTransfer]);
+  }, [contextMenu, commandContext]);
 
   const handleFileContextMenu = useCallback((e: React.MouseEvent, filePath: string) => {
     e.preventDefault();
@@ -537,7 +531,7 @@ function buildPointerTree(entries: PointerEntry[]): PointerTreeNode[] {
 }
 
 function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCommit?: (sha: string) => void }) {
-  const { runFileTransfer } = useStore();
+  const fileTransfers = useFileTransfers(repo);
   const [data, setData] = useState<PointerEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [limit, setLimit] = useState<50 | 100 | 250 | 500>(50);
@@ -569,12 +563,11 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
   const tree = useMemo(() => (data ? buildPointerTree(data) : []), [data]);
 
   const transfer = async (path: string, verb: HydrateVerb) => {
-    if (!repo.native_session_id || actionInProgress) return;
-    if (verb === "dehydrate" && !await mainProcess.dialogConfirm(`Dehydrate ${path}?`)) return;
+    if (!fileTransfers[verb] || actionInProgress) return;
     setActionInProgress(path);
     setErr(null);
     try {
-      await runFileTransfer(repo.repo_id, { verb, paths: [path] }, repo.native_session_id);
+      await fileTransfers[verb]?.({ kind: "custom", paths: [path] });
     } catch (error) {
       setErr(error instanceof Error ? error.message : String(error));
     } finally {
