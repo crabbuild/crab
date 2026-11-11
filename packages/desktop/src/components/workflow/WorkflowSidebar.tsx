@@ -51,9 +51,9 @@ export function WorkflowSidebar({ files, workflows, fileErrors, activeFile, link
     { title: "Used by", icon: ArrowUpRight, items: links.filter(link => link.fromFile === activeFile && link.toFile !== activeFile), file: (link: WorkflowLink) => link.toFile },
   ];
   return (
-    <aside aria-label="Workflows" className="flex w-56 shrink-0 flex-col border-r border-gx-border bg-gx-surface lg:w-64">
+    <aside aria-label="Workflows" className="flex h-full min-w-0 flex-col bg-gx-surface">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-gx-border px-3">
-        <h2 className="min-w-0 flex-1 text-xs font-medium text-gx-text">Workflows <span className="ml-1 text-gx-muted">{files.length}</span></h2>
+        <h2 className="min-w-0 flex-1 truncate text-xs font-medium text-gx-text">Workflows <span className="ml-1 text-gx-muted">{files.length}</span></h2>
         <button type="button" className="btn p-1.5" aria-label="Refresh workflows" disabled={disabled} onClick={onRefresh}><RefreshCw size={13} /></button>
         <button type="button" className="btn p-1.5" aria-label="New workflow" disabled={disabled} onClick={() => begin("create")}><Plus size={14} /></button>
       </div>

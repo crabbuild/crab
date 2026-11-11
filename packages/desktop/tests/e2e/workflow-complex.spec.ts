@@ -2,6 +2,7 @@ import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import { call, closeFixtureDaemon, packagedExecutable } from "./packaged-app";
@@ -183,6 +184,106 @@ test("workflow cancellation stops the stage process and releases the execution l
     if (stagePid) { try { process.kill(stagePid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
     await application.close();
     await closeFixtureDaemon(home);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("workflow studio resizes, retains a dismissible output dock, and runs locally with an unavailable S3 remote", async () => {
+  test.setTimeout(90_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-workflow-studio-"));
+  const repo = path.join(root, "repo"), home = path.join(root, "home");
+  mkdirSync(repo);
+  mkdirSync(home);
+  mkdirSync(path.join(repo, ".crab"));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: repo });
+  writeFileSync(path.join(repo, ".crab/local.toml"), '[remote]\nurl = "crab://workflow-fixture/local-run"\n');
+  writeFileSync(path.join(repo, "crab.yaml"), "stages:\n  example:\n    cmd: echo hello\n");
+  writeFileSync(path.join(repo, "other.workflow.yaml"), JSON.stringify({ stages: { other: {
+    cmd: { argv: [process.execPath, "-e", "require('fs').writeFileSync('result.txt','local');console.log('local-result')"] }, outs: ["result.txt"],
+  } } }));
+  writeFileSync(path.join(repo, "wait.workflow.yaml"), JSON.stringify({ stages: { wait: {
+    cmd: { argv: [process.execPath, "-e", "const fs=require('fs');console.log('waiting-for-release');setInterval(()=>{if(fs.existsSync('release')){console.error('intentional-studio-failure');process.exit(17)}},20)"] },
+  } } }));
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? "");
+    response.writeHead(403).end("storage intentionally unavailable");
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing S3 fixture listener");
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: {
+      ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache"),
+      AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture", AWS_REGION: "us-east-1", AWS_EC2_METADATA_DISABLED: "true",
+      AWS_ENDPOINT_URL_S3: `http://127.0.0.1:${address.port}`, AWS_ALLOW_HTTP: "true", AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false",
+    } });
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBeTruthy();
+    const handle = await call(page, "open_local", { repo_id: "studio", path: repo });
+    await page.evaluate(({ handle, repo }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repo } })), { handle, repo });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Data Workflows", exact: true }).click();
+    const sidebar = page.getByRole("complementary", { name: "Workflows", exact: true });
+    const listHandle = page.getByRole("separator", { name: "Resize workflow list", exact: true });
+    const beforeWidth = (await sidebar.boundingBox())!.width;
+    const divider = (await listHandle.boundingBox())!;
+    await page.mouse.move(divider.x + divider.width / 2, divider.y + divider.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(divider.x + 60, divider.y + divider.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeGreaterThan(beforeWidth + 30);
+    const output = page.getByRole("region", { name: "Workflow output", exact: true });
+    const toggle = page.getByRole("button", { name: "Toggle workflow output", exact: true });
+    await expect(output).toBeHidden();
+    await toggle.click();
+    await expect(output).toContainText("Run a workflow to see output here.");
+    const outputHandle = page.getByRole("separator", { name: "Resize workflow output", exact: true });
+    const beforeHeight = (await output.boundingBox())!.height;
+    await outputHandle.focus();
+    await outputHandle.press("ArrowUp");
+    await expect.poll(async () => (await output.boundingBox())!.height).toBeGreaterThan(beforeHeight);
+    const expandedHeight = (await output.boundingBox())!.height;
+    await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
+    await expect(output).toBeHidden();
+    await toggle.click();
+    expect(Math.abs((await output.boundingBox())!.height - expandedHeight)).toBeLessThan(3);
+    await page.getByRole("button", { name: "Status", exact: true }).click();
+    await expect(output).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "example" })).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "other.other" })).toBeHidden();
+    await page.getByRole("button", { name: "Editor", exact: true }).click();
+    await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(output).toContainText("hello");
+    await expect(output).toContainText("example: Completed");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
+    await toggle.click();
+    await expect(output).toContainText("hello");
+    await sidebar.getByRole("button").filter({ hasText: "other.workflow.yaml" }).click();
+    await page.getByRole("button", { name: "Status", exact: true }).click();
+    await expect(page.getByRole("row").filter({ hasText: "other" })).toBeVisible();
+    await page.getByRole("button", { name: "Run All", exact: true }).last().click();
+    await expect(output).toContainText("local-result");
+    expect(readFileSync(path.join(repo, "result.txt"), "utf8")).toBe("local");
+    await sidebar.getByRole("button").filter({ hasText: "wait.workflow.yaml" }).click();
+    await page.getByRole("button", { name: "Editor", exact: true }).click();
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(output).toContainText("waiting-for-release");
+    await output.getByRole("button", { name: "Hide workflow output", exact: true }).click();
+    writeFileSync(path.join(repo, "release"), "continue");
+    await expect(page.getByText("Failed", { exact: true })).toBeVisible();
+    await expect(output).toBeHidden();
+    await toggle.click();
+    await expect(output).toContainText("intentional-studio-failure");
+    expect(requests).toEqual([]);
+  } finally {
+    if (application) { await application.close(); await closeFixtureDaemon(home); }
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     rmSync(root, { recursive: true, force: true });
   }
 });

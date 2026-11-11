@@ -10,7 +10,8 @@ automatically discovered; use `pipeline.workflow.yaml` or `a.workflow.yaml`.
 The left pane lists workflow paths and stage counts. Filter the list to find a
 workflow, select it to edit, or refresh to pick up files changed outside Crab.
 An unreadable file stays in the list with an error indicator; other workflows
-remain accessible.
+remain accessible. Drag the divider beside the list to resize it, or focus the
+divider and use the arrow keys. The width is remembered between visits.
 
 - **New workflow** creates a discoverable YAML file with an example stage.
 - Hover or focus a row for **Rename** and **Delete**. Rename is available for
@@ -48,8 +49,7 @@ stdout capture contract.
 
 Changes autosave after a short delay; **Save** and `Cmd/Ctrl+S` save immediately.
 Undo/redo history belongs to the current workflow and resets when switching
-files. Output stays collapsed until a run starts, leaving more space for the
-canvas. Larger graphs also show a minimap.
+files. Larger graphs also show a minimap.
 
 ## Dependencies between workflow files
 
@@ -147,9 +147,22 @@ expanded executions belonging to that template. **Cancel** requests shutdown;
 **Stopping…** remains visible until the native process owner confirms cleanup.
 The next run can then acquire the execution lock. Conditional and frozen skips
 are counted separately from completed stages.
-The output pane opens automatically and shows command output, stage progress
-(including upstream stages in other files), and errors. Switching files clears
-the previous run display; unrelated repository output stays separate.
+The shared **Output** dock shows command output, stage progress (including
+upstream stages in other files), and errors below Editor, Status, and Experiments.
+Use **Output** in the top bar to show it, the close button to dismiss it, and
+its upper divider to resize it. Both dividers support arrow-key resizing.
+The panel remembers its height; dismissing it keeps the current run logs.
+A new run opens it automatically, but streaming output does not reopen a dock
+you dismissed during that run. Scrolling up keeps earlier logs in view; scroll
+back to the bottom to follow new output. Switching files clears the previous
+run display; unrelated repository output stays separate.
+
+**Run All** and stage runs execute locally and use local stage cache. Merely
+having a Crab/S3 remote configured does not connect to it. Workflows that
+explicitly download remote inputs still need those providers. Use the CLI for
+remote cache replay (`crab run --cache-only`) or publication
+(`crab run --cache-push`); failures of those requested remote operations remain
+visible.
 
 The **Status** tab checks stage freshness; **Experiments** manages parameterized
 runs. **Import DVC workflow** in the sidebar imports DVC pipeline definitions.

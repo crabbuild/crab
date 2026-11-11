@@ -310,25 +310,65 @@ pub struct WorkflowMigrateApplyParams {
 
 /// Compute workflow state through the same command used by terminal users.
 pub async fn workflow_status(work_dir: &Path, p: WorkflowStatusParams) -> Result<Value> {
-    let data = shellout::run_json(
-        Some(work_dir),
-        &["workflow", "status", "--json", &p.path],
-        &[],
+    let definition = workflow_get(
+        work_dir,
+        WorkflowGetParams {
+            repo_id: p.repo_id,
+            path: p.path.clone(),
+        },
     )
     .await?;
+    let workflow: WorkflowPayload = serde_json::from_value(definition)?;
+    if workflow.executions.is_empty() {
+        return Ok(json!({ "stages": [], "overall": "all_up_to_date" }));
+    }
+    // Status and execution must discover the same graph and select the same
+    // file-qualified executions, including expanded templates. A bare YAML
+    // target selects every discovered stage in the CLI status command.
+    let mut args = vec![
+        "workflow".into(),
+        "status".into(),
+        "--json".into(),
+        "--recursive".into(),
+    ];
+    args.extend(
+        workflow
+            .executions
+            .iter()
+            .map(|stage| format!("{}:{}", p.path, stage.name)),
+    );
+    let arguments: Vec<_> = args.iter().map(String::as_str).collect();
+    let data = shellout::run_json(Some(work_dir), &arguments, &[]).await?;
     let stages = data["stages"]
         .as_array()
         .ok_or_else(|| AgentError::Other("workflow status has no stage list".into()))?;
+    // The editor and Run Outdated use names local to this definition, while
+    // recursive CLI status returns names qualified by directory/workflow file.
+    let normalized = p.path.replace('\\', "/");
+    let mut parts: Vec<_> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if let Some(stem) = parts
+        .pop()
+        .and_then(|file| file.strip_suffix(".workflow.yaml"))
+    {
+        parts.push(stem);
+    }
+    let prefix = format!("{}.", parts.join("."));
     let stages: Vec<Value> = stages.iter().map(|stage| {
+        let qualified_name = stage["stage"].as_str()
+            .ok_or_else(|| AgentError::Other("workflow status has an unnamed stage".into()))?;
+        let name = qualified_name.strip_prefix(&prefix).unwrap_or(qualified_name);
         let status = match stage["state"].as_str() {
             Some("up_to_date") => "up_to_date",
             Some("never_run") => "not_run",
             _ => "outdated",
         };
-        json!({ "name": stage["stage"], "status": status,
+        Ok(json!({ "name": name, "status": status,
             "changed_deps": stage.get("changed_key").and_then(Value::as_str).into_iter().collect::<Vec<_>>(),
-            "changed_params": [], "last_run": null, "last_duration_ms": null })
-    }).collect();
+            "changed_params": [], "last_run": null, "last_duration_ms": null }))
+    }).collect::<Result<_>>()?;
     let overall = if stages.iter().all(|stage| stage["status"] == "up_to_date") {
         "all_up_to_date"
     } else if stages.iter().any(|stage| stage["status"] == "outdated") {

@@ -934,7 +934,6 @@ crab run [OPTIONS] --cmd <CMD> --name <NAME> [--deps <PATH-OR-URL>]... [--outs <
 | `--no-run-cache` | Execute commands even if a matching run-cache entry exists |
 | `--no-commit` | Execute and update lockfile without writing fresh cache entries |
 | `--cache-push` | Upload new cache entries after run |
-| `--pull-cache` | Consult remote on local miss |
 | `--no-overwrite` | Cache hit must not overwrite existing files |
 | `--keep-going` | On failure, keep running unrelated branches |
 | `--ignore-errors` | Continue all remaining stages |
@@ -1341,6 +1340,11 @@ Only when you ask. Crab gives you three modes:
 | `crab run --cache-push` | CI builders, shared workstations | After each stage commits, upload xorbs + manifest, then CAS a ref at `refs/crab/stages/<hex>`. Safe under concurrent pushes (conditional PUT). |
 | `crab workflow push-cache --all` | Backfill | Scan every local cache entry, upload whichever are not yet on the remote. Use after forgetting `--cache-push`, or when migrating from another tool. |
 
+Normal runs do not initialize repository object storage, even when a remote
+is configured. Explicit URL dependencies and `--pull` may still download
+required inputs. `--cache-push` initializes remote storage for publication;
+its credential and transport errors remain errors.
+
 On a fresh clone, `crab run --cache-only` consults the remote refs
 transparently: it reads the ref, fetches the manifest, and streams
 just the xorb ranges needed to materialize the declared outs. No
@@ -1357,7 +1361,8 @@ with `--cache-push` or backfilled via `workflow push-cache`.
 Cache-hit materialization writes via
 `.crab.tmp.<run_id>` sidecar + fsync + atomic rename:
 
-1. Fetch entry bytes (local cache → else remote via ref lookup).
+1. Fetch entry bytes from local cache. Explicit remote replay/publication
+   modes (`--cache-only` / `--cache-push`) can also look up remote refs.
 2. Fetch artifact bytes (local `.crab/cache/xorbs/` → else remote xorb ranges).
 3. For each cached out, metric, or plot:
    - If existing file/directory hashes match the entry, no-op.
