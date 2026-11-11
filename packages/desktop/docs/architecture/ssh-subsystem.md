@@ -133,6 +133,22 @@ worktree occupancy again before committing. Apply resolves the exact task branch
 to a commit and checks that the saved destination contains that commit before
 removing the remote checkout. Existing saved paths stay opaque.
 
+For a checked-out destination on Unix, Apply holds the real index lock and
+runs Git's merge in a private sparse checkout. The merge hooks project the
+result into the original checkout through Git's protected checkout and run
+there with the private index. Git owns the signing, sign-off and hook policy.
+Apply verifies the exact saved branch while the ref transaction holds HEAD,
+then publishes the ref and index before running `post-merge`. A rejected
+publication rolls back through Git's protected checkout and checks the saved
+working-tree and index state before releasing the lock.
+
+The common Git directory's `crab-desktop-active-apply` record retains the
+original index, ref OIDs, projected commit and index-lock identity when a
+writer or publication cannot be reconciled. An interrupted Apply can have a
+published ref and an old index. Recovery requires comparing the recorded and
+live ref and index states and confirming writer closure before releasing the
+matching lock and the task fence.
+
 ## Disposable task workspace ownership
 
 Creation records the task UUID, branch, canonical root, shared Git directory and

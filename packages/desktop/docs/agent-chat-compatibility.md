@@ -2352,3 +2352,54 @@ progress indistinguishable. The qualification now captures those phases and
 reports the pending RPC and completed count at timeout. A simulated timeout
 after `ping` reported `open_local` and confirmed container cleanup. The x64
 runtime gate still needs a live pass. [Desktop CI run](https://github.com/crabbuild/crab/actions/runs/42918867495).
+
+## Active SSH Apply publication candidate (2026-11-10)
+
+The previous runtime's true merge overwrote an existing ignored file in the
+target checkout. The first SSH regression shared an exclude rule with the
+source worktree, which hid the incoming file before it was staged. The corrected
+fixture stages the source before adding the rule. A paired direct run with an
+already committed incoming file confirmed the overwrite on the previous
+packaged runtime and preservation on the candidate. The candidate returned the
+checkout refusal, kept the source and released its index lock and journal.
+[Git checkout overwrite protection](https://git-scm.com/docs/git-checkout) and
+[Git's true-merge checkout](https://github.com/git/git/blob/v2.50.1/merge-ort.c#L4211-L4249).
+
+The candidate plans the merge in an empty sparse worktree using the saved
+branch's merge options. A protected checkout projects the result with a
+private index. The real target index stays locked. A prepared ref transaction
+verifies the exact saved branch before publishing, and the original checkout
+runs `post-merge` after the ref and index are installed. A same-OID HEAD switch
+aborts publication and restores the pre-Apply checkout. Two newly reproduced
+regressions established that a plain `merge-tree` plan skipped branch strategy
+options and unsigned-source rejection. Both pass with Git's merge planner.
+[Git merge options](https://git-scm.com/docs/git-config#Documentation/git-config.txt-branchltnamegtmergeOptions).
+
+All 21 scoped live SSH cases and 11 scoped Rust tests passed. A real
+`reference-transaction` hook held Git after the target ref moved and before
+the index was installed. Killing the sidecar stopped the hook and left the
+old index, candidate index lock, both OIDs and committed source available.
+A replacement sidecar refused Apply, Discard and native writer opens for the
+interrupted task. Evidence includes `apply-sparse-ssh-after.json`,
+`apply-sparse-rust-tests.json`, `apply-protected-direct-ignored-before.json`,
+`apply-protected-direct-ignored-after.json` and
+`apply-active-committed-ref-crash.json`.
+
+The merge now uses one Git porcelain operation. Git constructs and signs the
+commit while the commit hooks run in the original checkout against its private
+index. Git's result tree stays fixed across the hooks, so hook-staged edits
+remain staged for the user. The live regressions verify sign-off, SSH commit
+signing, conditional branch configuration with relative signing paths,
+`--no-verify` and a custom hook directory. The signed-merge test failed before
+the conditional configuration fix. Git initializes the private HEAD for
+reftable, which passed direct Apply on both primary and linked checkouts and
+rejected a same-OID checkout race. Direct SHA-256 Apply also passed.
+
+The final native build passed 24 selected live SSH cases and 11 scoped Rust
+tests. The unsigned macOS package matched the tested runtime hashes and its
+bundled sidecar passed the signed merge, linked reftable and ignored-file
+checks. Evidence includes `apply-reftable-ssh-final.json`,
+`apply-reftable-rust-final.json`, `apply-branch-policy-ssh-before.json` and
+`apply-protected-direct-reftable-race-after.json`. Interrupted publication
+still requires reconciling the real ref and index from the retained record.
+Local Desktop and Windows Apply publication need integration and verification.

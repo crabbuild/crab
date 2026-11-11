@@ -38,6 +38,10 @@ pub(crate) fn requires_recovery() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn retain_recovery() {
+    let _ = MUTATION.try_with(|owner| owner.unconfirmed.store(true, Ordering::Relaxed));
+}
+
 pub(crate) fn active() -> bool {
     MUTATION.try_with(|_| ()).is_ok()
 }

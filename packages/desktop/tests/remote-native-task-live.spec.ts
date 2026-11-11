@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -26,7 +26,7 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
@@ -42,17 +42,6 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       for (const binary of ["claude", "codex"]) await writeFile(path.join(bin, binary), `#!/bin/sh\nprintf '${binary} server-fixture\\n'\n`, { mode: 0o755 });
       server.env.PATH = `${bin}:/usr/bin:/bin`;
     }
-    if (mode === "apply-target-checkout-race") {
-      const git = (await run("which", ["git"])).stdout.trim();
-      await mkdir(bin);
-      await writeFile(path.join(bin, "git"), `#!/bin/sh
-if [ "$1" = merge ] && [ "$2" != --abort ] && [ "$(pwd -P)" = ${quote(repo)} ]; then
-  ${quote(git)} checkout other || exit 1
-fi
-exec ${quote(git)} "$@"
-`, { mode: 0o755 });
-      server.env.PATH = `${bin}:${server.env.PATH}`;
-    }
     // Keep temporary worktrees in this fixture; use the server account's
     // existing CLI configuration/login directories without copying credentials.
     Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
@@ -60,7 +49,8 @@ exec ${quote(git)} "$@"
     const client = await server.connect();
     const sidecarPidFile = path.join(root, "first-sidecar-pid");
     const openAgent = (recordPid = false) => new Promise<ClientChannel>((resolve, reject) => client.exec(`${recordPid ? `printf '%s\\n' "$$" > ${quote(sidecarPidFile)}; ` : ""}exec ${quote(path.join(runtime, "crab-desktop-agent"))}`, (error, stream) => error ? reject(error) : resolve(stream)));
-    const channel = await openAgent(mode === "apply-sidecar-kill");
+    const hardKill = mode.startsWith("apply-sidecar-kill");
+    const channel = await openAgent(hardKill);
     let diagnostics = ""; channel.stderr.on("data", (bytes: Buffer) => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
     const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
     const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
@@ -108,11 +98,37 @@ exec ${quote(git)} "$@"
         await orchestrator.shutdown();
         orchestrator = new Orchestrator({ persistPath, rpcRouter: router });
         task = orchestrator.getTask(task.id)!;
+        const strategy = mode === "apply-target-configured-strategy";
+        const signatures = mode === "apply-target-signature-required";
+        const signedMerge = mode === "apply-target-signed-merge";
+        const hookBypass = mode === "apply-target-hook-bypass";
+        const hookIndex = mode === "apply-target-hook-index";
+        if (strategy) {
+          await writeFile(path.join(task.worktreePath, "seed.txt"), "task conflict\n");
+          await writeFile(path.join(repo, "seed.txt"), "keep target bytes\n");
+          await run("git", ["add", "--", "seed.txt"], { cwd: repo });
+          await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "target changes"], { cwd: repo });
+          await run("git", ["config", "branch.main.mergeOptions", "-X ours"], { cwd: repo });
+        }
+        if (signatures) await run("git", ["config", "branch.main.mergeOptions", "--verify-signatures"], { cwd: repo });
+        if (hookBypass) await run("git", ["config", "branch.main.mergeOptions", "--no-verify"], { cwd: repo });
+        if (signedMerge) {
+          const key = path.join(repo, ".git", "merge-signing");
+          const allowed = path.join(repo, ".git", "allowed-signers");
+          const config = path.join(root, "main.gitconfig");
+          await run("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
+          await writeFile(allowed, `fixture@example.invalid ${await readFile(`${key}.pub`, "utf8")}`);
+          for (const [name, value] of [["gpg.format", "ssh"], ["user.signingkey", path.relative(repo, key)], ["gpg.ssh.allowedSignersFile", path.relative(repo, allowed)], ["commit.gpgSign", "true"], ["branch.main.mergeOptions", "--signoff"]]) {
+            await run("git", ["config", "--file", config, name, value], { cwd: repo });
+          }
+          await run("git", ["config", "includeIf.onbranch:main.path", config], { cwd: repo });
+        }
         const head = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout;
         const index = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
         const originalIndex = await readFile(path.resolve(task.worktreePath, index));
         await writeFile(path.join(task.worktreePath, "apply-target.txt"), "captured target bytes\n");
-        const active = mode === "apply-target-active" || mode === "apply-target-active-source-tag";
+        const overlap = mode.endsWith("-overlap");
+        const active = mode === "apply-target-active" || mode === "apply-target-active-source-tag" || mode === "apply-target-hook-rejected" || overlap || strategy || signatures || signedMerge || hookBypass || hookIndex;
         const sourceTag = mode.endsWith("-source-tag");
         if (sourceTag) await run("git", ["tag", task.branch, head.trim()], { cwd: repo });
         if (mode === "apply-target-checkout-race") await run("git", ["branch", "other"], { cwd: repo });
@@ -122,12 +138,75 @@ exec ${quote(git)} "$@"
           await run("git", ["branch", "alias-target"], { cwd: repo });
           await run("git", ["symbolic-ref", "refs/heads/main", "refs/heads/alias-target"], { cwd: repo });
         }
+        if (hookIndex) await run("git", ["config", "core.hooksPath", "test-hooks"], { cwd: repo });
+        const hooks = hookIndex ? path.join(repo, "test-hooks") : path.join(repo, ".git", "hooks");
+        const observed = path.join(root, "post-merge-state");
+        const preMerge = path.join(root, "pre-merge-state");
+        if (active || mode === "apply-target-checkout-race") {
+          await mkdir(hooks, { recursive: true });
+          await writeFile(path.join(hooks, "post-merge"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$(git rev-parse HEAD)" "$(git diff --cached --name-only)" > ${quote(observed)}
+`, { mode: 0o755 });
+        }
         if (mode === "apply-target-checkout-race") {
-          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target.*does not contain the task commit/i);
+          // Update real HEAD while Git is completing the merge. Both branches
+          // share one OID, so comparing only old commit IDs cannot detect it.
+          await writeFile(path.join(hooks, "pre-merge-commit"), `#!/bin/sh
+git --git-dir=${quote(path.join(repo, ".git"))} --work-tree=${quote(repo)} symbolic-ref HEAD refs/heads/other
+`, { mode: 0o755 });
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target.*changed before publication/i);
           expect({ active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
-            bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), status: task.status
-          }).toEqual({ active: "other", bytes: "captured target bytes\n", status: "stopped" });
+            target: (await run("git", ["rev-parse", "refs/heads/main"], { cwd: repo })).stdout,
+            other: (await run("git", ["rev-parse", "refs/heads/other"], { cwd: repo })).stdout,
+            checkout: (await run("git", ["status", "--porcelain"], { cwd: repo })).stdout,
+            postHook: existsSync(observed), bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8"), status: task.status
+          }).toEqual({ active: "other", target: head, other: head, checkout: "", postHook: false, bytes: "captured target bytes\n", status: "stopped" });
+        } else if (overlap) {
+          const file = path.join(repo, "apply-target.txt");
+          await writeFile(file, "user checkout bytes\n");
+          if (mode === "apply-target-ignored-overlap") {
+            // The exclude file is shared by both worktrees. Stage the source
+            // first so Apply sees a real incoming file to protect against.
+            await run("git", ["add", "--", "apply-target.txt"], { cwd: task.worktreePath });
+            await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+            await writeFile(path.join(repo, ".git", "info", "exclude"), "apply-target.txt\n");
+          }
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/overwrite|overwritten/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            file: await readFile(file, "utf8"), indexLock: existsSync(path.join(repo, ".git", "index.lock")),
+            journal: existsSync(path.join(repo, ".git", "crab-desktop-active-apply")), postHook: existsSync(observed)
+          }).toEqual({ head, file: "user checkout bytes\n", indexLock: false, journal: false, postHook: false });
+          await orchestrator.discardTask(task.id);
+        } else if (signatures) {
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/signature/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            file: existsSync(path.join(repo, "apply-target.txt")), postHook: existsSync(observed), source: existsSync(task.worktreePath)
+          }).toEqual({ head, file: false, postHook: false, source: true });
+          await orchestrator.discardTask(task.id);
+        } else if (mode === "apply-target-hook-rejected") {
+          await writeFile(path.join(hooks, "pre-merge-commit"), "#!/bin/sh\nprintf 'fixture rejected merge\\n' >&2\nexit 1\n", { mode: 0o755 });
+          const targetIndex = path.join(repo, ".git", "index");
+          const original = await readFile(targetIndex);
+          await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/fixture rejected merge/i);
+          expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
+            index: await readFile(targetIndex), checkout: (await run("git", ["status", "--porcelain"], { cwd: repo })).stdout,
+            postHook: existsSync(observed), bytes: await readFile(path.join(task.worktreePath, "apply-target.txt"), "utf8")
+          }).toEqual({ head, index: original, checkout: "", postHook: false, bytes: "captured target bytes\n" });
+          await orchestrator.discardTask(task.id);
         } else if (mode === "apply-target" || active || sourceTag) {
+          const prepareMerge = path.join(root, "prepare-merge-state");
+          if (hookBypass) {
+            await writeFile(path.join(hooks, "commit-msg"), `#!/bin/sh
+if [ "$(pwd -P)" = ${quote(repo)} ]; then exit 1; fi
+`, { mode: 0o755 });
+            await writeFile(path.join(hooks, "prepare-commit-msg"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$2" > ${quote(prepareMerge)}
+`, { mode: 0o755 });
+          }
+          if (active) await writeFile(path.join(hooks, "pre-merge-commit"), `#!/bin/sh
+printf '%s\\n' "$(pwd -P)" "$GIT_EDITOR" "$(git diff --cached --name-only)" > ${quote(preMerge)}
+${hookBypass ? "exit 1" : hookIndex ? "printf 'hook bytes\\n' > hook-file\ngit add -- hook-file" : ""}
+`, { mode: 0o755 });
           await orchestrator.applyTask(task.id);
           expect({ captured: task.baseBranch, active: (await run("git", ["branch", "--show-current"], { cwd: repo })).stdout.trim(),
             target: (await run("git", ["show", "main:apply-target.txt"], { cwd: repo })).stdout,
@@ -135,6 +214,24 @@ exec ${quote(git)} "$@"
             checkout: active ? await readFile(path.join(repo, "apply-target.txt"), "utf8") : existsSync(path.join(repo, "apply-target.txt")),
             status: task.status, worktree: existsSync(task.worktreePath) }).toEqual({ captured: "main", active: active ? "main" : "other", target: "captured target bytes\n", activeFiles: active ? "apply-target.txt" : "", checkout: active ? "captured target bytes\n" : false, status: "applied", worktree: false });
           if (sourceTag) expect((await run("git", ["rev-parse", `refs/tags/${task.branch}`], { cwd: repo })).stdout).toBe(head);
+          if (strategy) expect(await readFile(path.join(repo, "seed.txt"), "utf8")).toBe("keep target bytes\n");
+          if (signedMerge) {
+            await run("git", ["verify-commit", "HEAD"], { cwd: repo });
+            const { stdout: message } = await run("git", ["log", "-1", "--format=%B"], { cwd: repo });
+            expect(message).toMatch(/^Signed-off-by: .+ <[^>]+>$/m);
+          }
+          if (hookIndex) {
+            expect((await run("git", ["ls-tree", "--name-only", "HEAD", "hook-file"], { cwd: repo })).stdout).toBe("");
+            expect((await run("git", ["show", ":hook-file"], { cwd: repo })).stdout).toBe("hook bytes\n");
+          }
+          if (active) {
+            const headAfter = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+            if (hookBypass) {
+              expect(existsSync(preMerge)).toBe(false);
+              expect(await readFile(prepareMerge, "utf8")).toBe(`${repo}\nmerge\n`);
+            } else expect(await readFile(preMerge, "utf8")).toBe(`${repo}\n:\napply-target.txt\n`);
+            expect(await readFile(observed, "utf8")).toBe(`${repo}\n${headAfter}\n${hookIndex ? "hook-file" : ""}\n`);
+          }
         } else {
           await expect(orchestrator.applyTask(task.id)).rejects.toThrow(/target/i);
           // Apply drains a created conversation before backend validation;
@@ -149,15 +246,18 @@ exec ${quote(git)} "$@"
           }
           await orchestrator.discardTask(task.id);
         }
-      } else if (mode === "apply-eof" || mode === "apply-sidecar-kill") {
+      } else if (mode === "apply-eof" || hardKill) {
+        const active = mode === "apply-sidecar-kill-active";
         const worktree = task.worktreePath;
         const head = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+        const journal = path.join(repo, ".git", "crab-desktop-active-apply");
+        const targetLock = path.join(repo, ".git", "index.lock");
         const started = path.join(root, "hook-pid");
         const release = path.join(root, "release-hook");
         const late = path.join(worktree, "late.txt");
         await writeFile(path.join(worktree, "pending.txt"), "pending source bytes\n");
         await mkdir(path.join(repo, ".git", "hooks"), { recursive: true });
-        await writeFile(path.join(repo, ".git", "hooks", "pre-commit"), `#!/bin/sh
+        await writeFile(path.join(repo, ".git", "hooks", active ? "pre-merge-commit" : "pre-commit"), `#!/bin/sh
 printf '%s\\n' "$$" > ${quote(started)}
 for i in $(seq 1 300); do
   if [ -f ${quote(release)} ]; then
@@ -180,9 +280,16 @@ exit 1
             hookPid = Number((await readFile(started, "utf8")).trim());
             expect(hookPid).toBeGreaterThan(1);
           }, { timeout: 15_000 });
+          const sourceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+          if (active) {
+            const intent = JSON.parse(await readFile(path.join(journal, "intent.json"), "utf8"));
+            const owner = await stat(targetLock);
+            expect(intent).toMatchObject({ target: "refs/heads/main", old: head.trim(), source: sourceHead.trim(), lock_device: owner.dev, lock_inode: owner.ino });
+            expect((await run("git", ["show", "HEAD:pending.txt"], { cwd: worktree })).stdout).toBe("pending source bytes\n");
+          } else expect(sourceHead).toBe(head);
           const discard = { repo_id: repoId, task_id: task.id, branch: task.branch, worktree_path: worktree };
           await expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_workspace_busy" } });
-          if (mode === "apply-sidecar-kill") {
+          if (hardKill) {
             const sidecarPid = Number((await readFile(sidecarPidFile, "utf8")).trim());
             expect(sidecarPid).toBeGreaterThan(1);
             expect((await run("ps", ["-p", String(sidecarPid), "-o", "args="])).stdout.trim()).toBe(path.join(runtime, "crab-desktop-agent"));
@@ -193,12 +300,15 @@ exit 1
           await closed;
           // A separate worker can finish retiring Git after its RPC parent is
           // killed. Graceful EOF must confirm closure before the channel ends.
-          if (mode === "apply-sidecar-kill") await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
+          if (hardKill) await vi.waitFor(() => expect(hookAlive()).toBe(false), { timeout: 10_000 });
           expect({ reportedApplied: await apply, writerAlive: hookAlive(),
             source: (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout,
             target: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
             bytes: await readFile(path.join(worktree, "pending.txt"), "utf8")
-          }).toEqual({ reportedApplied: false, writerAlive: false, source: head, target: head, bytes: "pending source bytes\n" });
+          }).toEqual({ reportedApplied: false, writerAlive: false, source: sourceHead, target: head, bytes: "pending source bytes\n" });
+          if (active) {
+            expect(existsSync(targetLock) && existsSync(path.join(journal, "proposal"))).toBe(true);
+          }
           const replacement = await openAgent();
           replacement.stderr.resume();
           const replacementClosed = new Promise<void>(resolve => replacement.once("close", resolve));
@@ -363,7 +473,7 @@ wait "$child"
         expect({ status: task.status, checkpoints: await orchestrator.queryCheckpoints(task, manager => manager.listCheckpoints(task!)) }).toEqual({ status: "discarded", checkpoints: [] });
       }
       const opens = requests.mock.calls.filter(call => call[2] === "native_process_open").map(call => call[3]);
-      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-eof" || mode === "apply-sidecar-kill") expect(opens).toEqual([]);
+      if (mode === "checkpoint-stop-local" || mode === "apply-target" || mode === "apply-target-active" || mode.endsWith("-source-tag") || mode === "apply-target-checkout-race" || mode === "apply-target-configured-strategy" || mode === "apply-target-signed-merge" || mode === "apply-target-hook-bypass" || mode === "apply-target-hook-index" || mode === "apply-eof" || hardKill) expect(opens).toEqual([]);
       else expect(opens.length > 0 && opens.every(params => params && typeof params === "object" && !("env" in params) && !JSON.stringify(params).includes("client-only") && !JSON.stringify(params).includes("client-scope-only-value"))).toBe(true);
       succeeded = true;
     } finally {

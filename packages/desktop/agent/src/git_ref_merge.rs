@@ -33,7 +33,16 @@ pub(crate) fn local_branch_ref(branch: &str) -> String {
 }
 
 pub(crate) async fn current_branch_ref(work_dir: &Path) -> Result<Option<String>> {
-    let output = git_output(work_dir, &["symbolic-ref", "-q", "HEAD"]).await?;
+    symbolic_head(work_dir, &["symbolic-ref", "-q", "HEAD"]).await
+}
+
+#[cfg(unix)]
+pub(crate) async fn current_direct_branch_ref(work_dir: &Path) -> Result<Option<String>> {
+    symbolic_head(work_dir, &["symbolic-ref", "-q", "--no-recurse", "HEAD"]).await
+}
+
+async fn symbolic_head(work_dir: &Path, args: &[&str]) -> Result<Option<String>> {
+    let output = git_output(work_dir, args).await?;
     if output.status == 1 {
         return Ok(None);
     }
@@ -87,7 +96,7 @@ pub(crate) async fn branch_contains(
     is_ancestor(work_dir, source, &target).await
 }
 
-async fn is_ancestor(work_dir: &Path, source: &str, target: &str) -> Result<bool> {
+pub(crate) async fn is_ancestor(work_dir: &Path, source: &str, target: &str) -> Result<bool> {
     let ancestry = git_output(work_dir, &["merge-base", "--is-ancestor", source, target]).await?;
     match ancestry.status {
         0 => Ok(true),
@@ -215,6 +224,52 @@ async fn publish_inactive_ref(
         Some(next) => format!("update {target_ref} {next} {old}"),
         None => format!("verify {target_ref} {old}"),
     };
+    ref_transaction(
+        work_dir,
+        &format!("option no-deref\n{edit}"),
+        message,
+        async || {
+            // Git compares the old OID of a symbolic ref through its referent.
+            // Inspect the ref after prepare has locked its exact name.
+            require_direct_branch(work_dir, target_ref).await?;
+            #[cfg(unix)]
+            crate::git_active_apply::require_available(work_dir).await?;
+            Ok(!branch_is_checked_out(work_dir, target_ref).await?)
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub(crate) async fn publish_active_ref(
+    work_dir: &Path,
+    target_ref: &str,
+    old: &str,
+    next: &str,
+    message: &str,
+) -> Result<bool> {
+    let edit = format!("update HEAD {next} {old}\nupdate ORIG_HEAD {old}");
+    ref_transaction(work_dir, &edit, message, async || {
+        // Prepare locks HEAD and the branch it resolves to. Read the exact
+        // symbolic target while those locks are held, even if two refs share an OID.
+        if current_direct_branch_ref(work_dir).await?.as_deref() != Some(target_ref) {
+            return Ok(false);
+        }
+        match require_direct_branch(work_dir, target_ref).await {
+            Ok(()) => Ok(true),
+            Err(AgentError::Managed { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    })
+    .await
+}
+
+async fn ref_transaction(
+    work_dir: &Path,
+    edit: &str,
+    message: &str,
+    validate: impl AsyncFnOnce() -> Result<bool>,
+) -> Result<bool> {
     let mut command = crate::shellout::git_command();
     command
         .args(["update-ref", "--stdin", "-m", message])
@@ -225,15 +280,9 @@ async fn publish_inactive_ref(
             .ok_or_else(|| std::io::Error::other("Git reference transaction stdin unavailable"))?;
         let mut output = BufReader::new(output);
         transaction_step(&mut input, &mut output, "start\n", "start: ok").await?;
-        let prepare = format!("option no-deref\n{edit}\nprepare\n");
+        let prepare = format!("{edit}\nprepare\n");
         transaction_step(&mut input, &mut output, &prepare, "prepare: ok").await?;
-        // Git compares the old OID of a symbolic ref through its referent.
-        // Inspect the ref after prepare has locked its exact name.
-        let validation = async {
-            require_direct_branch(work_dir, target_ref).await?;
-            Ok(!branch_is_checked_out(work_dir, target_ref).await?)
-        }
-        .await;
+        let validation = validate().await;
         if matches!(validation, Ok(true)) {
             transaction_step(&mut input, &mut output, "commit\n", "commit: ok").await?;
         } else {

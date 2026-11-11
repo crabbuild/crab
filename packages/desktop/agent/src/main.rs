@@ -17,6 +17,8 @@ mod conflicts;
 mod credential_store;
 mod experiments;
 mod forge;
+#[cfg(unix)]
+mod git_active_apply;
 mod git_branches;
 mod git_commit;
 mod git_hunks;
@@ -150,6 +152,10 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 pub type SharedStdout = Arc<Mutex<tokio::io::Stdout>>;
 
 fn main() -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(result) = git_active_apply::run_if_hook() {
+        return result;
+    }
     #[cfg(unix)]
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(native_process::mutation::worker::ARG))

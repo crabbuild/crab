@@ -1874,6 +1874,8 @@ pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Va
             source: Some(Box::new(source)),
         })?;
     crate::git_ref_merge::require_direct_branch(repo_dir, &target_ref).await?;
+    #[cfg(unix)]
+    crate::git_active_apply::require_available(repo_dir).await?;
     workspace.begin_apply()?;
     let result =
         apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await;
@@ -1931,6 +1933,15 @@ async fn apply_workspace(
 
     let mut merge_commit: Option<String> = None;
     let merge_result = if current_ref.as_deref() == Some(target_ref) {
+        #[cfg(unix)]
+        {
+            merge_commit = Some(
+                crate::git_active_apply::merge(repo_dir, target_ref, &source, wt, &commit_msg)
+                    .await?,
+            );
+            Ok(String::new())
+        }
+        #[cfg(not(unix))]
         run_git_cmd(repo_dir, &["merge", &source, "--no-ff", "-m", &commit_msg]).await
     } else {
         match crate::git_ref_merge::merge_commit_without_checkout(
