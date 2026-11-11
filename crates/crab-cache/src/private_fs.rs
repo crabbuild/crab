@@ -89,6 +89,14 @@ pub(crate) fn open_database(
 }
 
 impl PinnedRoot {
+    pub(crate) fn clean_namespaces(
+        &self,
+        dry_run: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::CacheCleanReport> {
+        platform::clean_namespaces(&self.0, dry_run, cancel)
+    }
+
     pub(crate) fn clean(
         &self,
         dry_run: bool,
@@ -378,7 +386,7 @@ mod platform {
     use crate::{CacheError, Result};
 
     mod cleanup;
-    pub(super) use cleanup::clean;
+    pub(super) use cleanup::{clean, clean_namespaces};
     mod database;
     mod scan;
     pub(crate) use database::Database;
@@ -1344,6 +1352,14 @@ mod platform {
         _dry_run: bool,
         _cancel: &tokio_util::sync::CancellationToken,
         _remove: &mut super::RemovePayload<'_>,
+    ) -> Result<crate::CacheCleanReport> {
+        Err(unsupported(Path::new("cache")))
+    }
+
+    pub(super) fn clean_namespaces(
+        _root: &Directory,
+        _dry_run: bool,
+        _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<crate::CacheCleanReport> {
         Err(unsupported(Path::new("cache")))
     }

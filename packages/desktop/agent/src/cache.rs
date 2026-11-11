@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::Deserialize;
@@ -46,7 +46,27 @@ fn command(cwd: Option<&Path>, operation: Operation) -> Result<Command> {
 
 pub(crate) async fn run(cwd: Option<&Path>, operation: Operation) -> Result<Value> {
     let output = command(cwd, operation)?.output().await?;
-    reply(output, operation)
+    let data = reply(output, operation)?;
+    let Operation::Clean { .. } = operation else {
+        return Ok(data);
+    };
+    let mut report: crab_cache::CacheCleanReport = serde_json::from_value(data)?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cleaned =
+        crab_cache::clean_cache_namespaces(&content_root(), report.dry_run, &cancel).await?;
+    report.files_removed = report.files_removed.saturating_add(cleaned.files_removed);
+    report.bytes_reclaimed = report
+        .bytes_reclaimed
+        .saturating_add(cleaned.bytes_reclaimed);
+    report.busy_entries = report.busy_entries.saturating_add(cleaned.busy_entries);
+    report.unsafe_entries = report.unsafe_entries.saturating_add(cleaned.unsafe_entries);
+    // CLI already counts desktop-content as one retained subtree. Its catalogs
+    // and query workspaces remain, so do not count those descendants again.
+    Ok(serde_json::to_value(report)?)
+}
+
+pub(crate) fn content_root() -> PathBuf {
+    crab_cache::default_cache_root().join("desktop-content")
 }
 
 #[derive(Deserialize)]

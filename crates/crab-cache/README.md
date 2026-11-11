@@ -114,6 +114,13 @@ Directory guards coordinate cooperating local owners. Callers must join their
 workers before dropping a guard. Cache contents remain disposable; cleanup
 retains unknown state and does not authorize recursive deletion.
 
+Products with separate hash-named cache namespaces use `clean_cache_namespaces`.
+It retains the parent directory handle, opens each namespace beneath that
+captured parent, and applies payload cleanup through the namespace's own catalog.
+Unknown siblings, databases and workspaces remain untouched. Preview and apply
+both honor catalog leases and in-progress reservations; preview uses the existing
+private read-only SQLite snapshot and does not create or repair catalog state.
+
 For remote caches, enable `remote-client`, configure `CacheClient` authentication,
 and inspect health/capabilities before service-specific operations. Credential
 values are omitted from diagnostic `Debug` output.

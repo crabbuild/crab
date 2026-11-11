@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
@@ -15,8 +15,9 @@ interface Fixture {
 }
 
 for (const kind of ["crab", "lfs"] as const) {
-  for (const outcome of ["cancel", "native-crash", "app-crash"] as const) {
-    test(`SDK ${kind} partial response ${outcome} retries exact content`, async () => {
+  const outcomes = kind === "crab" ? ["cancel", "native-crash", "app-crash", "cleanup"] as const : ["cancel", "native-crash", "app-crash"] as const;
+  for (const outcome of outcomes) {
+    test(outcome === "cleanup" ? "SDK cache cleanup removes verified payloads and preserves retained state" : `SDK ${kind} partial response ${outcome} retries exact content`, async () => {
       const descriptor = process.env.CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE;
       test.skip(!descriptor || (outcome === "native-crash" && process.platform === "win32"), "Requires the owned storage fixture; native process lookup requires POSIX");
       test.setTimeout(120_000);
@@ -45,7 +46,7 @@ for (const kind of ["crab", "lfs"] as const) {
           for (const entry of readdirSync(directory, { withFileTypes: true })) {
             const file = path.join(directory, entry.name);
             if (entry.isDirectory()) visit(file);
-            else entries.push({ path: path.relative(cache, file), bytes: statSync(file).size });
+            else entries.push({ path: path.relative(cache, file).split(path.sep).join("/"), bytes: statSync(file).size });
           }
         };
         visit(cache);
@@ -90,6 +91,44 @@ for (const kind of ["crab", "lfs"] as const) {
         expect(repoId).toBeTruthy();
         await expect.poll(() => Boolean(epoch(repoId!))).toBe(true);
         const initialEpoch = epoch(repoId!);
+        if (outcome === "cleanup") {
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+          await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          await page.getByRole("button", { name: "Close tab", exact: true }).click();
+          // SDK payloads include decoded ranges, whose filenames are not chunk
+          // hashes. Count those alongside the shard before checking exact removal.
+          const cached = inventory().filter(entry => /^desktop-content\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs)\//.test(entry.path));
+          expect(cached.length).toBeGreaterThan(0);
+          const retained = path.join(cache, "desktop-content", "database-query", "retained.bin");
+          mkdirSync(path.dirname(retained), { recursive: true, mode: 0o700 });
+          writeFileSync(retained, "retain query state", { mode: 0o600 });
+          const nav = page.getByRole("navigation", { name: "Primary", exact: true });
+          await nav.getByRole("button", { name: "Settings", exact: true }).click();
+          await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
+          const settings = page.getByRole("region", { name: "Cache usage", exact: true });
+          await settings.getByRole("button", { name: "Preview cleanup", exact: true }).click();
+          await expect(settings.getByRole("status")).toContainText(`Would remove ${cached.length} payloads,`);
+          expect(cached.every(entry => existsSync(path.join(cache, entry.path)))).toBe(true);
+          await settings.getByRole("button", { name: "Clean cache", exact: true }).click();
+          await expect(settings.getByRole("status")).toContainText(`Removed ${cached.length} payloads,`);
+          await expect(settings.getByRole("button", { name: "Refresh usage", exact: true })).toBeEnabled();
+          await expect(settings.getByRole("alert")).toHaveCount(0);
+          expect(cached.some(entry => existsSync(path.join(cache, entry.path)))).toBe(false);
+          expect(readFileSync(retained, "utf8")).toBe("retain query state");
+          expect(inventory().some(entry => entry.path.startsWith("desktop-content/") && entry.path.endsWith("/.catalog.sqlite"))).toBe(true);
+          await settings.getByRole("status").scrollIntoViewIfNeeded();
+          await page.screenshot({ animations: "disabled", path: test.info().outputPath("sdk-cache-cleanup.png") });
+          const remaining = inventory();
+          await nav.getByRole("button", { name: "Files", exact: true }).click();
+          await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
+          await expect(page.getByText(payload.marker, { exact: false }).first()).toBeVisible();
+          const content = await call(page, "read_bytes", { repo_id: repoId, path: filename, max_bytes: payload.size + 1 });
+          expect(createHash("sha256").update(Buffer.from(String(content.bytes_b64), "base64")).digest("hex")).toBe(payload.sha256);
+          expect((await transport("stats")).writes).toBe(0);
+          writeFileSync(test.info().outputPath("sdk-cleanup-proof.json"), JSON.stringify({ cached, retainedStatePreserved: true, catalogPreserved: true, remaining, exactContentAfterCleanup: true }, null, 2));
+          return;
+        }
         const before = await transport(`stream_${kind}`);
         await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();
         await expect.poll(async () => (await transport("stats")).stream_blocked).toBeGreaterThan(0);

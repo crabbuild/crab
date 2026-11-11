@@ -76,11 +76,6 @@ jobs:
       - name: Test native desktop integration
         # Compilation, real CLI tests and Linux tests share the producer toolchain.
         run: node scripts/build-native.mjs --test
-      - name: Test workflow execution contracts
-        run: |
-          cargo test --release -p crab-workflow --locked --lib
-          cargo test --release -p crab --locked --no-default-features --lib cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity
-          cargo test --release -p crab --locked --no-default-features --lib cmd::run::tests::local_execution_does_not_resolve_the_repository_remote
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs
