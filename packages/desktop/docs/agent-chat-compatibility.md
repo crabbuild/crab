@@ -2342,3 +2342,13 @@ passed. Evidence is recorded in `selected-apply-staged-before.json` and
 The existing Claude CLI login passed real file-writing and cold-resume checks.
 The cold-resume check retained inference context across follow-up and process
 restart. Evidence is recorded in `claude-pr670-recheck.json`.
+
+## Linux runtime qualification timeout (2026-11-10)
+
+Desktop CI's x64 Linux job passed 273 native tests, then timed out in the
+AlmaLinux 8 runtime container. The ARM64 job passed. The x64 failure log ended
+after the image pull, leaving dependency installation, sidecar startup and RPC
+progress indistinguishable. The qualification now captures those phases and
+reports the pending RPC and completed count at timeout. A simulated timeout
+after `ping` reported `open_local` and confirmed container cleanup. The x64
+runtime gate still needs a live pass. [Desktop CI run](https://github.com/crabbuild/crab/actions/runs/42918867495).

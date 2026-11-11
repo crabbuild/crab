@@ -24,11 +24,14 @@ for (const [image, install] of [
   ["amazonlinux:2023", "dnf -q install -y git libstdc++ ca-certificates"],
 ]) {
   const name = `crab-runtime-${randomUUID()}`;
-  const script = `${install} </dev/null >&2
+  const script = `printf '%s\\n' 'Installing runtime dependencies' >&2
+${install} </dev/null >&2
+printf '%s\\n' 'Checking runtime versions and initializing the repository' >&2
 test "$(/runtime/crab --version)" = "crab $CRAB_RUNTIME_VERSION"
 test "$(/runtime/crab-desktop-agent --version)" = "crab-desktop-agent $CRAB_RUNTIME_VERSION"
 mkdir /proof
 git init --quiet --template= --initial-branch=main /proof
+printf '%s\\n' 'Starting the sidecar' >&2
 exec /runtime/crab-desktop-agent`;
   const args = ["run", "--init", "--platform", platform, "--name", name, "--interactive",
     "--volume", `${directory}:/runtime:ro`, "--env", `CRAB_RUNTIME_VERSION=${runtime.version}`,
@@ -47,7 +50,10 @@ exec /runtime/crab-desktop-agent`;
         child.kill("SIGTERM");
         escalation ??= setTimeout(() => child.kill("SIGKILL"), 5000);
       };
-      const deadline = setTimeout(() => stop(new Error(`${image}: runtime qualification timed out (${name})`)), 180_000);
+      const deadline = setTimeout(() => {
+        const pending = requests[completed]?.method ?? "sidecar shutdown";
+        stop(new Error(`${image}: runtime qualification timed out waiting for ${pending} after ${completed}/${requests.length} RPCs (${name})`));
+      }, 180_000);
       child.on("error", stop);
       child.stdin.on("error", stop);
       child.stderr.on("data", bytes => { diagnostics = (diagnostics + bytes.toString()).slice(-64 * 1024); });
