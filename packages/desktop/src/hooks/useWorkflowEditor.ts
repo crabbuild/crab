@@ -11,7 +11,7 @@ import {
   DagInfo,
 } from "../lib/workflow-types";
 import type { WorkflowTab } from "../components/workflow/WorkflowTabs";
-import { onAgentEvent, rpc } from "../ipc";
+import { mainProcess, onAgentEvent, rpc } from "../ipc";
 
 // Auto-save debounce delay in milliseconds.
 const AUTO_SAVE_DELAY_MS = 800;
@@ -47,7 +47,6 @@ type Action =
   | { type: "add_stage"; stage: WorkflowStage }
   | { type: "remove_stage"; name: string }
   | { type: "set_stages"; stages: WorkflowStage[] }
-  | { type: "set_dirty"; dirty: boolean }
   | { type: "run_started"; run_id: string; stages: string[] }
   | { type: "stage_status"; name: string; status: StageRunStatus; duration_ms?: number; error?: string }
   | { type: "run_output"; text: string; error?: boolean }
@@ -55,7 +54,8 @@ type Action =
   | { type: "run_done"; status: "done" | "failed" | "cancelled"; error?: string }
   | { type: "set_error"; message: string }
   | { type: "reset_run" }
-  | { type: "set_active_file"; path: string };
+  | { type: "set_files"; files: string[]; path: string | null }
+  | { type: "saved"; workflow: WorkflowDefinition };
 
 function initState(): WorkflowEditorState {
   return {
@@ -75,13 +75,14 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       return { ...state, phase: "loading", error: null };
 
     case "set_empty":
-      return { ...state, phase: "empty", workflow: null, availableFiles: action.files, error: null };
+      return { ...state, phase: "empty", workflow: null, activeFile: null, runState: null, dirty: false, availableFiles: action.files, error: null };
 
     case "loaded":
       return {
         ...state,
         phase: "editing",
         workflow: action.workflow,
+        runState: null,
         availableFiles: action.files,
         activeFile: action.workflow.path,
         dirty: false,
@@ -112,12 +113,6 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
         const deps = s.deps.map((d) => {
           if (d.kind === "stage_out" && d.value.startsWith(`${oldName}:`)) {
             return { ...d, value: `${newName}:${d.value.slice(oldName.length + 1)}` };
-          }
-          if (d.kind === "path") {
-            const colonIdx = d.value.indexOf(":");
-            if (colonIdx > 0 && d.value.slice(0, colonIdx) === oldName) {
-              return { ...d, value: `${newName}:${d.value.slice(colonIdx + 1)}` };
-            }
           }
           return d;
         });
@@ -157,9 +152,6 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
         dirty: true,
       };
     }
-
-    case "set_dirty":
-      return { ...state, dirty: action.dirty };
 
     case "run_started": {
       const stages: StageRunState[] = action.stages.map((name) => ({
@@ -229,8 +221,11 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
     case "set_error":
       return { ...state, phase: "error", error: action.message };
 
-    case "set_active_file":
-      return { ...state, activeFile: action.path };
+    case "set_files":
+      return { ...state, availableFiles: action.files, activeFile: action.path, workflow: null, dirty: false };
+
+    case "saved":
+      return state.workflow === action.workflow ? { ...state, dirty: false } : state;
 
     default:
       return state;
@@ -239,9 +234,37 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
 
 // ── Hook ────────────────────────────────────────────────────────────
 
-export function useWorkflowEditor(repoId: string) {
+export function useWorkflowEditor(repoId: string, repoPath?: string) {
   const [state, dispatch] = useReducer(reducer, undefined, initState);
   const runIdRef = useRef<string | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [catalog, setCatalog] = useState<WorkflowDefinition[]>([]);
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const lastSaved = useRef<WorkflowDefinition | null>(null);
+  const loadVersion = useRef(0);
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Serialize disk writes. A slow autosave must not overwrite a newer edit or
+  // clear its dirty flag; navigation flushes the same queue before loading.
+  const persist = useCallback(async (workflow: WorkflowDefinition) => {
+    const saved = saveQueue.current.catch(() => {}).then(() => rpc.workflowSave(repoId, workflow));
+    saveQueue.current = saved;
+    await saved;
+    lastSaved.current = workflow;
+    dispatch({ type: "saved", workflow });
+    setCatalog(files => files.map(file => file.path === workflow.path ? workflow : file));
+  }, [repoId]);
+
+  const flush = useCallback(async () => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    await saveQueue.current.catch(() => {});
+    const current = stateRef.current;
+    if (current.dirty && current.workflow && current.workflow !== lastSaved.current) await persist(current.workflow);
+  }, [persist]);
 
   // Layout state (persisted in localStorage per workflow file).
   const [layout, setLayout] = useState<WorkflowLayout>({ positions: {} });
@@ -253,7 +276,7 @@ export function useWorkflowEditor(repoId: string) {
 
   const loadLayout = useCallback((filePath: string) => {
     try {
-      const key = `crab.workflow.layout.${repoId}.${filePath}`;
+      const key = `crab.workflow.layout.v2.${repoId}.${filePath}`;
       const raw = localStorage.getItem(key);
       if (raw) setLayout(JSON.parse(raw));
       else setLayout({ positions: {} });
@@ -263,59 +286,60 @@ export function useWorkflowEditor(repoId: string) {
   }, [repoId]);
 
   const saveLayout = useCallback((filePath: string, positions: Record<string, NodePosition>) => {
-    const key = `crab.workflow.layout.${repoId}.${filePath}`;
+    const key = `crab.workflow.layout.v2.${repoId}.${filePath}`;
     const l: WorkflowLayout = { positions };
     setLayout(l);
     localStorage.setItem(key, JSON.stringify(l));
   }, [repoId]);
 
-  // Load workflow list + active workflow.
+  // Keep malformed workflows in the sidebar so another file remains reachable.
   const load = useCallback(async (filePath?: string) => {
-    runIdRef.current = null;
-    dispatch({ type: "reset_run" });
-    dispatch({ type: "set_loading" });
+    if (stateRef.current.phase === "running") return;
+    const version = ++loadVersion.current;
+    setBusy(true);
+    setOperationError(null);
+    let flushed = false;
     try {
+      await flush();
+      flushed = true;
+      dispatch({ type: "set_loading" });
       const { files } = await rpc.workflowList(repoId);
-      if (files.length === 0) {
-        dispatch({ type: "set_empty", files: [] });
-        return;
+      const entries = await Promise.all(files.map(async path => {
+        try { return { path, workflow: await rpc.workflowGet(repoId, path) }; }
+        catch (error) { return { path, error: error instanceof Error ? error.message : String(error) }; }
+      }));
+      if (version !== loadVersion.current) return;
+      setCatalog(entries.flatMap(entry => entry.workflow ? [entry.workflow] : []));
+      setFileErrors(Object.fromEntries(entries.flatMap(entry => entry.error ? [[entry.path, entry.error]] : [])));
+      setStatusReport(null);
+      setDagInfo(null);
+      runIdRef.current = null;
+      if (!files.length) { dispatch({ type: "set_empty", files }); return; }
+      const target = filePath ?? (files.includes(stateRef.current.activeFile ?? "") ? stateRef.current.activeFile : files[0]);
+      const entry = entries.find(entry => entry.path === target);
+      dispatch({ type: "set_files", files, path: target });
+      if (!entry?.workflow) throw new Error(entry?.error ?? `Workflow not found: ${target}`);
+      dispatch({ type: "loaded", workflow: entry.workflow, files });
+      loadLayout(entry.path);
+    } catch (error) {
+      if (version === loadVersion.current) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!flushed) setOperationError(message);
+        else dispatch({ type: "set_error", message });
       }
-      const target = filePath ?? files[0];
-      const workflow = await rpc.workflowGet(repoId, target);
-      dispatch({ type: "loaded", workflow, files });
-      loadLayout(target);
-    } catch (err) {
-      dispatch({ type: "set_error", message: err instanceof Error ? err.message : String(err) });
-    }
-  }, [repoId, loadLayout]);
+    } finally { if (version === loadVersion.current) setBusy(false); }
+  }, [repoId, loadLayout, flush]);
 
-  // Initial load.
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
-  // Save workflow to disk.
   const save = useCallback(async () => {
-    if (!state.workflow) return;
-    try {
-      await rpc.workflowSave(repoId, state.workflow);
-      dispatch({ type: "set_dirty", dirty: false });
-      // Fetch DAG after save.
-      if (state.workflow.path) {
-        try {
-          const dag = await rpc.workflowDag(repoId, state.workflow.path);
-          setDagInfo(dag);
-        } catch {
-          // Non-critical — DAG fetch failure shouldn't block save.
-        }
-      }
-    } catch (err) {
-      dispatch({ type: "set_error", message: err instanceof Error ? err.message : String(err) });
-    }
-  }, [repoId, state.workflow]);
+    const workflow = stateRef.current.workflow;
+    if (!workflow) return;
+    try { await persist(workflow); setOperationError(null); }
+    catch (error) { setOperationError(`Save failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [persist]);
 
   // Auto-save: debounce saves when dirty.
-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!state.dirty || !state.workflow) return;
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
@@ -353,16 +377,16 @@ export function useWorkflowEditor(repoId: string) {
   const run = useCallback(async (stages?: string[]) => {
     if (!state.workflow) return;
 
-    // Auto-save before running if there are unsaved changes.
-    if (state.dirty) {
-      try {
-        await rpc.workflowSave(repoId, state.workflow);
-        dispatch({ type: "set_dirty", dirty: false });
-      } catch (err) {
-        dispatch({ type: "set_error", message: `Save failed: ${err instanceof Error ? err.message : String(err)}` });
-        return;
-      }
+    if (state.phase === "running") return;
+    setBusy(true);
+    setOperationError(null);
+    try { await flush(); }
+    catch (error) {
+      setOperationError(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
+      setBusy(false);
+      return;
     }
+    setBusy(false);
 
     // Determine stage names from local state so we can show "running"
     // immediately without waiting for the RPC response.
@@ -380,7 +404,7 @@ export function useWorkflowEditor(repoId: string) {
       if (runIdRef.current !== tempRunId) return;
       dispatch({ type: "run_done", status: "failed", error: err instanceof Error ? err.message : String(err) });
     }
-  }, [repoId, state.workflow, state.dirty, fetchStatus]);
+  }, [repoId, state.workflow, state.phase, fetchStatus, flush]);
 
   // Run outdated stages only.
   const runOutdated = useCallback(async (stages: string[]) => {
@@ -402,25 +426,28 @@ export function useWorkflowEditor(repoId: string) {
     }
   }, [repoId, state.runState]);
 
-  // Delete a workflow file.
-  const deleteWorkflow = useCallback(async (filePath: string) => {
+  const manage = async (operation: () => Promise<unknown>, target?: string) => {
+    if (stateRef.current.phase === "running") return false;
+    setBusy(true);
+    setOperationError(null);
     try {
-      await rpc.workflowDelete(repoId, filePath);
-      await load();
-    } catch (err) {
-      dispatch({ type: "set_error", message: err instanceof Error ? err.message : String(err) });
-    }
-  }, [repoId, load]);
+      await flush();
+      await operation();
+      await load(target);
+      return true;
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally { setBusy(false); }
+  };
 
-  // Create a new workflow file.
-  const createWorkflow = useCallback(async (filePath: string) => {
-    try {
-      await rpc.workflowCreate(repoId, filePath);
-      await load(filePath);
-    } catch (err) {
-      dispatch({ type: "set_error", message: err instanceof Error ? err.message : String(err) });
-    }
-  }, [repoId, load]);
+  const deleteWorkflow = (path: string) => manage(() => rpc.workflowDelete(repoId, path));
+  const createWorkflow = (path: string) => manage(() => rpc.workflowCreate(repoId, path), path);
+  const renameWorkflow = (oldPath: string, newPath: string) => manage(async () => {
+    if (!repoPath) throw new Error("Rename requires a local working directory.");
+    const prefix = repoPath.replace(/[\\/]$/, "") + "/";
+    await mainProcess.fsRename(repoId, prefix + oldPath, prefix + newPath);
+  }, newPath);
 
   // Subscribe to workflow execution events.
   useEffect(() => {
@@ -454,12 +481,12 @@ export function useWorkflowEditor(repoId: string) {
       if (filename?.endsWith(".workflow.yaml")) parts.push(filename.slice(0, -".workflow.yaml".length));
       const prefix = parts.filter(part => part && part !== ".").join(".");
       const stage = state.workflow?.stages.find(({ name }) => data.stage === (prefix ? `${prefix}.${name}` : name));
-      if (!stage) return;
       const labels: Partial<Record<StageRunStatus, string>> = {
         running: "Started", cached: "Cached", done: "Completed", failed: "Failed", pending: "Not started",
       };
       const reason = status === "failed" && typeof data.reason === "string" ? `: ${data.reason}` : "";
-      dispatch({ type: "run_output", text: `${stage.name}: ${labels[status]}${reason}`, error: status === "failed" });
+      dispatch({ type: "run_output", text: `${stage?.name ?? data.stage}: ${labels[status]}${reason}`, error: status === "failed" });
+      if (!stage) return;
       dispatch({ type: "stage_status", name: stage.name, status,
         duration_ms: data.duration_ms as number | undefined,
         error: data.reason as string | undefined });
@@ -469,6 +496,10 @@ export function useWorkflowEditor(repoId: string) {
 
   return {
     state,
+    catalog,
+    fileErrors,
+    operationError,
+    busy,
     dispatch,
     layout,
     statusReport,
@@ -484,6 +515,7 @@ export function useWorkflowEditor(repoId: string) {
       cancel,
       deleteWorkflow,
       createWorkflow,
+      renameWorkflow,
       addStage: (stage: WorkflowStage) => dispatch({ type: "add_stage", stage }),
       updateStage: (stage: WorkflowStage) => dispatch({ type: "update_stage", stage }),
       renameStage: (oldName: string, newName: string) => dispatch({ type: "rename_stage", oldName, newName }),
@@ -491,10 +523,7 @@ export function useWorkflowEditor(repoId: string) {
       setStages: (stages: WorkflowStage[]) => dispatch({ type: "set_stages", stages }),
       resetRun: () => dispatch({ type: "reset_run" }),
       clearOutput: () => dispatch({ type: "clear_output" }),
-      switchFile: (path: string) => {
-        dispatch({ type: "set_active_file", path });
-        load(path);
-      },
+      switchFile: load,
       fetchStatus,
       fetchDag,
       setActiveTab,

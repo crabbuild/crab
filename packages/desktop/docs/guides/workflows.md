@@ -1,196 +1,103 @@
-# Workflows View
+# Data Workflows
 
-The Workflows view provides a visual DAG editor for defining and
-running multi-stage data pipelines. Workflows are defined in YAML and
-executed as directed acyclic graphs with dependency tracking.
+Open **Data Workflows** in the activity bar to manage repository pipelines.
+Crab discovers `crab.yaml` and `*.workflow.yaml` files recursively, excluding
+hidden and build directories. A file named `pipeline.yaml` or `a.yml` is not
+automatically discovered; use `pipeline.workflow.yaml` or `a.workflow.yaml`.
 
-## Accessing the Workflows View
+## Workflow sidebar
 
-- Click the **Workflow** icon in the activity bar
-- Workflows are defined in `pipeline.yaml` (or `crab.yaml`) at the
-  repository root
+The left pane lists workflow paths and stage counts. Filter the list to find a
+workflow, select it to edit, or refresh to pick up files changed outside Crab.
+An unreadable file stays in the list with an error indicator; other workflows
+remain accessible.
 
-## Concepts
+- **New workflow** creates a discoverable YAML file with an example stage.
+- Hover or focus a row for **Rename** and **Delete**. Rename is available for
+  local working directories and keeps the file in its current folder, so
+  relative output paths retain their meaning. Renaming a named workflow changes
+  its stage namespace; its next run recomputes cached state. Existing lockfiles
+  are not renamed.
+- **Delete** asks for confirmation in the sidebar and removes the definition.
+  Produced files remain. The confirmation warns when another workflow consumes
+  its outputs.
+- **Depends on** and **Used by** link directly to related workflow files.
 
-### Workflow
+Pending stage edits are saved before changing, creating, renaming, deleting,
+or refreshing workflows. If saving fails, edits remain visible with an error.
+Workflow selection and mutation are disabled during execution.
 
-A workflow is a collection of stages connected by dependencies. Each
-stage runs a command and produces outputs that downstream stages can
-consume.
+## Canvas and editing
 
-### Stage
+Stages have readable names, two-line command previews, input/output counts,
+and run status. The layout places dependencies above their consumers, separates
+parallel branches, and centers merge rows. **Arrange** restores that layout;
+**Fit workflow to view** frames the graph without enlarging small pipelines.
+Drag nodes to arrange them manually. Positions are saved per repository and
+workflow; the larger node geometry starts a new layout namespace.
 
-A stage is a single unit of work:
-- Has a name, command, and optional dependencies
-- Produces outputs (files or directories)
-- Can depend on outputs from other stages
-- Runs only when its dependencies are satisfied
+Select a stage to edit its command, dependencies, outputs, parameters, and
+execution settings in the inspector. **+ Stage** adds a stage. Drag between
+ports to add an explicit stage-output dependency within the same workflow.
+Commands must produce declared output files, or provide stdout for the engine's
+stdout capture contract.
 
-### DAG (Directed Acyclic Graph)
+Changes autosave after a short delay; **Save** and `Cmd/Ctrl+S` save immediately.
+Undo/redo history belongs to the current workflow and resets when switching
+files. Output stays collapsed until a run starts, leaving more space for the
+canvas. Larger graphs also show a minimap.
 
-Stages form a DAG — each stage depends on zero or more upstream
-stages. The workflow engine resolves the execution order automatically
-and can run independent stages in parallel.
+## Dependencies between workflow files
 
-## Layout
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  [pipeline.yaml ▾]  [+ New Stage]  [▶ Run]  [■ Stop]  [Save]    │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│         ┌──────────┐                                            │
-│         │  ingest  │                                            │
-│         └────┬─────┘                                            │
-│              │                                                  │
-│      ┌───────┴───────┐                                          │
-│      │               │                                          │
-│  ┌───▼────┐    ┌─────▼─────┐                                    │
-│  │ clean  │    │ transform │                                    │
-│  └───┬────┘    └─────┬─────┘                                    │
-│      │               │                                          │
-│      └───────┬───────┘                                          │
-│              │                                                  │
-│         ┌────▼─────┐                                            │
-│         │  train   │                                            │
-│         └────┬─────┘                                            │
-│              │                                                  │
-│         ┌────▼─────┐                                            │
-│         │ evaluate │                                            │
-│         └──────────┘                                            │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│  Properties Panel (selected stage)                              │
-│  Name: train                                                    │
-│  Command: python train.py --epochs 50                           │
-│  Deps: clean:output, transform:features                         │
-│  Outputs: model.safetensors, metrics.json                       │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Features
-
-### Visual DAG Editor
-
-The workflow is rendered as an interactive node graph using
-`@xyflow/react`:
-- **Nodes** — each stage is a draggable node
-- **Edges** — dependency connections between stages
-- **Auto-layout** — topological sort arranges nodes top-to-bottom
-- **Minimap** — overview for large workflows
-- **Zoom/Pan** — navigate complex graphs
-
-### Stage Nodes
-
-Each node shows:
-- Stage name
-- Run status (idle, running, completed, failed)
-- Color-coded border by status
-- Click to select and edit properties
-
-### Stage Properties Panel
-
-When a stage is selected, the bottom panel shows:
-- **Name** — stage identifier
-- **Command** — shell command to execute
-- **Dependencies** — upstream stage outputs this stage consumes
-- **Outputs** — files/directories this stage produces
-- **Environment** — environment variables
-- **Working directory** — execution context
-
-### Creating Stages
-
-1. Click **+ New Stage** in the toolbar
-2. Enter stage name and command
-3. Optionally add dependencies (select from existing stage outputs)
-4. The node appears in the graph
-
-### Connecting Stages
-
-- Drag from a stage's output port to another stage's input port
-- Or edit dependencies in the Properties Panel
-- The editor validates that connections don't create cycles
-
-### Running Workflows
-
-1. Click **▶ Run** to execute the entire workflow
-2. Or right-click a stage → **Run from here** (runs this stage and
-   all downstream)
-3. Progress shows per-stage status:
-   - ⏳ Waiting (dependencies not met)
-   - 🔄 Running
-   - ✅ Completed
-   - ❌ Failed (with error output)
-
-### Status Dashboard
-
-A collapsible panel shows:
-- Overall workflow status
-- Per-stage timing
-- Output file sizes
-- Error logs for failed stages
-
-### Experiment Panel
-
-For ML workflows, the experiment panel tracks:
-- Hyperparameters per run
-- Metrics (loss, accuracy, etc.)
-- Comparison across runs
-- Link to experiment tracking service
-
-### Workflow Tabs
-
-Multiple workflow files can be open simultaneously:
-- Tab bar at the top shows open workflows
-- Switch between `pipeline.yaml`, `ci.yaml`, etc.
-
-### Migration Wizard
-
-For repositories migrating from other pipeline tools (DVC, MLflow):
-- Detects existing pipeline definitions
-- Offers guided migration to Crab workflow format
-- Preserves stage structure and dependencies
-
-## YAML Format
+Crab connects **stages through their output paths**, rather than declaring that
+one YAML file depends on another YAML file. For example:
 
 ```yaml
+# prepare.workflow.yaml
 stages:
-  ingest:
-    cmd: python scripts/ingest.py
-    outputs:
-      - data/raw/
-
-  clean:
-    cmd: python scripts/clean.py
-    deps:
-      - ingest:data/raw/
-    outputs:
-      - data/clean/
-
-  train:
-    cmd: python scripts/train.py --epochs 50
-    deps:
-      - clean:data/clean/
-    outputs:
-      - models/latest.safetensors
-      - metrics/train.json
+  prepare:
+    cmd: python prepare.py
+    outs:
+      - features.csv
 ```
 
-## Keyboard Shortcuts
+```yaml
+# train.workflow.yaml
+stages:
+  fit:
+    cmd: python train.py
+    deps:
+      - features.csv
+    outs:
+      - model.bin
+```
 
-| Shortcut | Action |
-|----------|--------|
-| `Cmd+S` | Save workflow |
-| `Cmd+Shift+R` | Run workflow |
-| `Delete` | Remove selected stage |
-| `Cmd+Z` | Undo |
-| `Cmd+Shift+Z` | Redo |
-| `Cmd+A` | Select all stages |
-| `Escape` | Deselect |
+Running `train.workflow.yaml` includes the upstream `prepare` stage. The desktop
+runner uses recursive discovery and file-qualified targets so unrelated workflows
+are not selected merely because their stage names match.
 
-## Integration
+In a stage's **Dependencies** section, **Use a workflow output** lists outputs
+from other workflows that can be addressed from this workflow's directory.
+Choosing one adds a normal path dependency. The sidebar shows the relationship
+immediately; removing the dependency removes that relationship.
 
-- Workflow outputs are tracked as Crab large files
-- Experiment runs are linked to commits in the Timeline
-- The Dashboard shows recent workflow run status
-- Push operations include workflow output files
+Paths in nested workflow files are relative to the containing directory. The
+editor follows the engine's exact file and longest matching directory-output
+rules. It does not collapse `..` paths or invent cross-directory dependencies.
+Keep shared named workflows in the same folder when they exchange outputs.
+`stage_out` is for explicit references within a workflow; there is no general
+`depends_on: other.yml` file-level syntax.
+
+See [split workflows and lockfiles](https://crab.build/docs/cli/workflow/split-workflows-lockfiles)
+for namespaces, recursive discovery, and command-line usage.
+
+## Running and inspecting
+
+**Run All** runs the selected workflow with its upstream stages. A selected stage
+can also be run from the inspector or context menu. **Cancel** stops the run.
+The output pane opens automatically and shows command output, stage progress
+(including upstream stages in other files), and errors. Switching files clears
+the previous run display; unrelated repository output stays separate.
+
+The **Status** tab checks stage freshness; **Experiments** manages parameterized
+runs. **Import DVC workflow** in the sidebar imports DVC pipeline definitions.

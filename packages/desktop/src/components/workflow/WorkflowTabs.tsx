@@ -11,7 +11,7 @@ interface Props {
 
 export function WorkflowTabs({ active, onChange, outdatedCount, runningExpCount }: Props) {
   return (
-    <div className="flex border-b border-gx-border bg-gx-surface">
+    <div className="flex min-w-0 overflow-x-auto">
       <TabButton
         label="Editor"
         active={active === "editor"}

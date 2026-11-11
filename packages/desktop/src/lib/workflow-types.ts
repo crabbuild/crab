@@ -133,9 +133,6 @@ export interface NodePosition {
 export interface WorkflowLayout {
   /** Stage name → position. Missing entries get auto-laid-out. */
   positions: Record<string, NodePosition>;
-  /** Visual-only edges (source→target) not backed by workflow deps.
-   *  Persisted so they survive editor reopens. */
-  visualEdges?: Array<{ source: string; target: string }>;
 }
 
 // ── Enrichment types (templating, foreach, matrix, conditions) ───────
