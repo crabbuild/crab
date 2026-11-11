@@ -201,6 +201,16 @@ jobs:
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-native-owner" npm test -- tests/agent-process-live.spec.ts
       - name: Build desktop application
         run: npm run build:renderer && npm run build:electron
+      - name: Qualify terminal rendering and recovery
+        # The recovery fixture uses POSIX shells and process probes.
+        if: runner.os != 'Windows'
+        run: |
+          export E2E_SMOKE=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npx playwright test tests/e2e/terminal-recovery.spec.ts --project=e2e-smoke --workers=1
+          else
+            npx playwright test tests/e2e/terminal-recovery.spec.ts --project=e2e-smoke --workers=1
+          fi
       - name: Qualify selected Apply through the task view
         run: |
           mkdir -p "$RUNNER_TEMP/crab-selected-apply"

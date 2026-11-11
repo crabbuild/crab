@@ -1,4 +1,4 @@
-import { test, expect, _electron as electron } from "@playwright/test";
+import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { createServer } from "vite";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,6 +8,18 @@ import * as path from "node:path";
 
 const desktop = path.resolve(__dirname, "../..");
 const runtimeRequire = createRequire(path.join(desktop, "package.json"));
+
+async function expectRenderedFont(page: Page) {
+  // Inspect the actual renderer, not just options: a rejected canvas font
+  // silently leaves WebGL glyphs at 10px sans-serif in a full-size cell grid.
+  await expect.poll(() => page.locator(".xterm").first().evaluate(root => {
+    const rows = root.querySelector(".xterm-rows");
+    if (rows) return getComputedStyle(rows).fontSize === "13px";
+    const atlas = root.querySelector<HTMLCanvasElement>('canvas[style*="display: none"]');
+    const font = atlas?.getContext("2d")?.font ?? "";
+    return font.includes(`${13 * devicePixelRatio}px`) && font.includes("monospace");
+  })).toBe(true);
+}
 
 test("real terminal components recover processes and nested layouts across owners and app replacement", async () => {
   test.setTimeout(90_000);
@@ -24,6 +36,7 @@ test("real terminal components recover processes and nested layouts across owner
   try {
     let page = await app.firstWindow();
     await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(1);
+    await expectRenderedFont(page);
     const quote = (value: string) => process.platform === "win32" ? `"${value}"` : `'${value.replace(/'/g, "'\\''")}'`;
     await page.locator(".xterm-helper-textarea:visible").first().focus();
     await page.keyboard.type([process.execPath, path.join(desktop, "tests/fixtures/terminal-recovery/agent.cjs"), proof].map(quote).join(" "));
@@ -72,6 +85,12 @@ test("real terminal components recover processes and nested layouts across owner
     await page.keyboard.press("Enter");
     await expect.poll(() => records().find(value => value.input === "after-application-upgrade")?.pid).toBe(pid);
     await page.screenshot({ path: test.info().outputPath("terminal-recovery.png") });
+    await page.getByRole("button", { name: "Toggle task terminal", exact: true }).click();
+    await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(1);
+    await page.locator(".xterm-helper-textarea:visible").focus();
+    await page.keyboard.type("echo task-terminal-font-check");
+    await page.keyboard.press("Enter");
+    await expectRenderedFont(page);
   } finally {
     await app.close();
     await server.close();

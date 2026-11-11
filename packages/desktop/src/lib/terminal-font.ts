@@ -167,7 +167,7 @@ export interface WebglState {
   disabledAfterContextLoss: boolean;
 }
 
-/** Whether WebGL should be used (disabled on Linux/Wayland due to atlas corruption). */
+/** Whether the runtime can render the WebGL glyph atlas correctly. */
 function shouldUseWebgl(): boolean {
   if (typeof navigator === "undefined") return true;
   // Linux/Wayland GPU stacks can corrupt xterm's WebGL glyph atlas
@@ -175,7 +175,13 @@ function shouldUseWebgl(): boolean {
   if (navigator.platform.includes("Linux") || navigator.userAgent.includes("Linux")) {
     return false;
   }
-  return true;
+  // xterm prefixes upright canvas fonts with whitespace. Chromium can silently
+  // reject that syntax (electron/electron#55616), drawing tiny sans-serif glyphs.
+  // Retain DOM rendering until the runtime parser accepts the atlas font again.
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return false;
+  ctx.font = " 500 16px monospace";
+  return ctx.font === "500 16px monospace";
 }
 
 let webglGloballyFailed = false;
@@ -196,7 +202,7 @@ export function attachWebgl(
   try {
     const addon = new WebglAddon();
     addon.onContextLoss(() => {
-      console.warn("[terminal] WebGL context lost — falling back to canvas renderer");
+      console.warn("[terminal] WebGL context lost — using DOM renderer");
       state.disabledAfterContextLoss = true;
       disposeWebgl(terminal, state);
     });
@@ -206,7 +212,7 @@ export function attachWebgl(
     terminal.refresh(0, terminal.rows - 1);
     return addon;
   } catch (e) {
-    console.warn("[terminal] WebGL renderer unavailable, using canvas fallback:", e);
+    console.warn("[terminal] WebGL renderer unavailable, using DOM renderer:", e);
     webglGloballyFailed = true;
     state.addon = null;
     return null;

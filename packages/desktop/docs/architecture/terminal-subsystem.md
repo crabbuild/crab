@@ -117,6 +117,19 @@ Panes are managed using `react-resizable-panels`:
 - Each pane has its own PTY process and XTerm instance
 - Pane sizes are user-adjustable via drag handles
 
+## Font rendering
+
+Repository, SSH, and task terminals share the WebGL eligibility check in
+`src/lib/terminal-font.ts`. Before loading the addon, it checks the canvas font
+syntax xterm uses for upright glyphs. Electron's Chromium parser can silently
+reject that syntax and leave the atlas at `10px sans-serif`
+([upstream report](https://github.com/electron/electron/issues/55616)). In that
+runtime, xterm keeps its built-in DOM renderer and the selected font settings.
+Resetting preferences cannot repair a runtime parser. The check enables WebGL
+automatically once the parser supports that syntax; remove it when the minimum
+runtime and xterm versions no longer need it. Saved log replay already uses DOM
+rendering.
+
 ## Shell Integration
 
 When the shell supports it (zsh with precmd/preexec hooks), the

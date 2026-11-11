@@ -25,7 +25,11 @@ env -u ELECTRON_RUN_AS_NODE node_modules/.bin/electron \
 
 The fixture header switches repositories, reopens workspaces with new IDs, and
 changes the renderer cap. Split controls are the real terminal controls. The
-`agent.cjs` fixture is an interactive alternate-screen program: it records its
+task terminal toggle renders the production task shell. Check normal, bold,
+and italic text, CJK, emoji, box drawing, font-size changes, and pane resizing;
+the renderer must keep the selected font even if canvas font parsing fails.
+The automated smoke inspects rendered fonts in repository and task terminals.
+The `agent.cjs` fixture is an interactive alternate-screen program: it records its
 PID, input, cwd and resize events to a supplied disposable JSONL proof file.
 Type `stop` to end that process.
 

@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { SshTerminalRequest } from "../../../src/views/TerminalView";
 import { TerminalKeepAlive } from "../../../src/components/TerminalKeepAlive";
+import { TerminalTab } from "../../../src/components/orchestrator/TerminalTab";
 import { SettingsProvider } from "../../../src/settings";
 import { StoreProvider, type OpenRepo } from "../../../src/state";
 import { PtyModeProvider } from "../../../src/lib/pty-mode-context";
@@ -13,6 +14,7 @@ function Fixture() {
   const [generation, setGeneration] = useState(0);
   const [repo, setRepo] = useState("one");
   const [cap, setCap] = useState(2);
+  const [taskTerminal, setTaskTerminal] = useState(false);
   const [sshRequest, setSshRequest] = useState<SshTerminalRequest | null>(null);
   const repos = ["one", "two"].map(name => ({
     repo_id: `${workspace}-${name}-${generation}`, path: `${root}/${workspace}/${name}`,
@@ -24,9 +26,12 @@ function Fixture() {
       <button onClick={() => { setWorkspace(workspace === "a" ? "b" : "a"); setGeneration(value => value + 1); }}>Switch workspace</button>
       <button onClick={() => setCap(cap === 1 ? 2 : 1)}>Keep {cap} renderers</button>
       <button onClick={() => setSshRequest({ profileId: "fixture", hostname: "loopback", cwd: `${root}/remote` })}>Open SSH terminal</button>
+      <button onClick={() => setTaskTerminal(value => !value)}>Toggle task terminal</button>
       <span>Active: {workspace}/{repo}</span>
     </div>
-    <TerminalKeepAlive sshRequest={sshRequest} onSshRequestHandled={() => setSshRequest(null)} repos={repos} activeRepoId={`${workspace}-${repo}-${generation}`} maxKeptAlive={cap} />
+    {taskTerminal
+      ? <TerminalTab task={{ id: "font-check", title: "Font check", agentName: "fixture", status: "created", createdAt: 0 }} workspacePath={`${root}/${workspace}/${repo}`} />
+      : <TerminalKeepAlive sshRequest={sshRequest} onSshRequestHandled={() => setSshRequest(null)} repos={repos} activeRepoId={`${workspace}-${repo}-${generation}`} maxKeptAlive={cap} />}
   </div>;
 }
-createRoot(document.getElementById("root")!).render(<SettingsProvider><StoreProvider><PtyModeProvider><Fixture /></PtyModeProvider></StoreProvider></SettingsProvider>);
+createRoot(document.getElementById("root")!).render(<StoreProvider><SettingsProvider><PtyModeProvider><Fixture /></PtyModeProvider></SettingsProvider></StoreProvider>);
