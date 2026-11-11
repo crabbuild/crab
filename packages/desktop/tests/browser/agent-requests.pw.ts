@@ -7,6 +7,16 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/tests/fixtures/agent-requests.html");
 });
 
+test("keeps a collapsed batch working until its new tool has a result", async ({ page }) => {
+  const transcript = page.getByRole("region", { name: "Durable transcript" });
+  await transcript.getByRole("button", { name: "Show completed call", exact: true }).click();
+  await transcript.getByRole("button", { name: /^1 tool call/ }).click();
+  await transcript.getByRole("button", { name: "Start another call", exact: true }).click();
+  await expect(transcript.getByRole("button", { name: /^Working…/ })).toBeVisible();
+  await transcript.getByRole("button", { name: "Complete second call", exact: true }).click();
+  await expect(transcript.getByRole("button", { name: /^2 tool calls/ })).toHaveAttribute("aria-expanded", "false");
+});
+
 test("a rejected turn Undo shows failure and stops before editing another file", async ({ page }) => {
   await page.getByRole("region", { name: "Undo failure fixture" }).getByRole("button", { name: "Undo", exact: true }).click();
   await expect(page.getByText("Undo failed", { exact: true })).toBeVisible();

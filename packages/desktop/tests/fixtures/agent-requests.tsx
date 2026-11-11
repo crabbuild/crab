@@ -144,6 +144,14 @@ function Fixture() {
       <section aria-label="Durable transcript">
         {!useReplica && <>
           <button type="button" onClick={() => setTranscript(project([
+            { type: "tool_use", tool: "Bash", itemId: "first-call", input: { command: "echo first" }, timestamp: 2 },
+            { type: "tool_result", itemId: "first-call", output: "first", timestamp: 3 },
+          ]))}>Show completed call</button>
+          <button type="button" onClick={() => setTranscript(messages => applyAgentEvent(messages,
+            { type: "tool_use", tool: "Bash", itemId: "second-call", input: { command: "echo second" }, timestamp: 4 }, "second-call"))}>Start another call</button>
+          <button type="button" onClick={() => setTranscript(messages => applyAgentEvent(messages,
+            { type: "tool_result", itemId: "second-call", output: "second", timestamp: 5 }, "second-result"))}>Complete second call</button>
+          <button type="button" onClick={() => setTranscript(project([
             { type: "turn_started", turnId: "blocks-turn", timestamp: 2 },
             { type: "text", itemId: "first", content: "Repeated", timestamp: 3 },
             { type: "text", itemId: "second", content: "Repeated", timestamp: 4 },

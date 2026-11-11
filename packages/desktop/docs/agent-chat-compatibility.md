@@ -2519,3 +2519,35 @@ Assertions remain intact. All 47 enabled persistence/trust/real-SSH checks
 pass; the separate browser connection case is skipped without its live root.
 Evidence: `ci-shared-failures-before.json` and
 `ci-shared-fixtures-after.json`. Cross-platform broad-suite proof is pending.
+
+### Bounded tool-result grouping
+
+The timing failure prompted a source audit of the transcript path. Every tool
+result previously searched group members and repeatedly scanned the preceding
+event stream to establish completion. A deterministic probe counts 5,757,056
+item-ID reads for 512 events and 45,396,224 for 1,024 events in one batch.
+Splitting calls into separate groups still requires repeated history scans.
+The baseline also marks a batch complete after a new identified call starts
+following a completed call. All three new regressions fail before the fix.
+
+Grouping now indexes first-result positions and the most recent group for
+each item. Completion compares the required receipt position with the current
+event, so a future result cannot complete an earlier batch prematurely.
+An outstanding new call reopens its batch. Group boundaries, card identities,
+unidentified receipts, late results and completed-turn handling retain their
+existing contracts. Both Codex and Claude event projections use this path.
+The same 1,024-event probe now reads IDs 1,536 times; the two scanning helpers
+are removed, reducing production code by 62 lines.
+
+All 53 scoped derivation, Claude-stream, performance and summary cases pass,
+including the unchanged timing assertions. An actual browser check clicks
+through completed call, collapsed batch, another pending call and its result;
+the batch visibly returns to Working before showing two completed calls.
+Production types and renderer build pass. The fixture semantic probe reports
+the same four unused-import diagnostics as its unchanged baseline; compiler
+settings are not weakened. Evidence: `tool-group-work-before.json`,
+`tool-group-complexity.json`, `tool-group-final-scoped.json`,
+`tool-group-browser-owned.json` and `tool-group-fixture-type-baseline.json`.
+The browser check uses an owned Vite server with an allocated loopback port;
+the default Playwright web-server setup timed out before running the test and
+still needs separate investigation. Full cross-platform CI remains pending.
