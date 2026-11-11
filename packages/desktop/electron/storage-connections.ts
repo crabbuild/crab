@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile, rename, mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { SafeStorage } from "electron";
 import type { StorageConnection, StorageConnectionInfo } from "./storage-connection-types";
 import { parseRepoId } from "./ssh-types";
@@ -9,6 +10,28 @@ type Encryption = Pick<SafeStorage, "isEncryptionAvailable" | "encryptString" | 
 type Send = (method: string, params: unknown) => Promise<unknown>;
 type IdentityChanged = (keys: string[], state: "changed" | "removed") => Promise<void>;
 interface Vault { connections: StorageConnection[]; bindings: Record<string, string> }
+interface RepositoryBinding {
+  key: string;
+  location: string;
+  generation: number;
+  admitted?: number;
+}
+
+function selectedConnection(vault: Vault | undefined, key: string): StorageConnection | undefined {
+  return vault?.connections.find(item => item.id === vault.bindings[key]);
+}
+
+function sameSource(before?: StorageConnection, after?: StorageConnection): boolean {
+  if (before === after) return true;
+  if (!before || !after) return false;
+  const { name: _beforeName, ...oldSource } = before;
+  const { name: _afterName, ...newSource } = after;
+  return isDeepStrictEqual(oldSource, newSource);
+}
+
+function storageSourceChanged(): Error {
+  return new Error("Repository storage changed. Run the query after the repository reopens.");
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -71,9 +94,9 @@ export class StorageConnections {
   private mutations: Promise<unknown> = Promise.resolve();
   private cached: Vault | undefined;
   private inFlight = new Set<StorageConnection>();
-  private sessions = new Map<string, string>();
+  private sessions = new Map<string, RepositoryBinding>();
 
-  constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform, private identityChanged: IdentityChanged) {}
+  constructor(private file: string, private encryption: Encryption, private platform: NodeJS.Platform, private identityChanged: IdentityChanged, private sourceChanged?: (repoIds: string[]) => void) {}
 
   private available(): boolean {
     return this.encryption.isEncryptionAvailable() &&
@@ -88,7 +111,13 @@ export class StorageConnections {
     if (this.cached) return structuredClone(this.cached);
     let bytes: Buffer;
     try { bytes = await readFile(this.file); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { connections: [], bindings: {} }; throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(this.cached ?? { connections: [], bindings: {} });
+      throw error;
+    }
+    // A concurrent initial read or commit may have published the vault while
+    // this read was in flight. Keep that authority and its source generations.
+    if (this.cached) return structuredClone(this.cached);
     this.requireEncryption();
     try {
       const data: unknown = JSON.parse(this.encryption.decryptString(bytes));
@@ -105,6 +134,7 @@ export class StorageConnections {
     const operation = this.mutations.then(async () => {
       this.requireEncryption();
       const vault = await this.read();
+      const before = { connections: vault.connections, bindings: { ...vault.bindings } };
       const result = await change(vault);
       const encrypted = this.encryption.encryptString(JSON.stringify(vault));
       await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
@@ -113,6 +143,13 @@ export class StorageConnections {
         await writeFile(temporary, encrypted, { mode: 0o600, flag: "wx" });
         await rename(temporary, this.file);
         this.cached = vault;
+        const affected: string[] = [];
+        for (const [repoId, session] of this.sessions) {
+          if (sameSource(selectedConnection(before, session.key), selectedConnection(vault, session.key))) continue;
+          session.generation++;
+          if (session.admitted !== undefined) affected.push(repoId);
+        }
+        if (affected.length) this.sourceChanged?.(affected);
       } finally { await rm(temporary, { force: true }); }
       return result;
     });
@@ -158,7 +195,7 @@ export class StorageConnections {
     };
     const send: Send = async (name, payload) => {
       const repoId = record(payload) ? text(payload.repo_id) : "";
-      const binding = this.cached?.bindings[this.sessions.get(repoId) ?? repoId];
+      const binding = this.cached?.bindings[this.sessions.get(repoId)?.key ?? repoId];
       const selected = record(payload) && record(payload.__storage_auth)
         ? connection(payload.__storage_auth)
         : this.cached?.connections.find(item => item.id === binding);
@@ -183,7 +220,7 @@ export class StorageConnections {
     if (method === "storage_connections_list") {
       const vault = await this.read();
       const repoId = text(payload.repo_id);
-      const selected_id = vault.bindings[this.sessions.get(repoId) ?? repoId] ?? null;
+      const selected_id = vault.bindings[this.sessions.get(repoId)?.key ?? repoId] ?? null;
       return { connections: vault.connections.map(info), selected_id, secure_storage: this.available() };
     }
     if (method === "storage_connections_save") {
@@ -218,7 +255,7 @@ export class StorageConnections {
     }
     if (method === "storage_connections_bind") {
       const repo = text(payload.repo_id), id = text(payload.id);
-      const session = this.sessions.get(repo);
+      const session = this.sessions.get(repo)?.key;
       if (!session) throw new Error("Open a repository on this device before selecting its storage connection.");
       if (!id && !(await this.read()).bindings[session]) return { ok: true };
       const repositories = await this.mutate(vault => {
@@ -240,7 +277,7 @@ export class StorageConnections {
       if (!next) throw new Error("Storage connection was not found.");
       return send("storage_connection_test", { repo_id: payload.repo_id, __storage_auth: next });
     }
-    const session = this.sessions.get(repoId);
+    let session = this.sessions.get(repoId);
     const opening = method === "open_local" || method === "open_url";
     if (remoteProfileId !== undefined && opening && !repoId) throw new Error("An SSH repository identity is required");
     // Replacement resolves its destination, not the previous native owner's
@@ -249,10 +286,19 @@ export class StorageConnections {
     // select a local worktree's credentials just because the strings match.
     const source = remoteProfileId !== undefined ? repoId || undefined
       : typeof payload.path === "string" ? path.resolve(payload.path) : text(payload.cwd);
-    const key = opening ? storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined) : session ?? source;
+    const key = opening ? storageBindingKey(repoId, method === "open_local" ? text(payload.path) : undefined) : session?.key ?? source;
     // A desired repository can need credential repair before its first native
     // open succeeds. The binding context outlives that failed native attempt.
-    if (opening && key) this.sessions.set(repoId, key);
+    if (opening && key) {
+      const location = method === "open_url" ? text(payload.url) : key;
+      if (session?.key !== key || session.location !== location) {
+        const previous = session;
+        session = { key, location, generation: 0 };
+        this.sessions.set(repoId, session);
+        if (previous) this.sourceChanged?.([repoId]);
+      }
+    }
+    const queryGeneration = method === "file_query" ? session?.generation : undefined;
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
     const capture = method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
@@ -293,11 +339,22 @@ export class StorageConnections {
         return current;
       });
     }
+    // SQL results must belong to the admitted storage source even while the
+    // native owner is waiting to retire. Fence both admission and late replies.
+    const checkQuerySource = () => {
+      if (method === "file_query" && (!session || this.sessions.get(repoId) !== session ||
+        session.generation !== queryGeneration || session.admitted !== queryGeneration)) throw storageSourceChanged();
+    };
+    checkQuerySource();
+    const openingGeneration = opening ? session?.generation : undefined;
+    if (opening && key && !sameSource(selected, selectedConnection(this.cached, key))) throw storageSourceChanged();
     if (selected) payload.__storage_auth = selected;
     const result = await send(method, payload);
+    checkQuerySource();
+    if (opening && session && this.sessions.get(repoId) === session) session.admitted = openingGeneration;
     // Closing a reader is not forgetting its saved storage identity. Reopening
     // the logical snapshot must resolve the same binding after an app restart.
-    if (method === "close") this.sessions.delete(repoId);
+    if (method === "close" && this.sessions.get(repoId) === session) this.sessions.delete(repoId);
     return result;
   }
 }

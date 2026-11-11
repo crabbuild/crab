@@ -1748,6 +1748,7 @@ app.whenReady().then(async () => {
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1) throw new AggregateError(failures, "Storage identity changed but some repositories could not recover");
     },
+    repoIds => sendAgentEvent("repo:storage-source-changed", { repo_ids: repoIds }),
   );
 
   // Share construction, not process readiness: Agent retains its own restart

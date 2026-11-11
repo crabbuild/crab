@@ -36,6 +36,7 @@ describe("built-in storage connections", () => {
   let store: StorageConnections;
   let send: Mock<[method: string, params: unknown], Promise<unknown>>;
   let changed: Mock<[keys: string[], state: "changed" | "removed"], Promise<void>>;
+  let sourceChanged: Mock<[repoIds: string[]], void>;
   const call = (method: string, params: unknown = {}) => store.request(method, params, send);
   const save = (connection = fixture()) => call("storage_connections_save", { connection }) as Promise<StorageConnectionInfo>;
   const list = (repo_id?: string) => call("storage_connections_list", { repo_id }) as Promise<StorageConnectionStatus>;
@@ -44,7 +45,8 @@ describe("built-in storage connections", () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-storage-auth-"));
     file = path.join(directory, "connections.enc");
     crypto = encryption();
-    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
+    sourceChanged = vi.fn();
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state), sourceChanged);
     changed = vi.fn(async (_keys: string[], _state: "changed" | "removed"): Promise<void> => {});
     send = vi.fn(async (method: string, params: unknown): Promise<unknown> => {
       const payload = params as Record<string, unknown>;
@@ -98,6 +100,42 @@ describe("built-in storage connections", () => {
     send.mockClear();
     await call("open_local", { repo_id: "local", path: directory });
     expect(send).toHaveBeenCalledWith("open_local", expect.objectContaining({ repo_id: "local", __storage_auth: expect.objectContaining({ id: second.id }) }));
+  });
+
+  it("retires SQL admissions and pending replies for every alias of a replaced source", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    for (const repo_id of ["repo", "alias"]) {
+      await call("open_local", { repo_id, path: directory, storage_connection_id: first.id });
+    }
+    await call("open_url", { repo_id: "other", url: "crab://test-bucket/other", storage_connection_id: first.id });
+    const query = (repo_id: string) => call("file_query", { repo_id, path: "data.parquet", sql: "SELECT * FROM data" });
+    let finish!: (result: unknown) => void;
+    send.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = query("repo");
+    const stale = expect(pending).rejects.toThrow("Repository storage changed");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await call("storage_connections_bind", { repo_id: "alias", id: second.id });
+    expect(sourceChanged.mock.calls).toEqual([[["repo", "alias"]]]);
+    send.mockClear();
+    await expect(query("alias")).rejects.toThrow("Repository storage changed");
+    expect(send).not.toHaveBeenCalled();
+    finish({ rows: [{ value: "old source" }] });
+    await stale;
+    await expect(query("other")).resolves.toEqual({ ok: true, latency_ms: 2 });
+    await call("open_local", { repo_id: "repo", path: directory });
+    await expect(query("repo")).resolves.toEqual({ ok: true, latency_ms: 2 });
+    expect(sourceChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves source identity on display-name edits and retires same-ID endpoint replacements", async () => {
+    const original = fixture();
+    const saved = await save(original);
+    await call("open_url", { repo_id: "snapshot", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
+    await save({ ...original, id: saved.id, name: "Renamed" });
+    expect(sourceChanged).not.toHaveBeenCalled();
+    await save({ ...original, id: saved.id, endpoint: "https://other.invalid" });
+    expect(sourceChanged.mock.calls).toEqual([[["snapshot"]]]);
   });
 
   it("does not reopen a removed storage identity with ambient credentials", async () => {

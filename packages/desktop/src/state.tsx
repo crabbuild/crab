@@ -1,6 +1,6 @@
 import { fileBuffers } from "./lib/file-buffer-store";
 import { retainNotebookRepositories } from "./lib/jupyter-ipc";
-import { retainFileQueryRepositories } from "./lib/file-query";
+import { invalidateFileQuerySources, retainFileQueryRepositories } from "./lib/file-query";
 import { workspaceDocuments } from "./lib/workspace-settings-store";
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
@@ -717,6 +717,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "job-complete", job_id: p.job_id, status: p.status, outcome: p.outcome });
       } else if (evt.method === "progress/transfer") {
         dispatch({ type: "job-transfer", transfer: evt.params as ProgressTransfer });
+      } else if (evt.method === "repo:storage-source-changed") {
+        invalidateFileQuerySources((evt.params as { repo_ids: string[] }).repo_ids);
       } else if (evt.method === "repo:capabilities-changed") {
         const p = evt.params as { repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string };
         fileBuffers.runtime(p.repo_id, p.capabilities.canEdit, p.native_session_id);

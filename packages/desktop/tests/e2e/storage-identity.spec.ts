@@ -27,6 +27,8 @@ function isolatedEnvironment(root: string): NodeJS.ProcessEnv {
   return env;
 }
 
+const countParquetRows = "SELECT count(*) AS selected_rows FROM data";
+
 async function queryColdParquet(page: Page, connection: S3Profile, cache: string, expectedRows: number) {
   const snapshot = path.join(cache, "desktop-content", "database-query", "crab-query-snapshot");
   const transport = async (action: "pause_lfs" | "release" | "stats") => {
@@ -46,13 +48,22 @@ async function queryColdParquet(page: Page, connection: S3Profile, cache: string
   } finally {
     await transport("release");
   }
-  await page.getByRole("textbox", { name: "SQL query", exact: true }).fill("SELECT count(*) AS selected_rows FROM data");
+  await page.getByRole("textbox", { name: "SQL query", exact: true }).fill(countParquetRows);
   await page.getByRole("button", { name: "Run", exact: true }).click();
   await expect(page.getByRole("cell", { name: String(expectedRows), exact: true })).toBeVisible();
   expect(existsSync(snapshot)).toBe(false);
   const after = await transport("stats");
   expect(after.get).toBeGreaterThan(before.get);
   expect(after.writes).toBe(0);
+}
+
+async function rerunReboundParquet(page: Page, expectedRows: number) {
+  await page.locator('[role="treeitem"][data-item-path="query.parquet"]').click();
+  await expect(page.getByRole("textbox", { name: "SQL query", exact: true })).toHaveValue(countParquetRows);
+  await expect(page.getByRole("cell", { name: "3", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: "Repository storage changed" })).toBeVisible();
+  await page.getByRole("button", { name: "Run", exact: true }).click();
+  await expect(page.getByRole("cell", { name: String(expectedRows), exact: true })).toBeVisible();
 }
 
 test("device storage identities reach SSH cold reads, replacement and saved restart", async () => {
@@ -202,6 +213,8 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await expect(section.getByRole("status")).toContainText("Connection selected");
     await showFile(page, "weights.safetensors", source.payloads[0].marker);
     expect(epoch(alphaId)).not.toBe(alphaEpoch);
+    await rerunReboundParquet(page, 3);
+    await page.screenshot({ path: test.info().outputPath("ssh-sql-repaired-source.png") });
     expect(remote.requests.some(request => request.method === "file_open" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     expect(remote.requests.filter(request => request.method === "storage_connection_test")).toHaveLength(3);
     await page.screenshot({ path: test.info().outputPath("ssh-storage-identity-repaired.png") });
@@ -345,6 +358,8 @@ test("storage settings replace local and SDK reader identities across distinct r
     await expect(page.getByText(fixture.payloads[1].marker, { exact: false }).first()).toBeVisible();
     const replacement = epoch("snapshot");
     expect(replacement).not.toBe(remoteSession);
+    await rerunReboundParquet(page, 4);
+    await page.screenshot({ path: test.info().outputPath("sdk-sql-replaced-source.png") });
     const content = await call(page, "read_bytes", { repo_id: "snapshot", path: "weights.safetensors", max_bytes: fixture.payloads[1].size + 1 });
     expect(sha(Buffer.from(String(content.bytes_b64), "base64"))).toBe(fixture.payloads[1].sha256);
     await page.screenshot({ path: test.info().outputPath("storage-identity-replaced.png") });

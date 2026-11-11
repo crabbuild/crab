@@ -31,7 +31,7 @@ broadening profiles. Keep provider/platform qualification alongside the work.
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
 | P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, output budgets, and remote network loss. Local execution and token-authenticated Jupyter Server execution now have bounded packaged proof. Broader runtime, TLS, SSH and platform profiles remain open. |
-| P0 | Complete large and remote database queries | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs) and [file query session](../src/lib/file-query.ts). | Local crash recovery and cold SDK/SSH SQL have packaged macOS proof. Retire results when storage identity changes, while retaining state through same-source native repair. Measure multi-GiB scan memory and extend cold query and crash qualification across platforms. Use captured ranges for selective Parquet scans. Define and qualify SQLite WAL capture. |
+| P0 | Complete large and remote database queries | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs) and [file query session](../src/lib/file-query.ts). | Local crash recovery and cold SDK/SSH SQL have packaged macOS proof. Measure multi-GiB scan memory and extend cold query and crash qualification across platforms. Use captured ranges for selective Parquet scans. Define and qualify SQLite WAL capture. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree/cross-repository comparisons and read-only model isolation through their UI entry points. Qualify Dashboard/Datasets/cached metrics/shared hydration state under storage rebind and SSH reconnect; removal during admitted SDK opening; real jump-host cancellation; broader media profiles and repeated shutdown. Native/local publication has bounded mode/symlink/cleanup proof; other filesystem metadata and platforms remain open. |
 | P1 | Complete one Crab and LFS repository lifecycle per supported profile | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Create/edit/rename/delete, track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate; compare exact bytes, identities, executable modes and unrelated index entries. Finish remote physical mutations, standalone editor RPC parity and admitted task-worktree ownership. Optional SDK configuration needs typed path absence distinct from missing content objects. Qualify migrations/extensions/supported locks, ordinary Git captures, review/mode diffs, plain Git patch cancellation and crash drafts. |
 | P1 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect/restart and retry from supported state. Prove acknowledged cancellation, cleanup and publication outcomes; durable terminal/journal ownership; logical versus network counters; active-reader pins, budget enforcement, SDK namespace eviction and offline retention. Remove component-owned publishing rather than add another retry queue. |
@@ -54,6 +54,18 @@ modes. The repository session retains SQL drafts, results and recent statements
 across file switches and native-session recovery. Late completions from a retired
 session are ignored.
 
+The storage vault advances the source generation for repositories whose binding,
+endpoint or credentials change. It retires affected SQL results at commit time.
+The same fence prevents new SQL from reaching the old source during reopening
+and discards a reply that arrives after the binding changed. The editor keeps
+the draft and recent statements for an explicit rerun. Native repair and
+connection display-name changes preserve results from the same storage source.
+The macOS arm64 SDK test reproduces three stale rows in the prior package
+after switching endpoints. The updated package clears the result and returns
+the second store's four rows on rerun. SSH connection removal and repair also
+clear the old result, and a same-source native restart retains it. The two
+real-store tests use Electron's test keychain for the local unsigned package.
+
 The native query owns one private snapshot at a time per cache root, using the
 existing cache lease to exclude other processes and cleanup. Agent startup and
 new query admission reclaim the named snapshot only after acquiring that lease.
@@ -71,6 +83,10 @@ process-wide memory limits and selective Parquet reads remain open. The current
 DuckDB Rust table-function API supports column projection. A replacement scan
 also needs SQL predicate admission and parity with the bundled Parquet reader's
 type conversions.
+
+A live SQLite baseline reproduced a committed value of 91 in the WAL while the
+captured standalone database returned its checkpointed value of 17. The source
+database and WAL stayed byte-identical during the read.
 
 The unsigned macOS arm64 package returned historical rows for SQLite, LFS Parquet
 and Crab-chunked Parquet. It retained SQL drafts and results through file changes
@@ -97,6 +113,12 @@ The local packaged test starts a second agent while the query owns its snapshot,
 then kills the query owner and reopens the repository. The second agent leaves
 the live snapshot intact. The replacement agent removes the abandoned snapshot,
 and the next query succeeds with the source files and index byte-identical.
+
+The packaged native agent queried a 3 GiB sparse local Parquet fixture with the
+original three rows and footer preserved. The full 3 GiB snapshot took 42.24
+seconds end to end, with 46.7 MiB peak sampled agent RSS and cleanup on success.
+The fixture exercises the input copy. Dense multi-GiB column decoding and
+selective reads remain qualification gaps.
 
 ## Local notebook execution checkpoint
 

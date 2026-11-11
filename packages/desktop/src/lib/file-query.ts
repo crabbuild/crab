@@ -44,6 +44,16 @@ export class FileQuery {
     this.publish({ status: "idle", error: "Repository services changed. Run the query again." });
   }
 
+  storageSourceChanged(): void {
+    if (this.state.sql === null) return;
+    this.active?.cancel();
+    this.active = null;
+    this.publish({
+      status: "idle", result: null, elapsed: null,
+      error: "Repository storage changed. Run the query again.",
+    });
+  }
+
   startDefault(nativeSessionId: string, sql: string): void {
     if (this.state.sql !== null) return;
     this.setSql(sql);
@@ -108,5 +118,12 @@ export function retainFileQueryRepositories(repositories: Map<string, string | n
   for (const [key, session] of sessions) {
     session.rebind(repositories.get(session.repoId) ?? null);
     if (!repositories.has(session.repoId)) sessions.delete(key);
+  }
+}
+
+export function invalidateFileQuerySources(repoIds: string[]): void {
+  const affected = new Set(repoIds);
+  for (const session of sessions.values()) {
+    if (affected.has(session.repoId)) session.storageSourceChanged();
   }
 }
