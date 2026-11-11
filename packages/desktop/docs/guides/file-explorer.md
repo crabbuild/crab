@@ -103,10 +103,15 @@ names. Drafts, results and recent queries stay with the file and revision while
 the repository remains open. **Cancel query** stops native work and waits for
 cleanup. Results indicate when they reach the row or byte limit.
 
-SQL works from a private, temporary copy of the captured file. SQLite reads the
-database file bytes at that selection. Checkpoint active WAL transactions before
-capturing a standalone database with those changes. Input snapshots are limited
-to 8 GiB, and snapshot creation and execution share a 60-second budget.
+SQLite Browse and SQL include committed write-ahead log (WAL) changes. An active
+working-tree database uses a read-only SQLite transaction. SQLite may maintain
+its shared-memory index while the reader is open. For an index or committed
+selection, keep the database and its `-wal` companion in that same selection to
+include commits that have yet to be checkpointed.
+
+Parquet and captured SQLite copies use private temporary storage. The combined
+input snapshot is limited to 8 GiB. Source capture and execution share a
+60-second budget.
 
 ## Drag and Drop
 

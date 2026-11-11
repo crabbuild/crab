@@ -143,9 +143,10 @@ deletion fallback; retained, unknown and busy state stays with its owner.
 - `preview_sqlite`, `file_query`
 
 `file_query {repo_id, path, rev?, op_id?, sql, max_rows?}` captures a Parquet or
-SQLite source and runs SQL on its private snapshot. It returns columns, rows,
-returned row count and a truncation flag. `max_rows` defaults to 500 and is
-capped at 1,000. The original query returns its cancellation result after engine
+SQLite source. Active working SQLite journals use an isolated read-only
+transaction. Private snapshots include any WAL from the selected SQLite source.
+The RPC returns columns, rows, row count and a truncation flag. `max_rows`
+defaults to 500 and is capped at 1,000. The query reports cancellation after engine
 shutdown and snapshot cleanup. The desktop bridge validates the observed repository
 session before admitting the operation.
 

@@ -23,18 +23,17 @@ record historical evidence rather than separate work queues.
 
 ## Remaining priorities
 
-This is the single execution queue. The acceptance matrix defines completion;
-checkpoint sections below preserve evidence, not additional queues. Within each
-row, fix the canonical owner and qualify the actual UI entry point before
-broadening profiles. Keep provider/platform qualification alongside the work.
+Work through the P0 rows in order. Prove one full Crab and LFS workflow through
+Files, Activity and Settings before expanding the format or platform matrix.
+The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Finish notebook execution | The [kernel owner](../electron/jupyter-kernel.ts), reference-client worker and [notebook state](../src/lib/jupyter-ipc.ts). | Qualify installer failure/retry, abrupt kernel/worker death and retry, independent controls during native-reader outage, output budgets, and remote network loss. Local execution and token-authenticated Jupyter Server execution now have bounded packaged proof. Broader runtime, TLS, SSH and platform profiles remain open. |
-| P0 | Complete large and remote database queries | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs) and [file query session](../src/lib/file-query.ts). | Local crash recovery and cold SDK/SSH SQL have packaged macOS proof. Measure multi-GiB scan memory and extend cold query and crash qualification across platforms. Use captured ranges for selective Parquet scans. Define and qualify SQLite WAL capture. |
-| P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree/cross-repository comparisons and read-only model isolation through their UI entry points. Qualify Dashboard/Datasets/cached metrics/shared hydration state under storage rebind and SSH reconnect; removal during admitted SDK opening; real jump-host cancellation; broader media profiles and repeated shutdown. Native/local publication has bounded mode/symlink/cleanup proof; other filesystem metadata and platforms remain open. |
-| P1 | Complete one Crab and LFS repository lifecycle per supported profile | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Create/edit/rename/delete, track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate; compare exact bytes, identities, executable modes and unrelated index entries. Finish remote physical mutations, standalone editor RPC parity and admitted task-worktree ownership. Optional SDK configuration needs typed path absence distinct from missing content objects. Qualify migrations/extensions/supported locks, ordinary Git captures, review/mode diffs, plain Git patch cancellation and crash drafts. |
-| P1 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect/restart and retry from supported state. Prove acknowledged cancellation, cleanup and publication outcomes; durable terminal/journal ownership; logical versus network counters; active-reader pins, budget enforcement, SDK namespace eviction and offline retention. Remove component-owned publishing rather than add another retry queue. |
+| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate from Desktop. Prove exact bytes and identities, small-edit Crab deduplication, and preservation of unrelated index entries. Repeat after editing, renaming or removing a file. Qualify the local baseline first, then the equivalent SSH operations. |
+| P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
+| P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Cover removal during SDK opening, real jump-host cancellation and repeated shutdown. |
+| P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
+| P1 | Complete advanced repository workflows | Existing provider mutations, [captured diffs](../agent/src/repository/content/diff.rs) and workspace operation owners. | Finish standalone editor RPC parity and task-worktree ownership. Qualify LFS migration, extensions and supported locks, ordinary Git captures, review and mode diffs, plain Git patch cancellation and crash drafts. Distinguish optional SDK configuration absence from missing content objects. |
 | P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Complete remaining format comparisons. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
 
 File details, Activity and Settings remain the consolidation points. Reuse one
@@ -70,23 +69,42 @@ The native query owns one private snapshot at a time per cache root, using the
 existing cache lease to exclude other processes and cleanup. Agent startup and
 new query admission reclaim the named snapshot only after acquiring that lease.
 Git reads use a single sequential blob stream, and Crab/LFS reads verify the
-complete file before SQL can open it. Admission, snapshot creation and execution
-share a 60-second budget after source capture. Input is capped at 8 GiB. The
+complete file before SQL can open it. Source capture, admission, copying and
+execution share a 60-second budget. Private snapshots are capped at 8 GiB. The
 engines return at most 1,000 rows and about 2 MiB of serialized results. Large
 integers and decimals retain exact text. Cancel joins the engine and removes the
 snapshot before the query reports its terminal status.
 
-SQLite queries operate on standalone database bytes. DuckDB opens the captured
-Parquet file through the `data` view and streams result batches. Both engines
-still copy the full captured input for each operation. SQLite WAL capture,
-process-wide memory limits and selective Parquet reads remain open. The current
+DuckDB opens the captured Parquet file through the `data` view and streams
+result batches. Parquet still copies the full captured input for each operation.
+Process-wide memory limits and selective Parquet reads remain open. The current
 DuckDB Rust table-function API supports column projection. A replacement scan
 also needs SQL predicate admission and parity with the bundled Parquet reader's
 type conversions.
 
-A live SQLite baseline reproduced a committed value of 91 in the WAL while the
-captured standalone database returned its checkpointed value of 17. The source
-database and WAL stayed byte-identical during the read.
+The live SQLite baseline returned a checkpointed value of 17 while its WAL
+contained a committed value of 91. Browse and SQL now pin a read-only
+transaction in an isolated process for an active working database. SQLite can
+maintain its shared-memory index while the transaction is open. The process
+boundary protects SQLite's POSIX locks from unrelated file closes in the sidecar.
+[SQLite locking](https://www.sqlite.org/howtocorrupt.html#posix_advisory_locks_canceled_by_a_separate_thread_doing_close_)
+
+Git history and the index select both entries in one tree or index listing. The
+SDK checks the same snapshot's parent tree for the companion. The private pair
+uses SQLite's WAL recovery after checking the current frame sequence. Cleanup
+covers the private database, WAL and shared-memory index.
+[SQLite WAL format](https://www.sqlite.org/fileformat2.html#the_write_ahead_log)
+
+The packaged macOS arm64 test saw committed value 113 in Browse and SQL while a
+writer held uncommitted value 991. It recovered historical value 91, selected
+staged value 113, read a working LFS-pointer WAL, and rejected a damaged WAL and
+an attempted SQL update. Cancel waited for the live reader process to exit.
+The database, WAL, pointer and index bytes were unchanged. In a native replay,
+killing the sidecar also stopped its live reader and preserved those bytes.
+The paired SSH package read value 81 from a lazy clone with a Crab database
+pointer and an LFS WAL pointer, which both stayed intact. The direct SDK read
+value 82 from the second RustFS store after a storage rebind. The unsigned test
+package used Electron's test keychain for both storage cases.
 
 The unsigned macOS arm64 package returned historical rows for SQLite, LFS Parquet
 and Crab-chunked Parquet. It retained SQL drafts and results through file changes

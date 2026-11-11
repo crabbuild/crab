@@ -197,6 +197,9 @@ async fn main() -> std::io::Result<()> {
         println!("crab-desktop-agent {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if std::env::args().nth(1).as_deref() == Some("--sqlite-live-query") {
+        return preview::query::run_live_worker().await;
+    }
 
     let log_file = path_argument("--log-file")?;
     init_tracing(log_file.as_deref());

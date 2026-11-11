@@ -7015,9 +7015,11 @@ async fn git_code_frequency(state: &State, p: GitCodeFrequencyParams) -> Result<
 }
 
 async fn preview_sqlite(state: &State, p: PreviewParams) -> Result<Value> {
-    read_source(state, p, |source| {
-        preview::query::run(source, preview::query::Job::SqlitePreview)
-    })
+    database_query(
+        state,
+        p,
+        preview::query::Job::Sqlite(preview::query::SqliteJob::Preview),
+    )
     .await
 }
 
@@ -7031,7 +7033,23 @@ struct FileQueryParams {
 
 async fn file_query(state: &State, p: FileQueryParams) -> Result<Value> {
     let job = preview::query::Job::query(&p.file.path, p.sql, p.max_rows)?;
-    read_source(state, p.file, |source| preview::query::run(source, job)).await
+    database_query(state, p.file, job).await
+}
+
+async fn database_query(
+    state: &State,
+    p: PreviewParams,
+    job: preview::query::Job,
+) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    cancellable_read(
+        state,
+        p.op_id,
+        &scope,
+        preview::query::run(&repo, &p.path, p.rev.as_deref(), scope.clone(), job),
+    )
+    .await
 }
 
 // ---- ONNX preview -----------------------------------------------------

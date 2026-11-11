@@ -9,6 +9,7 @@ use super::*;
 pub(super) mod command;
 pub(crate) mod diff;
 mod materialize;
+mod sqlite;
 use materialize::WorkingPointer;
 
 pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
@@ -114,6 +115,7 @@ impl ReadScope {
 enum Source {
     Local {
         file: Mutex<tokio::fs::File>,
+        path: PathBuf,
         modified: Option<SystemTime>,
     },
     Git {
@@ -155,24 +157,7 @@ impl FileSource {
         let validated = GitPath::new(path.as_bytes().to_vec())?;
         let Some(root) = &repo.work_dir else {
             let snapshot = scope.run(repo.snapshot(rev, scope.options())).await?;
-            let metadata = scope
-                .run(async {
-                    Ok(snapshot
-                        .file_metadata(validated.clone())
-                        .with_options(ReadOptions::default().with_operation(scope.options()))
-                        .await?)
-                })
-                .await?;
-            return Ok(Self {
-                scope,
-                size: metadata.size,
-                source: Arc::new(Source::Remote {
-                    snapshot,
-                    path: validated,
-                    kind: metadata.kind,
-                    oid: metadata.id.to_string(),
-                }),
-            });
+            return Self::snapshot_file(snapshot, validated, scope).await;
         };
         if let Some(rev) = rev {
             // Resolve the index or revision once; a later checkout cannot redirect reads.
@@ -189,11 +174,23 @@ impl FileSource {
             .to_owned();
             return Self::git_blob(repo, root, oid, scope).await;
         }
+        Self::working_file(repo, root, Path::new(path), scope).await
+    }
+
+    async fn working_file(
+        repo: &BrowseSession,
+        root: &Path,
+        path: &Path,
+        scope: ReadScope,
+    ) -> Result<Self> {
+        scope.check()?;
         let absolute = tokio::fs::canonicalize(root.join(path))
             .await
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    AgentError::PathNotFound { path: path.into() }
+                    AgentError::PathNotFound {
+                        path: path.display().to_string(),
+                    }
                 } else {
                     error.into()
                 }
@@ -241,7 +238,29 @@ impl FileSource {
             size,
             source: Arc::new(Source::Local {
                 file: Mutex::new(file),
+                path: absolute,
                 modified: metadata.modified().ok(),
+            }),
+        })
+    }
+
+    async fn snapshot_file(snapshot: Snapshot, path: GitPath, scope: ReadScope) -> Result<Self> {
+        let metadata = scope
+            .run(async {
+                Ok(snapshot
+                    .file_metadata(path.clone())
+                    .with_options(ReadOptions::default().with_operation(scope.options()))
+                    .await?)
+            })
+            .await?;
+        Ok(Self {
+            scope,
+            size: metadata.size,
+            source: Arc::new(Source::Remote {
+                snapshot,
+                path,
+                kind: metadata.kind,
+                oid: metadata.id.to_string(),
             }),
         })
     }
@@ -388,6 +407,10 @@ impl FileSource {
 
     pub(crate) async fn close(&self) -> Result<()> {
         self.scope.cancel();
+        self.release_reader().await
+    }
+
+    pub(crate) async fn release_reader(&self) -> Result<()> {
         if let Source::Pointer { reader, .. } = self.source.as_ref() {
             reader.close().await?;
         }
@@ -479,7 +502,7 @@ impl FileSource {
         let end = start.saturating_add(u64::from(length)).min(self.size);
         let length = (end - start) as usize;
         if length == 0 {
-            if let Source::Local { file, modified } = self.source.as_ref() {
+            if let Source::Local { file, modified, .. } = self.source.as_ref() {
                 let metadata = file.lock().await.metadata().await?;
                 if metadata.len() != self.size || metadata.modified().ok() != *modified {
                     return Err(changed());
@@ -488,7 +511,7 @@ impl FileSource {
             return Ok(Bytes::new());
         }
         let bytes = match self.source.as_ref() {
-            Source::Local { file, modified } => {
+            Source::Local { file, modified, .. } => {
                 let mut file = file.lock().await;
                 let before = file.metadata().await?;
                 if before.len() != self.size || before.modified().ok() != *modified {

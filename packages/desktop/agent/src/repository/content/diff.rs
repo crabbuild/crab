@@ -159,11 +159,11 @@ async fn capture(
             .to_owned();
             let bytes = git::run(root, &["ls-tree", "-z", &tree, "--", path], &scope).await?;
             version = Version::Revision { rev: tree };
-            entry(&bytes, false)?
+            git::file_entry(&bytes, false)?
         }
         Version::Index => {
             let bytes = git::run(root, &["ls-files", "--stage", "-z", "--", path], &scope).await?;
-            entry(&bytes, true)?
+            git::file_entry(&bytes, true)?
         }
         Version::Working => {
             let metadata = match tokio::fs::symlink_metadata(root.join(path)).await {
@@ -220,38 +220,6 @@ async fn unborn_head(root: &Path, scope: &ReadScope) -> Result<bool> {
         Err(AgentError::Cli { status: 1, .. }) => Ok(true),
         Err(error) => Err(error),
     }
-}
-
-fn entry(bytes: &[u8], index: bool) -> Result<(Option<String>, Option<String>)> {
-    if bytes.is_empty() {
-        return Ok((None, None));
-    }
-    let entries = bytes
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    if entries.len() != 1 {
-        return Err(AgentError::Other(
-            "comparison requires one resolved file; resolve index conflicts first".into(),
-        ));
-    }
-    let header = entries[0]
-        .split(|byte| *byte == b'\t')
-        .next()
-        .ok_or_else(|| std::io::Error::other("invalid Git entry"))?;
-    let fields = std::str::from_utf8(header)
-        .map_err(std::io::Error::other)?
-        .split(' ')
-        .collect::<Vec<_>>();
-    if fields.len() != 3 || (index && fields[2] != "0") {
-        return Err(AgentError::Other(
-            "comparison requires a resolved Git entry".into(),
-        ));
-    }
-    Ok((
-        Some(fields[0].into()),
-        Some(fields[if index { 1 } else { 2 }].into()),
-    ))
 }
 
 async fn comparison(

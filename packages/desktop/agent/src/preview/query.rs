@@ -14,14 +14,20 @@ use rusqlite::{
     limits::Limit,
     types::ValueRef,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
     AgentError, Result,
-    repository::{FileSource, ReadScope},
+    repository::{BrowseSession, FileSource, ReadScope},
 };
 
 use super::parse_error;
+
+mod wal;
+mod worker;
+
+pub(crate) use worker::run as run_live_worker;
 
 const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
@@ -31,6 +37,8 @@ const MAX_COLUMNS: usize = 256;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 const SNAPSHOT: &str = "crab-query-snapshot";
+const SNAPSHOT_WAL: &str = "crab-query-snapshot-wal";
+const SNAPSHOT_SHM: &str = "crab-query-snapshot-shm";
 
 fn snapshot_directory() -> PathBuf {
     crab_cache::default_cache_root().join("desktop-content/database-query")
@@ -41,9 +49,25 @@ fn cache_busy(error: &CacheError) -> bool {
 }
 
 fn remove_snapshot(lease: &CacheUseGuard) -> Result<()> {
-    match std::fs::remove_file(lease.path().join(SNAPSHOT)) {
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        result => Ok(result?),
+    let mut cleanup = Ok(());
+    for name in [SNAPSHOT_SHM, SNAPSHOT_WAL, SNAPSHOT] {
+        let result = match std::fs::remove_file(lease.path().join(name)) {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            result => result.map_err(AgentError::from),
+        };
+        cleanup = cleanup.and(result);
+    }
+    cleanup
+}
+
+fn with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
+    match (result, cleanup) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(operation), Err(cleanup)) => Err(AgentError::Cleanup {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 
@@ -61,9 +85,14 @@ pub(crate) fn reclaim_abandoned_snapshot() -> Result<()> {
 }
 
 pub(crate) enum Job {
-    SqlitePreview,
-    Sqlite { sql: String, max_rows: usize },
+    Sqlite(SqliteJob),
     Parquet { sql: String, max_rows: usize },
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) enum SqliteJob {
+    Preview,
+    Query { sql: String, max_rows: usize },
 }
 
 impl Job {
@@ -77,7 +106,9 @@ impl Job {
         let ext = Path::new(path).extension().and_then(|ext| ext.to_str());
         match ext.map(str::to_ascii_lowercase).as_deref() {
             Some("parquet" | "pq") => Ok(Self::Parquet { sql, max_rows }),
-            Some("db" | "sqlite" | "sqlite3") => Ok(Self::Sqlite { sql, max_rows }),
+            Some("db" | "sqlite" | "sqlite3") => {
+                Ok(Self::Sqlite(SqliteJob::Query { sql, max_rows }))
+            }
             _ => Err(AgentError::Other(
                 "SQL requires a Parquet or SQLite file".into(),
             )),
@@ -85,10 +116,35 @@ impl Job {
     }
 }
 
-pub(crate) async fn run(source: Arc<FileSource>, job: Job) -> Result<Value> {
-    let scope = source.scope();
+pub(crate) async fn run(
+    repo: &BrowseSession,
+    path: &str,
+    rev: Option<&str>,
+    scope: ReadScope,
+    job: Job,
+) -> Result<Value> {
     let interrupt = Arc::new(OnceLock::<Arc<duckdb::InterruptHandle>>::new());
-    let work = execute(source, job, interrupt.clone());
+    let work = async {
+        let (source, wal) = if matches!(job, Job::Parquet { .. }) {
+            (
+                FileSource::capture(repo, path, rev, scope.clone()).await?,
+                None,
+            )
+        } else {
+            FileSource::capture_sqlite(repo, path, rev, scope.clone()).await?
+        };
+        let result = execute(&source, wal.as_ref(), job, interrupt.clone()).await;
+        // All reads have joined. Release native file owners without cancelling
+        // the enclosing query while it is publishing its terminal result.
+        let closed_wal = match &wal {
+            Some(wal) => wal.release_reader().await,
+            None => Ok(()),
+        };
+        with_cleanup(
+            with_cleanup(result, closed_wal),
+            source.release_reader().await,
+        )
+    };
     tokio::pin!(work);
     let timed_out = tokio::select! {
         result = &mut work => return result,
@@ -120,15 +176,11 @@ pub(crate) async fn run(source: Arc<FileSource>, job: Job) -> Result<Value> {
 }
 
 async fn execute(
-    source: Arc<FileSource>,
+    source: &FileSource,
+    wal: Option<&FileSource>,
     job: Job,
     interrupt: Arc<OnceLock<Arc<duckdb::InterruptHandle>>>,
 ) -> Result<Value> {
-    if source.size > MAX_SNAPSHOT_BYTES {
-        return Err(AgentError::Other(
-            "Database input exceeds the 8 GiB snapshot budget".into(),
-        ));
-    }
     let scope = source.scope();
     let directory = snapshot_directory();
     crab_cache::ensure_private_cache_directory(&directory)?;
@@ -148,47 +200,101 @@ async fn execute(
     // this fixed name can only belong to an interrupted previous operation.
     crab_cache::ensure_private_cache_directory(lease.path())?;
     remove_snapshot(&lease)?;
+    // A pointer companion has to be reconstructed into the private snapshot.
+    // SQLite's live connection can only consume a physical working journal.
+    let can_read_live =
+        !matches!(job, Job::Parquet { .. }) && wal.is_none_or(FileSource::is_plain_working_file);
+    if can_read_live
+        && let Job::Sqlite(job) = &job
+        && let Some(path) = source.live_sqlite_path().await?
+    {
+        return worker::execute(path, job, source.size, &scope).await;
+    }
+    let wal_size = wal.map_or(0, |wal| wal.size);
+    if source.size.saturating_add(wal_size) > MAX_SNAPSHOT_BYTES {
+        return Err(AgentError::Other(
+            "Database input and WAL exceed the 8 GiB snapshot budget".into(),
+        ));
+    }
     let file = tempfile::Builder::new()
         .prefix(SNAPSHOT)
         .rand_bytes(0)
         .tempfile_in(lease.path())?;
+    let wal_path = lease.path().join(SNAPSHOT_WAL);
     let input = async {
         source
             .copy_complete_to_file(file.as_file().try_clone()?)
-            .await
+            .await?;
+        if let Some(wal) = wal {
+            let output = std::fs::File::create_new(&wal_path)?;
+            wal.copy_complete_to_file(output).await?;
+        }
+        if can_read_live && source.live_sqlite_path().await?.is_some() {
+            return Err(AgentError::Other(
+                "SQLite changed while capturing the database. Run the query again.".into(),
+            ));
+        }
+        Ok(())
     }
     .await;
+    let journal = (wal_size > 0).then_some(wal_path);
     let result = match input {
         Err(error) => Err(error),
         Ok(()) => {
-            let path = file.path().to_owned();
-            let size = source.size;
-            tokio::task::spawn_blocking(move || {
-                scope.check()?;
-                match job {
-                    Job::Parquet { sql, max_rows } => {
-                        parquet_query(&path, &sql, max_rows, &scope, &interrupt)
-                    }
-                    Job::Sqlite { sql, max_rows } => {
-                        let conn = sqlite(&path, &scope)?;
-                        let (columns, rows) = sqlite_rows(&conn, &sql, max_rows, &scope)?;
-                        Ok(rows.result(columns))
-                    }
-                    Job::SqlitePreview => sqlite_preview(&sqlite(&path, &scope)?, size, &scope),
-                }
-            })
+            execute_engine(
+                file.path().to_owned(),
+                job,
+                source.size,
+                journal,
+                scope,
+                interrupt,
+            )
             .await
-            .map_err(|error| AgentError::Io(std::io::Error::other(error)))
-            .and_then(|result| result)
         }
     };
-    match (result, file.close()) {
-        (result, Ok(())) => result,
-        (Ok(_), Err(cleanup)) => Err(cleanup.into()),
-        (Err(operation), Err(cleanup)) => Err(AgentError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup.into()),
-        }),
+    let closed = file.close().map_err(AgentError::from);
+    with_cleanup(with_cleanup(result, closed), remove_snapshot(&lease))
+}
+
+async fn execute_engine(
+    path: PathBuf,
+    job: Job,
+    size: u64,
+    journal: Option<PathBuf>,
+    scope: ReadScope,
+    interrupt: Arc<OnceLock<Arc<duckdb::InterruptHandle>>>,
+) -> Result<Value> {
+    tokio::task::spawn_blocking(move || {
+        scope.check()?;
+        if let Some(wal) = &journal {
+            wal::verify(&path, wal, &scope)?;
+        }
+        match job {
+            Job::Parquet { sql, max_rows } => {
+                parquet_query(&path, &sql, max_rows, &scope, &interrupt)
+            }
+            Job::Sqlite(job) => execute_sqlite(&path, job, size, journal.is_some(), &scope),
+        }
+    })
+    .await
+    .map_err(|error| AgentError::Io(std::io::Error::other(error)))?
+}
+
+fn execute_sqlite(
+    path: &Path,
+    job: SqliteJob,
+    size: u64,
+    journaled: bool,
+    scope: &ReadScope,
+) -> Result<Value> {
+    scope.check()?;
+    let conn = sqlite(path, journaled, scope)?;
+    match job {
+        SqliteJob::Preview => sqlite_preview(&conn, size, scope),
+        SqliteJob::Query { sql, max_rows } => {
+            let (columns, rows) = sqlite_rows(&conn, &sql, max_rows, scope)?;
+            Ok(rows.result(columns))
+        }
     }
 }
 
@@ -342,20 +448,32 @@ fn integer(number: i64) -> Value {
     }
 }
 
-fn sqlite(path: &Path, scope: &ReadScope) -> Result<Connection> {
+fn sqlite(path: &Path, journaled: bool, scope: &ReadScope) -> Result<Connection> {
     let mut uri = url::Url::from_file_path(path)
         .map_err(|()| AgentError::Other("Invalid SQLite snapshot path".into()))?;
-    uri.set_query(Some("immutable=1"));
+    if !journaled {
+        uri.set_query(Some("immutable=1"));
+    }
     let error = |error| parse_error("SQLite", error);
     let conn = Connection::open_with_flags(
         uri.as_str(),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(error)?;
     conn.execute_batch(
         "PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;",
     )
     .map_err(error)?;
+    if journaled {
+        // SQLite must pin one read transaction across the schema, samples and
+        // SQL. Normal locking includes WAL commits and excludes dirty pages.
+        conn.busy_timeout(Duration::ZERO).map_err(error)?;
+        conn.execute_batch("BEGIN;").map_err(error)?;
+        conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+            .map_err(error)?;
+    }
     conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, MAX_RESULT_BYTES as i32)
         .map_err(error)?;
     conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, MAX_COLUMNS as i32)

@@ -80,7 +80,9 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     cpSync(source.repositories[index], directory, { recursive: true });
     mkdirSync(path.join(directory, ".crab"), { recursive: true });
     writeFileSync(path.join(directory, ".crab/config.toml"), `[cache]\nchunk_cache_dir = ${JSON.stringify(path.join(root, `remote-chunks-${index}`))}\n`);
-    for (const file of ["weights.safetensors", "lfs.safetensors", "cold.safetensors", "query.parquet"]) writeFileSync(path.join(directory, file), git(directory, ["show", `:${file}`]));
+    for (const file of ["weights.safetensors", "lfs.safetensors", "cold.safetensors", "query.parquet", "archive.sqlite", "archive.sqlite-wal"]) {
+      writeFileSync(path.join(directory, file), git(directory, ["show", `:${file}`]));
+    }
   }
   const profile = path.join(root, "profile");
   const events: Runtime[] = [];
@@ -160,6 +162,12 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(readFileSync(path.join(directories[0], "query.parquet"))).toEqual(git(directories[0], ["show", ":query.parquet"]));
     expect(remote.requests.some(request => request.method === "file_query" && request.repo_id === alphaId)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-cold-parquet-sql.png") });
+    await showFile(page, "archive.sqlite", "81");
+    await page.getByRole("button", { name: "SQL", exact: true }).click();
+    await expect(page.getByRole("cell", { name: "81", exact: true })).toBeVisible();
+    for (const file of ["archive.sqlite", "archive.sqlite-wal"]) {
+      expect(readFileSync(path.join(directories[0], file))).toEqual(git(directories[0], ["show", `:${file}`]));
+    }
     await showFile(page, "lfs.safetensors", source.payloads[0].marker);
     const alphaEpoch = epoch(alphaId);
     expect(typeof alphaEpoch).toBe("string");
@@ -360,6 +368,11 @@ test("storage settings replace local and SDK reader identities across distinct r
     expect(replacement).not.toBe(remoteSession);
     await rerunReboundParquet(page, 4);
     await page.screenshot({ path: test.info().outputPath("sdk-sql-replaced-source.png") });
+    await files(page, "archive.sqlite");
+    await expect(page.getByRole("cell", { name: "82", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "SQL", exact: true }).click();
+    await expect(page.getByRole("cell", { name: "82", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("sdk-sqlite-wal.png") });
     const content = await call(page, "read_bytes", { repo_id: "snapshot", path: "weights.safetensors", max_bytes: fixture.payloads[1].size + 1 });
     expect(sha(Buffer.from(String(content.bytes_b64), "base64"))).toBe(fixture.payloads[1].sha256);
     await page.screenshot({ path: test.info().outputPath("storage-identity-replaced.png") });

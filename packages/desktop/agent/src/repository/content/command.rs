@@ -66,6 +66,38 @@ fn git_command(root: &Path, args: &[&str]) -> std::process::Command {
     command
 }
 
+pub(super) fn file_entry(bytes: &[u8], index: bool) -> Result<(Option<String>, Option<String>)> {
+    if bytes.is_empty() {
+        return Ok((None, None));
+    }
+    let entries = bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if entries.len() != 1 {
+        return Err(AgentError::Other(
+            "Git selection requires one resolved file; resolve index conflicts first".into(),
+        ));
+    }
+    let header = entries[0]
+        .split(|byte| *byte == b'\t')
+        .next()
+        .ok_or_else(|| std::io::Error::other("invalid Git entry"))?;
+    let fields = std::str::from_utf8(header)
+        .map_err(std::io::Error::other)?
+        .split(' ')
+        .collect::<Vec<_>>();
+    if fields.len() != 3 || (index && fields[2] != "0") {
+        return Err(AgentError::Other(
+            "Git selection requires a resolved entry".into(),
+        ));
+    }
+    Ok((
+        Some(fields[0].into()),
+        Some(fields[if index { 1 } else { 2 }].into()),
+    ))
+}
+
 pub(super) async fn blob(
     root: &Path,
     oid: &str,

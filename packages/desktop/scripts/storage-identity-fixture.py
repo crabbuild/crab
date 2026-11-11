@@ -1,7 +1,7 @@
 """Prepare isolated, distinct S3 identities for packaged desktop qualification."""
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 import hashlib
 import http.client
 import http.server
@@ -13,6 +13,7 @@ import secrets
 import select
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -185,9 +186,21 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             url = f"crab://{bucket}/proof"
             run([crab, "init", url], source)
             run([crab, "lfs", "install", "--local", "--skip-repo"], source)
-            (source / ".gitattributes").write_text("weights.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\ncold.safetensors filter=lfs -text\nquery.parquet filter=lfs -text\n")
+            (source / ".gitattributes").write_text(
+                "weights.safetensors filter=crab -text\nlfs.safetensors filter=lfs -text\n"
+                "cold.safetensors filter=lfs -text\nquery.parquet filter=lfs -text\n"
+                "archive.sqlite filter=crab -text\narchive.sqlite-wal filter=lfs -text\n"
+            )
             parquet = "before" if index == 0 else "after"
             shutil.copyfile(PARQUET_FIXTURES / f"metadata-{parquet}.parquet", source / "query.parquet")
+            live = directory / "sqlite-seed"
+            with closing(sqlite3.connect(live)) as writer:
+                writer.executescript("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE data(value INTEGER); INSERT INTO data VALUES(17);")
+                writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                writer.execute("UPDATE data SET value=?", (81 + index,))
+                writer.commit()
+                shutil.copyfile(live, source / "archive.sqlite")
+                shutil.copyfile(str(live) + "-wal", source / "archive.sqlite-wal")
             size = 4 * 1024 * 1024
             marker = name.upper() + "_STORAGE_IDENTITY_CONTENT"
             header = json.dumps({marker: {"dtype": "U8", "shape": [size], "data_offsets": [0, size]}}).encode()
@@ -200,7 +213,7 @@ def prepare(target: Path, crab: Path, rustfs: Path):
             (source / "cold.safetensors").write_bytes(cold)
             samples = bytes([0x10 + index]) * 2048
             (source / "sample.wav").write_bytes(struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(samples), b"WAVE", b"fmt ", 16, 1, 1, 8000, 16000, 2, 16, b"data", len(samples)) + samples)
-            run([git, "add", ".gitattributes", "crab.toml", "weights.safetensors", "lfs.safetensors", "cold.safetensors", "sample.wav", "query.parquet"], source)
+            run([git, "add", ".gitattributes", "crab.toml", "weights.safetensors", "lfs.safetensors", "cold.safetensors", "sample.wav", "query.parquet", "archive.sqlite", "archive.sqlite-wal"], source)
             run([git, "commit", "-m", "Storage identity fixture"], source)
             run([crab, "push", url, "main", "--json"], source)
             payloads.append({"marker": marker, "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)})
