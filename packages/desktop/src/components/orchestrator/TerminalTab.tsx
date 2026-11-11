@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { Plus, Send, X, Terminal as TerminalIcon } from "lucide-react";
 import { OrchestratorTask } from "./TaskCard";
+import { attachWebgl } from "../../lib/terminal-font";
 import {
   registerTerminal,
   appendOutput,
@@ -313,13 +313,8 @@ export function TerminalTab({ task: _task, workspacePath, onSendErrorToAgent }: 
       container.appendChild(wrapper);
       term.open(wrapper);
 
-      // WebGL renderer for GPU-accelerated performance.
       requestAnimationFrame(() => {
-        try {
-          term.loadAddon(new WebglAddon());
-        } catch {
-          // Falls back to canvas renderer silently.
-        }
+        attachWebgl(term, { addon: null, disabledAfterContextLoss: false });
       });
 
       // Fit after layout settles. Use a longer delay to ensure the
