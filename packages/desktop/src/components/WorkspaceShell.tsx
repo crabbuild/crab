@@ -161,7 +161,7 @@ export function WorkspaceShell({
       aria-label={group === "files" ? "Files" : "Git"}
       className={clsx(
         "flex shrink-0 gap-1 border-b border-gx-border bg-gx-surface px-2 py-1",
-        group === "files" ? "min-w-0 overflow-x-auto" : "flex-wrap",
+        group === "files" ? "h-9 min-w-0 items-center overflow-x-auto" : "flex-wrap",
       )}
     >
       {VIEW_GROUPS[group]
