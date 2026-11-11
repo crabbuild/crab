@@ -664,10 +664,9 @@ async fn run_inline_single_stage(
         return Ok(());
     }
 
-    // Build the remote store for cache pull (and push if --cache-push).
-    // An explicitly requested push must not silently become a local-only run;
-    // callers can resume from the local journal/cache after the remote error.
-    let remote = try_build_workflow_remote(config, args.cache_push).await?;
+    // Local iteration must not depend on repository storage being available.
+    // Explicit cache replay/publication still fails visibly on remote errors.
+    let remote = try_build_workflow_remote(config, args.cache_push, args.cache_only).await?;
     let remote_store = remote.as_ref().map(|remote| remote.store.clone());
     let remote_prefix = remote.as_ref().map(|remote| remote.prefix.clone());
     let remote_primary_fallback_store = remote
@@ -1066,7 +1065,7 @@ async fn replay_yaml_cache(
     let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config)).await?;
     let lockfile = lock_ctx.load(repo_root)?;
     let selected = filter_stages(args, workflow, graph)?;
-    let remote = try_build_workflow_remote(config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push, args.cache_only).await?;
     let mut results = Vec::new();
     let mut succeeded = BTreeSet::new();
     let started_at = Instant::now();
@@ -1379,7 +1378,7 @@ async fn run_yaml_single_stage(
     journal.insert_run_start(run_id, env!("CARGO_PKG_VERSION"), &host_fingerprint())?;
 
     let run_state = RunState::new();
-    let remote = try_build_workflow_remote(config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push, args.cache_only).await?;
     let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
@@ -1528,7 +1527,7 @@ async fn run_dag(
     // (skipped) so the scheduler never dispatches them.
     let stage_filter = filter_stages(args, workflow, graph)?;
 
-    let remote = try_build_workflow_remote(config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push, args.cache_only).await?;
     let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
@@ -2664,14 +2663,17 @@ struct CacheOnlyContext<'a> {
 
 /// Build a remote store for workflow cache operations.
 ///
-/// A repository without a configured Crab remote remains local-only unless
-/// `--cache-push` explicitly requires durable remote state. Once a remote is
-/// configured, malformed configuration or credential/transport failures are
-/// returned instead of being downgraded to a local-only run.
+/// Ordinary execution uses local cache, independently of the Git remote.
+/// Explicit cache replay or publication can use repository storage; errors on
+/// those paths remain visible rather than silently changing execution policy.
 async fn try_build_workflow_remote(
     config: &Config,
     cache_push: bool,
+    cache_only: bool,
 ) -> Result<Option<WorkflowRemote>> {
+    if !cache_push && !cache_only {
+        return Ok(None);
+    }
     let Some(url_str) = config.remote_url.as_deref() else {
         if !cache_push {
             return Ok(None);
@@ -5312,6 +5314,61 @@ mod tests {
             matches!(err, CrabError::WorkflowStageNameInvalid { .. }),
             "wrong variant: {err}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_execution_does_not_resolve_the_repository_remote() {
+        let (_lock, _guard) = EnabledGuard::new();
+        for mode in ["inline", "single", "dag"] {
+            let tmp = TempDir::new().unwrap();
+            fs::create_dir(tmp.path().join(".crab")).unwrap();
+            fs::write(
+                tmp.path().join(".crab/local.toml"),
+                "[remote]\nurl = \"invalid-remote\"\n",
+            )
+            .unwrap();
+            fs::write(
+                tmp.path().join("crab.yaml"),
+                "stages:\n  report:\n    cmd: echo local>result.txt\n    outs: [result.txt]\n",
+            )
+            .unwrap();
+            let mut args = yaml_base_args();
+            match mode {
+                "inline" => {
+                    args.name = Some("report".into());
+                    args.outs = vec!["result.txt".into()];
+                    args.cmd = if cfg!(windows) {
+                        vec![
+                            "cmd.exe".into(),
+                            "/D".into(),
+                            "/S".into(),
+                            "/C".into(),
+                            "echo local>result.txt".into(),
+                        ]
+                    } else {
+                        vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            "echo local>result.txt".into(),
+                        ]
+                    };
+                }
+                "single" => args.cmd = vec!["report".into()],
+                _ => {}
+            }
+            run_in(&args, tmp.path(), OutputMode::Text)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{mode} local execution contacted its remote: {error}")
+                });
+            assert_eq!(
+                fs::read_to_string(tmp.path().join("result.txt"))
+                    .unwrap()
+                    .trim(),
+                "local",
+                "{mode}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
