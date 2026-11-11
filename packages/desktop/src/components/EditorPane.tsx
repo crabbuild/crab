@@ -579,8 +579,8 @@ function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: Editor
   const maxKib = useSetting("maxPreviewKib");
   const maxBytes = Math.max(maxKib * 1024, 64 * 1024);
   const capabilities = useRepoCapabilities();
-  const canEdit = capabilities.canEdit && tab.rev === null;
   const buffer = useFileBuffer(repo, tab.path, tab.rev === null, capabilities.canEdit);
+  const canEdit = capabilities.canEdit && tab.rev === null && !buffer.restoring;
   const { beginRead, finishRead, reload } = buffer;
   const content = buffer.content ?? (load.state === "text" ? load.text : null);
   const handleExternalReload = useCallback((text: string) => {
@@ -615,7 +615,7 @@ function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: Editor
       if (!controller.signal.aborted && finishRead(ticket)) setLoad({ state: "error", message: error instanceof Error ? error.message : String(error) });
     });
     return () => controller.abort();
-  }, [repo.repo_id, repo.native_session_id, tab.path, tab.rev, maxBytes, beginRead, finishRead]);
+  }, [repo.repo_id, repo.native_session_id, tab.path, tab.rev, maxBytes, beginRead, finishRead, buffer.restoring]);
 
   // Pending content belongs to the repository buffer, so remounting must not
   // replace it with a disk read or wait for services before displaying it.
@@ -637,6 +637,7 @@ function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: Editor
   </div>;
 
   return <div className="flex h-full flex-col">
+    {buffer.restoring && <div role="status" className="border-b border-gx-border px-3 py-1 text-[11px] text-gx-muted">Restoring index version…</div>}
     {buffer.error && <SaveErrorNotice error={buffer.error} onRetry={buffer.save} />}
     {buffer.dirty && !buffer.available && <div role="status" className="border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">Save pending — waiting for connection</div>}
     {showPrompt && <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />}

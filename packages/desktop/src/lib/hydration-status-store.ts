@@ -77,7 +77,7 @@ function subscribe(repoId: string, listener: () => void) {
     }
     if (event.method !== "progress/complete" || !event.params || typeof event.params !== "object") return;
     const { op, repo_id } = event.params as { op?: unknown; repo_id?: unknown };
-    if (op !== "hydrate" && op !== "dehydrate") return;
+    if (op !== "hydrate" && op !== "dehydrate" && op !== "restore") return;
     if (typeof repo_id === "string") {
       refresh(repo_id);
       return;

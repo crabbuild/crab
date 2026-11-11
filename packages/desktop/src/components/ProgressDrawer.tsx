@@ -321,17 +321,17 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
   const transfer = job.transfer;
   const dehydrating = job.op === "dehydrate";
   const transferBytes = transfer?.checked_bytes ?? transfer?.written_bytes ?? 0;
-  const activity = dehydrating ? "dehydration" : "materialization";
-  const completed = dehydrating ? "dehydrated" : "materialized";
-  let outcome = dehydrating ? "Dehydration failed" : "Materialization failed";
+  const activity = job.op === "restore" ? "restoration" : dehydrating ? "dehydration" : "materialization";
+  const completed = job.op === "restore" ? "restored" : dehydrating ? "dehydrated" : "materialized";
+  let outcome = job.op === "restore" ? "Restoration failed" : dehydrating ? "Dehydration failed" : "Materialization failed";
   if (job.status === "done") outcome = `Verified and ${completed}`;
   if (job.status === "cancelled") outcome = transfer?.files_published ? `Remaining ${activity} cancelled` : "Cancelled before publication";
   if (job.status === "interrupted") outcome = "Outcome unknown. Check the working files.";
   async function cancel() {
-    if (!transfer) return;
+    if (!transfer || !job.nativeSessionId) return;
     setCancelRequested(true);
     setCancelError(null);
-    try { await rpc.cancelOperation(transfer.repo_id, jobId); }
+    try { await rpc.cancelOperation(transfer.repo_id, jobId, job.nativeSessionId); }
     catch (error) {
       setCancelRequested(false);
       setCancelError(error instanceof Error ? error.message : String(error));
@@ -369,13 +369,13 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
         {expanded ? <ChevronDown size={9} className="text-gx-muted" /> : <ChevronRight size={9} className="text-gx-muted" />}
       </button>
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
-        <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)} / {formatBytes(transfer.total_bytes)} {dehydrating ? "checked" : "written"}</>}</p>
+        <p className="tabular-nums">{job.status === "running" && transfer.total_bytes === 0 && transfer.files_total ? "Checking selection…" : <>{formatBytes(transferBytes)}{transfer.total_bytes === null ? "" : ` / ${formatBytes(transfer.total_bytes)}`} {dehydrating ? "checked" : "written"}</>}</p>
         {transfer.files_published != null && transfer.files_total != null && (
           <p>{transfer.files_published} of {transfer.files_total} files {completed}</p>
         )}
         {job.status === "running" ? <>
-          <progress aria-label={dehydrating ? "Dehydration bytes checked" : "Materialization bytes written"} className="h-1 w-full" value={transferBytes} max={Math.max(1, transfer.total_bytes)} />
-          <button type="button" className="btn text-[10px]" disabled={cancelRequested} onClick={() => void cancel()}>{cancelRequested ? "Cancellation requested…" : `Cancel ${activity}`}</button>
+          <progress aria-label={`${activity} bytes ${dehydrating ? "checked" : "written"}`} className="h-1 w-full" value={transfer.total_bytes === null ? undefined : transferBytes} max={transfer.total_bytes === null ? undefined : Math.max(1, transfer.total_bytes)} />
+          <button type="button" className="btn text-[10px]" disabled={cancelRequested || !job.nativeSessionId} onClick={() => void cancel()}>{cancelRequested ? "Cancellation requested…" : `Cancel ${activity}`}</button>
         </> : <p>{outcome}</p>}
         {cancelError && <p role="alert" className="break-words text-gx-error">{cancelError}</p>}
       </div>}

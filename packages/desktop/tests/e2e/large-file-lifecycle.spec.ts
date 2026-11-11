@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { call, packagedExecutable } from "./packaged-app";
@@ -39,6 +39,93 @@ test("path staging preserves literal selection and safely unstages an unborn rep
     await application.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("whole-file restoration protects literal selections, staging and pending editor buffers", async () => {
+  test.setTimeout(120_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-restore-"));
+  const source = path.join(root, "source"); mkdirSync(source);
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(root, "gitconfig") };
+  writeFileSync(env.GIT_CONFIG_GLOBAL, "");
+  const git = (args: string[]) => execFileSync("git", ["--literal-pathspecs", ...args], { cwd: source, env, stdio: "pipe" });
+  git(["init", "--initial-branch=main"]);
+  const files = ["data[1].bin", "data1.bin", "other.bin"];
+  const head = Buffer.alloc(4096, 1), staged = Buffer.alloc(4096, 2), dirty = Buffer.alloc(4096, 3);
+  head[0] = 0; staged[0] = 0; dirty[0] = 0;
+  for (const file of files) writeFileSync(path.join(source, file), head);
+  writeFileSync(path.join(source, "note.md"), "INDEX_NOTE\n");
+  git(["add", "."]); git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Restoration fixture"]);
+  for (const file of files) writeFileSync(path.join(source, file), staged);
+  git(["add", "--", ...files]);
+  const index = git(["ls-files", "--stage", "-z"]);
+  for (const file of files) writeFileSync(path.join(source, file), dirty);
+  writeFileSync(path.join(source, "untracked.bin"), dirty);
+  const application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`], env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
+  try {
+    const page = await application.firstWindow();
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const handle = await call(page, "open_local", { repo_id: "restore", path: source });
+    await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
+    const primary = page.getByRole("navigation", { name: "Primary", exact: true });
+    const changes = async () => { await primary.getByRole("button", { name: "Git", exact: true }).click(); await page.getByRole("button", { name: "Changes", exact: true }).click(); };
+    const row = (file: string) => page.getByText(file, { exact: true }).and(page.locator(":visible")).first();
+    const discard = async (file: string) => { await row(file).hover(); await page.getByRole("button", { name: `Discard changes in ${file}`, exact: true }).click(); };
+    await changes();
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }); });
+    await discard(files[0]);
+    expect(readFileSync(path.join(source, files[0]))).toEqual(dirty);
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+    await discard(files[0]);
+    await expect.poll(() => readFileSync(path.join(source, files[0])).equals(staged)).toBe(true);
+    expect(readFileSync(path.join(source, files[1]))).toEqual(dirty);
+    await row(files[1]).click();
+    await page.getByRole("button", { name: "Discard entire file change", exact: true }).click();
+    await expect.poll(() => readFileSync(path.join(source, files[1])).equals(staged)).toBe(true);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
+    await expect(page.getByText("Index vs HEAD", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Discard entire file change", exact: true })).toBeDisabled();
+    for (const file of files) writeFileSync(path.join(source, file), dirty);
+    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByTitle("Refresh", { exact: true }).click();
+    for (const file of files.slice(0, 2)) await row(file).click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
+    await page.getByTitle("Discard selected files (Delete)", { exact: true }).click();
+    for (const file of files.slice(0, 2)) await expect.poll(() => readFileSync(path.join(source, file)).equals(staged)).toBe(true);
+    expect(readFileSync(path.join(source, files[2]))).toEqual(dirty);
+    expect(readFileSync(path.join(source, "untracked.bin"))).toEqual(dirty);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
+    await page.screenshot({ path: test.info().outputPath("whole-file-restore-selected.png") });
+    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await expect(page.getByText("Verified and restored", { exact: true })).toHaveCount(3);
+    await expect(page.getByText("2 of 2 files restored", { exact: true })).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath("whole-file-restore-activity.png") });
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+
+
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    await page.locator('[role="treeitem"][data-item-path="note.md"]').click();
+    const editor = page.locator(".monaco-editor .view-lines");
+    await expect(editor).toContainText("INDEX_NOTE");
+    chmodSync(source, 0o500);
+    await editor.click(); await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await page.keyboard.insertText("PENDING_EDITOR_DRAFT"); await page.keyboard.press(process.platform === "darwin" ? "Meta+S" : "Control+S");
+    await expect(page.getByRole("button", { name: "Retry saving", exact: true })).toBeVisible();
+    chmodSync(source, 0o700);
+    writeFileSync(path.join(source, "note.md"), "EXTERNAL_DISK_EDIT\n");
+    await changes();
+    await discard("note.md");
+    await expect(page.getByText("Save or reload pending editor changes before restoring these files.", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "note.md"), "utf8")).toBe("EXTERNAL_DISK_EDIT\n");
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    await expect(editor).toContainText("PENDING_EDITOR_DRAFT");
+    await page.getByRole("button", { name: "Retry saving", exact: true }).click();
+    await expect.poll(() => readFileSync(path.join(source, "note.md"), "utf8")).toBe("PENDING_EDITOR_DRAFT");
+    await changes(); await discard("note.md");
+    await expect.poll(() => readFileSync(path.join(source, "note.md"), "utf8")).toBe("INDEX_NOTE\n");
+    await primary.getByRole("button", { name: "Files", exact: true }).click();
+    await expect(editor).toContainText("INDEX_NOTE");
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
+    await page.screenshot({ path: test.info().outputPath("whole-file-restore-editor.png") });
+  } finally { chmodSync(source, 0o700); await application.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename and removal", async () => {
@@ -208,6 +295,17 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
       await page.getByRole("button", { name: `Stage ${file}`, exact: true }).click();
       await expect.poll(() => git(source, ["rev-parse", `:${file}`]).toString(), { timeout: 30_000 }).not.toBe(previous);
     }
+    const stagedIndexBeforeRestore = git(source, ["ls-files", "--stage", "-z"]);
+    for (const file of files) writeFileSync(path.join(source, file), content);
+    await page.getByRole("radiogroup", { name: "View mode", exact: true }).locator("..").getByTitle("Refresh", { exact: true }).click();
+    await page.getByText(files[0], { exact: true }).and(page.locator(":visible")).first().click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Discard Changes", exact: true }).click();
+    await expect.poll(() => readFileSync(path.join(source, files[0])).equals(edited), { timeout: 30_000 }).toBe(true);
+    await page.getByText(files[1], { exact: true }).and(page.locator(":visible")).first().click();
+    await page.getByRole("button", { name: /Discard entire (?:pointer|file) change/ }).click();
+    await expect.poll(() => readFileSync(path.join(source, files[1])).equals(edited), { timeout: 30_000 }).toBe(true);
+    expect(git(source, ["ls-files", "--stage", "-z"])).toEqual(stagedIndexBeforeRestore);
+    await page.screenshot({ path: test.info().outputPath("ui-lifecycle-managed-restore.png") });
     const diff = await call(page, "file_diff", { repo_id: "lifecycle-source", path: files[0], before: { kind: "revision", rev: first }, after: { kind: "index" } });
     expect(diff.status).toBe("modified");
     expect(diff.chunk_metrics).not.toBeNull();

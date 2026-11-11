@@ -11,9 +11,8 @@ import { decodeGitPath } from "../../electron/git-path";
 //   - We handle the conventional `@@ -old_start[,old_lines]
 //     +new_start[,new_lines] @@` header, including the "single-
 //     line" form where the count is omitted.
-//   - We reject patches with `Binary files … differ` silently —
-//     they have no hunks to iterate on, so the caller sees an
-//     empty list and shows the file-level affordance.
+//   - Binary and mode-only file headers remain in `files` with no
+//     text hunks, allowing the caller to offer whole-file actions.
 //
 // The output bodies include trailing newlines and the standard
 // `\ No newline at end of file` marker lines when git emits them,
@@ -65,8 +64,8 @@ const HUNK_HEADER_RE =
 /**
  * Parse a unified patch string into a flat list of hunks plus a
  * per-file grouping. Non-hunk sections (`diff --git`, `index`,
- * rename / mode metadata, binary markers) are consumed but do not
- * appear in the output.
+ * rename / mode metadata, binary markers) retain the file header
+ * without inventing text hunks.
  *
  * The parser is deliberately lenient: anything it doesn't
  * understand between hunks is skipped, not thrown on. The agent
@@ -95,7 +94,8 @@ export function parsePatch(patch: string): ParsedPatch {
       const parts = parseDiffGit(line);
       pendingOldPath = parts?.oldPath ?? null;
       pendingNewPath = parts?.newPath ?? null;
-      currentFile = null;
+      currentFile = parts ? { path: parts.newPath, oldPath: parts.oldPath, hunks: [] } : null;
+      if (currentFile) files.push(currentFile);
       i += 1;
       continue;
     }

@@ -21,12 +21,6 @@ vi.mock("../src/lib/operation-history", () => ({
   recordOperation: vi.fn(),
 }));
 
-// Mock the undo-stack module
-vi.mock("../src/lib/undo-stack", () => ({
-  pushUndo: vi.fn(() => "undo-mock-id"),
-  executeUndo: vi.fn(async () => ({ success: true, message: "Undone" })),
-}));
-
 function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
     repoId: "test-repo",
@@ -167,6 +161,16 @@ describe("executeCommand", () => {
     expect(await executeCommand("test.cmd", makeContext())).toEqual({ success: false, cancelled: true, message: "Cancelled" });
     expect(publishToast).not.toHaveBeenCalled();
     expect(recordOperation).not.toHaveBeenCalled();
+  });
+
+  it("reports a destructive result without inventing an Undo action", async () => {
+    const { publishToast } = await import("../src/lib/toasts");
+    const { recordOperation } = await import("../src/lib/operation-history");
+    vi.mocked(publishToast).mockClear(); vi.mocked(recordOperation).mockClear();
+    registerCommand(makeCommand({ destructive: true }));
+    await executeCommand("test.cmd", makeContext());
+    expect(vi.mocked(publishToast).mock.calls[0][0]).not.toHaveProperty("action");
+    expect(vi.mocked(recordOperation).mock.calls[0][0]).not.toHaveProperty("undoId");
   });
 
   it("returns error for unknown command id", async () => {

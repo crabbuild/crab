@@ -71,6 +71,25 @@ already published by a multi-file operation remain published. Refresh the
 inventory before retrying. Durable restart/resume and network-byte accounting
 remain open; bytes written are not a network-transfer measurement.
 
+## Discard whole-file changes
+
+In **Git → Changes**, discard a file from its row, its binary/pointer card,
+selected rows, or **Discard All**. The palette also provides **Git: Discard File
+Changes** and **Git: Discard All Unstaged Changes**. Every whole-file restore
+requires confirmation and restores the current index version. Staged changes
+and untracked files are preserved. No Undo is offered for this operation.
+
+Crab/LFS content is reconstructed and verified through the same native owner as
+hydration. Ordinary Git files retain Git's checkout conversions. The owner
+rechecks captured working-file and index identities before publication and rejects
+observed changes. Missing parent directories
+are created only after preparation succeeds. Pending editor buffers must first
+be saved or reloaded; clean editors remain reserved until restoration finishes,
+then read the restored file. **Activity** retains actual publication counts and
+errors, including partial multi-file outcomes. Cancellation leaves already
+published files in place. Read-only snapshots and older native runtimes do not
+admit this mutation.
+
 ## Storage presets and recovery
 
 In **Settings → Storage & Cache**, save a prefetch preset with a name and
@@ -89,7 +108,8 @@ work, rather than implied by those controls.
 
 Packaged macOS arm64 and owned S3-compatible fixtures qualify the Crab/LFS
 track/publish/lazy-clone/hydrate/edit/synchronize/rename/removal workflow, nested
-missing-file restoration, selected identities and bounded local/SSH recovery.
+missing-file restoration, confirmed index restoration, pending-editor protection,
+selected identities and bounded local/SSH recovery.
 The [completion record](../large-file-support.md) separates that evidence from
-safe binary discard, restartable transfers, storage budgets, larger workload
+restartable transfers, storage budgets, larger workload
 profiles and cross-platform/provider release gates.

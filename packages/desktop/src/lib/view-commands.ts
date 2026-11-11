@@ -481,13 +481,15 @@ const fileStageCommands: Command[] = [
     category: "Stage",
     icon: Trash2,
     destructive: true,
-    isEnabled: () => true,
+    prompt: { kind: "ref", placeholder: "Repository-relative file path…" },
+    isEnabled: (ctx) => !!ctx.fileTransfers?.restore,
     execute: async (ctx: CommandContext, input?: string): Promise<CommandResult> => {
       if (!input) {
         return { success: false, message: "File path is required" };
       }
-      await rpc.gitCheckout(ctx.repoId, input, { pathspec: true });
-      return { success: true, message: `Discarded changes in ${input}` };
+      const count = await ctx.fileTransfers!.restore!([input]);
+      return count === null ? { success: false, cancelled: true, message: "Restoration cancelled" }
+        : { success: true, message: count ? `Restored ${input} from the index` : "No unstaged tracked changes to restore" };
     },
   },
   {

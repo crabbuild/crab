@@ -230,6 +230,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "file_materialize" => materialize::one(state, decode(&method, params)?, out).await,
         "files_materialize" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Hydrate).await,
         "files_dehydrate" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Dehydrate).await,
+        "files_restore" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Restore).await,
         "read_text" => read_text(state, decode(&method, params)?).await,
         "read_bytes" => read_bytes(state, decode(&method, params)?).await,
         "read_range" => read_range(state, decode(&method, params)?).await,
@@ -2513,7 +2514,7 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
             .position(|&b| b == 0)
             .map_or(out.stdout.len(), |p| path_start + p);
         let path = String::from_utf8_lossy(&out.stdout[path_start..path_end]).into_owned();
-        let code = std::str::from_utf8(xy).unwrap_or("??").trim().to_owned();
+        let code = std::str::from_utf8(xy).unwrap_or("??").to_owned();
         // Skip the rename "old path" companion record when present.
         let is_rename = xy[0] == b'R' || xy[0] == b'C' || xy[1] == b'R' || xy[1] == b'C';
         // Internal publication names must not become transient untracked rows.

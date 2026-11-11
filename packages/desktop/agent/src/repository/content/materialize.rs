@@ -1,65 +1,33 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
+use super::publication::{IndexFile, WorkingFile, publish, refresh_stat_cache, unchanged_file};
 use super::*;
 
-pub(super) struct WorkingPointer {
-    root: PathBuf,
-    requested: PathBuf,
-    path: PathBuf,
-    original: Option<std::fs::Metadata>,
-    bytes: Bytes,
-    index: Option<IndexPointer>,
+pub(super) struct MaterializationTarget {
+    pub(super) working: WorkingFile,
+    pub(super) bytes: Bytes,
+    pub(super) index: Option<IndexFile>,
 }
 
-struct IndexPointer {
-    root: PathBuf,
-    path: String,
-    mode: String,
-    oid: String,
-}
-
-impl IndexPointer {
-    async fn entry(
-        root: &Path,
-        path: &str,
-        scope: &ReadScope,
-    ) -> Result<(Option<String>, Option<String>)> {
-        let entries = command::run(root, &["ls-files", "--stage", "-z", "--", path], scope).await?;
-        command::file_entry_at(&entries, path, true)
-    }
-
-    async fn check(&self, scope: &ReadScope) -> Result<()> {
-        let entry = Self::entry(&self.root, &self.path, scope).await?;
-        if !self.matches(&entry) {
-            return Err(changed());
+impl MaterializationTarget {
+    pub(super) fn capture(
+        root: PathBuf,
+        requested: PathBuf,
+        path: PathBuf,
+        bytes: Bytes,
+        metadata: std::fs::Metadata,
+    ) -> Self {
+        Self {
+            working: WorkingFile::from_bytes(root, requested, path, &bytes, metadata),
+            bytes,
+            index: None,
         }
-        Ok(())
-    }
-
-    fn matches(&self, entry: &(Option<String>, Option<String>)) -> bool {
-        entry.0.as_deref() == Some(self.mode.as_str())
-            && entry.1.as_deref() == Some(self.oid.as_str())
-    }
-
-    async fn check_commit(&self, scope: &ReadScope) -> Result<()> {
-        let entries = command::run(
-            &self.root,
-            &["ls-tree", "-z", "HEAD", "--", &self.path],
-            scope,
-        )
-        .await?;
-        if !self.matches(&command::file_entry_at(&entries, &self.path, false)?) {
-            return Err(AgentError::Other(
-                "Commit the selected pointer and mode before dehydrating".into(),
-            ));
-        }
-        Ok(())
     }
 }
 
 pub(crate) struct Dehydration {
-    index: IndexPointer,
+    index: IndexFile,
     pointer: FileSource,
     bytes: Bytes,
 }
@@ -70,26 +38,11 @@ impl Dehydration {
         path: &str,
         scope: ReadScope,
     ) -> Result<Self> {
-        GitPath::new(path.as_bytes().to_vec())?;
         let root = repo
             .work_dir
             .as_deref()
             .ok_or_else(|| AgentError::Other("Dehydration requires a working tree".into()))?;
-        let (mode, oid) = IndexPointer::entry(root, path, &scope).await?;
-        let (Some(mode), Some(oid)) = (
-            mode.filter(|mode| matches!(mode.as_str(), "100644" | "100755")),
-            oid,
-        ) else {
-            return Err(AgentError::Other(
-                "The selected file has no resolved regular index entry".into(),
-            ));
-        };
-        let index = IndexPointer {
-            root: root.into(),
-            path: path.into(),
-            mode,
-            oid,
-        };
+        let index = IndexFile::capture(root, path, &scope).await?;
         index.check_commit(&scope).await?;
         let no_pointer =
             || AgentError::Other("The committed file has no Crab or Git LFS pointer".into());
@@ -247,78 +200,6 @@ fn verify_content(
     progress(offset)
 }
 
-fn unchanged_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    if !after.is_file()
-        || before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-        || before.created().ok() != after.created().ok()
-    {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        before.dev() == after.dev()
-            && before.ino() == after.ino()
-            && before.ctime() == after.ctime()
-            && before.ctime_nsec() == after.ctime_nsec()
-    }
-    #[cfg(not(unix))]
-    true
-}
-
-impl WorkingPointer {
-    pub(super) fn capture(
-        root: PathBuf,
-        requested: PathBuf,
-        path: PathBuf,
-        bytes: Bytes,
-        metadata: std::fs::Metadata,
-    ) -> Self {
-        Self {
-            root,
-            requested,
-            path,
-            original: Some(metadata),
-            bytes,
-            index: None,
-        }
-    }
-
-    fn check(&self) -> Result<Option<std::fs::Permissions>> {
-        let Some(original) = &self.original else {
-            let relative = self
-                .requested
-                .strip_prefix(&self.root)
-                .map_err(std::io::Error::other)?;
-            if missing_destination(&self.root, relative)?.0 != self.path {
-                return Err(changed());
-            }
-            return match std::fs::symlink_metadata(&self.requested) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
-                Ok(_) => Err(changed()),
-            };
-        };
-        let metadata = std::fs::symlink_metadata(&self.requested)?;
-        if !metadata.is_file()
-            || metadata.modified().ok() != original.modified().ok()
-            || metadata.len() != self.bytes.len() as u64
-            || std::fs::canonicalize(&self.requested)? != self.path
-        {
-            return Err(changed());
-        }
-        let mut bytes = Vec::with_capacity(self.bytes.len() + 1);
-        std::fs::File::open(&self.requested)?
-            .take(self.bytes.len() as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes != self.bytes {
-            return Err(changed());
-        }
-        Ok(Some(metadata.permissions()))
-    }
-}
-
 impl FileSource {
     pub(crate) async fn capture_materialization(
         repo: &BrowseSession,
@@ -339,7 +220,7 @@ impl FileSource {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // Restore only a resolved index pointer and only if the path
                 // is still absent at publication. A new file always wins.
-                let (mode, oid) = IndexPointer::entry(root, path, &scope).await?;
+                let (mode, oid) = IndexFile::entry(root, path, &scope).await?;
                 let Some(mode @ ("100644" | "100755")) = mode.as_deref() else {
                     return Err(AgentError::Other(
                         "Missing file has no regular index entry".into(),
@@ -357,20 +238,11 @@ impl FileSource {
                         "Missing file has no index pointer".into(),
                     ));
                 };
-                let boundary = root.to_path_buf();
-                let relative = PathBuf::from(path);
-                let (destination, _) =
-                    tokio::task::spawn_blocking(move || missing_destination(&boundary, &relative))
-                        .await
-                        .map_err(std::io::Error::other)??;
                 source.scope.check()?;
-                *target = Some(WorkingPointer {
-                    root: root.into(),
-                    path: destination,
-                    requested,
-                    original: None,
+                *target = Some(MaterializationTarget {
+                    working: WorkingFile::missing(root, path)?,
                     bytes,
-                    index: Some(IndexPointer {
+                    index: Some(IndexFile {
                         root: root.into(),
                         path: path.into(),
                         mode: mode.into(),
@@ -405,25 +277,10 @@ impl FileSource {
                     "only a captured working pointer can be materialized".into(),
                 ));
             };
+            let working = &target.working;
             self.scope.check()?;
-            target.check()?;
-            let parent = target
-                .path
-                .parent()
-                .ok_or_else(|| AgentError::Other("file has no parent directory".into()))?;
-            let temporary_parent = if target.original.is_none() {
-                let relative = target
-                    .requested
-                    .strip_prefix(&target.root)
-                    .map_err(std::io::Error::other)?;
-                missing_destination(&target.root, relative)?.1
-            } else {
-                parent.into()
-            };
-            let mut parents = ParentDirectories::default();
-            // Reconstruct beside the nearest existing ancestor. Missing
-            // directories stay absent until all content has been verified.
-            let mut temporary = tempfile::NamedTempFile::new_in(temporary_parent)?;
+            working.check_metadata()?;
+            let mut temporary = tempfile::NamedTempFile::new_in(working.temporary_parent()?)?;
             let prepared = (|| {
                 let mut hasher = identity.hasher();
                 let mut written = 0;
@@ -444,29 +301,15 @@ impl FileSource {
                 temporary.flush()?;
                 temporary.as_file().sync_data()?;
                 progress(written)?;
+                let permissions = working.check(&self.scope)?;
                 if let Some(index) = &target.index {
-                    runtime.block_on(index.check(&self.scope))?;
-                }
-                self.scope.check()?;
-                if let Some(permissions) = target.check()? {
+                    index.apply_mode(temporary.as_file(), permissions)?;
+                } else if let Some(permissions) = permissions {
                     temporary.as_file().set_permissions(permissions)?;
-                } else if target
-                    .index
-                    .as_ref()
-                    .is_some_and(|index| index.mode == "100755")
-                {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let file = temporary.as_file();
-                        let mut permissions = file.metadata()?.permissions();
-                        permissions.set_mode(permissions.mode() | 0o100);
-                        file.set_permissions(permissions)?;
-                    }
                 }
-                let relative = target
+                let relative = working
                     .requested
-                    .strip_prefix(&target.root)
+                    .strip_prefix(&working.root)
                     .map_err(std::io::Error::other)?;
                 let update = crab_git::index_stat::IndexStatUpdate::from_file(
                     relative.into(),
@@ -474,199 +317,21 @@ impl FileSource {
                     &target.bytes,
                 )
                 .map_err(std::io::Error::other)?;
-                if target.original.is_none() {
-                    parents.prepare(&target.root, parent)?;
+                // Index identity is checked after the potentially large raw
+                // working-file hash, immediately before publication admission.
+                if let Some(index) = &target.index {
+                    runtime.block_on(index.check(&self.scope))?;
                 }
-                parents.check()?;
-                target.check()?;
                 self.scope.check()?;
                 Ok::<_, AgentError>((written, update))
             })();
-            let (written, update) = parents.finish(publish(
-                temporary,
-                &target.path,
-                target.original.is_some(),
-                prepared,
-            ))?;
-            refresh_stat_cache(&target.root, update);
+            let (written, update) = working.publish(temporary, &self.scope, prepared)?;
+            refresh_stat_cache(&working.root, update);
             Ok(written)
         })
         .await
         .map_err(std::io::Error::other)?;
         result.map_err(|error| scope.record(error))
-    }
-}
-
-// Missing worktree paths are literal paths beneath the canonical repository.
-// Reject links before any mkdir; otherwise a dangling or replaced parent could
-// redirect publication outside the captured working tree.
-fn missing_destination(root: &Path, relative: &Path) -> Result<(PathBuf, PathBuf)> {
-    if relative
-        .components()
-        .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
-        return Err(changed());
-    }
-    let root = std::fs::canonicalize(root)?;
-    let destination = root.join(relative);
-    let mut parent = destination.parent().ok_or_else(changed)?;
-    loop {
-        match std::fs::symlink_metadata(parent) {
-            Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => {
-                if std::fs::canonicalize(parent)? != parent {
-                    return Err(changed());
-                }
-                let existing = parent.to_owned();
-                return Ok((destination, existing));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                parent = parent
-                    .parent()
-                    .filter(|path| path.starts_with(&root))
-                    .ok_or_else(changed)?;
-            }
-            Err(error) => return Err(error.into()),
-            Ok(_) => return Err(changed()),
-        }
-    }
-}
-
-#[derive(Default)]
-struct ParentDirectories {
-    entries: Vec<(PathBuf, std::fs::Metadata, bool)>,
-}
-
-impl ParentDirectories {
-    fn prepare(&mut self, root: &Path, parent: &Path) -> Result<()> {
-        let root = std::fs::canonicalize(root)?;
-        let relative = parent.strip_prefix(&root).map_err(std::io::Error::other)?;
-        let mut path = root.clone();
-        self.entries
-            .push((root.clone(), std::fs::symlink_metadata(&root)?, false));
-        for component in relative.components() {
-            if !matches!(component, std::path::Component::Normal(_)) {
-                return Err(changed());
-            }
-            self.check()?;
-            path.push(component);
-            let created = match std::fs::create_dir(&path) {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(error) => return Err(error.into()),
-            };
-            let metadata = std::fs::symlink_metadata(&path)?;
-            if !metadata.is_dir() || metadata.is_symlink() || std::fs::canonicalize(&path)? != path
-            {
-                return Err(changed());
-            }
-            self.entries.push((path.clone(), metadata, created));
-        }
-        Ok(())
-    }
-
-    fn check(&self) -> Result<()> {
-        for (path, before, _) in &self.entries {
-            if !same_directory(before, &std::fs::symlink_metadata(path)?)
-                || std::fs::canonicalize(path)? != *path
-            {
-                return Err(changed());
-            }
-        }
-        Ok(())
-    }
-
-    fn finish<T>(self, result: Result<T>) -> Result<T> {
-        let Err(mut operation) = result else {
-            return result;
-        };
-        // Remove only empty directories created by this operation, in reverse
-        // order. A replaced directory or another writer's content belongs to
-        // that writer and must survive cancellation/failure cleanup.
-        for (path, before, created) in self.entries.into_iter().rev() {
-            if !created {
-                continue;
-            }
-            let cleanup = (|| -> Result<()> {
-                let current = match std::fs::symlink_metadata(&path) {
-                    Ok(current) => current,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                    Err(error) => return Err(error.into()),
-                };
-                if !same_directory(&before, &current) || std::fs::canonicalize(&path)? != path {
-                    return Ok(());
-                }
-                match std::fs::remove_dir(&path) {
-                    Ok(()) => Ok(()),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                        ) =>
-                    {
-                        Ok(())
-                    }
-                    Err(error) => Err(error.into()),
-                }
-            })();
-            if let Err(cleanup) = cleanup {
-                operation = AgentError::Cleanup {
-                    operation: Box::new(operation),
-                    cleanup: Box::new(cleanup),
-                };
-            }
-        }
-        Err(operation)
-    }
-}
-
-fn same_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    if !after.is_dir() || after.is_symlink() || before.created().ok() != after.created().ok() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        before.dev() == after.dev() && before.ino() == after.ino()
-    }
-    #[cfg(not(unix))]
-    true
-}
-
-fn refresh_stat_cache(root: &Path, update: crab_git::index_stat::IndexStatUpdate) {
-    // Publication is already complete. Like CLI hydration, this advisory cache
-    // must not turn verified bytes into a failed transfer when Git holds a lock.
-    if let Err(error) = crab_git::index_stat::refresh(root, &[update]) {
-        tracing::warn!(error = %error, "published file but could not refresh Git stat cache");
-    }
-}
-
-fn publish<T>(
-    temporary: tempfile::NamedTempFile,
-    path: &Path,
-    replace: bool,
-    prepared: Result<T>,
-) -> Result<T> {
-    // A successful same-filesystem publication wins a late cancellation.
-    let (operation, temporary) = match prepared {
-        Ok(value) => {
-            let result = if replace {
-                temporary.persist(path)
-            } else {
-                temporary.persist_noclobber(path)
-            };
-            match result {
-                Ok(_) => return Ok(value),
-                Err(error) => (AgentError::from(error.error), error.file),
-            }
-        }
-        Err(error) => (error, temporary),
-    };
-    match temporary.close() {
-        Ok(()) => Err(operation),
-        Err(cleanup) => Err(AgentError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup.into()),
-        }),
     }
 }
 

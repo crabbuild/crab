@@ -14,8 +14,7 @@ import { PointerPatchKind, pointerKindLabel } from "../lib/pointer-detection";
  * once.
  *
  * The card emits intents only; the consumer wires them up to the
- * `git_stage_hunks` / `git_unstage_hunks` / `git_discard_hunks`
- * verbs (or to `git add` for the whole-file / untracked case).
+ * whole-file staging and confirmed, verified index restoration owners.
  *
  * Visual language matches `<HunkToolbar />`: same tone classes,
  * same icon set, same confirm-before-discard flow. The card is
@@ -36,7 +35,7 @@ export interface PointerFileCardProps {
   canUnstage?: boolean;
   onStageFile: () => void;
   onUnstageFile?: () => void;
-  onDiscardFile: () => void;
+  onDiscardFile?: () => void;
   className?: string;
 }
 
@@ -49,7 +48,7 @@ export function PointerFileCard({
   onDiscardFile,
   className,
 }: PointerFileCardProps) {
-  const label = pointerKindLabel(kind);
+  const label = kind ? pointerKindLabel(kind) : "Binary or mode change";
   // Basename for the heading — the path is shown full in the file
   // header above the card, so the card focuses on the explanation.
   const basename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
@@ -78,33 +77,33 @@ export function PointerFileCard({
             </span>
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-gx-muted">
-            {kind === "crab" ? "Crab pointers" : kind === "lfs" ? "LFS pointers" : "Pointers"}
-            {" are hex blobs — per-hunk editing isn't supported. This stages the pointer change as a whole."}
+            This change has whole-file actions. Discard restores the index version after confirmation.
           </p>
         </div>
       </div>
       <div
         role="toolbar"
-        aria-label="Pointer file actions"
+        aria-label="Whole-file actions"
         className="flex items-center gap-1 border-t border-gx-border/60 pt-3"
       >
         <CardButton
           icon={<Plus size={12} />}
-          label="Stage entire pointer change"
+          label={kind ? "Stage entire pointer change" : "Stage entire file change"}
           onClick={onStageFile}
           tone="success"
         />
         <CardButton
           icon={<Minus size={12} />}
-          label="Unstage entire pointer change"
+          label={kind ? "Unstage entire pointer change" : "Unstage entire file change"}
           onClick={() => onUnstageFile?.()}
           disabled={!canUnstage || !onUnstageFile}
           tone="warn"
         />
         <CardButton
           icon={<Trash2 size={12} />}
-          label="Discard entire pointer change"
-          onClick={onDiscardFile}
+          label={kind ? "Discard entire pointer change" : "Discard entire file change"}
+          onClick={() => onDiscardFile?.()}
+          disabled={!onDiscardFile}
           tone="error"
           className="ml-auto"
         />

@@ -59,7 +59,7 @@ const MAX_CONCURRENT_CALLS = 4;
 // completes after native cleanup; the metadata timer must not discard its reply.
 const OWNED_METHODS = new Set([
   "open_local", "open_url",
-  "file_open", "file_diff", "file_chunks", "file_materialize", "files_materialize", "files_dehydrate", "read_range", "read_text", "read_bytes",
+  "file_open", "file_diff", "file_chunks", "file_materialize", "files_materialize", "files_dehydrate", "files_restore", "read_range", "read_text", "read_bytes",
   "preview_parquet", "preview_safetensors", "preview_npy", "preview_npz", "preview_zip",
   "preview_notebook_meta", "preview_torch_checkpoint", "preview_sqlite", "file_query",
 ]);

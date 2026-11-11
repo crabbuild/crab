@@ -5,6 +5,7 @@ export interface FileBufferState {
   content: string | null;
   dirty: boolean;
   saving: boolean;
+  restoring: boolean;
   available: boolean;
   error: string | null;
 }
@@ -19,13 +20,14 @@ interface Entry {
   nativeSessionId: string | null;
   runtimeKnown: boolean;
   bindingVersion: number;
+  reviewRequired?: boolean;
   read?: symbol;
   timer?: ReturnType<typeof setTimeout>;
   task?: Promise<void>;
   listeners: Set<() => void>;
 }
 
-const EMPTY: FileBufferState = { content: null, dirty: false, saving: false, available: false, error: null };
+const EMPTY: FileBufferState = { content: null, dirty: false, saving: false, restoring: false, available: false, error: null };
 
 /** Own one acknowledged working buffer and one writer across all its views. */
 export class FileBufferStore {
@@ -38,6 +40,35 @@ export class FileBufferStore {
   snapshot(key: string): FileBufferState { return this.entries.get(key)?.state ?? EMPTY; }
   version = (): number => this.sequence;
   pendingCount(): number { return [...this.entries.values()].filter(entry => entry.state.dirty).length; }
+
+  /** Reserve clean buffers until a confirmed filesystem restoration finishes. */
+  protect(keys: string[]): () => void {
+    const selected = [...new Set(keys)];
+    for (const key of selected) {
+      const entry = this.entries.get(key);
+      if (entry && (entry.state.dirty || entry.state.saving || entry.task || entry.state.restoring)) {
+        throw new Error("Save or reload pending editor changes before restoring these files.");
+      }
+    }
+    const entries = selected.map(key => [key, this.entry(key)] as const);
+    for (const [, entry] of entries) {
+      entry.read = undefined;
+      if (entry.timer) { clearTimeout(entry.timer); entry.timer = undefined; }
+      entry.state = { ...entry.state, restoring: true };
+    }
+    for (const [, entry] of entries) this.publish(entry, {});
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const [key, entry] of entries) {
+        entry.read = undefined;
+        if (!entry.state.dirty) entry.acknowledged = null;
+        this.publish(entry, { restoring: false, ...(!entry.state.dirty ? { content: null } : {}) });
+        this.collect(key, entry);
+      }
+    };
+  }
 
   subscribe = (key: string, listener: () => void): (() => void) => {
     const entry = this.entry(key);
@@ -59,7 +90,7 @@ export class FileBufferStore {
       entry.bindingVersion++;
     }
     if (!entry.runtimeKnown) this.availability(key, entry, binding.available, binding.nativeSessionId);
-    if (changed && binding.available && entry.state.dirty) void this.save(key);
+    if (changed && binding.available && entry.state.dirty && !entry.reviewRequired) void this.save(key);
   }
 
   runtime(repoId: string, available: boolean, nativeSessionId: string | null): void {
@@ -74,21 +105,25 @@ export class FileBufferStore {
     const entry = this.entry(key);
     if (entry.state.content === content) return;
     entry.read = undefined;
-    this.publish(entry, { content, dirty: entry.state.saving || content !== entry.acknowledged, error: null });
+    entry.reviewRequired = entry.state.restoring;
+    // A stale editor event can arrive after reservation. Retain that draft,
+    // but never autosave it over the restored index version.
+    this.publish(entry, { content, dirty: entry.state.saving || entry.state.restoring || content !== entry.acknowledged,
+      error: entry.state.restoring ? "Draft retained during restoration. Review it before saving." : null });
     if (entry.timer) clearTimeout(entry.timer);
-    if (entry.state.dirty && entry.state.available) entry.timer = setTimeout(() => { entry.timer = undefined; void this.save(key); }, 300);
+    if (entry.state.dirty && entry.state.available && !entry.state.restoring) entry.timer = setTimeout(() => { entry.timer = undefined; void this.save(key); }, 300);
   }
 
   beginRead(key: string): symbol | null {
     const entry = this.entry(key);
-    if (entry.state.dirty || entry.state.saving) return null;
+    if (entry.state.dirty || entry.state.saving || entry.state.restoring) return null;
     const ticket = Symbol(); entry.read = ticket;
     return ticket;
   }
 
   finishRead(key: string, ticket: symbol, content?: string | null): boolean {
     const entry = this.entries.get(key);
-    if (!entry || entry.read !== ticket || entry.state.dirty || entry.state.saving) return false;
+    if (!entry || entry.read !== ticket || entry.state.dirty || entry.state.saving || entry.state.restoring) return false;
     entry.read = undefined;
     if (content !== undefined) {
       entry.acknowledged = content;
@@ -99,6 +134,7 @@ export class FileBufferStore {
 
   reload(key: string, content: string): void {
     const entry = this.entry(key);
+    if (entry.state.restoring) return;
     entry.read = undefined;
     if (entry.timer) { clearTimeout(entry.timer); entry.timer = undefined; }
     // An admitted write cannot be revoked. If Reload races it, drain the
@@ -111,12 +147,13 @@ export class FileBufferStore {
     const entry = this.entry(key);
     if (entry.timer) { clearTimeout(entry.timer); entry.timer = undefined; }
     if (entry.task) return entry.task;
-    if (!entry.state.dirty || !entry.state.available || !entry.target) return Promise.resolve();
+    if (!entry.state.dirty || !entry.state.available || entry.state.restoring || !entry.target) return Promise.resolve();
+    entry.reviewRequired = false;
     // Install ownership before notifying views; a subscriber may request a
     // save synchronously, and must join this writer rather than start another.
     const task = Promise.resolve().then(async () => {
       this.publish(entry, { saving: true, error: null });
-      while (entry.state.dirty && entry.state.available && entry.state.content !== null && entry.target) {
+      while (entry.state.dirty && entry.state.available && !entry.state.restoring && entry.state.content !== null && entry.target) {
         const content = entry.state.content, target = entry.target, bindingVersion = entry.bindingVersion, nativeSessionId = entry.nativeSessionId;
         try {
           await this.write(target, content, nativeSessionId);
@@ -132,7 +169,7 @@ export class FileBufferStore {
     }).finally(() => {
       entry.task = undefined;
       this.publish(entry, { saving: false });
-      if (entry.state.dirty && entry.state.available && !entry.state.error) void this.save(key);
+      if (entry.state.dirty && entry.state.available && !entry.state.restoring && !entry.state.error) void this.save(key);
       this.collect(key, entry);
     });
     entry.task = task;
@@ -157,7 +194,7 @@ export class FileBufferStore {
     if (writeChanged) entry.bindingVersion++;
     entry.read = undefined; entry.nativeSessionId = nativeSessionId;
     this.publish(entry, { available });
-    if (writeChanged && available && entry.state.dirty) void this.save(key);
+    if (writeChanged && available && entry.state.dirty && !entry.reviewRequired) void this.save(key);
   }
 
   private publish(entry: Entry, patch: Partial<FileBufferState>): void {
@@ -168,7 +205,7 @@ export class FileBufferStore {
   }
 
   private collect(key: string, entry: Entry): void {
-    if (this.entries.get(key) !== entry || entry.listeners.size || entry.state.dirty || entry.task) return;
+    if (this.entries.get(key) !== entry || entry.listeners.size || entry.state.dirty || entry.state.restoring || entry.task) return;
     if (entry.timer) clearTimeout(entry.timer);
     this.entries.delete(key);
   }

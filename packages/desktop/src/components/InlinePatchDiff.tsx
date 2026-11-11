@@ -44,15 +44,8 @@ export interface InlinePatchDiffProps {
   onUnstageHunk?: (action: InlinePatchDiffAction) => void;
   onDiscardHunk: (action: InlinePatchDiffAction) => void;
   onDiscardLine?: (action: InlinePatchDiffLineAction) => void;
-  /** Whole-file pointer-staging callbacks. Optional: when a file
-   *  is detected as a pointer but no `onStageFile` / `onUnstageFile`
-   *  / `onDiscardFile` prop is provided, we fall back to invoking
-   *  the per-hunk callbacks once per hunk for that file. This
-   *  keeps the component usable by callers that only have the
-   *  per-hunk wiring, at the cost of emitting N RPC calls where
-   *  one would do. Providing the dedicated callbacks lets consumers
-   *  batch into a single RPC (cleaner, faster, and atomic from the
-   *  agent's POV). */
+  /** Whole-file owners handle pointers and binary/mode changes. Discard has
+   * no text-hunk fallback: reconstruction and confirmation belong to its owner. */
   onStageFile?: (action: InlinePatchDiffFileAction) => void;
   onUnstageFile?: (action: InlinePatchDiffFileAction) => void;
   onDiscardFile?: (action: InlinePatchDiffFileAction) => void;
@@ -101,7 +94,7 @@ export function InlinePatchDiff({
   const effective = useEffectiveTheme();
   const options = useMemo(() => diffOptions(effective), [effective]);
 
-  if (parsed.hunks.length === 0) {
+  if (parsed.files.length === 0) {
     return (
       <div className="p-6 text-center text-sm text-gx-muted">
         {emptyState ?? "No hunks in this patch."}
@@ -132,7 +125,7 @@ export function InlinePatchDiff({
                   : `${f.hunks.length} hunk${f.hunks.length === 1 ? "" : "s"}`}
               </span>
             </div>
-            {pointer.isPointer ? (
+            {pointer.isPointer || f.hunks.length === 0 ? (
               <PointerFileBlock
                 file={f}
                 kind={pointer.kind}
@@ -160,14 +153,7 @@ export function InlinePatchDiff({
                         )
                     : undefined
                 }
-                onDiscardFile={() =>
-                  invokeFileAction(
-                    f,
-                    pointer.kind,
-                    onDiscardFile,
-                    (hunk) => onDiscardHunk({ hunk }),
-                  )
-                }
+                onDiscardFile={onDiscardFile ? () => onDiscardFile({ path: f.path, kind: pointer.kind, hunks: f.hunks }) : undefined}
               />
             ) : (
               f.hunks.map((hunk) => (
@@ -201,7 +187,7 @@ interface PointerFileBlockProps {
   options: ReturnType<typeof diffOptions>;
   onStageFile: () => void;
   onUnstageFile?: () => void;
-  onDiscardFile: () => void;
+  onDiscardFile?: () => void;
 }
 
 /**

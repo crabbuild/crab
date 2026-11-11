@@ -9,9 +9,12 @@ use super::*;
 pub(super) mod command;
 pub(crate) mod diff;
 mod materialize;
+mod publication;
+mod restore;
+pub(crate) use restore::Restoration;
 mod sqlite;
 pub(crate) use materialize::Dehydration;
-use materialize::WorkingPointer;
+use materialize::MaterializationTarget;
 
 pub(crate) const MAX_RANGE_BYTES: u32 = 8 * 1024 * 1024;
 pub(crate) const MAX_COMPLETE_BYTES: usize = 200 * 1024 * 1024;
@@ -130,7 +133,7 @@ enum Source {
     Pointer {
         reader: super::native::CapturedRead,
         identity: Identity,
-        target: Option<WorkingPointer>,
+        target: Option<MaterializationTarget>,
     },
     Remote {
         snapshot: Snapshot,
@@ -226,7 +229,7 @@ impl FileSource {
                 let bytes = Bytes::from(bytes);
                 let requested = root.join(path);
                 let target = if tokio::fs::symlink_metadata(&requested).await?.is_file() {
-                    Some(WorkingPointer::capture(
+                    Some(MaterializationTarget::capture(
                         root.into(),
                         requested,
                         absolute,
@@ -307,7 +310,7 @@ impl FileSource {
         bytes: Bytes,
         size: u64,
         identity: Identity,
-        target: Option<WorkingPointer>,
+        target: Option<MaterializationTarget>,
         scope: ReadScope,
     ) -> Result<Self> {
         let source = repo.readers.capture(root, bytes, size, scope.id.clone())?;

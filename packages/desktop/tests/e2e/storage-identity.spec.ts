@@ -225,6 +225,12 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     await expect(page.getByText("Dehydrated 1 file", { exact: true })).toBeVisible();
     expect(readFileSync(path.join(directories[0], "lfs.safetensors"))).toEqual(git(directories[0], ["show", ":lfs.safetensors"]));
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
+    writeFileSync(path.join(directories[0], "lfs.safetensors"), "unstaged remote edit");
+    await paletteFile("Git: Discard File Changes");
+    await expect(page.getByText("Restored lfs.safetensors from the index", { exact: true })).toBeVisible();
+    expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
+    expect(remote.requests.some(request => request.method === "files_restore" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-palette-transfers.png") });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Git", exact: true }).click();
     await page.getByRole("button", { name: "Worktrees", exact: true }).click();

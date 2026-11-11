@@ -165,6 +165,7 @@ export class LocalProvider extends BaseProvider {
     caps.canHydrate = available && this.agent.supports("hydrate", "dehydrate");
     caps.canHydrateSelection = available && this.agent.supports("files_materialize");
     caps.canDehydrateSelection = available && this.agent.supports("files_dehydrate");
+    caps.canRestoreSelection = available && this.agent.supports("files_restore") && this.agent.supports("git_status_porcelain");
     // Electron's shell.trashItem works on macOS and Windows but is
     // unreliable on Linux (depends on desktop environment).
     caps.canTrash = process.platform !== "linux";

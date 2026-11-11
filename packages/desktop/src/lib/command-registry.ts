@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { publishToast } from "./toasts";
 import { recordOperation } from "./operation-history";
-import { pushUndo, executeUndo } from "./undo-stack";
 import { isStaleHunkError } from "../ipc";
 import type { SelectionTransfers } from "../hooks/useFileTransfers";
 
@@ -58,7 +57,7 @@ export interface Command {
   icon?: LucideIcon;
   shortcut?: string;
   prompt?: PromptConfig;
-  /** Whether this command is destructive (enables undo support). */
+  /** Whether this command is destructive; its handler owns confirmation. */
   destructive?: boolean;
   isEnabled: (ctx: CommandContext) => boolean;
   execute: (ctx: CommandContext, input?: string) => Promise<CommandResult>;
@@ -152,7 +151,7 @@ export function filterCommands(query: string, ctx: CommandContext): Command[] {
 
 /**
  * Execute a command by id. Checks enabled state, calls the handler,
- * records to operation history, pushes undo entry if destructive,
+ * records to operation history,
  * and publishes toast feedback.
  */
 export async function executeCommand(
@@ -190,17 +189,6 @@ export async function executeCommand(
   if (result.cancelled) return result;
   const durationMs = Date.now() - startTime;
 
-  // Push undo entry for destructive commands on success
-  let undoId: string | undefined;
-  if (result.success && cmd.destructive) {
-    undoId = pushUndo({
-      description: cmd.label,
-      undoAction: async () => {
-        return { success: false, message: "Undo not implemented for this command" };
-      },
-    });
-  }
-
   // Record to operation history
   recordOperation({
     commandId: cmd.id,
@@ -209,39 +197,11 @@ export async function executeCommand(
     durationMs,
     status: result.success ? "success" : "error",
     message: result.message,
-    undoId,
   });
 
   // Publish toast feedback
   if (result.success) {
-    if (cmd.destructive && undoId) {
-      publishToast({
-        kind: "success",
-        title: cmd.label,
-        body: result.message,
-        action: {
-          label: "Undo",
-          onClick: async () => {
-            const undoResult = await executeUndo(undoId!);
-            if (!undoResult.success) {
-              if (undoResult.message === "Undo window expired") {
-                publishToast({ kind: "warning", title: "Undo window expired" });
-              } else {
-                publishToast({ kind: "error", title: "Undo failed", body: undoResult.message });
-              }
-            } else {
-              publishToast({ kind: "success", title: "Undone", body: undoResult.message });
-            }
-          },
-        },
-      });
-    } else {
-      publishToast({
-        kind: "success",
-        title: cmd.label,
-        body: result.message,
-      });
-    }
+    publishToast({ kind: "success", title: cmd.label, body: result.message });
   } else {
     const isStaleHunk = result.message.includes("File changed on disk since the diff was loaded");
     publishToast({

@@ -39,7 +39,7 @@ export function StatusPage({ repo }: { repo: OpenRepo }) {
 
       let staged = 0, modified = 0, untracked = 0;
       for (const e of entries) {
-        const code = e.code.trim();
+        const code = e.code;
         if (code === "??") untracked++;
         else if (code[0] !== " " && code[0] !== "?") staged++;
         if (code[1] === "M" || code[1] === "D") modified++;

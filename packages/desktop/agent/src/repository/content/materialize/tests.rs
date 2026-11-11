@@ -167,25 +167,3 @@ async fn missing_parent_materialization_rejects_symlink_redirection_before_publi
     );
     repo.close().await.unwrap();
 }
-
-#[test]
-fn failed_publication_cleans_only_owned_empty_directories() {
-    for retain_content in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let mut parents = ParentDirectories::default();
-        parents.prepare(&root, &root.join("models/deep")).unwrap();
-        if retain_content {
-            std::fs::write(root.join("models/deep/user-file"), "keep").unwrap();
-        }
-        let result: Result<()> = parents.finish(Err(changed()));
-        assert!(result.is_err());
-        assert_eq!(root.join("models").exists(), retain_content);
-        if retain_content {
-            assert_eq!(
-                std::fs::read(root.join("models/deep/user-file")).unwrap(),
-                b"keep"
-            );
-        }
-    }
-}

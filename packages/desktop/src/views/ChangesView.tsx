@@ -36,10 +36,11 @@ import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
 import { executeCommand, CommandContext } from "../lib/command-registry";
 import { CommitComposer } from "./CommitComposer";
-import { hunkToAnchor, lineToDiscardAnchor, ParsedHunk } from "../lib/parse-patch";
+import { hunkToAnchor, lineToDiscardAnchor } from "../lib/parse-patch";
 import { deriveFileStatesFromPatches } from "../lib/file-state";
 import { countDiscardedLines, shouldConfirmDiscard } from "../lib/discard-threshold";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 import { useSettings } from "../settings";
 import { BatchActionBar } from "../components/BatchActionBar";
 import { StagingZones } from "../components/StagingZones";
@@ -329,9 +330,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
 
   // Build a CommandContext from the view's available state.
   const dirtyCount = entries?.length ?? 0;
+  const fileTransfers = useFileTransfers(repo);
   const commandContext = useMemo<CommandContext>(
     () => ({
       repoId: repo.repo_id,
+      fileTransfers,
       currentBranch: "",
       upstream: null,
       ahead: 0,
@@ -341,7 +344,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       activeOperation: null,
       forgeProvider: repo.forge_provider ?? null,
     }),
-    [repo.repo_id, repo.forge_provider, dirtyCount, hasStaged],
+    [repo.repo_id, repo.forge_provider, dirtyCount, hasStaged, fileTransfers],
   );
 
   // Toolbar actions with dynamic disabled states.
@@ -349,12 +352,12 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     () => [
       { id: "git.stage.all", icon: Plus, label: "Stage All", disabled: dirtyCount === 0 },
       { id: "git.unstage.all", icon: Minus, label: "Unstage All", disabled: !hasStaged },
-      { id: "git.discard.all", icon: Undo2, label: "Discard All", disabled: dirtyCount === 0 },
+      { id: "git.discard.all", icon: Undo2, label: "Discard All", disabled: dirtyCount === 0 || !fileTransfers.restore },
       { id: "git.push", icon: ArrowUp, label: "Push" },
       { id: "git.pull", icon: ArrowDown, label: "Pull" },
       { id: "git.fetch", icon: RefreshCw, label: "Fetch" },
     ],
-    [dirtyCount, hasStaged],
+    [dirtyCount, hasStaged, fileTransfers.restore],
   );
 
   // Handle toolbar action clicks — route through CommandRegistry.
@@ -377,11 +380,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     () => [
       { id: "git.stage.file", label: "Stage", icon: Plus },
       { id: "git.unstage.file", label: "Unstage", icon: Minus },
-      { id: "git.discard.file", label: "Discard Changes", icon: Undo2, danger: true },
+      { id: "git.discard.file", label: "Discard Changes", icon: Undo2, danger: true, disabled: !fileTransfers.restore },
       { id: "open.diff", label: "Open Diff", icon: FileDiff, separator: true },
       { id: "open.file", label: "Open File", icon: FileText },
     ],
-    [],
+    [fileTransfers.restore],
   );
 
   const handleFileContextMenu = useCallback(
@@ -393,7 +396,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   );
 
   // Per-file discard handler for the inline action buttons.
-  // Routes through the command registry so undo/toast/history all work.
+  // The registry reports only the confirmed operation and its real outcome.
   const handleDiscardFileByPath = useCallback(
     async (path: string) => {
       const result = await executeCommand("git.discard.file", commandContext, path);
@@ -655,12 +658,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   );
 
   const onDiscardFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) return;
-      requestDiscard(anchors, "Discarded pointer");
-    },
-    [requestDiscard],
+    ({ path }: { path: string }) => { void handleDiscardFileByPath(path); },
+    [handleDiscardFileByPath],
   );
 
   // Whole-file actions use Git paths; pointer/binary contents are not text
@@ -783,11 +782,10 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
 
   /** Batch discard all multi-selected files. */
   const batchDiscard = useCallback(async () => {
-    if (multiSelected.size === 0) return;
+    if (multiSelected.size === 0 || !fileTransfers.restore) return;
     setBatchBusy(true);
     try {
-      // Use git checkout -- for tracked files, clean for untracked
-      await rpc.gitCheckout(repo.repo_id, ".", { pathspec: true });
+      if (await fileTransfers.restore([...multiSelected]) === null) return;
       skipPatchPairEffectRef.current = true;
       refreshStatus();
       await refreshPatchPair();
@@ -797,7 +795,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     } finally {
       setBatchBusy(false);
     }
-  }, [multiSelected, repo.repo_id, refreshStatus, refreshPatchPair]);
+  }, [multiSelected, fileTransfers, refreshStatus, refreshPatchPair]);
 
   // Keyboard shortcuts for batch operations
   useEffect(() => {
@@ -982,7 +980,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
               count={multiSelected.size}
               onStage={batchStage}
               onUnstage={batchUnstage}
-              onDiscard={batchDiscard}
+              onDiscard={fileTransfers.restore ? batchDiscard : undefined}
               onClear={clearMultiSelect}
               busy={batchBusy}
             />
@@ -1012,7 +1010,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                   onSelect={handleFileSelect}
                   onDoubleClick={openFileDiff}
                   onToggleFile={onToggleFile}
-                  onDiscardFile={handleDiscardFileByPath}
+                  onDiscardFile={fileTransfers.restore ? handleDiscardFileByPath : undefined}
                   onOpenFile={handleOpenFile}
                   onContextMenu={handleFileContextMenu}
                 />
@@ -1027,7 +1025,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                   onSelect={selectFile}
                   onDoubleClick={openFileDiff}
                   onToggleFile={onToggleFile}
-                  onDiscardFileByPath={handleDiscardFileByPath}
+                  onDiscardFileByPath={fileTransfers.restore ? handleDiscardFileByPath : undefined}
                   onOpenFile={handleOpenFile}
                   onContextMenu={handleFileContextMenu}
                   scrollRef={fileListScrollRef}
@@ -1075,13 +1073,14 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                 loading={patchLoading}
                 error={patchError}
                 canUnstage={canUnstage}
+                stagedOnly={!!selectedPath && fileStates[selectedPath] === "full"}
                 onStageHunk={onStageHunk}
                 onUnstageHunk={onUnstageHunk}
                 onDiscardHunk={onDiscardHunk}
                 onDiscardLine={onDiscardLine}
                 onStageFile={({ path }) => onToggleFile(path, "stage")}
                 onUnstageFile={({ path }) => onToggleFile(path, "unstage")}
-                onDiscardFile={onDiscardFile}
+                onDiscardFile={fileTransfers.restore && selectedPath && fileStates[selectedPath] !== "full" ? onDiscardFile : undefined}
                 toast={toast}
                 onDismissToast={() => setToast(null)}
               />
@@ -1165,7 +1164,7 @@ function FlatList({
   onSelect: (path: string) => void;
   onDoubleClick: (path: string) => void;
   onToggleFile: (path: string, intent: "stage" | "unstage") => void;
-  onDiscardFileByPath: (path: string) => void;
+  onDiscardFileByPath?: (path: string) => void;
   onOpenFile?: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -1280,8 +1279,8 @@ function FlatList({
                   type="button"
                   title={`Discard changes in ${e.path}`}
                   aria-label={`Discard changes in ${e.path}`}
-                  disabled={toggling}
-                  onClick={(ev) => { ev.stopPropagation(); onDiscardFileByPath(e.path); }}
+                  disabled={toggling || !onDiscardFileByPath}
+                  onClick={(ev) => { ev.stopPropagation(); onDiscardFileByPath?.(e.path); }}
                   className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-error/20 hover:text-gx-error disabled:opacity-50 disabled:cursor-not-allowed transition"
                 >
                   <Undo2 size={13} />
@@ -1445,6 +1444,7 @@ interface PatchPaneProps {
   loading: boolean;
   error: string | null;
   canUnstage: boolean;
+  stagedOnly: boolean;
   onStageHunk: Parameters<typeof InlinePatchDiff>[0]["onStageHunk"];
   onUnstageHunk: Parameters<typeof InlinePatchDiff>[0]["onUnstageHunk"];
   onDiscardHunk: Parameters<typeof InlinePatchDiff>[0]["onDiscardHunk"];
@@ -1536,6 +1536,7 @@ function PatchPane({
   loading,
   error,
   canUnstage,
+  stagedOnly,
   onStageHunk,
   onUnstageHunk,
   onDiscardHunk,
@@ -1552,7 +1553,7 @@ function PatchPane({
         <span className="font-mono text-gx-text">
           {selectedPath ?? "No file selected"}
         </span>
-        <span className="ml-auto">Working tree vs Index</span>
+        <span className="ml-auto">{stagedOnly ? "Index vs HEAD" : "Working tree vs Index"}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {!selectedPath && (

@@ -1,5 +1,5 @@
 use super::*;
-use crate::repository::{Dehydration, FileSource, ReadScope};
+use crate::repository::{Dehydration, FileSource, ReadScope, Restoration};
 
 #[derive(Deserialize)]
 pub(super) struct FileMaterializeParams {
@@ -44,6 +44,7 @@ pub(super) struct FilesMaterializeParams {
 pub(super) enum Direction {
     Hydrate,
     Dehydrate,
+    Restore,
 }
 
 impl Direction {
@@ -51,6 +52,7 @@ impl Direction {
         match self {
             Self::Hydrate => "hydrate",
             Self::Dehydrate => "dehydrate",
+            Self::Restore => "restore",
         }
     }
 
@@ -61,6 +63,7 @@ impl Direction {
         let action = match self {
             Self::Hydrate => "Hydrate",
             Self::Dehydrate => "Dehydrate",
+            Self::Restore => "Restore",
         };
         AgentError::Preview {
             context: format!("{action} {path}"),
@@ -72,6 +75,7 @@ impl Direction {
 enum SelectedFile {
     Hydrate(Arc<FileSource>),
     Dehydrate(Arc<Dehydration>),
+    Restore(Arc<Restoration>),
 }
 
 impl SelectedFile {
@@ -88,6 +92,9 @@ impl SelectedFile {
             Direction::Dehydrate => {
                 Self::Dehydrate(Arc::new(Dehydration::capture(repo, path, scope).await?))
             }
+            Direction::Restore => {
+                Self::Restore(Arc::new(Restoration::capture(repo, path, scope).await?))
+            }
         })
     }
 
@@ -95,6 +102,7 @@ impl SelectedFile {
         match self {
             Self::Hydrate(source) => source.size,
             Self::Dehydrate(source) => source.size().saturating_mul(2),
+            Self::Restore(source) => source.size(),
         }
     }
 
@@ -106,6 +114,7 @@ impl SelectedFile {
         match self {
             Self::Hydrate(source) => source.clone().materialize(progress).await,
             Self::Dehydrate(source) => source.clone().run(repo, progress).await,
+            Self::Restore(source) => source.clone().run(progress).await,
         }
     }
 
@@ -113,6 +122,7 @@ impl SelectedFile {
         match self {
             Self::Hydrate(source) => source.release_reader().await,
             Self::Dehydrate(source) => source.release_reader().await,
+            Self::Restore(source) => source.release_reader().await,
         }
     }
 }
@@ -169,7 +179,12 @@ pub(super) async fn many(
                 .await;
             if let Ok(bytes) = &outcome {
                 written = written.saturating_add(*bytes);
-                processed = processed.saturating_add(source.work_bytes());
+                let completed_work = if matches!(direction, Direction::Restore) {
+                    *bytes
+                } else {
+                    source.work_bytes()
+                };
+                processed = processed.saturating_add(completed_work);
                 if let Err(error) = crate::notify(
                     &job.out,
                     "progress/transfer",
@@ -182,6 +197,7 @@ pub(super) async fn many(
                 let action = match direction {
                     Direction::Hydrate => "Hydrated",
                     Direction::Dehydrate => "Dehydrated",
+                    Direction::Restore => "Restored",
                 };
                 job.line(shellout::Stream::Stdout, &format!("{action} {path}"))
                     .await;
@@ -239,7 +255,11 @@ impl Materialization<'_> {
         let (written, checked) = match self.direction {
             Direction::Hydrate => (processed, None),
             Direction::Dehydrate => (0, Some(processed)),
+            Direction::Restore => (processed, None),
         };
+        // Git checkout conversions can change the output size. Keep its total
+        // unknown rather than label raw blob size as converted bytes written.
+        let total = (!matches!(self.direction, Direction::Restore)).then_some(total);
         json!({
             "op": self.direction.verb(), "job_id": self.op_id, "repo_id": self.repo_id,
             "written_bytes": written, "checked_bytes": checked, "total_bytes": total,
@@ -284,10 +304,18 @@ impl Materialization<'_> {
         let signal = state.cancel_registry.register(self.op_id.to_owned()).await;
         tokio::pin!(signal);
         tokio::pin!(work);
-        let result = tokio::select! {
-            biased;
-            result = &mut work => result,
-            _ = &mut signal => { scope.cancel(); work.await },
+        // Publish admission only after cancellation is registered, before
+        // waiting for another publisher or configuring filters. Queued work
+        // must be cancellable without waiting for its first written byte.
+        let admitted =
+            crate::notify(&self.out, "progress/transfer", self.progress(0, 0, None)).await;
+        let result = match admitted {
+            Err(error) => Err(error),
+            Ok(()) => tokio::select! {
+                biased;
+                result = &mut work => result,
+                _ = &mut signal => { scope.cancel(); work.await },
+            },
         };
         state.cancel_registry.unregister(self.op_id).await;
         // The writer checks cancellation before atomic publication. Its terminal

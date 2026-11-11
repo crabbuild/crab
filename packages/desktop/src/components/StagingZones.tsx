@@ -42,7 +42,7 @@ interface StagingZonesProps {
   onSelect: (path: string, e: React.MouseEvent) => void;
   onDoubleClick: (path: string) => void;
   onToggleFile: (path: string, intent: "stage" | "unstage") => void;
-  onDiscardFile: (path: string) => void;
+  onDiscardFile?: (path: string) => void;
   onOpenFile?: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
 }
@@ -190,7 +190,7 @@ export function StagingZones({
               onDoubleClick={onDoubleClick}
               onStage={() => onToggleFile(e.path, "stage")}
               onUnstage={() => onToggleFile(e.path, "unstage")}
-              onDiscard={() => onDiscardFile(e.path)}
+              onDiscard={onDiscardFile ? () => onDiscardFile(e.path) : undefined}
               onOpenFile={onOpenFile ? () => onOpenFile(e.path) : undefined}
               onContextMenu={onContextMenu}
             />
@@ -242,7 +242,7 @@ export function StagingZones({
               onDoubleClick={onDoubleClick}
               onStage={() => onToggleFile(e.path, "stage")}
               onUnstage={() => onToggleFile(e.path, "unstage")}
-              onDiscard={() => onDiscardFile(e.path)}
+              onDiscard={onDiscardFile ? () => onDiscardFile(e.path) : undefined}
               onOpenFile={onOpenFile ? () => onOpenFile(e.path) : undefined}
               onContextMenu={onContextMenu}
             />
@@ -348,7 +348,7 @@ function FileRow({
   onDoubleClick: (path: string) => void;
   onStage: () => void;
   onUnstage: () => void;
-  onDiscard: () => void;
+  onDiscard?: () => void;
   onOpenFile?: () => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
 }) {
@@ -451,8 +451,8 @@ function FileRow({
             type="button"
             title={`Discard changes in ${entry.path}`}
             aria-label={`Discard changes in ${entry.path}`}
-            disabled={toggling}
-            onClick={(ev) => { ev.stopPropagation(); onDiscard(); }}
+            disabled={toggling || !onDiscard}
+            onClick={(ev) => { ev.stopPropagation(); onDiscard?.(); }}
             className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-error/20 hover:text-gx-error disabled:opacity-50 transition"
           >
             <Undo2 size={12} />

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { executeCommand, getCommand, type CommandContext } from "../src/lib/command-registry";
 import "../src/lib/view-commands";
+import "../src/lib/git-commands";
 
 vi.mock("../src/ipc", () => ({ rpc: {}, isStaleHunkError: () => false }));
 vi.mock("../src/lib/toasts", () => ({ publishToast: vi.fn() }));
@@ -32,4 +33,11 @@ describe("large-file command admission", () => {
   it("retains a dismissed confirmation as cancellation rather than success", async () => {
     expect(await executeCommand("crab.dehydrate", { ...context, fileTransfers: { dehydrate: async () => null } })).toEqual({ success: false, cancelled: true, message: "File transfer cancelled" });
   });
+});
+
+it.each(["git.discard.file", "git.discard.all"])("routes %s through the verified restore owner", async id => {
+  const restore = vi.fn().mockResolvedValue(1);
+  const result = await executeCommand(id, { ...context, dirtyCount: 2, fileTransfers: { restore } }, "model[1].bin");
+  expect(result.success).toBe(true);
+  expect(restore.mock.calls).toEqual(id.endsWith("file") ? [[["model[1].bin"]]] : [[]]);
 });

@@ -545,12 +545,12 @@ export interface ProgressTransfer {
   repo_id: string;
   written_bytes: number;
   checked_bytes?: number | null;
-  total_bytes: number;
+  total_bytes: number | null;
   files_published?: number | null;
   files_total?: number | null;
 }
 
-export type FileTransfer = { fileId: string } | { paths: string[]; verb: "hydrate" | "dehydrate" };
+export type FileTransfer = { fileId: string } | { paths: string[]; verb: "hydrate" | "dehydrate" | "restore" };
 
 /** Incremental chunk from a streaming read handler. */
 export interface ProgressPartial {
@@ -1810,9 +1810,9 @@ export const rpc = {
   fileTransfer: (repo_id: string, selection: FileTransfer, op_id: string, native_session_id: string) =>
     "fileId" in selection
       ? call<{ written_bytes: number }>("file_materialize", { repo_id, file_id: selection.fileId, op_id, native_session_id })
-      : call<{ written_bytes: number }>(selection.verb === "dehydrate" ? "files_dehydrate" : "files_materialize", { repo_id, paths: selection.paths, op_id, native_session_id }),
+      : call<{ written_bytes: number }>(selection.verb === "restore" ? "files_restore" : selection.verb === "dehydrate" ? "files_dehydrate" : "files_materialize", { repo_id, paths: selection.paths, op_id, native_session_id }),
 
-  cancelOperation: (repo_id: string, op_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id }),
+  cancelOperation: (repo_id: string, op_id: string, native_session_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id, native_session_id }),
 
   readText: (repo_id: string, path: string, { signal, ...opts }: { native_session_id?: string; rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
     call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),
@@ -2114,7 +2114,7 @@ export const rpc = {
 
   // ---- Git write actions ----
 
-  gitCheckout: (repo_id: string, target: string, opts: { create?: boolean; detach?: boolean; pathspec?: boolean } = {}) =>
+  gitCheckout: (repo_id: string, target: string, opts: { detach?: boolean } = {}) =>
     call<{ ref_name: string; detached: boolean }>("git_checkout", { repo_id, ref_name: target, ...opts }),
 
   gitBranchCreate: (repo_id: string, name: string, opts: { start_point?: string; track?: boolean } = {}) =>

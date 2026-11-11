@@ -142,3 +142,57 @@ describe("repository file buffers", () => {
     expect(store.pendingCount()).toBe(0);
   });
 });
+
+
+describe("restoration buffer reservation", () => {
+  it("refuses pending and admitted saves before reserving any selected buffer", async () => {
+    const first = deferred();
+    const { store } = opened(vi.fn().mockReturnValue(first.promise));
+    store.edit("file", "pending");
+    expect(() => store.protect(["clean", "file"])).toThrow("pending editor");
+    expect(store.snapshot("clean").restoring).toBe(false);
+    const saving = store.save("file");
+    expect(() => store.protect(["file"])).toThrow("pending editor");
+    first.resolve(); await saving;
+  });
+  it("revokes stale reads, survives unmount and reloads clean content after release", () => {
+    const { store, unsubscribe } = opened();
+    const read = store.beginRead("file")!;
+    const release = store.protect(["file", "file"]);
+    unsubscribe();
+    const close = store.subscribe("file", () => {});
+    expect(store.snapshot("file").restoring).toBe(true);
+    expect(store.finishRead("file", read, "old")).toBe(false);
+    expect(store.beginRead("file")).toBeNull();
+    release(); release();
+    expect(store.snapshot("file")).toMatchObject({ restoring: false, content: null, dirty: false });
+    store.finishRead("file", store.beginRead("file")!, "restored");
+    expect(store.snapshot("file").content).toBe("restored");
+    close();
+  });
+  it("retains a late draft without autosaving over restoration, including recovery", async () => {
+    const { store, write } = opened();
+    const release = store.protect(["file"]);
+    store.edit("file", "late draft");
+    await store.save("file");
+    store.reload("file", "stale reload");
+    release();
+    store.runtime(target.repoId, false, null); store.runtime(target.repoId, true, "native:2");
+    store.bind("file", { ...target, repoId: "new-alias", nativeSessionId: "native:2" });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(write).not.toHaveBeenCalled();
+    expect(store.snapshot("file")).toMatchObject({ content: "late draft", dirty: true, restoring: false });
+    await store.save("file");
+    expect(write.mock.calls.map(call => call[1])).toEqual(["late draft"]);
+  });
+  it("reserves unopened files before synchronous view callbacks can start writers", async () => {
+    const { store, write } = opened();
+    const close = store.subscribe("file", () => { if (store.snapshot("file").restoring) store.edit("second", "late"); });
+    const release = store.protect(["file", "second"]);
+    store.bind("second", target);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.snapshot("second")).toMatchObject({ restoring: true, dirty: true, content: "late" });
+    expect(write).not.toHaveBeenCalled();
+    release(); close();
+  });
+});

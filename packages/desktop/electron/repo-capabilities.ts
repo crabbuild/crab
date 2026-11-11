@@ -8,6 +8,7 @@ export interface CapabilitySet {
   canHydrate: boolean;
   canHydrateSelection?: boolean;
   canDehydrateSelection?: boolean;
+  canRestoreSelection?: boolean;
   canMaterialize: boolean;
   canSearch: boolean;
   canExec: boolean;

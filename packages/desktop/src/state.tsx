@@ -214,6 +214,7 @@ export function getActiveWorkspace(state: AppState): Workspace | null {
 
 export interface JobState {
   op: string;
+  nativeSessionId?: string;
   status: "running" | "done" | "failed" | "cancelled" | "interrupted";
   transfer?: ProgressTransfer;
   interruption?: string;
@@ -355,7 +356,7 @@ export type Action =
   | { type: "pin-repo"; path: string }
   | { type: "unpin-repo"; path: string }
   | { type: "reorder-repos"; orderedPaths: string[] }
-  | { type: "job-start"; job_id: string; op: string }
+  | { type: "job-start"; job_id: string; op: string; nativeSessionId?: string }
   | { type: "job-line"; line: ProgressLine }
   | { type: "job-lines-batch"; lines: ProgressLine[] }
   | { type: "job-complete"; job_id: string; status: number; outcome?: ProgressComplete["outcome"] }
@@ -447,6 +448,7 @@ function reducer(state: AppState, action: Action): AppState {
           ...state.jobs,
           [action.job_id]: {
             op: action.op,
+            nativeSessionId: action.nativeSessionId,
             status: "running",
             lines: 0,
             startedAt: now,
@@ -858,7 +860,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       runFileTransfer: (repoId, selection, nativeSessionId, jobId) => transferOwner.current!.run(repoId, async () => {
         const op = "verb" in selection ? selection.verb : "hydrate";
         const job_id = jobId ?? nextJobId(op);
-        dispatch({ type: "job-start", job_id, op });
+        dispatch({ type: "job-start", job_id, op, nativeSessionId });
         try {
           const result = await rpc.fileTransfer(repoId, selection, job_id, nativeSessionId);
           dispatch({ type: "job-complete", job_id, status: 0 });

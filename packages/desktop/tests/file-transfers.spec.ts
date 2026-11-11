@@ -3,14 +3,16 @@ import type { HydrationEntry } from "../src/ipc";
 import type { OpenRepo } from "../src/state";
 import { useFileTransfers } from "../src/hooks/useFileTransfers";
 
-const native = vi.hoisted(() => ({ inventory: vi.fn(), confirm: vi.fn(), transfer: vi.fn() }));
+const native = vi.hoisted(() => ({ inventory: vi.fn(), status: vi.fn(), protect: vi.fn(), release: vi.fn(), confirm: vi.fn(), transfer: vi.fn() }));
 vi.mock("react", () => ({ useMemo: (read: () => unknown) => read() }));
-vi.mock("../src/state", () => ({ useStore: () => ({ runFileTransfer: native.transfer }) }));
-vi.mock("../src/ipc", () => ({ rpc: { hydrationStatus: native.inventory }, mainProcess: { dialogConfirm: native.confirm } }));
+vi.mock("../src/state", () => ({ useStore: () => ({ runFileTransfer: native.transfer }), repositoryKey: (repo: OpenRepo) => repo.path ?? repo.repo_id }));
+vi.mock("../src/ipc", () => ({ rpc: { hydrationStatus: native.inventory, gitStatus: native.status }, mainProcess: { dialogConfirm: native.confirm } }));
+
+vi.mock("../src/lib/file-buffer-store", () => ({ fileBuffers: { protect: native.protect } }));
 
 const repo = {
   repo_id: "ssh://profile/worktree", native_session_id: "captured-owner",
-  capabilities: { canHydrateSelection: true, canDehydrateSelection: true },
+  capabilities: { canHydrateSelection: true, canDehydrateSelection: true, canRestoreSelection: true },
 } as OpenRepo;
 const entries: HydrationEntry[] = [
   { path: "model[1].bin", kind: "crab", state: "pointer", logical: 4096, on_disk: 128 },
@@ -21,6 +23,8 @@ const entries: HydrationEntry[] = [
 
 beforeEach(() => {
   vi.resetAllMocks();
+  native.protect.mockReturnValue(native.release);
+  native.status.mockResolvedValue({ entries: [{ path: "model[1].bin", code: " M" }, { path: "model1.bin", code: "M " }, { path: "untracked", code: "??" }, { path: "both.bin", code: "MM" }, { path: "missing.bin", code: " D" }] });
   native.inventory.mockResolvedValue({ items: entries });
   native.confirm.mockResolvedValue(true);
   native.transfer.mockResolvedValue({ written_bytes: 4096 });
@@ -85,11 +89,45 @@ describe("verified selection entry points", () => {
   });
 
   it.each([null, { ...repo, native_session_id: null }, { ...repo, deferred: true }])("does not expose mutations for unavailable repositories", unavailable => {
-    expect(useFileTransfers(unavailable)).toEqual({ hydrate: undefined, dehydrate: undefined });
+    expect(useFileTransfers(unavailable)).toEqual({ hydrate: undefined, dehydrate: undefined, restore: undefined });
   });
 
   it("gates transfer directions independently and disables history mutations", () => {
     expect(useFileTransfers({ ...repo, capabilities: { ...repo.capabilities!, canDehydrateSelection: false } }).dehydrate).toBeUndefined();
-    expect(useFileTransfers(repo, false)).toEqual({ hydrate: undefined, dehydrate: undefined });
+    expect(useFileTransfers(repo, false)).toEqual({ hydrate: undefined, dehydrate: undefined, restore: undefined });
+  });
+});
+
+
+describe("confirmed index restoration", () => {
+  it("selects only unstaged tracked files and protects buffers through publication", async () => {
+    expect(await useFileTransfers(repo).restore!()).toBe(3);
+    expect(native.transfer).toHaveBeenCalledWith(repo.repo_id, { verb: "restore", paths: ["model[1].bin", "both.bin", "missing.bin"] }, "captured-owner");
+    expect(native.protect).toHaveBeenCalledWith(["model[1].bin", "both.bin", "missing.bin"].map(path => JSON.stringify([repo.repo_id, path])));
+    expect(native.release).toHaveBeenCalledOnce();
+  });
+  it("retains literal batch scope and excludes staged-only and untracked paths", async () => {
+    await useFileTransfers(repo).restore!(["model[1].bin", "model[1].bin", "model1.bin", "untracked"]);
+    expect(native.transfer).toHaveBeenCalledWith(repo.repo_id, { verb: "restore", paths: ["model[1].bin"] }, "captured-owner");
+  });
+  it.each(["dismissed", "failed"])("releases editor protection after %s restoration", async outcome => {
+    if (outcome === "dismissed") {
+      native.confirm.mockResolvedValue(false);
+      expect(await useFileTransfers(repo).restore!()).toBeNull();
+      expect(native.transfer).not.toHaveBeenCalled();
+    } else {
+      native.transfer.mockRejectedValue(new Error("Working file changed"));
+      await expect(useFileTransfers(repo).restore!()).rejects.toThrow("Working file changed");
+    }
+    expect(native.release).toHaveBeenCalledOnce();
+  });
+  it("refuses pending editor buffers before confirmation or mutation", async () => {
+    native.protect.mockImplementation(() => { throw new Error("Save pending"); });
+    await expect(useFileTransfers(repo).restore!()).rejects.toThrow("Save pending");
+    expect(native.confirm).not.toHaveBeenCalled();
+    expect(native.transfer).not.toHaveBeenCalled();
+  });
+  it("does not expose restoration for an older runtime", () => {
+    expect(useFileTransfers({ ...repo, capabilities: { ...repo.capabilities!, canRestoreSelection: false } }).restore).toBeUndefined();
   });
 });
