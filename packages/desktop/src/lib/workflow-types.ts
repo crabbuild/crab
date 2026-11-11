@@ -1,10 +1,9 @@
 /**
  * Workflow types for the visual DAG editor.
  *
- * These mirror the Rust `crab/src/workflow/` structures closely
- * enough that round-tripping through the agent's JSON-RPC layer is
- * lossless. The visual editor operates on these types; serialization
- * to/from `crab.yaml` happens server-side in the agent.
+ * The agent preserves authored YAML fields and supplies expanded executions
+ * from crab-workflow. Editing changes the source template; runtime projections
+ * are refreshed after saving and never written back as authored stages.
  */
 
 // ── Stage definition ────────────────────────────────────────────────
@@ -24,10 +23,10 @@ export interface StageDep {
   /** For path deps: the file path. For stage_out: "stage:out_path". */
   value: string;
   /** Extra metadata for structured deps. */
-  meta?: Record<string, string>;
+  meta?: Record<string, unknown>;
 }
 
-export type OutKind = "file" | "directory";
+export type OutKind = "file" | "directory" | "stdout";
 
 export interface StageOut {
   path: string;
@@ -35,6 +34,7 @@ export interface StageOut {
   cache?: boolean;
   persist?: boolean;
   max_bytes?: number;
+  extra?: Record<string, unknown>;
 }
 
 export interface StageResources {
@@ -53,15 +53,19 @@ export interface RetryPolicy {
   on_timeout?: boolean;
 }
 
-export type EnvSpec = "inherit" | "empty" | { allowlist: string[] };
+export type EnvSpec = "inherit" | "empty" | "allowlist" | string[];
 
 export interface WorkflowStage {
   name: string;
   cmd: StageCmd;
   deps: StageDep[];
   outs: StageOut[];
-  params: string[];
-  env: EnvSpec;
+  params: unknown[];
+  env: EnvSpec | null;
+  group?: string | null;
+  foreach?: unknown;
+  matrix?: unknown;
+  extra?: Record<string, unknown>;
   retry?: RetryPolicy;
   timeout?: string;
   nondeterministic?: boolean;
@@ -69,7 +73,7 @@ export interface WorkflowStage {
   side_effects?: boolean;
   resources?: StageResources;
   frozen?: boolean;
-  wdir?: string;
+  wdir?: string | null;
   condition?: ConditionSpec;
   desc?: string;
   meta?: Record<string, unknown>;
@@ -80,6 +84,15 @@ export interface WorkflowStage {
 export interface WorkflowDefaults {
   env?: EnvSpec;
   retry?: RetryPolicy;
+  extra?: Record<string, unknown>;
+}
+
+export interface WorkflowExecution {
+  name: string;
+  source: string;
+  deps: StageDep[];
+  outs: StageOut[];
+  wdir?: string | null;
 }
 
 export interface WorkflowDefinition {
@@ -87,7 +100,9 @@ export interface WorkflowDefinition {
   path: string;
   params: string[];
   metrics: string[];
-  plots: string[];
+  plots: unknown[];
+  extra?: Record<string, unknown>;
+  executions?: WorkflowExecution[];
   defaults: WorkflowDefaults;
   stages: WorkflowStage[];
 }

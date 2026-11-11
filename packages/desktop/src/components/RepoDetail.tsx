@@ -472,12 +472,12 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
   }, [entries]);
 
   const openFile = useCallback(
-    (path: string, entry: DirEntry, line?: number) => {
-      const key = `file::${rev ?? "HEAD"}::${path}`;
+    (path: string, entry: DirEntry, line?: number, revision = rev) => {
+      const key = `file::${revision ?? "HEAD"}::${path}`;
       setEditorTabs((prev) =>
         prev.some((t) => t.key === key)
-          ? prev.map((t) => t.key === key ? { ...t, line } : t)
-          : [...prev, { key, path, rev, entry, line }],
+          ? prev.map((t) => t.key === key ? { ...t, rev: revision, entry, line } : t)
+          : [...prev, { key, path, rev: revision, entry, line }],
       );
       setActiveKey(key);
     },
@@ -825,7 +825,12 @@ export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) 
               ) : activeView === "crab" ? (
                 <CrabFlowView repo={repo} onSelectCommit={(sha) => { setSelectedCommit(sha); setActiveView("timeline"); }} onOpenFile={openFile} />
               ) : activeView === "workflows" ? (
-                <WorkflowEditorView repo={repo} />
+                <WorkflowEditorView repo={repo} onOpenSource={async path => {
+                  const stat = await rpc.stat(repo.repo_id, path);
+                  setRev(null);
+                  openFile(path, { path, kind: "file", size: stat.size, pointer_hash: stat.pointer_hash }, undefined, null);
+                  setActiveView("explorer");
+                }} />
               ) : activeView === "orchestrator" ? (
                 <AgentTasksView repo={repo} onOpenAgentManager={() => {
                   setActiveView("settings");

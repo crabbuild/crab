@@ -15,6 +15,7 @@ import {
   NodeTypes,
   MarkerType,
   useReactFlow,
+  useStore,
   useNodesInitialized,
   ReactFlowProvider,
 } from "@xyflow/react";
@@ -23,6 +24,7 @@ import {
   AlertTriangle,
   ChevronDown,
   Copy,
+  Code2,
   FilePlus,
   HelpCircle,
   LayoutGrid,
@@ -39,12 +41,12 @@ import {
 } from "lucide-react";
 import { OpenRepo } from "../state";
 import { useWorkflowEditor } from "../hooks/useWorkflowEditor";
-import { WorkflowStage, StageRunStatus, WorkflowRunState } from "../lib/workflow-types";
+import { WorkflowStage, WorkflowRunState } from "../lib/workflow-types";
 import { StageNode } from "../components/workflow/StageNode";
 import { StagePropertiesPanel } from "../components/workflow/StagePropertiesPanel";
 import { NewStageDialog } from "../components/workflow/NewStageDialog";
 import { WorkflowSidebar } from "../components/workflow/WorkflowSidebar";
-import { availableWorkflowOutputs, layoutStages, normalizeWorkflowPath, stageEdges, workflowLinks } from "../lib/workflow-graph";
+import { artifactPath, availableWorkflowOutputs, cycleStages, layoutStages, stageEdges, stageRunStatus, workflowLinks } from "../lib/workflow-graph";
 import { WorkflowTabs } from "../components/workflow/WorkflowTabs";
 import { StatusDashboard } from "../components/workflow/StatusDashboard";
 import { ExperimentPanel } from "../components/workflow/ExperimentPanel";
@@ -54,6 +56,7 @@ import { MigrateWizard } from "../components/workflow/MigrateWizard";
 
 interface Props {
   repo: OpenRepo;
+  onOpenSource: (path: string) => Promise<void>;
 }
 
 /** A snapshot of the workflow stages at a point in time, used for undo/redo. */
@@ -74,6 +77,9 @@ interface ContextMenu {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const nodeTypes: NodeTypes = { stage: StageNode };
+// React Flow stores prop options beside queued fit requests. A new object on
+// selection would overwrite Find stage's node filter before the request runs.
+const fitViewOptions = { padding: 0.2, maxZoom: 1 };
 
 // ─── Undo/Redo Hook ──────────────────────────────────────────────────────────
 
@@ -118,62 +124,6 @@ function useUndoRedo() {
   };
 }
 
-// ─── Utility: Cycle Detection ────────────────────────────────────────────────
-
-/**
- * Detects cycles in the stage dependency graph using DFS coloring.
- * Returns the set of stage names that participate in at least one cycle.
- */
-function detectCycles(stages: WorkflowStage[]): Set<string> {
-  const stageNames = new Set(stages.map((stage) => stage.name));
-
-  // Build adjacency list: parent -> children (stages that depend on parent)
-  const adjacency = new Map<string, string[]>();
-  for (const stage of stages) {
-    adjacency.set(stage.name, []);
-  }
-
-  for (const edge of stageEdges(stages)) adjacency.get(edge.source)!.push(edge.target);
-
-  // DFS with 3-color marking to find back edges (cycles)
-  const cycleMembers = new Set<string>();
-  const WHITE = 0;
-  const GRAY = 1;
-  const BLACK = 2;
-  const color = new Map<string, number>();
-
-  for (const name of stageNames) {
-    color.set(name, WHITE);
-  }
-
-  function dfs(node: string, path: string[]) {
-    color.set(node, GRAY);
-    path.push(node);
-
-    for (const neighbor of adjacency.get(node)!) {
-      if (color.get(neighbor) === GRAY) {
-        // Back edge found — mark all nodes in the cycle
-        const cycleStart = path.indexOf(neighbor);
-        for (let i = cycleStart; i < path.length; i++) {
-          cycleMembers.add(path[i]);
-        }
-      } else if (color.get(neighbor) === WHITE) {
-        dfs(neighbor, path);
-      }
-    }
-
-    path.pop();
-    color.set(node, BLACK);
-  }
-
-  for (const name of stageNames) {
-    if (color.get(name) === WHITE) {
-      dfs(name, []);
-    }
-  }
-
-  return cycleMembers;
-}
 
 // ─── Utility: Edge ID Parsing ────────────────────────────────────────────────
 
@@ -185,8 +135,8 @@ function parseEdgeId(id: string): { source: string; target: string } | null {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-function WorkflowEditorInner({ repo }: Props) {
-  const { state, catalog, fileErrors, operationError, busy, layout, saveLayout, actions, statusReport, activeTab } =
+function WorkflowEditorInner({ repo, onOpenSource }: Props) {
+  const { state, catalog, fileErrors, operationError, busy, cancelling, layout, saveLayout, actions, statusReport, activeTab } =
     useWorkflowEditor(repo.repo_id, repo.path);
   const locked = busy || state.phase === "running";
 
@@ -196,11 +146,13 @@ function WorkflowEditorInner({ repo }: Props) {
 
   // Selection state
   const [selectedStage, setSelectedStage] = useState<string | null>(null);
+  const [focusTarget, setFocusTarget] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
 
   // Dialog visibility
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [showMigrateWizard, setShowMigrateWizard] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
 
   // Context menu
@@ -208,13 +160,15 @@ function WorkflowEditorInner({ repo }: Props) {
 
   // Refs and hooks
   const reactFlow = useReactFlow();
+  const viewportWidth = useStore(state => state.width);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const fitViewDone = useRef<string | null>(null);
   const nodesInitialized = useNodesInitialized();
   const history = useUndoRedo();
 
   // Derived state
   const cycleNodes = useMemo(
-    () => (state.workflow ? detectCycles(state.workflow.stages) : new Set<string>()),
+    () => (state.workflow ? cycleStages(state.workflow.stages, state.workflow.executions) : new Set<string>()),
     [state.workflow],
   );
 
@@ -240,15 +194,10 @@ function WorkflowEditorInner({ repo }: Props) {
     }
 
     const stages = state.workflow.stages;
-    const positions = { ...layoutStages(stages), ...layout.positions };
+    const positions = layoutStages(stages, layout.positions, state.workflow.executions);
 
     // Build run status lookup
-    const statusMap = new Map<string, StageRunStatus>();
-    if (state.runState) {
-      for (const stageRun of state.runState.stages) {
-        statusMap.set(stageRun.name, stageRun.status);
-      }
-    }
+    const statusMap = new Map(stages.map(stage => [stage.name, stageRunStatus(stage.name, state.workflow?.executions, state.runState)]));
 
     // Create nodes
     setNodes(
@@ -261,11 +210,12 @@ function WorkflowEditorInner({ repo }: Props) {
           status: statusMap.get(stage.name) ?? "pending",
           selected: selectedStage === stage.name,
           hasCycle: cycleNodes.has(stage.name),
+          executions: state.workflow?.executions?.filter(execution => execution.source === stage.name).length,
         },
       })),
     );
 
-    setEdges(stageEdges(stages).map(({ source, target }) => {
+    setEdges(stageEdges(stages, state.workflow.executions).map(({ source, target }) => {
       const cycle = cycleNodes.has(source) && cycleNodes.has(target);
       const color = cycle ? "rgb(var(--gx-error))" : "rgb(var(--gx-muted))";
       return {
@@ -283,8 +233,10 @@ function WorkflowEditorInner({ repo }: Props) {
 
   useEffect(() => {
     setSelectedStage(null);
+    setFocusTarget(null);
     setSelectedEdge(null);
     setContextMenu(null);
+    setEditorError(null);
     history.clear();
   }, [state.activeFile, history.clear]);
 
@@ -297,6 +249,17 @@ function WorkflowEditorInner({ repo }: Props) {
       return () => cancelAnimationFrame(frame);
     }
   }, [nodesInitialized, state.activeFile, activeTab, layout.positions, reactFlow]);
+
+  useEffect(() => {
+    const width = canvasRef.current?.clientWidth;
+    if (!focusTarget || !nodesInitialized || width === undefined || Math.abs(width - viewportWidth) > 1) return;
+    // Opening the inspector shrinks the canvas. Wait for React Flow's measured
+    // width so the selected node is centered in the visible canvas, not clipped.
+    let cancelled = false;
+    void reactFlow.fitView({ nodes: [{ id: focusTarget }], padding: 0.2, minZoom: 0.2, maxZoom: 1 })
+      .then(() => { if (!cancelled) setFocusTarget(null); });
+    return () => { cancelled = true; };
+  }, [focusTarget, nodesInitialized, viewportWidth, reactFlow]);
 
   // ─── Actions ─────────────────────────────────────────────────────────────
 
@@ -314,6 +277,15 @@ function WorkflowEditorInner({ repo }: Props) {
       const targetStage = state.workflow.stages.find((s) => s.name === connection.target);
       const sourceStage = state.workflow.stages.find((s) => s.name === connection.source);
       if (!targetStage || !sourceStage) return;
+      if (sourceStage.foreach || sourceStage.matrix) {
+        setEditorError("Connect template outputs through Edit YAML using their expanded artifact paths.");
+        return;
+      }
+      if (!sourceStage.outs.length) {
+        setEditorError(`Declare an output written by ${sourceStage.name} before connecting it.`);
+        return;
+      }
+      setEditorError(null);
 
       // Skip if dependency already exists
       const alreadyConnected = targetStage.deps.some(
@@ -322,16 +294,7 @@ function WorkflowEditorInner({ repo }: Props) {
       if (alreadyConnected) return;
 
       withHistory("Add connection", () => {
-        let outputPath: string;
-        if (sourceStage.outs.length > 0) {
-          outputPath = sourceStage.outs[0].path;
-        } else {
-          outputPath = `${connection.source}.out`;
-          actions.updateStage({
-            ...sourceStage,
-            outs: [...sourceStage.outs, { path: outputPath, kind: "file" }],
-          });
-        }
+        const outputPath = artifactPath("crab.yaml", sourceStage.wdir, sourceStage.outs[0].path);
         actions.updateStage({
           ...targetStage,
           deps: [
@@ -360,7 +323,7 @@ function WorkflowEditorInner({ repo }: Props) {
       withHistory("Remove connection", () => {
         const filteredDeps = targetStage.deps.filter(dep => {
           if (dep.kind === "stage_out") return !dep.value.startsWith(`${parsed.source}:`);
-          return dep.kind !== "path" || !linkedPaths.has(normalizeWorkflowPath(dep.value));
+          return dep.kind !== "path" || !linkedPaths.has(artifactPath("crab.yaml", targetStage.wdir, dep.value));
         });
         actions.updateStage({ ...targetStage, deps: filteredDeps });
       });
@@ -393,7 +356,7 @@ function WorkflowEditorInner({ repo }: Props) {
   const handleAutoLayout = useCallback(() => {
     if (!state.workflow) return;
     fitViewDone.current = null;
-    saveLayout(layoutStages(state.workflow.stages));
+    saveLayout(layoutStages(state.workflow.stages, {}, state.workflow.executions));
   }, [state.workflow, saveLayout, reactFlow]);
 
   const handleAddStage = useCallback(
@@ -543,8 +506,14 @@ function WorkflowEditorInner({ repo }: Props) {
 
   const workflows = useMemo(() => catalog.map(workflow => workflow.path === state.workflow?.path ? state.workflow : workflow), [catalog, state.workflow]);
   const links = useMemo(() => workflowLinks(workflows), [workflows]);
-  const outputOptions = useMemo(() => availableWorkflowOutputs(workflows, state.activeFile ?? ""), [workflows, state.activeFile]);
+  const outputOptions = useMemo(() => availableWorkflowOutputs(workflows, state.activeFile ?? "", selectedStageData?.wdir), [workflows, state.activeFile, selectedStageData?.wdir]);
   const outdatedCount = statusReport?.stages.filter((s) => s.status === "outdated").length ?? 0;
+
+  const openSource = async () => {
+    if (!state.activeFile || !await actions.save()) return;
+    try { setEditorError(null); await onOpenSource(state.activeFile); }
+    catch (error) { setEditorError(String(error)); }
+  };
 
   // ─── Main Render ───────────────────────────────────────────────────────────
 
@@ -554,7 +523,7 @@ function WorkflowEditorInner({ repo }: Props) {
         links={links} disabled={locked} dirty={state.dirty} canRename={!!repo.path}
         onSelect={actions.switchFile} onRefresh={() => actions.load()} onCreate={actions.createWorkflow} onRename={actions.renameWorkflow} onDelete={actions.deleteWorkflow} onMigrate={() => setShowMigrateWizard(true)} />
       <div className="flex min-w-0 flex-1 flex-col">
-      {operationError && <div role="alert" className="border-b border-gx-error/40 bg-gx-error/10 px-4 py-2 text-xs text-gx-error">{operationError}</div>}
+      {(operationError || editorError) && <div role="alert" className="border-b border-gx-error/40 bg-gx-error/10 px-4 py-2 text-xs text-gx-error">{operationError || editorError}</div>}
       {state.phase === "loading" ? (
         <div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={18} className="animate-spin" />Loading workflows…</div>
       ) : state.phase === "error" ? (
@@ -562,6 +531,7 @@ function WorkflowEditorInner({ repo }: Props) {
           <AlertTriangle size={24} className="text-gx-error" />
           <p role="alert" aria-label="Workflow error" className="max-w-lg break-words text-sm text-gx-error">{state.error}</p>
           <button type="button" className="btn text-xs" onClick={() => actions.load(state.activeFile ?? undefined)}>Retry workflow</button>
+          {state.activeFile && <button type="button" className="btn text-xs" onClick={openSource}>Edit YAML</button>}
         </div>
       ) : !state.workflow ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
@@ -576,8 +546,8 @@ function WorkflowEditorInner({ repo }: Props) {
         <div className="flex shrink-0 items-center gap-2 py-1">
         {/* Run controls */}
         {state.phase === "running" ? (
-          <button type="button" className="btn btn-danger flex items-center gap-1 text-xs" onClick={actions.cancel}>
-            <Square size={14} /> Cancel
+          <button type="button" className="btn btn-danger flex items-center gap-1 text-xs" onClick={actions.cancel} disabled={cancelling}>
+            <Square size={14} /> {cancelling ? "Stopping…" : "Cancel"}
           </button>
         ) : (
           <button type="button" className="btn btn-primary flex items-center gap-1 text-xs" onClick={() => actions.run()} disabled={busy || (state.phase !== "editing" && state.phase !== "done")}>
@@ -592,10 +562,22 @@ function WorkflowEditorInner({ repo }: Props) {
 
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gx-border bg-gx-surface px-3 py-2">
-        <div className="mr-2 min-w-0 flex-1">
+        <div className="flex basis-full items-center gap-3">
+        <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium text-gx-text" title={state.activeFile ?? ""}>{state.activeFile}</div>
-          <div role="status" className="mt-0.5 text-[11px] text-gx-muted">{state.workflow.stages.length} {state.workflow.stages.length === 1 ? "stage" : "stages"} · {state.dirty ? "Unsaved changes" : "Saved"}</div>
+          <div role="status" className="mt-0.5 truncate text-[11px] text-gx-muted">{state.workflow.stages.length} {state.workflow.stages.length === 1 ? "stage" : "stages"}{state.workflow.executions && state.workflow.executions.length !== state.workflow.stages.length ? ` · ${state.workflow.executions.length} executions` : ""} · {state.dirty ? "Unsaved changes" : "Saved"}</div>
         </div>
+        <button type="button" className="btn flex shrink-0 items-center gap-1 text-xs" disabled={locked} onClick={openSource}><Code2 size={14} />Edit YAML</button>
+        </div>
+        <select aria-label="Find stage" className="input-field min-w-40 flex-1 text-xs" value="" onChange={event => {
+          const name = event.target.value;
+          if (!name) return;
+          setSelectedStage(name);
+          setFocusTarget(name);
+        }}>
+          <option value="">Find stage…</option>
+          {state.workflow.stages.map(stage => <option key={stage.name} value={stage.name}>{stage.name}</option>)}
+        </select>
         <fieldset disabled={locked} className="flex items-center gap-2">
         {/* Add stage */}
         <button type="button" className="btn flex items-center gap-1 text-xs" onClick={() => setShowNewDialog(true)} title="Add Stage (N)">
@@ -644,7 +626,7 @@ function WorkflowEditorInner({ repo }: Props) {
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1">
             {/* Canvas */}
-            <div className="min-w-0 flex-1">
+            <div ref={canvasRef} className="min-w-0 flex-1">
               <ReactFlow
                 nodes={nodes}
                 edges={styledEdges}
@@ -661,9 +643,9 @@ function WorkflowEditorInner({ repo }: Props) {
                 nodeTypes={nodeTypes}
                 nodesDraggable={!locked}
                 nodesConnectable={!locked}
-                minZoom={0.2}
+                minZoom={0.02}
                 maxZoom={1.5}
-                fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+                fitViewOptions={fitViewOptions}
                 fitView
                 deleteKeyCode={null}
                 proOptions={{ hideAttribution: true }}
@@ -941,6 +923,7 @@ function RunStatusBadge({ runState }: { runState: import("../lib/workflow-types"
   const done = runState.stages.filter((s) => s.status === "done" || s.status === "cached").length;
   const failed = runState.stages.filter((s) => s.status === "failed").length;
   const total = runState.stages.length;
+  const skipped = runState.stages.filter(stage => stage.status === "skipped").length;
 
   return (
     <div className="rounded border border-gx-border bg-gx-surface px-3 py-2 text-xs shadow-lg">
@@ -953,13 +936,14 @@ function RunStatusBadge({ runState }: { runState: import("../lib/workflow-types"
       <div className="flex gap-3 text-gx-muted">
         <span className="text-gx-success">{done} done</span>
         {failed > 0 && <span className="text-gx-error">{failed} failed</span>}
+        {skipped > 0 && <span>{skipped} skipped</span>}
         <span>{total} total</span>
       </div>
       {runState.status === "running" && (
         <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-gx-bg">
           <div
             className="h-full rounded-full bg-gx-accent transition-all"
-            style={{ width: `${((done + failed) / total) * 100}%` }}
+            style={{ width: `${((done + failed + skipped) / Math.max(1, total)) * 100}%` }}
           />
         </div>
       )}
@@ -969,10 +953,10 @@ function RunStatusBadge({ runState }: { runState: import("../lib/workflow-types"
 
 // ─── Export ──────────────────────────────────────────────────────────────────
 
-export function WorkflowEditorView({ repo }: Props) {
+export function WorkflowEditorView({ repo, onOpenSource }: Props) {
   return (
     <ReactFlowProvider key={repo.repo_id}>
-      <WorkflowEditorInner repo={repo} />
+      <WorkflowEditorInner repo={repo} onOpenSource={onOpenSource} />
     </ReactFlowProvider>
   );
 }

@@ -1002,25 +1002,10 @@ async fn run_with_yaml(
         });
     }
 
-    // Single-yaml fast path: read + parse directly so the error
-    // surface (line numbers, path) matches the pre-recursive
-    // behavior. Multi-yaml recursive mode goes through the merger.
-    // In both cases we capture per-stage provenance so the
-    // split-lockfile layer knows which lockfile each stage belongs
-    // to. For single-yaml repos provenance is trivial (every stage
-    // came from the one file) and the lookup stays free.
-    let (workflow, provenance) = if yaml_paths.len() == 1 {
-        let path = &yaml_paths[0];
-        let yaml_text = std::fs::read_to_string(path).map_err(CrabError::Io)?;
-        let wf = yaml::parse_at(path, &yaml_text)?;
-        let mut prov: StageProvenance = std::collections::BTreeMap::new();
-        for name in wf.stages.keys() {
-            prov.insert(name.clone(), path.clone());
-        }
-        (wf, prov)
-    } else {
-        crate::workflow::discover::parse_all_with_provenance(repo_root, yaml_paths)?
-    };
+    // Discovery owns names and physical paths even when only one named or
+    // nested file exists. A direct-parse shortcut changes target identities.
+    let (workflow, provenance) =
+        crate::workflow::discover::parse_all_with_provenance(repo_root, yaml_paths)?;
     let remote_aliases = workflow_remote_aliases(config);
     for stage in workflow.stages.values() {
         validate_checkpoint_execution(stage, options.allow_checkpoints)?;
@@ -1622,12 +1607,6 @@ async fn run_dag(
         &skip_stages,
     );
 
-    // Mark pre-committed stages as succeeded in the scheduler so
-    // their consumers become eligible.
-    for stage_name in &skip_stages {
-        scheduler.handle_success(stage_name, graph, &Resources::default());
-    }
-
     // Build a resource map for the scheduler to check availability.
     let stage_resources: BTreeMap<StageName, Resources> = workflow
         .stages
@@ -2010,7 +1989,11 @@ async fn run_dag(
                         emit_not_started_shared(
                             jsonl_shared.as_ref(),
                             blocked,
-                            "upstream_failed",
+                            if keep_going {
+                                "upstream_failed"
+                            } else {
+                                "prior_stage_failed"
+                            },
                             mode,
                         )
                         .await;
@@ -6263,6 +6246,34 @@ mod tests {
             matches!(err, CrabError::Configuration { .. }),
             "wrong variant: {err}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sole_workflow_file_keeps_discovery_target_identity() {
+        for file in [
+            "crab.yaml",
+            "only.workflow.yaml",
+            "nested/crab.yaml",
+            "nested/only.workflow.yaml",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "stages:\n  report:\n    cmd: echo report\n").unwrap();
+            let mut args = yaml_base_args();
+            args.dry_run = true;
+            args.cmd = vec![format!("{file}:report")];
+            run_with_yaml(
+                &args,
+                tmp.path(),
+                &[path],
+                OutputMode::Text,
+                &Config::default(),
+                RunInvocationOptions::default(),
+            )
+            .await
+            .unwrap();
+        }
     }
 
     #[cfg(unix)]

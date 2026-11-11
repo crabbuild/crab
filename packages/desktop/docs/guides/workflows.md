@@ -33,12 +33,16 @@ Stages have readable names, two-line command previews, input/output counts,
 and run status. The layout places dependencies above their consumers, separates
 parallel branches, and centers merge rows. **Arrange** restores that layout;
 **Fit workflow to view** frames the graph without enlarging small pipelines.
-Drag nodes to arrange them manually. Positions are saved per repository and
+**Find stage** zooms to readable detail and opens its inspector. Newly added
+nodes avoid existing manual placements. Drag nodes to arrange them manually.
+Positions are saved per repository and
 workflow; the larger node geometry starts a new layout namespace.
 
 Select a stage to edit its command, dependencies, outputs, parameters, and
 execution settings in the inspector. **+ Stage** adds a stage. Drag between
 ports to add an explicit stage-output dependency within the same workflow.
+The source must already declare an output; a connection does not create a file
+or change its command. Use **Edit YAML** for advanced policies or template axes.
 Commands must produce declared output files, or provide stdout for the engine's
 stdout capture contract.
 
@@ -81,20 +85,68 @@ from other workflows that can be addressed from this workflow's directory.
 Choosing one adds a normal path dependency. The sidebar shows the relationship
 immediately; removing the dependency removes that relationship.
 
-Paths in nested workflow files are relative to the containing directory. The
-editor follows the engine's exact file and longest matching directory-output
+Without `wdir`, paths in nested workflow files are relative to the containing
+directory. An explicit `wdir` is relative to the repository root; dependencies
+and outputs resolve within it. Use `wdir: .` to exchange repository-relative
+artifacts from workflows in different folders. An explicit `stage_out.out`
+includes the producer's working directory, independently of the consumer's.
+The editor follows the engine's exact file and longest matching directory-output
 rules. It does not collapse `..` paths or invent cross-directory dependencies.
-Keep shared named workflows in the same folder when they exchange outputs.
+Without an explicit `wdir`, keep shared named workflows in the same folder when
+they exchange outputs.
 `stage_out` is for explicit references within a workflow; there is no general
 `depends_on: other.yml` file-level syntax.
 
 See [split workflows and lockfiles](https://crab.build/docs/cli/workflow/split-workflows-lockfiles)
 for namespaces, recursive discovery, and command-line usage.
 
+## Complex workflows
+
+Foreach and matrix definitions appear as source template nodes with execution
+counts. The engine expands their dependencies and output paths; the canvas
+collapses those edges back onto the editable templates. Template status combines
+all executions in the current run. Named `workflows:` groups retain their stage
+membership when edited or saved.
+
+Use the inspector to change a template's shared command and stage settings.
+Use **Edit YAML** to change iteration items, matrix axes, variables, retry
+policies, resources, metrics, plots, hooks, or output metadata. The editor opens
+the working-tree definition. Refresh workflows after changing its source.
+Visual saves preserve these fields, validate with the runtime parser, and replace
+the file atomically. A rejected edit leaves the previous definition intact.
+
+```yaml
+defaults:
+  retry:
+    max_attempts: 3
+    on_exit_codes: [1]
+stages:
+  prepare:
+    foreach: [train, test]
+    do:
+      cmd: python prepare.py --split ${item}
+      outs: ["data/${item}.csv"]
+  fit:
+    matrix:
+      model: [linear, forest]
+    cmd: python train.py --model ${item.model}
+    deps: [data/train.csv, data/test.csv]
+    outs: ["models/${item.model}.bin"]
+```
+
+The commands must write their declared files. Retries only apply to configured
+exit codes, signals, or timeouts; `max_attempts` includes the initial attempt.
+Connecting a template's individual outputs requires their expanded artifact
+paths in YAML rather than a stage-output reference to the template name.
+
 ## Running and inspecting
 
 **Run All** runs the selected workflow with its upstream stages. A selected stage
-can also be run from the inspector or context menu. **Cancel** stops the run.
+can also be run from the inspector or context menu. Template runs select all
+expanded executions belonging to that template. **Cancel** requests shutdown;
+**Stopping…** remains visible until the native process owner confirms cleanup.
+The next run can then acquire the execution lock. Conditional and frozen skips
+are counted separately from completed stages.
 The output pane opens automatically and shows command output, stage progress
 (including upstream stages in other files), and errors. Switching files clears
 the previous run display; unrelated repository output stays separate.

@@ -11,7 +11,8 @@ import {
   DagInfo,
 } from "../lib/workflow-types";
 import type { WorkflowTab } from "../components/workflow/WorkflowTabs";
-import { mainProcess, onAgentEvent, rpc } from "../ipc";
+import { renameStages } from "../lib/workflow-graph";
+import { isCancelledError, mainProcess, onAgentEvent, rpc } from "../ipc";
 
 // Auto-save debounce delay in milliseconds.
 const AUTO_SAVE_DELAY_MS = 800;
@@ -55,7 +56,7 @@ type Action =
   | { type: "set_error"; message: string }
   | { type: "reset_run" }
   | { type: "set_files"; files: string[]; path: string | null }
-  | { type: "saved"; workflow: WorkflowDefinition };
+  | { type: "saved"; workflow: WorkflowDefinition; resolved: WorkflowDefinition };
 
 function initState(): WorkflowEditorState {
   return {
@@ -96,31 +97,17 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       );
       return {
         ...state,
-        workflow: { ...state.workflow, stages },
+        workflow: { ...state.workflow, executions: undefined, stages },
         dirty: true,
       };
     }
 
     case "rename_stage": {
       if (!state.workflow) return state;
-      const { oldName, newName } = action as { type: "rename_stage"; oldName: string; newName: string };
-      const stages = state.workflow.stages.map((s) => {
-        // Rename the stage itself.
-        if (s.name === oldName) {
-          return { ...s, name: newName };
-        }
-        // Update deps that reference the old name.
-        const deps = s.deps.map((d) => {
-          if (d.kind === "stage_out" && d.value.startsWith(`${oldName}:`)) {
-            return { ...d, value: `${newName}:${d.value.slice(oldName.length + 1)}` };
-          }
-          return d;
-        });
-        return { ...s, deps };
-      });
+      const stages = renameStages(state.workflow.stages, action.oldName, action.newName);
       return {
         ...state,
-        workflow: { ...state.workflow, stages },
+        workflow: { ...state.workflow, executions: undefined, stages },
         dirty: true,
       };
     }
@@ -129,7 +116,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       if (!state.workflow) return state;
       return {
         ...state,
-        workflow: { ...state.workflow, stages: [...state.workflow.stages, action.stage] },
+        workflow: { ...state.workflow, executions: undefined, stages: [...state.workflow.stages, action.stage] },
         dirty: true,
       };
     }
@@ -139,7 +126,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       const stages = state.workflow.stages.filter((s) => s.name !== action.name);
       return {
         ...state,
-        workflow: { ...state.workflow, stages },
+        workflow: { ...state.workflow, executions: undefined, stages },
         dirty: true,
       };
     }
@@ -148,7 +135,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       if (!state.workflow) return state;
       return {
         ...state,
-        workflow: { ...state.workflow, stages: action.stages },
+        workflow: { ...state.workflow, executions: undefined, stages: action.stages },
         dirty: true,
       };
     }
@@ -173,11 +160,9 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
 
     case "stage_status": {
       if (!state.runState) return state;
-      const stages = state.runState.stages.map((s) =>
-        s.name === action.name
-          ? { ...s, status: action.status, duration_ms: action.duration_ms, error: action.error }
-          : s,
-      );
+      const update = { name: action.name, status: action.status, duration_ms: action.duration_ms, error: action.error };
+      const exists = state.runState.stages.some(stage => stage.name === action.name);
+      const stages = exists ? state.runState.stages.map(stage => stage.name === action.name ? update : stage) : [...state.runState.stages, update];
       return {
         ...state,
         runState: { ...state.runState, stages },
@@ -210,6 +195,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
         runState: {
           ...state.runState,
           status: action.status,
+          stages: state.runState.stages.map(stage => action.status !== "done" && ["pending", "queued", "running"].includes(stage.status) ? { ...stage, status: "skipped" } : stage),
           finished_at: Date.now(),
           error: action.error,
         },
@@ -225,7 +211,7 @@ function reducer(state: WorkflowEditorState, action: Action): WorkflowEditorStat
       return { ...state, availableFiles: action.files, activeFile: action.path, workflow: null, dirty: false };
 
     case "saved":
-      return state.workflow === action.workflow ? { ...state, dirty: false } : state;
+      return state.workflow === action.workflow ? { ...state, workflow: action.resolved, dirty: false } : state;
 
     default:
       return state;
@@ -243,6 +229,7 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
   const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
   const [operationError, setOperationError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
   const lastSaved = useRef<WorkflowDefinition | null>(null);
   const loadVersion = useRef(0);
@@ -251,12 +238,15 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
   // Serialize disk writes. A slow autosave must not overwrite a newer edit or
   // clear its dirty flag; navigation flushes the same queue before loading.
   const persist = useCallback(async (workflow: WorkflowDefinition) => {
-    const saved = saveQueue.current.catch(() => {}).then(() => rpc.workflowSave(repoId, workflow));
+    const saved = saveQueue.current.catch(() => {}).then(async () => {
+      await rpc.workflowSave(repoId, workflow);
+      return rpc.workflowGet(repoId, workflow.path);
+    });
     saveQueue.current = saved;
-    await saved;
-    lastSaved.current = workflow;
-    dispatch({ type: "saved", workflow });
-    setCatalog(files => files.map(file => file.path === workflow.path ? workflow : file));
+    const resolved = await saved;
+    lastSaved.current = resolved;
+    dispatch({ type: "saved", workflow, resolved });
+    setCatalog(files => files.map(file => file.path === workflow.path ? resolved : file));
   }, [repoId]);
 
   const flush = useCallback(async () => {
@@ -333,11 +323,9 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
   useEffect(() => { void load(); }, [load]);
 
   const save = useCallback(async () => {
-    const workflow = stateRef.current.workflow;
-    if (!workflow) return;
-    try { await persist(workflow); setOperationError(null); }
-    catch (error) { setOperationError(`Save failed: ${error instanceof Error ? error.message : String(error)}`); }
-  }, [persist]);
+    try { await flush(); setOperationError(null); return true; }
+    catch (error) { setOperationError(`Save failed: ${error instanceof Error ? error.message : String(error)}`); return false; }
+  }, [flush]);
 
   // Auto-save: debounce saves when dirty.
   useEffect(() => {
@@ -380,17 +368,21 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
     if (state.phase === "running") return;
     setBusy(true);
     setOperationError(null);
-    try { await flush(); }
-    catch (error) {
-      setOperationError(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
+    let definition: WorkflowDefinition;
+    try {
+      await flush();
+      definition = await rpc.workflowGet(repoId, state.workflow.path);
+    } catch (error) {
+      setOperationError(`Cannot run workflow: ${error instanceof Error ? error.message : String(error)}`);
       setBusy(false);
       return;
     }
     setBusy(false);
+    dispatch({ type: "loaded", workflow: definition, files: state.availableFiles });
+    setCatalog(files => files.map(file => file.path === definition.path ? definition : file));
 
-    // Determine stage names from local state so we can show "running"
-    // immediately without waiting for the RPC response.
-    const stageNames = stages ?? state.workflow.stages.map((s) => s.name);
+    const stageNames = definition.executions?.filter(stage => !stages || stages.includes(stage.source) || stages.includes(stage.name)).map(stage => stage.name)
+      ?? stages ?? definition.stages.map(stage => stage.name);
     const tempRunId = crypto.randomUUID();
     runIdRef.current = tempRunId;
     dispatch({ type: "run_started", run_id: tempRunId, stages: stageNames });
@@ -402,9 +394,9 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
       await fetchStatus();
     } catch (err) {
       if (runIdRef.current !== tempRunId) return;
-      dispatch({ type: "run_done", status: "failed", error: err instanceof Error ? err.message : String(err) });
-    }
-  }, [repoId, state.workflow, state.phase, fetchStatus, flush]);
+      dispatch({ type: "run_done", status: isCancelledError(err) ? "cancelled" : "failed", error: isCancelledError(err) ? undefined : err instanceof Error ? err.message : String(err) });
+    } finally { setCancelling(false); }
+  }, [repoId, state.workflow, state.phase, state.availableFiles, fetchStatus, flush]);
 
   // Run outdated stages only.
   const runOutdated = useCallback(async (stages: string[]) => {
@@ -415,14 +407,13 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
   // Cancel running workflow.
   const cancel = useCallback(async () => {
     if (!state.runState?.run_id) return;
+    setCancelling(true);
     try {
       const { cancelled } = await rpc.workflowCancel(repoId, state.runState.run_id);
-      if (cancelled) {
-        runIdRef.current = null;
-        dispatch({ type: "run_done", status: "cancelled" });
-      }
-    } catch {
-      // Best-effort cancel.
+      if (!cancelled) setCancelling(false);
+    } catch (error) {
+      setCancelling(false);
+      setOperationError(`Cancel failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [repoId, state.runState]);
 
@@ -471,7 +462,7 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
         "workflow.stage.running": "running",
         "workflow.stage.committed": data.cache_hit ? "cached" : "done",
         "workflow.stage.failed": "failed",
-        "workflow.stage.not_started": "pending",
+        "workflow.stage.not_started": "skipped",
       };
       const status = statuses[schema];
       if (!status || typeof data.stage !== "string") return;
@@ -480,14 +471,13 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
       const filename = parts.pop();
       if (filename?.endsWith(".workflow.yaml")) parts.push(filename.slice(0, -".workflow.yaml".length));
       const prefix = parts.filter(part => part && part !== ".").join(".");
-      const stage = state.workflow?.stages.find(({ name }) => data.stage === (prefix ? `${prefix}.${name}` : name));
+      const stage = prefix && data.stage.startsWith(prefix + ".") ? data.stage.slice(prefix.length + 1) : data.stage;
       const labels: Partial<Record<StageRunStatus, string>> = {
-        running: "Started", cached: "Cached", done: "Completed", failed: "Failed", pending: "Not started",
+        running: "Started", cached: "Cached", done: "Completed", failed: "Failed", pending: "Not started", skipped: "Skipped",
       };
       const reason = status === "failed" && typeof data.reason === "string" ? `: ${data.reason}` : "";
-      dispatch({ type: "run_output", text: `${stage?.name ?? data.stage}: ${labels[status]}${reason}`, error: status === "failed" });
-      if (!stage) return;
-      dispatch({ type: "stage_status", name: stage.name, status,
+      dispatch({ type: "run_output", text: `${stage}: ${labels[status]}${reason}`, error: status === "failed" });
+      dispatch({ type: "stage_status", name: stage, status,
         duration_ms: data.duration_ms as number | undefined,
         error: data.reason as string | undefined });
     });
@@ -500,6 +490,7 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
     fileErrors,
     operationError,
     busy,
+    cancelling,
     dispatch,
     layout,
     statusReport,

@@ -65,6 +65,43 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
   launch pipes while the detached daemon stays alive. All 23 Windows spawner
   tests also passed with the system shell launcher.
 
+## Complex workflow qualification
+
+The macOS arm64 package exercises workflow actions through the production
+preload, native agent, bundled CLI, and real repository files. Four packaged
+scenarios cover sidebar CRUD and save-before-navigation, cross-file dependencies,
+command output and failures, foreach/matrix expansion, named groups, explicit
+working directories, conditional skips, retries, cache reuse, and cancellation.
+The branching fixture runs 64 stages and checks their final artifact; its stage
+finder must leave the selected node fully visible beside the inspector.
+Cancellation checks both immediate admission and a running child, proves the
+stage PID exits, and starts another run to prove the scheduler lock is released.
+A repository containing only a nested named workflow also produces its output
+under an explicit repository-relative working directory.
+
+Focused checks pass: 713 `crab-workflow` tests, seven native document/handler
+tests, one CLI test covering four sole-file discovery forms, and 24 graph tests
+including a deterministic 512-node DAG and preserved manual placements.
+Renderer/Electron type checks, renderer/Electron builds, native staging,
+unsigned macOS packaging, and Rust formatting pass. The sidebar test waits for
+the destination graph before checking disk, so its save assertion observes
+completed navigation rather than the click event's asynchronous start.
+
+Ownership proof: `yaml::parse_at` supplies template expansion and execution
+policy; desktop document conversion retains the authored fields. `Graph::build`
+uses the same working-directory paths as the executor/cache. `DagScheduler`
+owns pre-committed admission and resource release. Structured commands reuse
+`crab_git::process::OwnedChild`; Tokio's `from_std` adapters retain streaming
+pipes. Workflow cancellation waits for process cleanup before its terminal RPC
+response. Add/push retain their command/credential configuration and JSONL pumps;
+the existing native storage CI remains their broader integration gate.
+
+The Desktop v2 workflow runs the complex packaged scenarios and workflow contract
+tests across macOS, Linux, and Windows. Local proof covers macOS only; it does
+not qualify cloud artifact stores, SSH workflow sessions, signed distribution,
+or every possible workflow. ESLint remains blocked by the existing missing flat
+configuration, independently of these source changes.
+
 ## Built-in storage connections
 
 The main process owns encrypted saved connections and checkout bindings through

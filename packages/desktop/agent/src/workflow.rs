@@ -3,9 +3,11 @@
 //! Provides JSON-RPC verbs for listing, reading, saving, running,
 //! and cancelling crab workflows from the desktop UI.
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 
-use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{AgentError, Result, SharedStdout, shellout};
@@ -62,91 +64,9 @@ pub struct WorkflowValidateParams {
     pub path: String,
 }
 
-// ── Payload types ───────────────────────────────────────────────────
+mod document;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowPayload {
-    pub path: String,
-    #[serde(default)]
-    pub params: Vec<String>,
-    #[serde(default)]
-    pub metrics: Vec<String>,
-    #[serde(default)]
-    pub plots: Vec<String>,
-    #[serde(default)]
-    pub defaults: WorkflowDefaultsPayload,
-    pub stages: Vec<StagePayload>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowDefaultsPayload {
-    #[serde(default)]
-    pub env: Option<Value>,
-    #[serde(default)]
-    pub retry: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StagePayload {
-    pub name: String,
-    pub cmd: CmdPayload,
-    #[serde(default)]
-    pub deps: Vec<DepPayload>,
-    #[serde(default)]
-    pub outs: Vec<OutPayload>,
-    #[serde(default)]
-    pub params: Vec<String>,
-    #[serde(default)]
-    pub env: Value,
-    #[serde(default)]
-    pub retry: Option<Value>,
-    #[serde(default)]
-    pub timeout: Option<String>,
-    #[serde(default)]
-    pub nondeterministic: Option<bool>,
-    #[serde(default)]
-    pub hermetic: Option<bool>,
-    #[serde(default)]
-    pub side_effects: Option<bool>,
-    #[serde(default)]
-    pub resources: Option<Value>,
-    #[serde(default)]
-    pub frozen: Option<bool>,
-    #[serde(default)]
-    pub wdir: Option<String>,
-    #[serde(default)]
-    pub desc: Option<String>,
-    #[serde(default)]
-    pub meta: Option<Value>,
-    #[serde(default)]
-    pub condition: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CmdPayload {
-    pub kind: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DepPayload {
-    pub kind: String,
-    pub value: String,
-    #[serde(default)]
-    pub meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutPayload {
-    pub path: String,
-    pub kind: String,
-    #[serde(default)]
-    pub cache: Option<bool>,
-    #[serde(default)]
-    pub persist: Option<bool>,
-    #[serde(default)]
-    pub max_bytes: Option<u64>,
-}
+use document::{WorkflowPayload, payload_to_yaml, yaml_to_payload};
 
 // ── Handlers ────────────────────────────────────────────────────────
 
@@ -175,14 +95,12 @@ pub async fn workflow_get(work_dir: &Path, p: WorkflowGetParams) -> Result<Value
         .await
         .map_err(|e| AgentError::Other(format!("failed to read {}: {}", p.path, e)))?;
 
-    // Parse YAML into a generic Value first, then transform to our
-    // payload format. This avoids depending on the crab crate
-    // directly (the agent is a separate binary).
     let yaml: Value = serde_yaml::from_str(&content)
         .map_err(|e| AgentError::Other(format!("YAML parse error in {}: {}", p.path, e)))?;
 
-    let workflow = yaml_to_payload(&p.path, &yaml)?;
-    Ok(serde_json::to_value(&workflow).unwrap_or(json!(null)))
+    let mut workflow = yaml_to_payload(&p.path, &yaml)?;
+    workflow.resolve(&file_path, &content)?;
+    Ok(serde_json::to_value(&workflow)?)
 }
 
 /// Save a workflow definition back to YAML on disk.
@@ -190,16 +108,37 @@ pub async fn workflow_save(work_dir: &Path, p: WorkflowSaveParams) -> Result<Val
     let file_path = work_dir.join(&p.workflow.path);
     let yaml_str = payload_to_yaml(&p.workflow)?;
 
-    // Ensure parent directory exists.
-    if let Some(parent) = file_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AgentError::Other(format!("mkdir failed: {}", e)))?;
-    }
-
-    tokio::fs::write(&file_path, yaml_str.as_bytes())
-        .await
-        .map_err(|e| AgentError::Other(format!("write failed: {}", e)))?;
+    // Validate through the runtime parser before replacing the original. A
+    // rejected visual edit must leave the last runnable definition intact.
+    crab_workflow::parse_at(&file_path, &yaml_str)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| AgentError::Other("workflow has no parent directory".into()))?;
+        std::fs::create_dir_all(parent)?;
+        let permissions = match std::fs::metadata(&file_path) {
+            Ok(metadata) => {
+                if metadata.permissions().readonly() {
+                    return Err(AgentError::Other("workflow is read-only".into()));
+                }
+                Some(metadata.permissions())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        if let Some(permissions) = permissions {
+            temporary.as_file().set_permissions(permissions)?;
+        }
+        temporary.write_all(yaml_str.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&file_path)
+            .map_err(|error| AgentError::Io(error.error))?;
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)??;
 
     Ok(json!({ "saved": true }))
 }
@@ -207,13 +146,6 @@ pub async fn workflow_save(work_dir: &Path, p: WorkflowSaveParams) -> Result<Val
 /// Create a new empty workflow file.
 pub async fn workflow_create(work_dir: &Path, p: WorkflowCreateParams) -> Result<Value> {
     let file_path = work_dir.join(&p.path);
-    if file_path.exists() {
-        return Err(AgentError::Other(format!(
-            "file already exists: {}",
-            p.path
-        )));
-    }
-
     let template = "stages:\n  example:\n    cmd: \"echo hello\"\n";
 
     if let Some(parent) = file_path.parent() {
@@ -222,9 +154,13 @@ pub async fn workflow_create(work_dir: &Path, p: WorkflowCreateParams) -> Result
             .map_err(|e| AgentError::Other(format!("mkdir failed: {}", e)))?;
     }
 
-    tokio::fs::write(&file_path, template.as_bytes())
-        .await
-        .map_err(|e| AgentError::Other(format!("write failed: {}", e)))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file_path)
+        .await?;
+    file.write_all(template.as_bytes()).await?;
+    file.sync_all().await?;
 
     Ok(json!({ "created": true }))
 }
@@ -248,11 +184,30 @@ pub async fn workflow_run(
     work_dir: &Path,
     p: WorkflowRunParams,
     out: SharedStdout,
+    cancel: tokio_util::sync::WaitForCancellationFutureOwned,
 ) -> Result<Value> {
-    let stage_names = match p.stages {
-        Some(stages) if !stages.is_empty() => stages,
-        _ => read_stage_names(work_dir, &p.path).await?,
-    };
+    let definition = workflow_get(
+        work_dir,
+        WorkflowGetParams {
+            repo_id: p.repo_id,
+            path: p.path.clone(),
+        },
+    )
+    .await?;
+    let workflow: WorkflowPayload = serde_json::from_value(definition)?;
+    let stage_names: Vec<_> = workflow
+        .executions
+        .iter()
+        .filter(|execution| {
+            p.stages.as_ref().is_none_or(|selected| {
+                selected.is_empty()
+                    || selected
+                        .iter()
+                        .any(|name| name == &execution.source || name == &execution.name)
+            })
+        })
+        .map(|execution| execution.name.clone())
+        .collect();
     if stage_names.is_empty() {
         return Err(AgentError::Other("workflow has no stages".into()));
     }
@@ -269,9 +224,9 @@ pub async fn workflow_run(
         &p.run_id,
         work_dir,
         &args,
-        &[],
         "workflow/event",
         out,
+        Some(cancel),
     )
     .await?;
     Ok(json!({ "run_id": p.run_id, "stage_names": stage_names, "summary": summary }))
@@ -284,464 +239,11 @@ pub async fn workflow_validate(work_dir: &Path, p: WorkflowValidateParams) -> Re
         .await
         .map_err(|e| AgentError::Other(format!("failed to read {}: {}", p.path, e)))?;
 
-    // Try parsing — collect errors.
-    let mut errors: Vec<String> = Vec::new();
-
-    let yaml_result: std::result::Result<Value, _> = serde_yaml::from_str(&content);
-    match yaml_result {
-        Err(e) => {
-            errors.push(format!("YAML syntax error: {}", e));
-        }
-        Ok(ref yaml) => {
-            // Validate structure.
-            if !yaml.is_object() {
-                errors.push("workflow must be a YAML mapping".to_string());
-            } else if yaml.get("stages").is_none() {
-                errors.push("workflow must have a 'stages' key".to_string());
-            } else if let Some(stages) = yaml.get("stages") {
-                if !stages.is_object() {
-                    errors.push("'stages' must be a mapping".to_string());
-                } else if let Some(map) = stages.as_object() {
-                    for (name, stage) in map {
-                        if !stage.is_object() {
-                            errors.push(format!("stage '{}' must be a mapping", name));
-                            continue;
-                        }
-                        if stage.get("cmd").is_none() {
-                            errors.push(format!("stage '{}' is missing 'cmd'", name));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(json!({
-        "valid": errors.is_empty(),
-        "errors": errors,
-    }))
-}
-
-// ── YAML ↔ Payload conversion ───────────────────────────────────────
-
-/// Convert a parsed YAML Value into our WorkflowPayload structure.
-fn yaml_to_payload(file_path: &str, yaml: &Value) -> Result<WorkflowPayload> {
-    let stages_map = yaml
-        .get("stages")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| AgentError::Other("missing or invalid 'stages' key".to_string()))?;
-
-    let mut stages = Vec::new();
-    for (name, stage_val) in stages_map {
-        let stage = parse_stage_yaml(name, stage_val)?;
-        stages.push(stage);
-    }
-
-    let params = yaml
-        .get("params")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
+    let errors: Vec<String> = crab_workflow::parse_at(&file_path, &content)
+        .err()
+        .map(|error| vec![error.to_string()])
         .unwrap_or_default();
-
-    let metrics = yaml
-        .get("metrics")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let plots = yaml
-        .get("plots")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let defaults = yaml
-        .get("defaults")
-        .map(|d| WorkflowDefaultsPayload {
-            env: d.get("env").cloned(),
-            retry: d.get("retry").cloned(),
-        })
-        .unwrap_or_default();
-
-    Ok(WorkflowPayload {
-        path: file_path.to_string(),
-        params,
-        metrics,
-        plots,
-        defaults,
-        stages,
-    })
-}
-
-fn parse_stage_yaml(name: &str, val: &Value) -> Result<StagePayload> {
-    let cmd = match val.get("cmd") {
-        Some(Value::String(s)) => CmdPayload {
-            kind: "shell".to_string(),
-            value: s.clone(),
-        },
-        Some(Value::Object(obj)) if obj.contains_key("argv") => CmdPayload {
-            kind: "argv".to_string(),
-            value: serde_json::to_string(&obj["argv"])?,
-        },
-        Some(Value::Array(commands)) => CmdPayload {
-            kind: "shell_list".to_string(),
-            value: serde_json::to_string(commands)?,
-        },
-        _ => {
-            return Err(AgentError::Other(format!(
-                "stage '{}': missing or invalid 'cmd'",
-                name
-            )));
-        }
-    };
-
-    let deps = val
-        .get("deps")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(parse_dep_yaml).collect())
-        .unwrap_or_default();
-
-    let outs = val
-        .get("outs")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(parse_out_yaml).collect())
-        .unwrap_or_default();
-
-    let params = val
-        .get("params")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let env = val
-        .get("env")
-        .cloned()
-        .unwrap_or(Value::String("inherit".to_string()));
-
-    Ok(StagePayload {
-        name: name.to_string(),
-        cmd,
-        deps,
-        outs,
-        params,
-        env,
-        retry: val.get("retry").cloned(),
-        timeout: val
-            .get("timeout")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        nondeterministic: val.get("nondeterministic").and_then(|v| v.as_bool()),
-        hermetic: val.get("hermetic").and_then(|v| v.as_bool()),
-        side_effects: val.get("side_effects").and_then(|v| v.as_bool()),
-        resources: val.get("resources").cloned(),
-        frozen: val.get("frozen").and_then(|v| v.as_bool()),
-        wdir: val.get("wdir").and_then(|v| v.as_str()).map(String::from),
-        desc: val.get("desc").and_then(|v| v.as_str()).map(String::from),
-        meta: val.get("meta").cloned(),
-        condition: val.get("condition").cloned(),
-    })
-}
-
-fn parse_dep_yaml(val: &Value) -> Option<DepPayload> {
-    match val {
-        Value::String(s) => Some(DepPayload {
-            kind: "path".to_string(),
-            value: s.clone(),
-            meta: None,
-        }),
-        Value::Object(obj) => {
-            if let Some(stage_out) = obj.get("stage_out") {
-                let stage = stage_out
-                    .get("stage")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let out = stage_out.get("out").and_then(|v| v.as_str()).unwrap_or("");
-                Some(DepPayload {
-                    kind: "stage_out".to_string(),
-                    value: format!("{}:{}", stage, out),
-                    meta: None,
-                })
-            } else if let Some(path) = obj.get("path") {
-                Some(DepPayload {
-                    kind: "path".to_string(),
-                    value: path.as_str().unwrap_or("").to_string(),
-                    meta: None,
-                })
-            } else {
-                // Other dep kinds (crab, git, url, oci).
-                let kind = if obj.contains_key("crab") {
-                    "crab"
-                } else if obj.contains_key("git") {
-                    "git"
-                } else if obj.contains_key("url") {
-                    "url"
-                } else if obj.contains_key("oci") {
-                    "oci"
-                } else {
-                    "path"
-                };
-                Some(DepPayload {
-                    kind: kind.to_string(),
-                    value: serde_json::to_string(obj).unwrap_or_default(),
-                    meta: Some(Value::Object(obj.clone())),
-                })
-            }
-        }
-        _ => None,
-    }
-}
-
-fn parse_out_yaml(val: &Value) -> Option<OutPayload> {
-    match val {
-        Value::String(s) => Some(OutPayload {
-            path: s.clone(),
-            kind: "file".to_string(),
-            cache: None,
-            persist: None,
-            max_bytes: None,
-        }),
-        Value::Object(obj) => {
-            let path = obj
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let kind = obj
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("file")
-                .to_string();
-            Some(OutPayload {
-                path,
-                kind,
-                cache: obj.get("cache").and_then(|v| v.as_bool()),
-                persist: obj.get("persist").and_then(|v| v.as_bool()),
-                max_bytes: obj.get("max_bytes").and_then(|v| v.as_u64()),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Convert a WorkflowPayload back to YAML string for saving.
-fn payload_to_yaml(workflow: &WorkflowPayload) -> Result<String> {
-    use std::fmt::Write;
-
-    let mut out = String::new();
-
-    // Top-level fields.
-    if !workflow.params.is_empty() {
-        writeln!(out, "params:").ok();
-        for p in &workflow.params {
-            writeln!(out, "  - {}", p).ok();
-        }
-    }
-    if !workflow.metrics.is_empty() {
-        writeln!(out, "metrics:").ok();
-        for m in &workflow.metrics {
-            writeln!(out, "  - {}", m).ok();
-        }
-    }
-    if !workflow.plots.is_empty() {
-        writeln!(out, "plots:").ok();
-        for p in &workflow.plots {
-            writeln!(out, "  - {}", p).ok();
-        }
-    }
-
-    // Stages.
-    writeln!(out, "stages:").ok();
-    for stage in &workflow.stages {
-        writeln!(out, "  {}:", stage.name).ok();
-
-        // Command.
-        match stage.cmd.kind.as_str() {
-            "argv" | "shell_list" => {
-                // The editor uses JSON arrays so quoted arguments and separate
-                // shell commands survive load/save without changing execution.
-                let parts: Vec<String> = serde_json::from_str(&stage.cmd.value)?;
-                let command = if stage.cmd.kind == "argv" {
-                    json!({ "argv": parts })
-                } else {
-                    json!(parts)
-                };
-                writeln!(out, "    cmd: {}", serde_json::to_string(&command)?).ok();
-            }
-            "shell" => {
-                writeln!(out, "    cmd: {}", serde_json::to_string(&stage.cmd.value)?).ok();
-            }
-            kind => {
-                return Err(AgentError::Other(format!(
-                    "unsupported command kind: {kind}"
-                )));
-            }
-        }
-
-        // Deps.
-        if !stage.deps.is_empty() {
-            writeln!(out, "    deps:").ok();
-            for dep in &stage.deps {
-                match dep.kind.as_str() {
-                    "path" => {
-                        writeln!(out, "      - {}", dep.value).ok();
-                    }
-                    "stage_out" => {
-                        let parts: Vec<&str> = dep.value.splitn(2, ':').collect();
-                        if parts.len() == 2 {
-                            writeln!(out, "      - stage_out:").ok();
-                            writeln!(out, "          stage: \"{}\"", parts[0]).ok();
-                            writeln!(out, "          out: \"{}\"", parts[1]).ok();
-                        } else {
-                            writeln!(out, "      - {}", dep.value).ok();
-                        }
-                    }
-                    _ => {
-                        writeln!(out, "      - {}", dep.value).ok();
-                    }
-                }
-            }
-        }
-
-        // Outs.
-        if !stage.outs.is_empty() {
-            writeln!(out, "    outs:").ok();
-            for o in &stage.outs {
-                let has_extras = o.cache.is_some()
-                    || o.persist.is_some()
-                    || o.max_bytes.is_some()
-                    || o.kind != "file";
-                if has_extras {
-                    writeln!(out, "      - path: {}", o.path).ok();
-                    if o.kind != "file" {
-                        writeln!(out, "        kind: {}", o.kind).ok();
-                    }
-                    if let Some(cache) = o.cache {
-                        writeln!(out, "        cache: {}", cache).ok();
-                    }
-                    if let Some(persist) = o.persist {
-                        writeln!(out, "        persist: {}", persist).ok();
-                    }
-                    if let Some(max_bytes) = o.max_bytes {
-                        writeln!(out, "        max_bytes: {}", max_bytes).ok();
-                    }
-                } else {
-                    writeln!(out, "      - {}", o.path).ok();
-                }
-            }
-        }
-
-        // Params.
-        if !stage.params.is_empty() {
-            writeln!(out, "    params:").ok();
-            for p in &stage.params {
-                writeln!(out, "      - {}", p).ok();
-            }
-        }
-
-        // Options.
-        if let Some(true) = stage.nondeterministic {
-            writeln!(out, "    nondeterministic: true").ok();
-        }
-        if let Some(true) = stage.hermetic {
-            writeln!(out, "    hermetic: true").ok();
-        }
-        if let Some(true) = stage.side_effects {
-            writeln!(out, "    side_effects: true").ok();
-        }
-        if let Some(ref timeout) = stage.timeout {
-            writeln!(out, "    timeout: \"{}\"", timeout).ok();
-        }
-
-        // Frozen.
-        if let Some(true) = stage.frozen {
-            writeln!(out, "    frozen: true").ok();
-        }
-
-        // Working directory.
-        if let Some(ref wdir) = stage.wdir {
-            if !wdir.is_empty() {
-                writeln!(out, "    wdir: \"{}\"", escape_yaml_string(wdir)).ok();
-            }
-        }
-
-        // Description.
-        if let Some(ref desc) = stage.desc {
-            if !desc.is_empty() {
-                writeln!(out, "    desc: \"{}\"", escape_yaml_string(desc)).ok();
-            }
-        }
-
-        // Metadata.
-        if let Some(ref meta) = stage.meta {
-            if let Some(obj) = meta.as_object() {
-                if !obj.is_empty() {
-                    writeln!(out, "    meta:").ok();
-                    for (k, v) in obj {
-                        let val_str = match v {
-                            Value::String(s) => format!("\"{}\"", escape_yaml_string(s)),
-                            _ => v.to_string(),
-                        };
-                        writeln!(out, "      {}: {}", k, val_str).ok();
-                    }
-                }
-            }
-        }
-
-        // Condition.
-        if let Some(ref condition) = stage.condition {
-            if let Some(obj) = condition.as_object() {
-                if let (Some(kind), Some(value)) = (
-                    obj.get("kind").and_then(|v| v.as_str()),
-                    obj.get("value").and_then(|v| v.as_str()),
-                ) {
-                    writeln!(out, "    condition:").ok();
-                    writeln!(out, "      {}: \"{}\"", kind, escape_yaml_string(value)).ok();
-                }
-            }
-        }
-    }
-
-    Ok(out)
-}
-
-/// Escape special characters in a YAML string value.
-fn escape_yaml_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Read stage names from a workflow YAML file without full parsing.
-async fn read_stage_names(work_dir: &Path, file_path: &str) -> Result<Vec<String>> {
-    let full_path = work_dir.join(file_path);
-    let content = tokio::fs::read_to_string(&full_path)
-        .await
-        .map_err(|e| AgentError::Other(format!("read failed: {}", e)))?;
-
-    let yaml: Value = serde_yaml::from_str(&content)
-        .map_err(|e| AgentError::Other(format!("YAML parse error: {}", e)))?;
-
-    let names = yaml
-        .get("stages")
-        .and_then(|v| v.as_object())
-        .map(|map| map.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    Ok(names)
+    Ok(json!({ "valid": errors.is_empty(), "errors": errors }))
 }
 
 // ── SDK-backed workflow builder handlers ─────────────────────────────
@@ -1054,6 +556,150 @@ pub async fn workflow_migrate_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advanced_document_fields_survive_visual_edits() {
+        let source = json!({
+            "vars": [{"message": "hello"}],
+            "artifacts": {"model": {"path": "model.bin"}},
+            "defaults": {"env": "empty", "retry": {"max_attempts": 3}},
+            "plots": [{"scores.csv": {"x": "epoch", "y": "loss"}}],
+            "stages": {"train": {
+                "cmd": "echo hello", "env": ["PATH"],
+                "retry": {"max_attempts": 2}, "resources": {"cpu": 2},
+                "metrics": ["scores.json"], "persist": true,
+                "on_cache_hit": "echo cached", "side_effects": true,
+                "outs": [{"path": "file: with # syntax", "remote": "archive"}]
+            }}
+        });
+        let mut payload = yaml_to_payload("crab.yaml", &source).unwrap();
+        payload.stages[0].cmd.value = "echo updated".into();
+        let saved: Value = serde_yaml::from_str(&payload_to_yaml(&payload).unwrap()).unwrap();
+        let mut expected = source;
+        expected["stages"]["train"]["cmd"] = json!("echo updated");
+        assert_eq!(saved, expected);
+        assert_eq!(
+            crab_workflow::parse_yaml(&serde_yaml::to_string(&saved).unwrap()).unwrap(),
+            crab_workflow::parse_yaml(&serde_yaml::to_string(&expected).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn advanced_foreach_and_named_groups_can_be_loaded_and_saved() {
+        let source = json!({"stages": {"prepare": {
+            "foreach": ["a", "b"], "do": {"cmd": "echo ${item}", "outs": ["${item}.out"]}
+        }}, "workflows": {"release": {"stages": {"publish": {"cmd": "echo publish"}}}}});
+        let payload = yaml_to_payload("crab.yaml", &source).unwrap();
+        let saved: Value = serde_yaml::from_str(&payload_to_yaml(&payload).unwrap()).unwrap();
+        assert_eq!(saved, source);
+    }
+
+    #[test]
+    fn expanded_templates_and_output_settings_keep_runtime_meaning() {
+        let source = json!({"defaults": {"env": "empty", "retry": {"max_attempts": 2}}, "stages": {
+            "prepare": {"foreach": ["a", "b"], "do": {"cmd": "echo ${item}", "outs": [{"${item}.out": {"cache": false, "push": false}}]}},
+            "build": {"matrix": {"os": ["linux", "mac"], "arch": ["arm", "x64"]}, "cmd": "echo ${item.os} ${item.arch}", "outs": ["${item.os}-${item.arch}.out"]}
+        }});
+        let text = serde_yaml::to_string(&source).unwrap();
+        let mut payload = yaml_to_payload("crab.yaml", &source).unwrap();
+        payload.resolve(Path::new("crab.yaml"), &text).unwrap();
+        assert_eq!(payload.executions.len(), 6);
+        let saved = payload_to_yaml(&payload).unwrap();
+        assert_eq!(
+            crab_workflow::parse_yaml(&text).unwrap(),
+            crab_workflow::parse_yaml(&saved).unwrap()
+        );
+    }
+
+    #[test]
+    fn authored_expanded_names_keep_their_own_source() {
+        let source = json!({"stages": {
+            "prepare": {"cmd": "true"}, "prepare@manual": {"cmd": "true"},
+            "train": {"foreach": ["x"], "do": {"cmd": "echo ${item}"}},
+            "train@manual": {"cmd": "true"}
+        }});
+        let text = serde_yaml::to_string(&source).unwrap();
+        let mut payload = yaml_to_payload("crab.yaml", &source).unwrap();
+        payload.resolve(Path::new("crab.yaml"), &text).unwrap();
+        let sources: std::collections::BTreeMap<_, _> = payload
+            .executions
+            .iter()
+            .map(|stage| (stage.name.as_str(), stage.source.as_str()))
+            .collect();
+        assert_eq!(
+            sources,
+            std::collections::BTreeMap::from([
+                ("prepare", "prepare"),
+                ("prepare@manual", "prepare@manual"),
+                ("train@x", "train"),
+                ("train@manual", "train@manual")
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_visual_save_leaves_original_bytes_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "stages:\n  train:\n    cmd: echo original\n";
+        let path = dir.path().join("crab.yaml");
+        std::fs::write(&path, original).unwrap();
+        let yaml: Value = serde_yaml::from_str(original).unwrap();
+        let mut payload = yaml_to_payload("crab.yaml", &yaml).unwrap();
+        payload.stages[0]
+            .extra
+            .insert("unsupported_policy".into(), json!(true));
+        assert!(
+            workflow_save(
+                dir.path(),
+                WorkflowSaveParams {
+                    repo_id: "test".into(),
+                    workflow: payload
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn save_publishes_validated_document_and_create_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = json!({"stages": {"train": {"cmd": "echo original"}}});
+        let mut payload = yaml_to_payload("crab.yaml", &source).unwrap();
+        payload.stages[0].cmd.value = "echo updated".into();
+        workflow_save(
+            dir.path(),
+            WorkflowSaveParams {
+                repo_id: "test".into(),
+                workflow: payload,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            workflow_create(
+                dir.path(),
+                WorkflowCreateParams {
+                    repo_id: "test".into(),
+                    path: "crab.yaml".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        let loaded = workflow_get(
+            dir.path(),
+            WorkflowGetParams {
+                repo_id: "test".into(),
+                path: "crab.yaml".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(loaded["stages"][0]["cmd"]["value"], "echo updated");
+        assert_eq!(loaded["executions"][0]["name"], "train");
+    }
 
     #[test]
     fn command_forms_preserve_argument_boundaries() {

@@ -34,7 +34,8 @@ pub enum Dep {
     Url { url: String, digest: Option<String> },
     /// OCI image reference pinned by manifest digest.
     OciImage { reference: String, digest: String },
-    /// Output produced by another stage in the same workflow.
+    /// Output produced by another stage, named by its repository-relative
+    /// artifact path including the producer's working directory.
     StageOut { stage: StageName, out: PathBuf },
 }
 

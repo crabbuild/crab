@@ -188,6 +188,7 @@ export function StagePropertiesPanel({
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto">
         {/* Command section */}
+        {Boolean(stage.foreach || stage.matrix) && <p className="px-3 py-2 text-xs text-gx-muted">{stage.foreach ? "Foreach" : "Matrix"} template. Changes apply to every execution. Use Edit YAML to change iterations or axes.</p>}
         <Section
           id="command"
           label="Command"
@@ -347,7 +348,7 @@ export function StagePropertiesPanel({
             {stage.params.map((param, i) => (
               <div key={i} className="group flex items-center gap-1">
                 <span className="flex-1 truncate font-mono text-xs text-gx-text">
-                  {param}
+                  {typeof param === "string" ? param : JSON.stringify(param)}
                 </span>
                 <button
                   type="button"

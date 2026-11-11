@@ -294,15 +294,13 @@ async fn run_sidecar() -> std::io::Result<()> {
                 continue;
             }
         };
-        let operation = (request.method != "rpc/cancel")
-            .then(|| {
-                request
-                    .params
-                    .get("op_id")
-                    .and_then(|id| id.as_str())
-                    .map(str::to_owned)
-            })
-            .flatten();
+        let operation = match request.method.as_str() {
+            "rpc/cancel" | "workflow_cancel" => None,
+            "workflow_run" => request.params.get("run_id"),
+            _ => request.params.get("op_id"),
+        }
+        .and_then(|id| id.as_str())
+        .map(str::to_owned);
         if let Some(id) = &operation {
             // Reserve before spawning: a following cancel frame can otherwise
             // run before the handler subscribes and lose the signal entirely.

@@ -6,10 +6,8 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parse } from "yaml";
-import { call, packagedExecutable } from "./packaged-app";
-import { DaemonClient } from "../../electron/daemon/daemon-client";
 import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
-import { socketAddress } from "../../electron/daemon/socket-address";
+import { call, closeFixtureDaemon, packagedExecutable } from "./packaged-app";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -38,32 +36,6 @@ async function closeFixtureTerminals(application: ElectronApplication, directory
   }).map(session => session.pid), { timeout: 10_000 }).toEqual([]);
 }
 
-async function closeFixtureDaemon(home: string): Promise<void> {
-  // Only callers that created this HOME own its daemon. Tests inheriting the
-  // developer's HOME must leave that durable process running.
-  const socketDir = path.join(home, ".crab", "desktop", "daemon");
-  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
-  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
-  const client = new DaemonClient({
-    socketDir, daemonEntryPath: "",
-    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
-  });
-  try {
-    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
-  } finally { client.disconnect(); }
-  await expect.poll(() => {
-    try { process.kill(pid, 0); return false; }
-    catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      return true;
-    }
-  }, { timeout: 10_000 }).toBe(true);
-  const address = socketAddress(`${base}.sock`);
-  if (process.platform !== "win32" && address !== `${base}.sock`) {
-    rmSync(path.dirname(address), { recursive: true });
-  }
-}
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
@@ -197,6 +169,7 @@ test("workflow sidebar manages files, flushes edits, and runs cross-file depende
     await inspector.getByRole("textbox", { name: "Stage command", exact: true }).fill(JSON.stringify(["node", "-e", "const fs=require('fs'); setTimeout(() => fs.writeFileSync('model.txt', fs.readFileSync('features.txt', 'utf8') + 'trained'), 2000)"]));
     // Switch immediately, before the autosave debounce. Navigation must flush.
     await select("prepare.workflow.yaml");
+    await expect(page.locator(".react-flow__node")).toHaveCount(4);
     expect(readFileSync(path.join(repo, "train.workflow.yaml"), "utf8")).toContain("trained");
     await expect(sidebar.getByRole("region", { name: "Used by", exact: true }).getByRole("button", { name: "train.workflow.yaml", exact: true })).toBeVisible();
     await select("train.workflow.yaml");
@@ -205,7 +178,7 @@ test("workflow sidebar manages files, flushes edits, and runs cross-file depende
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(sidebar.getByRole("button", { name: "New workflow", exact: true })).toBeDisabled();
     await expect(files.getByRole("button").filter({ hasText: "prepare.workflow.yaml" })).toBeDisabled();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Completed", { exact: true })).toBeVisible({ timeout: 20_000 });
     expect(readFileSync(path.join(repo, "model.txt"), "utf8")).toBe("preparedtrained");
     await expect(page.getByRole("region", { name: "Workflow output", exact: true })).toContainText("prepare.package: Completed");
     await page.screenshot({ path: test.info().outputPath("workflow-cross-file-run.png") });

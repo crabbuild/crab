@@ -96,6 +96,16 @@ and events. Child stdout and stderr stream to the CLI's stderr; stage log files,
 stderr failure tails, and declared stdout capture are preserved independently.
 JSONL stage events flush immediately so consumers can show progress during a run.
 
+Stage `wdir` is relative to the repository root, including in recursively
+loaded workflow files. Local path dependencies and declared outputs resolve
+against that working directory; without `wdir`, recursive discovery resolves
+paths against the YAML file's directory. Graph ownership uses those same physical
+paths, so producers in different working directories can use the same local
+filename. Explicit `stage_out.out` identifies the repository-relative artifact
+(including the producer's `wdir`); it is independent of the consumer's directory.
+Within a nested file, discovery prefixes local `stage_out` names and adds the
+YAML directory to outputs only when the producer has no explicit `wdir`.
+
 Cached artifact paths are repository-relative and already include stage `wdir`.
 The product materializer resolves them against the invocation repository, so
 experiment worktrees do not publish cache hits into the caller’s directory.
@@ -125,6 +135,13 @@ Four consecutive failures with exit code 1 produce three retry delays:
 the product retry loop owns waiting, output cleanup, and journal transitions.
 
 ## Scheduler ownership
+
+`DagScheduler::new` owns pre-committed stage admission. Skipped producers
+satisfy dependency counts, and excluded consumers never re-enter the ready
+queue. Callers do not seed skips through completion callbacks. Only dispatched
+stages release reserved resources; frozen and conditionally skipped stages own
+no reservation. Default failure policy stops admission, reports pending stages
+as not started, and drains in-flight results before returning.
 
 Await `SchedulerLock::acquire` inside a Tokio runtime. Contention backoff yields
 to other futures, and dropping the acquisition future cancels waiting. Individual

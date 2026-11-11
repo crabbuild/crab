@@ -18,6 +18,7 @@ interface StageNodeData {
   status: StageRunStatus;
   selected: boolean;
   hasCycle?: boolean;
+  executions?: number;
   [key: string]: unknown;
 }
 
@@ -34,8 +35,19 @@ const statusConfig: Record<
   skipped: { icon: SkipForward, color: "text-gx-muted" },
 };
 
+function commandLabel(stage: WorkflowStage): string {
+  if (stage.cmd.kind !== "argv") return stage.cmd.value;
+  try {
+    const argv: unknown = JSON.parse(stage.cmd.value);
+    if (Array.isArray(argv) && argv.every(part => typeof part === "string")) {
+      return [argv[0]?.split(/[\\/]/).at(-1), ...argv.slice(1)].join(" ");
+    }
+  } catch { /* Show incomplete input while the command is being edited. */ }
+  return stage.cmd.value;
+}
+
 export const StageNode = memo(function StageNode({ data }: NodeProps) {
-  const { stage, status, selected, hasCycle } = data as unknown as StageNodeData;
+  const { stage, status, selected, hasCycle, executions } = data as unknown as StageNodeData;
   const config = statusConfig[status];
   const Icon = config.icon;
 
@@ -48,7 +60,7 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
         hasCycle && !selected && "!border-gx-error",
       )}
       style={{ width: STAGE_WIDTH, height: STAGE_HEIGHT }}
-      title={`${stage.name}\n${stage.cmd.value}`}
+      title={`${stage.name}\n${stage.cmd.value}${stage.foreach || stage.matrix ? "\nTemplate: edit the shared body here; edit iterations in YAML." : ""}`}
     >
       <Handle
         type="target"
@@ -70,11 +82,11 @@ export const StageNode = memo(function StageNode({ data }: NodeProps) {
       </div>
 
       <div className="mt-2 line-clamp-2 h-8 break-all font-mono text-xs leading-4 text-gx-muted">
-        {stage.cmd.value}
+        {commandLabel(stage)}
       </div>
 
       <div className="mt-2 flex items-center justify-between text-[11px] leading-4 text-gx-muted">
-        <span>{stage.deps.length} {stage.deps.length === 1 ? "input" : "inputs"} · {stage.outs.length} {stage.outs.length === 1 ? "output" : "outputs"}</span>
+        <span>{stage.foreach || stage.matrix ? `${executions ?? "…"} executions` : <>{stage.deps.length} {stage.deps.length === 1 ? "input" : "inputs"} · {stage.outs.length} {stage.outs.length === 1 ? "output" : "outputs"}</>}</span>
         <span className={clsx("capitalize", config.color)}>{stage.frozen ? "Frozen" : status}</span>
       </div>
 

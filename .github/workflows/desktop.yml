@@ -76,6 +76,10 @@ jobs:
       - name: Test native desktop integration
         # Compilation, real CLI tests and Linux tests share the producer toolchain.
         run: node scripts/build-native.mjs --test
+      - name: Test workflow execution contracts
+        run: |
+          cargo test --release -p crab-workflow --locked --lib
+          cargo test --release -p crab --locked --no-default-features --lib cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity
       - name: Qualify Linux runtime ABI and repository operations
         if: runner.os == 'Linux'
         run: node scripts/qualify-linux-runtime.mjs
@@ -257,6 +261,14 @@ jobs:
       - name: Smoke packaged Electron under Xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:e2e-smoke
+      - name: Qualify complex workflows in packaged Electron
+        run: |
+          export E2E_SMOKE=1
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1
+          else
+            npx playwright test tests/e2e/workflow-complex.spec.ts --project=e2e-smoke --workers=1
+          fi
       - name: Qualify captured database queries in packaged Electron
         run: |
           export E2E_SMOKE=1
