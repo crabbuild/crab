@@ -1846,6 +1846,15 @@ pub(crate) struct TaskApplyParams {
 /// 4. Remove the worktree.
 /// 5. Delete the task branch.
 pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Value> {
+    #[cfg(unix)]
+    let workspace = crate::task_workspace::TaskWorkspace::open_for_apply(
+        repo_dir,
+        Path::new(&p.worktree_path),
+        Some(&p.task_id),
+        Some(&p.branch),
+    )
+    .await?;
+    #[cfg(not(unix))]
     let workspace = crate::task_workspace::TaskWorkspace::open(
         repo_dir,
         Path::new(&p.worktree_path),
@@ -1875,10 +1884,25 @@ pub(crate) async fn task_apply(repo_dir: &Path, p: TaskApplyParams) -> Result<Va
         })?;
     crate::git_ref_merge::require_direct_branch(repo_dir, &target_ref).await?;
     #[cfg(unix)]
-    crate::git_active_apply::require_available(repo_dir).await?;
-    workspace.begin_apply()?;
-    let result =
-        apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await;
+    let recovered = if workspace.apply_pending()? {
+        let source_ref = crate::git_ref_merge::local_branch_ref(&p.branch);
+        crate::git_active_apply::recover(repo_dir, &target_ref, workspace.root(), &source_ref)
+            .await?
+    } else {
+        crate::git_active_apply::require_available(repo_dir).await?;
+        workspace.begin_apply()?;
+        None
+    };
+    #[cfg(not(unix))]
+    let recovered = {
+        workspace.begin_apply()?;
+        None
+    };
+    let result = if let Some(commit) = recovered {
+        complete_apply(repo_dir, &workspace, &target_branch, Some(commit), true).await
+    } else {
+        apply_workspace(repo_dir, &workspace, &p.branch, &target_branch, &target_ref).await
+    };
     #[cfg(unix)]
     let retain = crate::native_process::mutation::requires_recovery();
     #[cfg(not(unix))]
@@ -1998,16 +2022,50 @@ async fn apply_workspace(
         });
     }
 
-    let (worktree_removed, branch_deleted, cleanup_error) =
-        match workspace.remove(repo_dir, true, true).await {
-            Ok(cleanup) => (true, cleanup.branch_deleted, cleanup.error),
-            Err(error) => {
-                // Merge already succeeded. Report retained cleanup separately so
-                // the client does not retry or hide a merge that actually landed.
-                tracing::warn!(%error, "task applied; workspace retained");
-                (false, false, Some(error.to_string()))
+    complete_apply(repo_dir, workspace, target_branch, merge_commit, false).await
+}
+
+async fn complete_apply(
+    repo_dir: &Path,
+    workspace: &crate::task_workspace::TaskWorkspace,
+    target_branch: &str,
+    merge_commit: Option<String>,
+    recovered: bool,
+) -> Result<Value> {
+    let cleanup = async {
+        if recovered {
+            // Git's removal check honors status settings and ignores ignored
+            // files. Include all source files so recovery preserves new data.
+            let status = run_git_cmd(
+                workspace.root(),
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain",
+                    "--ignored",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )
+            .await?;
+            if !status.is_empty() {
+                return Err(AgentError::Other(
+                    "Recovered Apply retained modified, untracked or ignored source files".into(),
+                ));
             }
-        };
+        }
+        workspace.remove(repo_dir, !recovered, true).await
+    }
+    .await;
+    let (worktree_removed, branch_deleted, cleanup_error) = match cleanup {
+        Ok(cleanup) => (true, cleanup.branch_deleted, cleanup.error),
+        Err(error) => {
+            // Merge already succeeded. Report retained cleanup separately so
+            // the client does not retry or hide a merge that actually landed.
+            tracing::warn!(%error, "task applied; workspace retained");
+            (false, false, Some(error.to_string()))
+        }
+    };
 
     Ok(json!({
         "applied": true,
@@ -2016,6 +2074,7 @@ async fn apply_workspace(
         "worktree_removed": worktree_removed,
         "branch_deleted": branch_deleted,
         "cleanup_error": cleanup_error,
+        "recovery_warning": recovered.then_some("Apply recovered after interruption. Check whether the post-merge hook completed."),
     }))
 }
 

@@ -12,15 +12,19 @@ use crate::git_ref_merge::{
     current_direct_branch_ref, exact_branch_oid, is_ancestor, publish_active_ref,
 };
 use crate::handlers::run_git_worktree_cmd as git;
-use crate::native_process::mutation::{requires_recovery, retain_recovery};
+use crate::native_process::mutation::{requires_recovery, retain_recovery, writers_confirmed};
 use crate::{AgentError, Result, shellout};
 
 const JOURNAL: &str = "crab-desktop-active-apply";
 const PLANNING: &str = "planning";
 const STAGED_BEFORE: &str = "staged-before.patch";
+const CHECKOUT_BEFORE: [&str; 3] = ["status-before", "unstaged-before.patch", STAGED_BEFORE];
+const WRITERS_CLOSED: &str = "writers-closed";
 
 mod hooks;
+mod reconcile;
 pub(crate) use hooks::run_if_hook;
+pub(crate) use reconcile::recover;
 
 #[derive(Deserialize, Serialize)]
 struct Intent {
@@ -105,10 +109,7 @@ pub(crate) async fn merge(
             .prepare(&git_dir, target, source, source_worktree, &old)
             .await?;
         let before = stage.checkout_state().await?;
-        for (name, bytes) in ["status-before", "unstaged-before.patch", STAGED_BEFORE]
-            .iter()
-            .zip(&before)
-        {
+        for (name, bytes) in CHECKOUT_BEFORE.iter().zip(&before) {
             if !bytes.is_empty() {
                 write_synced(&stage.dir.join(name), bytes)?;
             }
@@ -134,7 +135,12 @@ pub(crate) async fn merge(
                 .map_err(|error| recovery(&stage.dir, error))?;
             Ok(commit)
         }
-        Err(error) => Err(recovery(&stage.dir, error)),
+        Err(error) => {
+            if stage.dir.try_exists()? && writers_confirmed() {
+                record_closed_writers(&stage.dir).map_err(|error| recovery(&stage.dir, error))?;
+            }
+            Err(recovery(&stage.dir, error))
+        }
     }
 }
 
@@ -465,16 +471,20 @@ impl Stage<'_> {
     }
 
     async fn rollback(&mut self, old: &str, before: &[Vec<u8>; 3]) -> Result<()> {
+        if self.restore_checkout(old, before).await? {
+            self.cleanup()?;
+        }
+        Ok(())
+    }
+
+    async fn restore_checkout(&self, old: &str, before: &[Vec<u8>; 3]) -> Result<bool> {
         // Git refuses to overwrite an intervening edit or ignored file. Keep
         // the journal and index lock if the original state cannot be proved.
         let output = self.checkout(old).await?;
         if !output.status.success() {
             return Err(command_error(output));
         }
-        if self.checkout_state().await? == *before {
-            self.cleanup()?;
-        }
-        Ok(())
+        Ok(self.checkout_state().await? == *before)
     }
 
     async fn checkout_state(&self) -> Result<[Vec<u8>; 3]> {
@@ -539,12 +549,21 @@ impl Stage<'_> {
     }
 
     fn cleanup(&mut self) -> Result<()> {
+        self.release_lock()?;
+        fs::remove_dir_all(&self.dir)?;
+        File::open(self.common)?.sync_all()?;
+        Ok(())
+    }
+
+    fn release_lock(&mut self) -> Result<()> {
         if self.lock.is_some() {
             self.check_lock()?;
             fs::remove_file(&self.lock_path)?;
             self.lock.take();
+            if let Some(parent) = self.index.parent() {
+                File::open(parent)?.sync_all()?;
+            }
         }
-        fs::remove_dir_all(&self.dir)?;
         Ok(())
     }
 }
@@ -635,6 +654,14 @@ fn command_error(output: Output) -> AgentError {
             String::from_utf8_lossy(&output.stderr)
         ),
     }
+}
+
+fn record_closed_writers(dir: &Path) -> Result<()> {
+    // Only the supervising worker can issue this proof after its commands
+    // close. A worker crash cannot authorize recovery from a released lease.
+    write_synced(&dir.join(WRITERS_CLOSED), b"closed\n")?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 fn target_changed(target: &str) -> AgentError {

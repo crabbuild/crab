@@ -42,6 +42,12 @@ pub(crate) fn retain_recovery() {
     let _ = MUTATION.try_with(|owner| owner.unconfirmed.store(true, Ordering::Relaxed));
 }
 
+pub(crate) fn writers_confirmed() -> bool {
+    MUTATION
+        .try_with(|owner| !owner.unconfirmed.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
 pub(crate) fn active() -> bool {
     MUTATION.try_with(|_| ()).is_ok()
 }

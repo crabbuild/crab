@@ -228,6 +228,7 @@ async fn publish_inactive_ref(
         work_dir,
         &format!("option no-deref\n{edit}"),
         message,
+        true,
         async || {
             // Git compares the old OID of a symbolic ref through its referent.
             // Inspect the ref after prepare has locked its exact name.
@@ -249,28 +250,67 @@ pub(crate) async fn publish_active_ref(
     message: &str,
 ) -> Result<bool> {
     let edit = format!("update HEAD {next} {old}\nupdate ORIG_HEAD {old}");
-    ref_transaction(work_dir, &edit, message, async || {
-        // Prepare locks HEAD and the branch it resolves to. Read the exact
-        // symbolic target while those locks are held, even if two refs share an OID.
-        if current_direct_branch_ref(work_dir).await?.as_deref() != Some(target_ref) {
-            return Ok(false);
-        }
-        match require_direct_branch(work_dir, target_ref).await {
-            Ok(()) => Ok(true),
-            Err(AgentError::Managed { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
+    ref_transaction(work_dir, &edit, message, true, async || {
+        active_target_matches(work_dir, target_ref).await
     })
     .await
+}
+
+#[cfg(unix)]
+pub(crate) async fn with_verified_active_ref(
+    work_dir: &Path,
+    target_ref: &str,
+    oid: &str,
+    reconcile: impl AsyncFnOnce() -> Result<()>,
+) -> Result<bool> {
+    // A verify-only transaction locks HEAD and its referent. Reconciliation
+    // repairs the index of an existing commit and must not replay ref hooks.
+    let edit = format!("verify HEAD {oid}");
+    ref_transaction(
+        work_dir,
+        &edit,
+        "Reconcile interrupted Apply",
+        false,
+        async || {
+            if !active_target_matches(work_dir, target_ref).await? {
+                return Ok(false);
+            }
+            reconcile().await?;
+            Ok(true)
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn active_target_matches(work_dir: &Path, target_ref: &str) -> Result<bool> {
+    // Verify the symbolic name under the locks because branches can share an OID.
+    if current_direct_branch_ref(work_dir).await?.as_deref() != Some(target_ref) {
+        return Ok(false);
+    }
+    match require_direct_branch(work_dir, target_ref).await {
+        Ok(()) => Ok(true),
+        Err(AgentError::Managed { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 async fn ref_transaction(
     work_dir: &Path,
     edit: &str,
     message: &str,
+    run_hooks: bool,
     validate: impl AsyncFnOnce() -> Result<bool>,
 ) -> Result<bool> {
     let mut command = crate::shellout::git_command();
+    if !run_hooks {
+        command.args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "hook.reference-transaction.enabled=false",
+        ]);
+    }
     command
         .args(["update-ref", "--stdin", "-m", message])
         .current_dir(work_dir)

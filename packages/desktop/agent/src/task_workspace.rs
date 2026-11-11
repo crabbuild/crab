@@ -65,6 +65,17 @@ impl TaskWorkspace {
         task_id: Option<&str>,
         branch: Option<&str>,
     ) -> Result<Self> {
+        let workspace = Self::open_for_apply(repo, root, task_id, branch).await?;
+        require_no_pending_apply(&workspace.record.identity.git_dir)?;
+        Ok(workspace)
+    }
+
+    pub(crate) async fn open_for_apply(
+        repo: &Path,
+        root: &Path,
+        task_id: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<Self> {
         let identity = identity(repo, root).await?;
         let mut lease = owner_file(&identity.git_dir)?;
         lease.try_lock().map_err(lease_error)?;
@@ -87,7 +98,6 @@ impl TaskWorkspace {
             ));
         }
         verify_branch(root, &record.branch).await?;
-        require_no_pending_apply(&identity.git_dir)?;
         Ok(Self {
             record,
             _lease: lease,
@@ -96,6 +106,15 @@ impl TaskWorkspace {
 
     pub(crate) fn root(&self) -> &Path {
         &self.record.identity.root
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn apply_pending(&self) -> Result<bool> {
+        match require_no_pending_apply(&self.record.identity.git_dir) {
+            Ok(()) => Ok(false),
+            Err(AgentError::Managed { .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn begin_apply(&self) -> Result<()> {
@@ -113,8 +132,13 @@ impl TaskWorkspace {
     }
 
     pub(crate) fn finish_apply(&self) -> Result<()> {
-        match std::fs::remove_file(self.record.identity.git_dir.join(APPLY_FENCE)) {
-            Ok(()) => Ok(()),
+        let git_dir = &self.record.identity.git_dir;
+        match std::fs::remove_file(git_dir.join(APPLY_FENCE)) {
+            Ok(()) => {
+                #[cfg(unix)]
+                File::open(git_dir)?.sync_all()?;
+                Ok(())
+            }
             // A successful worktree removal also removes its private Git dir.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),

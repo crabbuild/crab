@@ -2403,3 +2403,70 @@ checks. Evidence includes `apply-reftable-ssh-final.json`,
 `apply-protected-direct-reftable-race-after.json`. Interrupted publication
 still requires reconciling the real ref and index from the retained record.
 Local Desktop and Windows Apply publication need integration and verification.
+
+## Interrupted SSH Apply recovery
+
+An explicit Apply retry can reconcile a retained Unix publication. It validates
+its saved task, source commit, destination, checkout and original index-lock
+identity while holding the workspace lease. The original supervising worker
+must first write a durable receipt after observing its command groups close.
+A killed worker releases its lease without issuing that receipt, so a new
+worker cannot start recovery while an orphaned Git command may still write.
+Recovery consumes the receipt before launching commands and reissues it after
+a failed attempt only when those commands have confirmed closure.
+
+Before publication, a protected checkout restores the saved state under a
+prepared HEAD/ref verification transaction before the explicit retry starts a
+new merge. After publication, recovery validates the saved merge's exact
+parents and installs its recorded index, preserving newer working-tree edits.
+An already-installed index must retain its recorded inode and bytes. Recovery
+suppresses reference hooks and leaves the published commit unchanged. It
+reports uncertainty about completion of the original post-merge hook. Recovery checks modified, untracked and ignored source files explicitly before
+asking Git to remove the worktree. This preserves new data even when user
+configuration hides untracked files. The client reports the retained worktree
+alongside the successful Apply.
+
+Changed checkout bytes, replaced locks, changed refs, missing writer-closure
+proof and a candidate whose destination moved back to the old commit retain
+the recovery record. Early source-only interruptions and a crash between
+journal cleanup and source-fence removal still require manual inspection.
+Local Desktop and Windows publication, escaped process sessions and arbitrary
+hook completion remain release gates.
+
+The corrected baseline fails all three recovery cases with the retained Apply
+error. The final candidate passes 31 real SSH cases, 250 scoped desktop cases and 11
+scoped Rust tests. A direct worker SIGKILL leaves its hook alive while a new
+sidecar refuses Apply, Discard and native writer opens. Only the fixture's
+recorded command group is terminated during cleanup. Production and fixture
+types and the Electron build pass. Evidence includes
+`apply-recovery-ssh-before-corrected.json`, `apply-recovery-ssh-after.json`,
+`apply-recovery-desktop-after.json`, `apply-recovery-rust-after.json` and
+`apply-active-worker-kill-after.json`. The ignored-file and hidden-untracked
+regressions both lose their source files before the explicit cleanup check.
+Evidence includes `apply-recovery-source-files-before-corrected.json` and
+`apply-recovery-ssh-final.json`.
+
+The rebuilt unsigned package's sidecar passes actual published-ref recovery
+with files refs, reftable, linked reftable worktrees and SHA-256 objects. The
+published commit remains unchanged and newer target editor bytes survive.
+The first combined GUI smoke run passes four enabled cases, skips isolated
+storage and fails the workspace Recent-list assertion. Its isolated repeat
+hits the test deadline. A direct UI probe eventually displays the correct
+Recent entry, taking about 9.6 seconds to switch to the second repository.
+Closing that probe requires a signal after 15 seconds. The fixture's daemon
+then closes with verified birth time and canonical entry path. Sidebar latency
+and application shutdown remain under investigation. Evidence includes
+`sidebar-recent-probe.json` and `sidebar-recent-probe-cleanup.json`.
+
+Linux x64 CI passes runtime startup and repository RPC qualification on
+AlmaLinux 8, Debian 12 and Amazon Linux 2023. Its later SSH fixture failures
+exposed missing repository author configuration under an isolated global Git
+configuration. The fixture now records its own identity for every commit.
+The preceding Linux ARM64 job passes. Windows and both macOS jobs remain in
+progress at that head. The full release matrix remains open.
+
+Recovery uses Git's prepared verification transaction to hold the exact HEAD
+and branch while reconciling the index. A real files/reftable probe confirms
+that both names remain locked until commit or abort.
+[Git reference transactions](https://git-scm.com/docs/git-update-ref) and
+[Git files-backend locking](https://github.com/git/git/blob/v2.50.1/refs/files-backend.c).

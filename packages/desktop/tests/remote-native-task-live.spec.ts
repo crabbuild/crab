@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -26,13 +26,17 @@ const run = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native task lifecycle", () => {
-  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
+  it.each(["checkpoints", "checkpoint-stop-local", "checkpoint-stop-remote", "apply-target", "apply-target-active", "apply-target-active-source-tag", "apply-target-inactive-source-tag", "apply-target-checkout-race", "apply-target-hook-rejected", "apply-target-overlap", "apply-target-ignored-overlap", "apply-target-configured-strategy", "apply-target-signature-required", "apply-target-signed-merge", "apply-target-hook-bypass", "apply-target-hook-index", "apply-target-deleted", "apply-target-detached", "apply-target-symbolic", "apply-eof", "apply-sidecar-kill", "apply-sidecar-kill-active", "apply-sidecar-kill-active-edited", "apply-sidecar-kill-published", "apply-sidecar-kill-published-foreign-lock", "apply-sidecar-kill-published-source-edit", "apply-sidecar-kill-published-source-ignored", "apply-sidecar-kill-published-source-untracked", "apply-sidecar-kill-published-unconfirmed", "availability", "catalogs", "codex", "claude-code"] as const)("%s uses the real sidecar and workspace host", async mode => {
     const root = await realpath(await mkdtemp(path.join(liveRoot!, "remote-native-task-")));
     const repo = path.join(root, "repo"); await mkdir(repo);
     await run("git", ["init", "--template=", "--initial-branch=main", repo]);
+    // Apply commits later in the sidecar with the server's global config disabled.
+    for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["user.useConfigOnly", "true"], ["commit.gpgSign", "false"]]) {
+      await run("git", ["config", "--local", key, value], { cwd: repo });
+    }
     await writeFile(path.join(repo, "seed.txt"), "before\n");
     await run("git", ["add", "."], { cwd: repo });
-    await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo });
+    await run("git", ["commit", "-m", "baseline"], { cwd: repo });
     const platform = process.platform === "darwin" ? "mac" : "linux";
     const runtime = path.resolve(`resources/native/${platform}-${process.arch}`);
     const server = await terminalSshServer(root, getExpandedEnv().PATH);
@@ -55,7 +59,8 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     const closed = new Promise<void>((resolve, reject) => { channel.once("close", resolve); channel.once("error", reject); });
     const endpoint = { host: "127.0.0.1", port: server.connection.port, username: "fixture",
       hostKey: `SHA256:${Buffer.from(server.connection.fingerprint, "hex").toString("base64").replace(/=+$/, "")}` };
-    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, endpoint, channels: { agent: channel } }) } as unknown as SshSessionManager;
+    let connectedAgent = channel;
+    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, endpoint, channels: { agent: connectedAgent } }) } as unknown as SshSessionManager;
     const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } });
     router.attachChannel("fixture", channel);
     const repoId = `ssh://fixture${repo}`;
@@ -107,7 +112,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
           await writeFile(path.join(task.worktreePath, "seed.txt"), "task conflict\n");
           await writeFile(path.join(repo, "seed.txt"), "keep target bytes\n");
           await run("git", ["add", "--", "seed.txt"], { cwd: repo });
-          await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "target changes"], { cwd: repo });
+          await run("git", ["commit", "-m", "target changes"], { cwd: repo });
           await run("git", ["config", "branch.main.mergeOptions", "-X ours"], { cwd: repo });
         }
         if (signatures) await run("git", ["config", "branch.main.mergeOptions", "--verify-signatures"], { cwd: repo });
@@ -247,7 +252,15 @@ ${hookBypass ? "exit 1" : hookIndex ? "printf 'hook bytes\\n' > hook-file\ngit a
           await orchestrator.discardTask(task.id);
         }
       } else if (mode === "apply-eof" || hardKill) {
-        const active = mode === "apply-sidecar-kill-active";
+        const published = mode.startsWith("apply-sidecar-kill-published");
+        const active = mode.startsWith("apply-sidecar-kill-active") || published;
+        const edited = mode === "apply-sidecar-kill-active-edited";
+        const foreign = mode === "apply-sidecar-kill-published-foreign-lock";
+        const sourceEdited = mode === "apply-sidecar-kill-published-source-edit";
+        const sourceIgnored = mode === "apply-sidecar-kill-published-source-ignored";
+        const sourceUntracked = mode === "apply-sidecar-kill-published-source-untracked";
+        const retainSource = sourceEdited || sourceIgnored || sourceUntracked;
+        const unconfirmed = mode === "apply-sidecar-kill-published-unconfirmed";
         const worktree = task.worktreePath;
         const head = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
         const journal = path.join(repo, ".git", "crab-desktop-active-apply");
@@ -255,9 +268,15 @@ ${hookBypass ? "exit 1" : hookIndex ? "printf 'hook bytes\\n' > hook-file\ngit a
         const started = path.join(root, "hook-pid");
         const release = path.join(root, "release-hook");
         const late = path.join(worktree, "late.txt");
+        const postMerge = path.join(root, "post-merge-replay");
         await writeFile(path.join(worktree, "pending.txt"), "pending source bytes\n");
         await mkdir(path.join(repo, ".git", "hooks"), { recursive: true });
-        await writeFile(path.join(repo, ".git", "hooks", active ? "pre-merge-commit" : "pre-commit"), `#!/bin/sh
+        const hook = path.join(repo, ".git", "hooks", published ? "reference-transaction" : active ? "pre-merge-commit" : "pre-commit");
+        if (published) await writeFile(path.join(repo, ".git", "hooks", "post-merge"), `#!/bin/sh
+printf 'ran\\n' > ${quote(postMerge)}
+`, { mode: 0o755 });
+        await writeFile(hook, `#!/bin/sh
+${published ? 'if [ "$1" != committed ] || ! grep " refs/heads/main$" >/dev/null; then exit 0; fi' : ""}
 printf '%s\\n' "$$" > ${quote(started)}
 for i in $(seq 1 300); do
   if [ -f ${quote(release)} ]; then
@@ -281,6 +300,7 @@ exit 1
             expect(hookPid).toBeGreaterThan(1);
           }, { timeout: 15_000 });
           const sourceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout;
+          const targetHead = published ? `${await readFile(path.join(journal, "candidate"), "utf8")}\n` : head;
           if (active) {
             const intent = JSON.parse(await readFile(path.join(journal, "intent.json"), "utf8"));
             const owner = await stat(targetLock);
@@ -305,7 +325,7 @@ exit 1
             source: (await run("git", ["rev-parse", "HEAD"], { cwd: worktree })).stdout,
             target: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout,
             bytes: await readFile(path.join(worktree, "pending.txt"), "utf8")
-          }).toEqual({ reportedApplied: false, writerAlive: false, source: sourceHead, target: head, bytes: "pending source bytes\n" });
+          }).toEqual({ reportedApplied: false, writerAlive: false, source: sourceHead, target: targetHead, bytes: "pending source bytes\n" });
           if (active) {
             expect(existsSync(targetLock) && existsSync(path.join(journal, "proposal"))).toBe(true);
           }
@@ -313,13 +333,53 @@ exit 1
           replacement.stderr.resume();
           const replacementClosed = new Promise<void>(resolve => replacement.once("close", resolve));
           try {
+            connectedAgent = replacement;
             router.attachChannel("fixture", replacement);
             await router.restoreRepositories("fixture");
             await vi.waitFor(() => expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } }), { timeout: 10_000 });
-            await expect(router.sendToRemoteAgent("fixture", "task_apply", { ...discard, base_branch: task.baseBranch })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
             await expect(router.sendToRemoteAgent("fixture", "native_process_open", {
               process_id: randomUUID(), task_id: task.id, executable: "/bin/true", args: [], cwd: worktree,
             })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+            const targetFile = path.join(repo, "pending.txt");
+            if (published || edited) await writeFile(targetFile, "new editor bytes\n");
+            if (foreign) {
+              await rename(targetLock, path.join(root, "retired-fixture-lock"));
+              await writeFile(targetLock, "foreign index writer\n");
+            }
+            if (sourceEdited) await writeFile(path.join(worktree, "pending.txt"), "new source bytes\n");
+            if (sourceIgnored || sourceUntracked) {
+              await run("git", ["config", "status.showUntrackedFiles", "no"], { cwd: repo });
+              if (sourceIgnored) {
+                await mkdir(path.join(repo, ".git", "info"), { recursive: true });
+                await writeFile(path.join(repo, ".git", "info", "exclude"), "recovery-local.txt\n");
+              }
+              await writeFile(path.join(worktree, "recovery-local.txt"), "new source-only bytes\n");
+            }
+            if (unconfirmed) await rm(path.join(journal, "writers-closed"));
+            if (!active || edited || foreign || unconfirmed) {
+              await expect(router.sendToRemoteAgent("fixture", "task_apply", { ...discard, base_branch: task.baseBranch })).rejects.toMatchObject({ data: { kind: "task_apply_pending" } });
+              if (edited || foreign) expect(await readFile(targetFile, "utf8")).toBe("new editor bytes\n");
+              if (foreign) expect(await readFile(targetLock, "utf8")).toBe("foreign index writer\n");
+              expect(existsSync(worktree)).toBe(true);
+            } else {
+              // A new explicit Apply retries an unpublished merge. Published
+              // recovery leaves the original hook installed to catch replay.
+              if (!published) await rm(hook);
+              const warnings: string[] = [];
+              orchestrator.on("orchestrator:error", ({ message }) => warnings.push(message));
+              await expect(orchestrator.applyTask(task.id)).resolves.toEqual({ success: true });
+              expect({ status: task.status, journal: existsSync(journal), lock: existsSync(targetLock), worktree: existsSync(worktree),
+                indexed: (await run("git", ["show", ":pending.txt"], { cwd: repo })).stdout, bytes: await readFile(targetFile, "utf8")
+              }).toEqual({ status: "applied", journal: false, lock: false, worktree: retainSource,
+                indexed: "pending source bytes\n", bytes: published ? "new editor bytes\n" : "pending source bytes\n" });
+              if (published) {
+                expect((await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout).toBe(targetHead);
+                expect(existsSync(postMerge)).toBe(false);
+                expect(warnings.join("\n")).toMatch(/post-merge hook completed/);
+              }
+              if (sourceEdited) expect(await readFile(path.join(worktree, "pending.txt"), "utf8")).toBe("new source bytes\n");
+              if (sourceIgnored || sourceUntracked) expect(await readFile(path.join(worktree, "recovery-local.txt"), "utf8")).toBe("new source-only bytes\n");
+            }
           } finally {
             replacement.end();
             await replacementClosed;

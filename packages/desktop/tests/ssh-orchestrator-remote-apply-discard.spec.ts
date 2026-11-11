@@ -192,6 +192,21 @@ describe("Remote Apply/Discard", () => {
   });
 
   describe("applyTask (remote)", () => {
+    it.each([true, false])("reports recovered Apply when source cleanup succeeds=%s", async removed => {
+      const task = injectRemoteTask(orchestrator);
+      const warnings: string[] = [];
+      orchestrator.on("orchestrator:error", ({ message }) => warnings.push(message));
+      mockRouter.nextResult = {
+        applied: true, worktree_removed: removed, branch_deleted: removed,
+        recovery_warning: "Check whether the post-merge hook completed.",
+        cleanup_error: removed ? null : "New source edits retained",
+      };
+      await orchestrator.applyTask(task.id);
+      expect({ status: task.status, warnings }).toEqual({ status: "applied", warnings: [removed
+        ? "Check whether the post-merge hook completed."
+        : "Task applied; remote cleanup needs attention: New source edits retained\nCheck whether the post-merge hook completed."] });
+    });
+
     it("sends task_apply RPC to the remote agent", async () => {
       const task = injectRemoteTask(orchestrator);
 
