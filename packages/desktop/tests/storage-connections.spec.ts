@@ -155,6 +155,11 @@ describe("built-in storage connections", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("opens a plain local repository without initializing an unused keyring", async () => {
+    crypto.isAsyncEncryptionAvailable.mockImplementation(() => new Promise<boolean>(() => {}));
+    await expect(call("open_local", { repo_id: "local", path: directory })).resolves.toMatchObject({ repo_id: "local" });
+  }, 1_000);
+
   it("reopens unbound local browsing while the keyring is locked", async () => {
     await call("open_local", { repo_id: "local", path: directory });
     crypto.isAsyncEncryptionAvailable.mockResolvedValue(false);

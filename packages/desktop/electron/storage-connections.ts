@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, rename, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, rm, stat } from "node:fs/promises";
 import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { SafeStorage } from "electron";
@@ -102,6 +102,11 @@ export class StorageConnections {
     if (!await this.encryption.isAsyncEncryptionAvailable()) return false;
     const backend = this.platform === "linux" ? this.encryption.getSelectedStorageBackend() : undefined;
     return backend !== "basic_text" && backend !== "unknown";
+  }
+
+  private async hasSavedVault(): Promise<boolean> {
+    try { await stat(this.file); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
   }
 
   private async requireEncryption(): Promise<void> {
@@ -325,7 +330,9 @@ export class StorageConnections {
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
     const capture = method === "files_materialize" || method === "files_dehydrate" || method === "files_restore" || method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
-    const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && await this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
+    // An absent vault cannot bind a local repository. Avoid initializing the
+    // OS key provider for plain Git browsing; initialization may await user input.
+    const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && await this.hasSavedVault() && await this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
       ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method));
     // Local browsing and app startup do not depend on an unlocked cloud keyring.
     const vault = needsAuth ? await this.read() : undefined;
