@@ -211,6 +211,10 @@ When an owned task is discarded:
 
 Applying changes retains the worktree and branch. Reopen returns an applied
 conversation to review without reverting Git changes or sending a prompt.
+Primary conversations edit the repository directly. Their Diff view disables
+Apply and directs the user to commit through Git Changes; direct Apply requests
+reject before stopping conversations or changing task state. They never report
+a merge or commit that did not happen.
 Archive preserves the branch and checkpoints for later restoration. Closed
 conversations retain their transcript; only explicit deletion removes the row.
 

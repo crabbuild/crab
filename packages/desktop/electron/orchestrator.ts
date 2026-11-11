@@ -34,7 +34,7 @@ import { CheckpointManager } from "./orchestrator-checkpoints";
 import { remoteAgentProcessFactory } from "./ssh-native-process";
 import { AgentProcessClosureError, WorkspaceCommandCancelledError, type AgentProcessFactory } from "./agent-process";
 import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hunks";
-import { applyAll, cherryPickFiles, computeDiff, type ApplyResult } from "./orchestrator-diff";
+import { applyAll, cherryPickFiles, computeDiff, requireApplyWorkspace, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, currentBranch, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
 import { parseRepoId } from "./ssh-router";
@@ -1750,6 +1750,7 @@ export class Orchestrator extends EventEmitter {
     if (!task) throw new Error(`Task not found: ${taskId}`);
     this.assertWorkspaceAvailable(task);
     if (["archived", "applied", "discarded"].includes(task.status)) throw new Error("Reopen this conversation before applying changes");
+    requireApplyWorkspace(task);
     const parent = task.parentTaskId ? this.tasks.get(task.parentTaskId) : undefined;
     if (parent && sameWorkspace(parent, task)) {
       throw new Error("Review and apply shared workspace changes from the parent conversation.");

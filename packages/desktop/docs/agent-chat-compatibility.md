@@ -1,7 +1,32 @@
 # Agent chat compatibility
 
-Status: in progress; [PR #670](https://github.com/crabbuild/crab/pull/670). Base: `origin/crab-v2` at `e60de177853`.
-Compatibility is not yet fully qualified.
+Status: priority closeout; [PR #670](https://github.com/crabbuild/crab/pull/670).
+Base: `origin/crab-v2` at `fe527105459`. Full production compatibility is not
+certified. The user requested completion of the highest-priority fixes and
+conclusion of this audit pass, with the PR updated for review.
+
+The closeout fixes confirmed source-data loss in Apply/Archive, stale
+selected-file Apply, unsafe replacement of occupied target paths, and primary
+workspace actions that claimed a merge or commit without performing one.
+Final local proof includes 315 lifecycle/checkpoint/diff tests, three actual
+Electron task-view cases and five checks through rebuilt unsigned macOS
+package modules, SQLite and CLI. Production types, renderer/Electron builds,
+Rust formatting and diff checks pass. Fixture diagnostics match their baseline.
+
+At the preceding PR head `41e6436b076`, all four desktop runners pass the six
+sidebar cases. Linux x64 also passes native integration, ABI qualification and
+the checkpoint/SSH lifecycle gate; its packaging and other runners' native
+builds were still running when the closeout was prepared. These results do
+not establish a green matrix for the new closeout head.
+
+Release remains gated on current-head cross-platform CI; local/Windows atomic
+Apply publication and interruption recovery; descendant/process ownership;
+remaining provider controls/recovery; context-data archival; native keyring,
+clipboard, signing and minimum-platform qualification; and the dependency and
+tooling reports recorded below. This priority pass does not merge or release
+the application, or claim that every official-product capability is complete.
+
+## Historical integration evidence
 
 Refreshed from `64b33b64cba`; the workflow-output update integrated without
 conflicts. The earlier sidebar/navigation update and terminal-launch handoff
@@ -2725,5 +2750,42 @@ Evidence: `selected-corrected-baseline.json`,
 all four desktop platforms. Local and Windows publication remains a release
 gate: target preflight is not an atomic ref/index transaction, and checkout,
 hook failure and interruption recovery still need the protected publisher.
-The primary-workspace success receipt also still needs qualification against
-the UI's claim that selected files were committed.
+The primary-workspace success receipt is corrected in the closeout below.
+
+### Primary workspace actions and priority closeout
+
+Primary conversations edit the opened repository directly. Both Apply helpers
+previously returned success without a Git operation; the lifecycle owner then
+persisted applied state, and the UI announced a merge or commit. Two real-Git
+regressions reproduce those successful no-ops. An actual Electron baseline
+also confirms the primary workspace offered enabled Apply actions.
+
+One workspace-policy guard now rejects primary Apply in the lifecycle owner
+before conversation closure or persistence, and in both Git helpers. The
+guard depends only on workspace mode, so it applies equally to Codex, Claude,
+local and remote conversations. The primary Diff view disables Apply all and
+selected Apply, omits the partial-Apply action and directs users to Git Changes
+to commit their already-present edits. Primary Discard retains its existing
+conversation-only ownership contract. No new result shape or configuration
+mode is introduced.
+
+All 315 scoped lifecycle/checkpoint/diff tests pass. Three Electron task-view
+cases pass: live selection, occupied target refusal and primary-workspace
+controls. The primary case also invokes both backend operations and verifies
+unchanged HEAD, index bytes, working data and reviewing state. Its screenshot
+confirms the guidance and disabled controls remain visible. The rebuilt
+unsigned macOS package passes the three selected-file cases and both primary
+operations; primary refusal preserves reopened SQLite state. Production types,
+renderer/Electron builds and formatting pass. Semantic fixture diagnostics
+remain identical to the baseline's two unused declarations. Two reader tests
+first exceeded their unchanged five-second deadlines while builds ran; their
+three-case focused recheck and final isolated 315-case suite pass. No timeout
+or assertion was relaxed.
+
+Evidence: `primary-apply-before.json`, `primary-apply-ui-before.json`,
+`primary-apply-ui-final.json`, `primary-apply-visual.json`,
+`closeout-reader-recheck.json`, `closeout-family-final.json`,
+`closeout-selected-packaged.json`, `primary-apply-packaged.json` and
+`closeout-fixture-type-baseline.log`. The priority pass is concluded for PR
+review as requested. The release gates in the opening status remain open;
+these narrow proofs do not certify full production parity.

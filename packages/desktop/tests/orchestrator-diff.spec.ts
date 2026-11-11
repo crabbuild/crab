@@ -444,6 +444,18 @@ rename to new-name.ts
   });
 
   describe("applyAll", () => {
+    it.each(["all", "selected"])("rejects %s Apply in the primary workspace without claiming a commit", async operation => {
+      const head = await getHead(repoDir);
+      const task = createMockTask(repoDir, "primary-apply", head, repoDir);
+      task.worktreeMode = "primary";
+      fs.writeFileSync(path.join(repoDir, "README.md"), "pending primary bytes\n");
+      const index = fs.readFileSync(path.join(repoDir, ".git/index"));
+      const result = operation === "all" ? applyAll(task) : cherryPickFiles(task, ["README.md"], new CheckpointManager());
+      await expect(result).rejects.toThrow("already in the primary workspace");
+      expect({ head: await getHead(repoDir), index: fs.readFileSync(path.join(repoDir, ".git/index")), content: fs.readFileSync(path.join(repoDir, "README.md"), "utf8") })
+        .toEqual({ head, index, content: "pending primary bytes\n" });
+    });
+
     it.each(["active", "inactive"])("includes untracked source files hidden by display settings for an %s target", async target => {
       const baseRef = await getHead(repoDir);
       const taskId = `hidden-source-${path.basename(repoDir)}`;

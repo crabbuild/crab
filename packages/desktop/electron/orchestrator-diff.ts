@@ -70,8 +70,9 @@ type RefMergeResult =
   | { kind: "conflict"; conflicts: string[] }
   | { kind: "target-checked-out"; targetBranch: string };
 
-function isPrimaryWorkspaceTask(task: Task): boolean {
-  return task.worktreeMode === "primary";
+/** Rejects Apply when edits already belong to the primary workspace. */
+export function requireApplyWorkspace(task: Pick<Task, "worktreeMode">): void {
+  if (task.worktreeMode === "primary") throw new Error("Changes are already in the primary workspace. Commit them in Git Changes.");
 }
 
 function execErrorText(err: unknown): string {
@@ -517,9 +518,7 @@ export async function computeRemoteDiff(
  * returns conflicts after aborting a conflicting merge.
  */
 export async function applyAll(task: Task): Promise<ApplyResult> {
-  if (isPrimaryWorkspaceTask(task)) {
-    return { success: true };
-  }
+  requireApplyWorkspace(task);
 
   const commitMessage = `Apply agent task: ${task.prompt.slice(0, 50)}`;
   // Validate the captured destination before staging source work. A missing
@@ -610,7 +609,7 @@ export async function cherryPickFiles(
   files: string[],
   snapshots: Pick<CheckpointManager, "snapshotHead">,
 ): Promise<void> {
-  if (isPrimaryWorkspaceTask(task)) return;
+  requireApplyWorkspace(task);
   if (files.length === 0) return;
 
   const targetBranch = await applyTarget(task);
@@ -684,6 +683,6 @@ async function requireCleanSelection(repoPath: string, files: string[]): Promise
  * Delegates to `removeWorktree` from the worktree module.
  */
 export async function discard(task: Task): Promise<string | undefined> {
-  if (isPrimaryWorkspaceTask(task)) return;
+  if (task.worktreeMode === "primary") return;
   return removeWorktree(task);
 }

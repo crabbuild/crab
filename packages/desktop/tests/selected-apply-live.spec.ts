@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Orchestrator } from "../electron/orchestrator";
 import { computeDiff } from "../electron/orchestrator-diff";
@@ -17,8 +17,10 @@ const bytes = (file: string) => readFile(file, "utf8").catch((error: NodeJS.Errn
 });
 
 describe.skipIf(!liveRoot)("selected Apply in the task view", () => {
-  it.each(["live", "occupied"])("confirms the %s selection through actual Git and durable task state", async mode => {
+  it.each(["live", "occupied", "primary"])("confirms the %s selection through actual Git and durable task state", async mode => {
     const directory = await mkdtemp(path.join(liveRoot!, "selected-apply-"));
+    const repo = path.join(directory, "repo");
+    await mkdir(repo);
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     const orchestrator = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
     const clients = new Set<ServerResponse>();
@@ -74,12 +76,13 @@ describe.skipIf(!liveRoot)("selected Apply in the task view", () => {
       optimizeDeps: { entries: ["tests/fixtures/agent-workspace.html"] },
       server: { host: "127.0.0.1", port: 0 }, clearScreen: false });
     try {
-      await run("git", ["init", "--template=", "--initial-branch=main", directory]);
-      for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["commit.gpgSign", "false"]]) await run("git", ["config", key, value], { cwd: directory });
-      for (const [file, content] of [["old.txt", "rename original\n"], ["remove.txt", "delete original\n"], ["unchanged.txt", "before\n"]]) await writeFile(path.join(directory, file), content);
-      await run("git", ["add", "old.txt", "remove.txt", "unchanged.txt"], { cwd: directory });
-      await run("git", ["commit", "-m", "Baseline"], { cwd: directory });
-      const task = await orchestrator.createTask("Select live files", "codex", directory);
+      await run("git", ["init", "--template=", "--initial-branch=main", repo]);
+      for (const [key, value] of [["user.name", "Fixture"], ["user.email", "fixture@example.invalid"], ["commit.gpgSign", "false"]]) await run("git", ["config", key, value], { cwd: repo });
+      for (const [file, content] of [["old.txt", "rename original\n"], ["remove.txt", "delete original\n"], ["unchanged.txt", "before\n"]]) await writeFile(path.join(repo, file), content);
+      await run("git", ["add", "old.txt", "remove.txt", "unchanged.txt"], { cwd: repo });
+      await run("git", ["commit", "-m", "Baseline"], { cwd: repo });
+      const baselineHead = (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout;
+      const task = await orchestrator.createTask("Select live files", "codex", repo, "HEAD", { worktreeMode: mode === "primary" ? "primary" : "auto" });
       taskId = task.id; task.status = "reviewing"; await orchestrator.persistTasks();
       await rename(path.join(task.worktreePath, "old.txt"), path.join(task.worktreePath, "renamed.txt"));
       await rm(path.join(task.worktreePath, "remove.txt"));
@@ -87,11 +90,11 @@ describe.skipIf(!liveRoot)("selected Apply in the task view", () => {
       await writeFile(path.join(task.worktreePath, "private-source.txt"), "unselected source bytes\n");
       const indexPath = (await run("git", ["rev-parse", "--git-path", "index"], { cwd: task.worktreePath })).stdout.trim();
       const sourceIndex = await readFile(path.resolve(task.worktreePath, indexPath));
-      await writeFile(path.join(directory, "unchanged.txt"), "staged user bytes\n");
-      await run("git", ["add", "unchanged.txt"], { cwd: directory });
-      await writeFile(path.join(directory, "unchanged.txt"), "unstaged user bytes\n");
-      if (mode === "occupied") await writeFile(path.join(directory, "pending.txt"), "private target bytes\n");
-      const targetIndex = await readFile(path.join(directory, ".git/index"));
+      await writeFile(path.join(repo, "unchanged.txt"), "staged user bytes\n");
+      await run("git", ["add", "unchanged.txt"], { cwd: repo });
+      await writeFile(path.join(repo, "unchanged.txt"), "unstaged user bytes\n");
+      if (mode === "occupied") await writeFile(path.join(repo, "pending.txt"), "private target bytes\n");
+      const targetIndex = await readFile(path.join(repo, ".git/index"));
       await new Promise<void>(resolve => api.listen(0, "127.0.0.1", resolve));
       await vite.listen();
       const bridge = api.address(); const renderer = vite.httpServer?.address();
@@ -114,16 +117,29 @@ describe.skipIf(!liveRoot)("selected Apply in the task view", () => {
         throw error;
       }
       for (const file of ["pending.txt", "renamed.txt", "remove.txt"]) await page.getByRole("checkbox", { name: `Select ${file}`, exact: true }).check();
+      if (mode === "primary") {
+        await browserExpect(page.getByRole("button", { name: "Apply all", exact: true })).toBeDisabled();
+        await browserExpect(page.getByRole("button", { name: "Apply selected (3)", exact: true })).toBeDisabled();
+        await browserExpect(page.getByText("These edits are already in this workspace. Commit them in Git Changes.", { exact: true })).toBeVisible();
+        await expect(orchestrator.applyTask(task.id, ["pending.txt"])).rejects.toThrow("already in the primary workspace");
+        await expect(orchestrator.applyTask(task.id)).rejects.toThrow("already in the primary workspace");
+        expect({ head: (await run("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout, index: await readFile(path.join(repo, ".git/index")),
+          pending: await bytes(path.join(repo, "pending.txt")), status: orchestrator.getTask(task.id)?.status, receipts })
+          .toEqual({ head: baselineHead, index: targetIndex, pending: "pending live bytes\n", status: "reviewing", receipts: [] });
+        await page.screenshot({ path: path.join(liveRoot!, "primary-apply-view.png") });
+        await writeFile(path.join(liveRoot!, "selected-apply-primary.json"), JSON.stringify({ applyDisabled: true, directRequestsRejected: true, headAndIndexPreserved: true, status: "reviewing" }));
+        return;
+      }
       await page.getByRole("button", { name: "Apply selected (3)", exact: true }).click();
       await browserExpect(page.getByText(mode === "live" ? "3 file(s) applied and committed" : /Cherry-pick failed: Selected target paths contain/).first()).toBeVisible();
-      const current = { pending: await bytes(path.join(directory, "pending.txt")), old: await bytes(path.join(directory, "old.txt")),
-        removed: await bytes(path.join(directory, "remove.txt")), renamed: await bytes(path.join(directory, "renamed.txt")), applied: orchestrator.getTask(task.id)?.status === "applied",
-        sourceIndex: await readFile(path.resolve(task.worktreePath, indexPath)), staged: (await run("git", ["show", ":unchanged.txt"], { cwd: directory })).stdout,
-        unstaged: await bytes(path.join(directory, "unchanged.txt")) };
+      const current = { pending: await bytes(path.join(repo, "pending.txt")), old: await bytes(path.join(repo, "old.txt")),
+        removed: await bytes(path.join(repo, "remove.txt")), renamed: await bytes(path.join(repo, "renamed.txt")), applied: orchestrator.getTask(task.id)?.status === "applied",
+        sourceIndex: await readFile(path.resolve(task.worktreePath, indexPath)), staged: (await run("git", ["show", ":unchanged.txt"], { cwd: repo })).stdout,
+        unstaged: await bytes(path.join(repo, "unchanged.txt")) };
       expect(current).toEqual({ pending: mode === "live" ? "pending live bytes\n" : "private target bytes\n", old: mode === "live" ? null : "rename original\n",
         removed: mode === "live" ? null : "delete original\n", renamed: mode === "live" ? "rename original\n" : null, applied: mode === "live",
         sourceIndex, staged: "staged user bytes\n", unstaged: "unstaged user bytes\n" });
-      if (mode === "occupied") expect(await readFile(path.join(directory, ".git/index"))).toEqual(targetIndex);
+      if (mode === "occupied") expect(await readFile(path.join(repo, ".git/index"))).toEqual(targetIndex);
       const reopened = new Orchestrator({ persistPath: path.join(directory, "tasks.sqlite") });
       try { expect(reopened.getTask(task.id)?.status === "applied").toBe(mode === "live"); }
       finally { await reopened.shutdown(); }

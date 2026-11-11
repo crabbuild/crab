@@ -2159,6 +2159,17 @@ describe("Orchestrator", () => {
   });
 
   describe("applyTask", () => {
+    it.each(["all", "selected"])("rejects %s Apply in a primary workspace before closing or persisting the conversation", async mode => {
+      const task = await orchestrator.createTask("Primary edits", "codex", path.dirname(persistPath), "main", { worktreeMode: "primary" });
+      task.status = "reviewing";
+      await orchestrator.persistTasks();
+      execFileCalls = [];
+      await expect(orchestrator.applyTask(task.id, mode === "selected" ? ["source.txt"] : undefined)).rejects.toThrow("already in the primary workspace");
+      const reopened = new Orchestrator({ persistPath });
+      try { expect({ status: task.status, saved: reopened.getTask(task.id)?.status, git: execFileCalls }).toEqual({ status: "reviewing", saved: "reviewing", git: [] }); }
+      finally { await reopened.shutdown(); }
+    });
+
     it("retains the workspace fence when selected Apply cannot confirm snapshot closure", async () => {
       const task = await orchestrator.createTask("Selected source", "codex", "/tmp/repo", "main");
       const error = new AgentProcessClosureError(new Error("Owned snapshot closure probe"));

@@ -121,6 +121,7 @@ interface Props {
 // ── Component ───────────────────────────────────────────────────────
 
 export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialActiveFile, checkpointSha, checkpointFromSha, appliedFiles: externalAppliedFiles, onAppliedFilesChange, onApplyAll, onCherryPick, onDiscard, onCreatePr, onReviewWithAi }: Props & { active: boolean }) {
+  const inPrimaryWorkspace = task.worktreeMode === "primary";
   const [files, setFiles] = useState<DiffFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -478,7 +479,7 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
       )}
 
       {/* Partial apply status */}
-      {appliedFiles.size > 0 && remainingFiles.length > 0 && (
+      {!inPrimaryWorkspace && appliedFiles.size > 0 && remainingFiles.length > 0 && (
         <PartialApplyBanner
           appliedCount={appliedFiles.size}
           remainingCount={remainingFiles.length}
@@ -568,19 +569,26 @@ export function DiffTab({ task, workspaceRevision, repo: _repo, active, initialA
         </Panel>
       </PanelGroup>
 
+      {inPrimaryWorkspace && (
+        <p role="status" className="border-t border-gx-border px-4 py-2 text-xs text-gx-muted">
+          These edits are already in this workspace. Commit them in Git Changes.
+        </p>
+      )}
+
       {/* Action buttons (bottom bar) */}
       <div className="flex shrink-0 items-center gap-2 border-t border-gx-border px-4 py-2">
         <button
           type="button"
           onClick={handleApplyAll}
-          className="flex items-center gap-1.5 rounded-md bg-gx-success px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-success/85 transition"
+          disabled={inPrimaryWorkspace}
+          className="flex items-center gap-1.5 rounded-md bg-gx-success px-3 py-1.5 text-xs font-medium text-white hover:bg-gx-success/85 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Check size={12} /> Apply all
         </button>
         <button
           type="button"
           onClick={handleCherryPick}
-          disabled={selectedFiles.size === 0}
+          disabled={inPrimaryWorkspace || selectedFiles.size === 0}
           className="flex items-center gap-1.5 rounded-md border border-gx-border px-3 py-1.5 text-xs text-gx-text hover:bg-gx-surface-hover transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Cherry size={12} /> Apply selected ({selectedFiles.size})
