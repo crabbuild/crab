@@ -115,6 +115,30 @@ Cache coordination markers use private permissions so cleanup does not make
 subsequent usage inspection report its own marker unsafe. One enforced retention
 budget and cache-file interruption remain open in the priority table.
 
+### Windows captured-index restoration
+
+Fresh Windows CI repeated four ordinary-Git restoration failures and one
+workspace-replacement fixture failure. A separate Windows probe isolated the
+index failure: Git 2.56.0.windows.4 saw a populated private index as empty through
+its native canonical verbatim path, including after both writers closed. The
+same index returned its expected entry through a worktree-relative path. The
+temporary-file and captured-working-file metadata checks passed.
+
+Native conversion now passes the owned private index relative to Git's working
+directory for both selection and filtered checkout. Filesystem ownership keeps
+its canonical paths. The task-diff sibling uses an ordinary temporary path;
+active-Apply index wiring is Unix-only. No Windows path fallback or new setting
+is introduced. Seven macOS restoration tests pass, including literal staged
+versions, split indexes, checkout conversions and concurrent-writer rejection.
+
+The probe also confirmed that Windows denies moving a workspace while its
+payload writer remains open, then permits the move after closing it. The cleanup
+fixture releases that OS protection on Windows before directory replacement;
+its moved-payload and foreign-content assertions remain intact, and Unix keeps
+the open-writer case. All six macOS workspace ownership tests pass. Focused
+Windows native qualification, the full platform gate and packaged Windows proof
+remain required; the diagnostic probe is not a substitute for those results.
+
 ### Origin response receipts
 
 Transfer accounting uses the shared [transport admission](../../../crates/crab-storage/src/transport_read_admission.rs),
