@@ -79,6 +79,32 @@ network filesystems and published matching SSH runtime downloads. Close a row
 only after visible user-action proof; retain platform/provider limits alongside
 the result. Do not infer release completion from the local macOS package.
 
+### SDK preview interruption
+
+Six packaged SDK preview cases interrupt a real Crab or LFS response after some
+body bytes arrive, then cancel the preview, kill its native owner, or kill main.
+Cancellation and main shutdown drain the held response before storage release.
+Retry displays the source marker and verifies the complete payload's SHA-256,
+using the saved storage identity with invalid ambient credentials and no writes
+to the selected origin. Crab reuses its existing cache namespace; LFS retains no
+on-disk payload in this fixture. No partial cache file was observed, so these
+cases do not qualify a crash during on-disk cache allocation/publication.
+
+The cancellation cases exposed a selected-file activation defect: closing a
+loading tab left the tree selection unchanged, so clicking it again did not open
+the file. The shared tree now handles that repeated activation before the
+dependency updates selection. New selection and keyboard navigation retain the
+existing subscription; modifiers, directories, submodules and context-menu
+buttons do not trigger repeated-file activation. Both Crab/LFS cases fail on
+the earlier package and pass after the fix. The six-case fixture is included in
+the canonical packaged smoke runner.
+
+The SDK's `desktop-content` namespaces are still retained by the shared CLI
+cleanup policy. Their bytes are included in live usage, but placing them under
+the product root does not make their payloads eligible for cleanup. Namespace
+cleanup, one enforced retention budget and cache-file interruption remain open
+in the priority table.
+
 ### Origin response receipts
 
 Transfer accounting uses the shared [transport admission](../../../crates/crab-storage/src/transport_read_admission.rs),

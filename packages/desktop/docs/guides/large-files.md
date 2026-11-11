@@ -38,6 +38,9 @@ Open a file in **Files**, then use its preview or **File details**. Previews
 capture one version and use bounded native reads, including index and historical
 versions. Opening a preview does not replace a working pointer.
 
+Close a loading preview to cancel its reads. Clicking that selected file again
+reopens the preview without selecting another file first.
+
 SQLite uses its table metadata to choose the first SQL query. The editor remains
 usable while metadata loads. A query you type stays yours when the table lookup
 finishes; empty databases can still show their catalog.
