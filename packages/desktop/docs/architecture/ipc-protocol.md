@@ -183,6 +183,14 @@ replacement, preserving permissions and the Git index. Historical, remote and
 symlink captures cannot be materialized. The result contains `written_bytes`
 only after publication; complete-response preview limits do not apply.
 
+`files_materialize {repo_id, paths, op_id}` applies the same writer to exact
+working-tree paths. It captures the selection before writing and serializes
+publication with other materialization in that repository session. For a
+missing path with an existing parent, it captures a resolved index pointer and
+rechecks the index before a no-clobber publication. A batch can publish some
+files before a cancellation or error stops it. Activity retains the count
+already published.
+
 The operation has a repository-owned scope. Closing its view cancels ordinary
 queries and waits for materialization before releasing the native source;
 repository close cancels and drains the write. `rpc/cancel {repo_id, op_id}`
@@ -192,6 +200,7 @@ writes explicitly remove their temporary output. Detected external edits survive
 
 `progress/transfer {op, job_id, repo_id, written_bytes, total_bytes}` reports
 logical bytes actually written to the temporary file, not network traffic.
+Batch progress includes `files_published` and `files_total`.
 `progress/complete` includes `outcome` for materialization: `completed`, `failed`
 or `cancelled`. Activity owns progress and cancellation across view changes.
 A transport error without a terminal result leaves the outcome unknown;

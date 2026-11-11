@@ -24,6 +24,7 @@ use crate::{
 
 mod file_write;
 mod lifecycle;
+mod materialize;
 
 /// Shared state across dispatch tasks. Holds the map of open
 /// repositories keyed by a desktop-assigned id.
@@ -204,7 +205,8 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "file_open" => file_open(state, decode(&method, params)?).await,
         "file_chunks" => file_chunks(state, decode(&method, params)?).await,
         "file_close" => file_close(state, decode(&method, params)?).await,
-        "file_materialize" => file_materialize(state, decode(&method, params)?, out).await,
+        "file_materialize" => materialize::one(state, decode(&method, params)?, out).await,
+        "files_materialize" => materialize::many(state, decode(&method, params)?, out).await,
         "read_text" => read_text(state, decode(&method, params)?).await,
         "read_bytes" => read_bytes(state, decode(&method, params)?).await,
         "read_range" => read_range(state, decode(&method, params)?).await,
@@ -2547,94 +2549,6 @@ async fn file_close(state: &State, p: FileIdParams) -> Result<Value> {
     Ok(json!({ "closed": p.file_id }))
 }
 
-#[derive(Deserialize)]
-struct FileMaterializeParams {
-    #[serde(flatten)]
-    file: FileIdParams,
-    op_id: String,
-}
-
-async fn file_materialize(
-    state: &State,
-    p: FileMaterializeParams,
-    out: SharedStdout,
-) -> Result<Value> {
-    let repo = state.get(&p.file.repo_id).await?;
-    let scope = repo.read_scope();
-    let signal = state.cancel_registry.register(p.op_id.clone()).await;
-    tokio::pin!(signal);
-    let work = async {
-        let file = repo.files.get(&p.file.file_id).await?;
-        let (_guard, source) = file.materialization(scope.clone()).await?;
-        let runtime = tokio::runtime::Handle::current();
-        let output = out.clone();
-        let job_id = p.op_id.clone();
-        let repo_id = p.file.repo_id.clone();
-        let total_bytes = source.size;
-        let written = source
-            .materialize(move |written_bytes| {
-                runtime.block_on(crate::notify(
-                    &output,
-                    "progress/transfer",
-                    json!({
-                        "op": "hydrate", "job_id": job_id, "repo_id": repo_id,
-                        "written_bytes": written_bytes, "total_bytes": total_bytes,
-                    }),
-                ))
-            })
-            .await?;
-        Ok::<_, AgentError>(json!({ "written_bytes": written }))
-    };
-    tokio::pin!(work);
-    let result = tokio::select! {
-        biased;
-        result = &mut work => result,
-        _ = &mut signal => { scope.cancel(); work.await },
-    };
-    state.cancel_registry.unregister(&p.op_id).await;
-    // The writer checks cancellation before atomic publication. Its terminal
-    // result wins a late cancel, so committed bytes cannot be called cancelled.
-    let result = match scope.failure() {
-        Some(error) => Err(error),
-        None if matches!(&result, Err(error) if error.is_cancelled()) => {
-            Err(AgentError::OpCancelled {
-                op_id: p.op_id.clone(),
-            })
-        }
-        None => result,
-    };
-    let (status, outcome) = match &result {
-        Ok(_) => (0, "completed"),
-        Err(error) if error.is_cancelled() => (-1, "cancelled"),
-        Err(_) => (1, "failed"),
-    };
-    if let Err(error) = &result {
-        if !error.is_cancelled() {
-            let event = shellout::ProgressEvent {
-                op: "hydrate",
-                job_id: &p.op_id,
-                stream: shellout::Stream::Stderr,
-                line: error.to_string(),
-            };
-            if let Err(delivery) = crate::notify(&out, "progress/line", event).await {
-                tracing::error!(%delivery, "materialization failure delivery failed");
-            }
-        }
-    }
-    if let Err(error) = crate::notify(
-        &out,
-        "progress/complete",
-        json!({
-            "op": "hydrate", "job_id": p.op_id, "status": status, "outcome": outcome,
-        }),
-    )
-    .await
-    {
-        tracing::error!(%error, "materialization completion delivery failed");
-    }
-    result
-}
-
 async fn preview_fmt(
     state: &State,
     p: PreviewParams,
@@ -2947,8 +2861,7 @@ struct HydrationStatusParams {
 ///
 ///   - `hydrated` — on-disk bytes match the logical size. The file
 ///     is fully materialised.
-///   - `pointer` — on-disk size is small (under 1 KiB) and matches
-///     the usual pointer-blob format. Needs hydrate.
+///   - `pointer` — the bounded working file parses as a Crab or LFS pointer.
 ///   - `partial` — on-disk size is non-zero but doesn't match. Most
 ///     commonly a truncated / stale hydration; we surface as a
 ///     warning state.
@@ -2960,6 +2873,7 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
     let repo = state.get(&p.repo_id).await?;
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let entries = repo.list(None, p.rev.as_deref()).await?;
+    let boundary = tokio::fs::canonicalize(&work_dir).await?;
 
     let mut items: Vec<Value> = Vec::new();
     let mut hydrated = 0u64;
@@ -2975,26 +2889,48 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
         }
         let path_str = e.path.display().to_string();
         let abs = work_dir.join(&e.path);
-        let logical = e.size.unwrap_or(0);
-        logical_bytes += u128::from(logical);
-
-        let md = tokio::fs::metadata(&abs).await.ok();
-        let (state_label, on_disk): (&'static str, u64) = match md {
-            None => ("missing", 0),
-            Some(m) => {
-                let disk = m.len();
-                // Heuristic: pointer blobs are typically ~200-1000
-                // bytes. Anything under 1 KiB we call a pointer.
-                // Equal sizes = hydrated. Anything else is partial.
-                if logical > 0 && disk == logical {
-                    ("hydrated", disk)
-                } else if disk < 1024 {
+        let mut logical = e.size.unwrap_or(0);
+        let mut kind = e.kind;
+        let (state_label, on_disk) = match tokio::fs::symlink_metadata(&abs).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("missing", 0),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if !metadata.is_file() => ("partial", 0),
+            Ok(metadata) => {
+                let disk = metadata.len();
+                let pointer = if disk < crab_git::MAX_LFS_POINTER_SIZE as u64 {
+                    use tokio::io::AsyncReadExt;
+                    let canonical = tokio::fs::canonicalize(&abs).await?;
+                    if !canonical.starts_with(&boundary) {
+                        continue;
+                    }
+                    let mut bytes = Vec::new();
+                    tokio::fs::File::open(&canonical)
+                        .await?
+                        .take(crab_git::MAX_LFS_POINTER_SIZE as u64)
+                        .read_to_end(&mut bytes)
+                        .await?;
+                    match crab_git::classify(&bytes) {
+                        crab_git::PointerKind::Crab(pointer) => {
+                            Some((EntryKind::Pointer, pointer.size))
+                        }
+                        crab_git::PointerKind::Lfs(pointer) => Some((EntryKind::Lfs, pointer.size)),
+                        crab_git::PointerKind::NotAPointer => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((working_kind, working_size)) = pointer {
+                    kind = working_kind;
+                    logical = working_size;
                     ("pointer", disk)
+                } else if disk == logical {
+                    ("hydrated", disk)
                 } else {
                     ("partial", disk)
                 }
             }
         };
+        logical_bytes += u128::from(logical);
         on_disk_bytes += u128::from(on_disk);
         match state_label {
             "hydrated" => hydrated += 1,
@@ -3008,7 +2944,7 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
             "state": state_label,
             "on_disk": on_disk,
             "logical": logical,
-            "kind": format!("{:?}", e.kind).to_lowercase(),
+            "kind": format!("{kind:?}").to_lowercase(),
         }));
     }
 

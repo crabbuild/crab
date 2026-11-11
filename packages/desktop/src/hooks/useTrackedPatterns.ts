@@ -3,7 +3,7 @@ import { mainProcess, rpc } from "../ipc";
 import { OpenRepo } from "../state";
 import { repositoryWorktree } from "../lib/repository-worktree";
 
-/** A pattern parsed from `.gitattributes` that has `filter=crab`. */
+/** A Crab or Git LFS pattern parsed from `.gitattributes`. */
 export interface TrackedPattern {
   /** The glob as written in `.gitattributes` (e.g. `*.bin`). */
   pattern: string;
@@ -24,7 +24,7 @@ export interface UseTrackedPatterns {
 }
 
 /**
- * Read the repo's `.gitattributes` patterns marked with `filter=crab`
+ * Read the repo's `.gitattributes` patterns marked with `filter=crab` or `filter=lfs`
  * and any prefetch profiles defined in `.crab/prefetch.toml`. Local
  * worktrees use their filesystem provider; SDK snapshots use captured native
  * reads. Failed or truncated reads remain visible instead of becoming defaults.
@@ -94,7 +94,7 @@ export function parseGitattributes(content: string): TrackedPattern[] {
   for (const raw of content.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    if (!line.includes("filter=crab")) continue;
+    if (!/(?:^|\s)filter=(?:crab|lfs)(?:\s|$)/.test(line)) continue;
     const pattern = extractFirstToken(line);
     if (pattern && !seen.has(pattern)) {
       seen.add(pattern);

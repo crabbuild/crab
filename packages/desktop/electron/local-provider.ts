@@ -163,6 +163,7 @@ export class LocalProvider extends BaseProvider {
     caps.canWatch = true;
     caps.canMaterialize = available && this.agent.supports("file_open", "file_materialize", "file_close");
     caps.canHydrate = available && this.agent.supports("hydrate", "dehydrate");
+    caps.canHydrateSelection = available && this.agent.supports("files_materialize");
     // Electron's shell.trashItem works on macOS and Windows but is
     // unreliable on Linux (depends on desktop environment).
     caps.canTrash = process.platform !== "linux";

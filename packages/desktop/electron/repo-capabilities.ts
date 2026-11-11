@@ -6,6 +6,7 @@ export interface CapabilitySet {
   canWorktree: boolean;
   canForge: boolean;
   canHydrate: boolean;
+  canHydrateSelection?: boolean;
   canMaterialize: boolean;
   canSearch: boolean;
   canExec: boolean;

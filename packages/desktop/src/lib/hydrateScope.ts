@@ -4,8 +4,7 @@
  * The Hydrate tab lets users pick *what* to hydrate or dehydrate via
  * a structured scope picker rather than a freeform glob textarea.
  * Each [`Scope`] mode is resolved against the repo's hydration state
- * to produce a [`ResolvedScope`] — the matched files and the literal
- * `patterns` array we send to the `hydrate`/`dehydrate` RPC.
+ * to produce the exact file selection and the dehydrate CLI arguments.
  *
  * The verb (hydrate vs dehydrate) is applied as a final filter:
  * hydrate skips files already hydrated, dehydrate skips files that
@@ -31,7 +30,7 @@ export type Scope =
 export interface ResolvedScope {
   /** Tracked entries that match the scope and are eligible for the verb. */
   matched: HydrationEntry[];
-  /** Tracked entries that match the scope but are already in target state. */
+  /** Tracked entries that match the scope but are ineligible for this verb. */
   skipped: HydrationEntry[];
   /** Total logical bytes across `matched` (what the action will affect). */
   bytes: number;
@@ -47,11 +46,9 @@ export interface ResolvedScope {
 /** True if a file is eligible for the verb (i.e. not already in target state). */
 export function isEligible(entry: HydrationEntry, verb: HydrateVerb): boolean {
   if (verb === "hydrate") {
-    // Anything not fully hydrated counts: pointer, partial, missing.
-    return entry.state !== "hydrated";
+    return entry.state === "pointer" || entry.state === "missing";
   }
-  // Dehydrate only acts on currently-hydrated files.
-  return entry.state === "hydrated";
+  return entry.state === "hydrated" && entry.kind === "pointer";
 }
 
 /**
@@ -66,7 +63,7 @@ export function resolveScope(
   // Step 1: apply the scope filter to get candidate entries.
   const candidates = filterByScope(scope, entries);
 
-  // Step 2: split into eligible (matched) vs already-in-state (skipped).
+  // Split into eligible and skipped entries.
   const matched: HydrationEntry[] = [];
   const skipped: HydrationEntry[] = [];
   for (const e of candidates) {

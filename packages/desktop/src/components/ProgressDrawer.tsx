@@ -362,10 +362,13 @@ function JobCard({ jobId, job, expanded, onToggle, onFilter }: JobCardProps) {
       </button>
       {transfer && <div className="space-y-1 px-2 pb-2 text-[10px] text-gx-muted">
         <p className="tabular-nums">{formatBytes(transfer.written_bytes)} / {formatBytes(transfer.total_bytes)} written</p>
+        {transfer.files_published != null && transfer.files_total != null && (
+          <p>{transfer.files_published} of {transfer.files_total} files materialized</p>
+        )}
         {job.status === "running" ? <>
           <progress aria-label="Materialization bytes written" className="h-1 w-full" value={transfer.written_bytes} max={Math.max(1, transfer.total_bytes)} />
           <button type="button" className="btn text-[10px]" disabled={cancelRequested} onClick={() => void cancel()}>{cancelRequested ? "Cancellation requested…" : "Cancel materialization"}</button>
-        </> : <p>{job.status === "done" ? "Verified and materialized" : job.status === "cancelled" ? "Cancelled before publication" : job.status === "interrupted" ? "Outcome unknown. Reopen the file to inspect its working copy." : "Materialization failed"}</p>}
+        </> : <p>{job.status === "done" ? "Verified and materialized" : job.status === "cancelled" ? (transfer.files_published ? "Remaining materialization cancelled" : "Cancelled before publication") : job.status === "interrupted" ? "Outcome unknown. Check the working files." : "Materialization failed"}</p>}
         {cancelError && <p role="alert" className="break-words text-gx-error">{cancelError}</p>}
       </div>}
       {job.status === "interrupted" && <p className="break-words px-2 pb-2 text-[10px] text-gx-warn">{job.interruption}</p>}

@@ -669,7 +669,7 @@ interface Ctx {
   unpinRepo: (path: string) => void;
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
-  materializeFile: (repoId: string, fileId: string, nativeSessionId: string) => Promise<{ written_bytes: number }>;
+  materializeFile: (repoId: string, selection: string | string[], nativeSessionId: string, jobId?: string) => Promise<{ written_bytes: number }>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -846,11 +846,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
-      materializeFile: async (repoId, fileId, nativeSessionId) => {
-        const job_id = nextJobId("hydrate");
+      materializeFile: async (repoId, selection, nativeSessionId, job_id = nextJobId("hydrate")) => {
         dispatch({ type: "job-start", job_id, op: "hydrate" });
         try {
-          const result = await rpc.materializeFile(repoId, fileId, job_id, nativeSessionId);
+          const result = await rpc.materializeFile(repoId, selection, job_id, nativeSessionId);
           dispatch({ type: "job-complete", job_id, status: 0 });
           return result;
         }

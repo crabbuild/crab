@@ -180,6 +180,22 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(sha(readFileSync(path.join(directories[0], "lfs.safetensors")))).toBe(source.payloads[0].sha256);
     expect(git(directories[0], ["show", ":lfs.safetensors"])).toEqual(git(source.repositories[0], ["show", ":lfs.safetensors"]));
     expect((await stats(0)).get).toBeGreaterThan(beforeAlpha.get);
+    const bulkPaths = ["lfs.safetensors", "weights.safetensors"];
+    for (const file of bulkPaths) writeFileSync(path.join(directories[0], file), git(directories[0], ["show", `:${file}`]));
+    const batchIndex = git(directories[0], ["ls-files", "--stage", "-z"]);
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
+    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    for (const file of bulkPaths) await page.getByRole("checkbox", { name: new RegExp(file) }).check();
+    await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
+    await expect(page.getByRole("main").getByText("Hydrated weights.safetensors", { exact: true })).toBeVisible();
+    for (const file of bulkPaths) expect(sha(readFileSync(path.join(directories[0], file)))).toBe(source.payloads[0].sha256);
+    expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(batchIndex);
+    expect(remote.requests.some(request => request.method === "files_materialize" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("ssh-bulk-hydration.png") });
+    // The later credential test must fetch content from storage again.
+    writeFileSync(path.join(directories[0], "weights.safetensors"), git(directories[0], ["show", ":weights.safetensors"]));
     const beta: RepoHandle = await page.evaluate(({ id, directory }) => window.crab.ssh.openAsRepo(id, directory), { id: saved.id, directory: directories[1] });
     await page.evaluate(({ handle, path }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path } })), { handle: beta, path: betaId });
     section = await settings(page);

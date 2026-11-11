@@ -301,7 +301,7 @@ export class StorageConnections {
     const queryGeneration = method === "file_query" ? session?.generation : undefined;
     const explicit = Object.hasOwn(payload, "storage_connection_id");
     const control = ["close", "file_close", "rpc/cancel"].includes(method);
-    const capture = method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
+    const capture = method === "files_materialize" || method.startsWith("file_") || method.startsWith("preview_") || method.startsWith("read_");
     const needsAuth = !control && (explicit || Boolean(key && this.cached?.bindings[key]) || capture || (method === "open_local" && this.available()) || method.startsWith("crab_") || method.startsWith("workflow_") ||
       ["open_url", "clone", "push", "hydrate", "dehydrate", "storage_summary", "storage_config_get", "storage_config_verify", "git_fetch", "git_fetch_branch", "git_fetch_all", "git_pull", "git_pull_branch", "git_pull_mode", "git_push_branch", "git_push_remote", "git_remote_add", "git_remote_set_url"].includes(method));
     // Local browsing and app startup do not depend on an unlocked cloud keyring.

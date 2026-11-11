@@ -386,6 +386,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       {/* Dataset inspection uses captured reads and does not require Crab storage. */}
       {tab === "datasets" ? (
         <DatasetsView repo={repo} onOpenFile={onOpenFile ?? (() => {})} />
+      ) : tab === "hydrate" ? (
+        <HydratePage repo={repo} />
       ) : crabStatus.status === "loading" ? (
         <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
           <Loader2 size={14} className="animate-spin" /> Checking repository status…
@@ -394,8 +396,6 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
         <CrabSetupWizard repoId={repo.repo_id} onComplete={crabStatus.refresh} />
       ) : tab === "storage-map" ? (
         <PointerMapPanel repo={repo} onSelectCommit={onSelectCommit} />
-      ) : tab === "hydrate" ? (
-        <HydratePage repo={repo} />
       ) : (
         <FilesPanel
           loading={loading}

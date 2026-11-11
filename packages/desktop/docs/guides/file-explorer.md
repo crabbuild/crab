@@ -57,10 +57,17 @@ Right-click a file or folder for context menu actions:
 
 ### Hydration Decorations
 
-Files tracked by Crab show their hydration state:
+Crab and Git LFS files show their working-tree state:
 - 🟢 **Hydrated** — full content available locally
 - 🔵 **Pointer** — only the pointer blob is present (content in cloud)
-- 🟡 **Partial** — some chunks cached, not fully hydrated
+- 🟡 **Partial** — working content differs in size from the expected file
+
+Use **Large Files → Hydrate** to select files by folder, type, pattern, profile,
+or individual path. Desktop verifies each selected Crab or Git LFS file before
+placing it on disk. For a missing file whose parent directory exists, it uses
+the resolved index pointer. Activity shows written bytes and how many files
+have reached disk. If the operation stops partway, the completed files stay
+available and you can retry the remaining selection.
 
 ### Live Refresh
 

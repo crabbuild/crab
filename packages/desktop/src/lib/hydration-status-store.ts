@@ -76,8 +76,12 @@ function subscribe(repoId: string, listener: () => void) {
       return;
     }
     if (event.method !== "progress/complete" || !event.params || typeof event.params !== "object") return;
-    const { op } = event.params as { op?: unknown };
+    const { op, repo_id } = event.params as { op?: unknown; repo_id?: unknown };
     if (op !== "hydrate" && op !== "dehydrate") return;
+    if (typeof repo_id === "string") {
+      refresh(repo_id);
+      return;
+    }
     // CLI completion frames have a job ID but no repository. Each subscribed
     // snapshot refreshes through its own repository route, including failures
     // that may have materialized only part of the requested inventory.

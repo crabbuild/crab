@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { call, packagedExecutable } from "./packaged-app";
@@ -16,7 +16,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
   const source = path.join(root, "source");
   mkdirSync(source);
   writeFileSync(path.join(root, "gitconfig"), "");
-  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env, CRAB_CACHE_DIR: path.join(root, "cache"), GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" };
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;
   delete env.GIT_INDEX_FILE;
@@ -53,7 +53,11 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     }
     git(["add", ".gitattributes", ".gitignore"]);
     git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Captured large-file fixture"]);
-    application = await electron.launch({ executablePath, env, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+    application = await electron.launch({
+      executablePath,
+      env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+      args: [`--user-data-dir=${path.join(root, "profile")}`],
+    });
     const page = await application.firstWindow();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
@@ -190,6 +194,69 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(2);
     await expect(page.getByText("Verified and materialized", { exact: true }).first()).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("materialized-lfs-and-crab.png") });
+
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+    writeFileSync(path.join(source, "staged.safetensors"), pointers.get("staged.safetensors")!);
+    rmSync(path.join(source, "lfs.safetensors"));
+    const tinyPath = "data[1].lfs";
+    const tinyContent = Buffer.alloc(128, 7);
+    writeFileSync(path.join(source, ".gitattributes"), "*.lfs filter=lfs -text\n", { flag: "a" });
+    writeFileSync(path.join(source, tinyPath), tinyContent);
+    git(["--literal-pathspecs", "add", "--", ".gitattributes", tinyPath]);
+    const tinyPointer = git(["show", `:${tinyPath}`]);
+    expect(tinyPointer.length).toBe(tinyContent.length);
+    writeFileSync(path.join(source, tinyPath), tinyPointer);
+    if (process.platform !== "win32") {
+      const oid = git(["rev-parse", ":lfs.safetensors"]).toString().trim();
+      git(["update-index", "--cacheinfo", `100755,${oid},lfs.safetensors`]);
+    }
+    const index = readFileSync(path.join(source, ".git", "index"));
+    const untouched = readFileSync(path.join(source, "large.safetensors"));
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await expect.poll(async () => {
+      const status = await call(page, "hydration_status", { repo_id: "large-files" });
+      return (status.items as { path: string; state: string }[]).find(item => item.path === tinyPath)?.state;
+    }).toBe("pointer");
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
+    await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
+    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    for (const file of ["staged.safetensors", "lfs.safetensors", tinyPath]) {
+      await page.getByRole("checkbox", { name: new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).check();
+    }
+    await expect.poll(() => page.evaluate(() => window.crab.getCapabilities("large-files"))).toMatchObject({ canHydrateSelection: true });
+    await expect(page.getByRole("button", { name: /^Hydrate 3 files/ })).toBeEnabled();
+    await page.getByRole("button", { name: /^Hydrate 3 files/ }).click();
+    await expect(page.getByRole("main").getByText("Hydrated staged.safetensors", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "staged.safetensors"))).toEqual(stagedContent);
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
+    if (process.platform !== "win32") expect(statSync(path.join(source, "lfs.safetensors")).mode & 0o100).toBe(0o100);
+    expect(readFileSync(path.join(source, "large.safetensors"))).toEqual(untouched);
+    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    await expect(page.getByText("Verified and materialized", { exact: true })).toHaveCount(3);
+    await expect(page.getByText("3 of 3 files materialized", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("bulk-crab-lfs-hydration.png") });
+
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+    writeFileSync(path.join(source, tinyPath), tinyPointer);
+    writeFileSync(path.join(source, "lfs.safetensors"), pointers.get("lfs.safetensors")!);
+    writeFileSync(payload, corrupt);
+    await page.getByRole("button", { name: "Refresh hydration status", exact: true }).click();
+    await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Hydrate lfs.safetensors" })).toBeVisible();
+    expect(readFileSync(path.join(source, tinyPath))).toEqual(tinyContent);
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(pointers.get("lfs.safetensors"));
+    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
+    await page.getByRole("button", { name: "Toggle Activity (background jobs)", exact: true }).click();
+    const partial = page.getByText("1 of 2 files materialized", { exact: true });
+    await expect(partial.locator("..").getByText("Materialization failed", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+    writeFileSync(payload, original);
+    await page.getByRole("button", { name: /^Hydrate 1 file/ }).click();
+    await expect(page.getByRole("main").getByText("Hydrated lfs.safetensors", { exact: true })).toBeVisible();
+    expect(readFileSync(path.join(source, "lfs.safetensors"))).toEqual(original);
+    expect(readFileSync(path.join(source, ".git", "index"))).toEqual(index);
   } finally {
     await application?.close();
     rmSync(root, { recursive: true, force: true });

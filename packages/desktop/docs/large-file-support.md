@@ -15,7 +15,7 @@ record historical evidence rather than separate work queues.
 | Bounded reads | Capture a source/revision, read bounded ranges with cancellation and integrity checks, and reject mutation or unavailable content. Cover working tree, index, committed history, and remote snapshots. | Owned native sessions, bounded complete reads and structured errors have focused native/S3-compatible and packaged macOS proof. Packaged local/staged media seeking and close are qualified. Cold 2 GiB SDK LFS ranges and warm proof reuse have dedicated RustFS proof; packaged cold-read progress/interruption and other profiles remain open. |
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
-| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file Crab/LFS materialization has packaged macOS and real lazy-clone proof. Bulk LFS operations, extensions/profiles and the complete lifecycle remain open. |
+| Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. LFS bulk dehydrate, creation of missing directory trees, extensions/profiles and the complete lifecycle remain open. |
 | Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file materialization has repository-owned native work and global Activity state with actual written bytes. Packaged macOS SSH progress and user cancellation preserve pointers and drain temporary files. Cold-transfer interruption, network counters, durable/restart ownership and component-owned publishing remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Track, stage, commit, push, fetch/pull, lazy clone and bulk hydrate/dehydrate from Desktop. Prove exact bytes and identities, small-edit Crab deduplication, and preservation of unrelated index entries. Repeat after editing, renaming or removing a file. Qualify the local baseline first, then the equivalent SSH operations. |
+| P0 | Complete the Crab and LFS lifecycle | Existing provider mutations, native attribute routing, captured reads and [materialization](../agent/src/repository/content/materialize.rs). | Exact mixed bulk hydration now has local and SSH proof. Finish verified dehydrate and run track, stage, commit, push, fetch/pull and lazy clone from Desktop. Prove exact bytes and identities, small-edit Crab deduplication, and preservation of unrelated index entries. Repeat after editing, renaming or removing a file. |
 | P0 | Make transfers and storage recoverable | Repository-owned operations and verified read/cache owners. | Interrupt a cold transfer, close its view, disconnect or restart, and retry from Activity. Prove acknowledged cancellation, cleanup, durable outcomes and distinct logical/network counters. Enforce storage budgets around active reads and retained offline content. Move remaining component-owned publishing to the repository operation owner. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Cover removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -44,6 +44,23 @@ or hide unsupported actions. Each row closes with user action → real side effe
 multi-GiB bounds, small-edit dedup, cold interruption/restart, corrupt/missing
 objects and the cross-OS/provider matrix remain release gates for the whole
 feature; a successful preview smoke does not substitute for them.
+
+## Mixed bulk hydration checkpoint
+
+Large Files → Hydrate captures the exact selected paths for one repository
+operation. Each file uses the same verified writer as File details. Missing
+files with an existing parent use the resolved index pointer, preserve the Git
+executable bit and use no-clobber publication. Activity shows each file that
+reached disk and reports a terminal error if a later file fails. The selection
+survives a status refresh so the next attempt can skip files already hydrated.
+
+The prior packaged inventory classified a 128-byte LFS pointer as hydrated when
+its logical size was also 128 bytes. The new inventory parses the bounded
+working bytes before comparing sizes. The native and packaged fixtures exercise
+literal bracket characters in paths, mixed Crab/LFS content, restoration of a
+missing LFS file, unchanged index entries and an untouched out-of-scope pointer.
+A damaged LFS object stops the batch after an earlier file has reached disk.
+Activity retains the published count, and the failing pointer stays intact.
 
 ## Captured database query checkpoint
 

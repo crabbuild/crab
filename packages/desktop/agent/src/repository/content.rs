@@ -56,6 +56,10 @@ impl ReadScope {
         &self.stop
     }
 
+    pub(crate) fn child(&self) -> Self {
+        Self::new(self.stop.child_token())
+    }
+
     pub(crate) async fn cancelled(&self) -> AgentError {
         self.stop.cancelled().await;
         self.record(AgentError::OpCancelled {
@@ -373,7 +377,7 @@ impl FileSource {
     pub(super) fn query(&self) -> Self {
         Self {
             source: self.source.clone(),
-            scope: ReadScope::new(self.scope.stop.child_token()),
+            scope: self.scope.child(),
             size: self.size,
         }
     }

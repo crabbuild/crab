@@ -543,6 +543,8 @@ export interface ProgressTransfer {
   repo_id: string;
   written_bytes: number;
   total_bytes: number;
+  files_published?: number | null;
+  files_total?: number | null;
 }
 
 /** Incremental chunk from a streaming read handler. */
@@ -1773,8 +1775,10 @@ export const rpc = {
 
   closeFile: (repo_id: string, file_id: string, native_session_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id, native_session_id }),
 
-  materializeFile: (repo_id: string, file_id: string, op_id: string, native_session_id: string) =>
-    call<{ written_bytes: number }>("file_materialize", { repo_id, file_id, op_id, native_session_id }),
+  materializeFile: (repo_id: string, selection: string | string[], op_id: string, native_session_id: string) =>
+    typeof selection === "string"
+      ? call<{ written_bytes: number }>("file_materialize", { repo_id, file_id: selection, op_id, native_session_id })
+      : call<{ written_bytes: number }>("files_materialize", { repo_id, paths: selection, op_id, native_session_id }),
 
   cancelOperation: (repo_id: string, op_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id }),
 

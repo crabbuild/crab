@@ -121,19 +121,7 @@ impl FileSource {
 }
 
 fn git_file(entries: &[u8], path: &str, index: bool) -> Result<Option<String>> {
-    let matching = entries
-        .split_inclusive(|byte| *byte == 0)
-        .filter(|record| {
-            record
-                .splitn(2, |byte| *byte == b'\t')
-                .nth(1)
-                .and_then(|name| name.strip_suffix(&[0]))
-                == Some(path.as_bytes())
-        })
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    let (mode, oid) = command::file_entry(&matching, index)?;
+    let (mode, oid) = command::file_entry_at(entries, path, index)?;
     if mode
         .as_deref()
         .is_some_and(|mode| !matches!(mode, "100644" | "100755"))

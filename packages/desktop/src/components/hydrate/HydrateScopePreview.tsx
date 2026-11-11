@@ -85,7 +85,7 @@ function PreviewCell({
         </span>
         <span className="font-mono text-gx-muted">{formatBytes(resolved.bytes)}</span>
         {resolved.skipped.length > 0 && (
-          <span className="text-[10px] text-gx-muted" title={`${resolved.skipped.length} already in target state`}>
+          <span className="text-[10px] text-gx-muted">
             ({resolved.skipped.length} skipped)
           </span>
         )}
@@ -127,7 +127,7 @@ function FileList({
           )}
           {skipped.length > 0 && (
             <div className="mt-2 border-t border-gx-border pt-1.5 text-[10px] text-gx-muted">
-              {skipped.length.toLocaleString()} already in target state, will be skipped.
+              {skipped.length.toLocaleString()} outside the eligible file states.
             </div>
           )}
         </>

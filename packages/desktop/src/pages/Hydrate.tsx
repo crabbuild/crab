@@ -21,11 +21,13 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmVerb, setConfirmVerb] = useState<HydrateVerb | null>(null);
-  const { startJob } = useStore();
+  const { startJob, materializeFile } = useStore();
   const lines = useJobLines(jobId);
 
-  const enabled = !!repo.path;
-  const { byPath, summary } = useHydrationStatus(repo.repo_id, enabled);
+  const enabled = !!repo.path || repo.is_remote;
+  const canHydrate = !!repo.native_session_id && !!repo.capabilities?.canHydrateSelection;
+  const canDehydrate = !!repo.path && !repo.is_remote && !!repo.capabilities?.canHydrate;
+  const { byPath, summary, loading: loadingStatus, error: statusError } = useHydrationStatus(repo.repo_id, enabled);
   const tracked = useTrackedPatterns(repo, enabled);
 
   const entries = useMemo(() => Array.from(byPath.values()), [byPath]);
@@ -44,20 +46,23 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   const activePreview = confirmVerb === "dehydrate" ? resolvedDehydrate : resolvedHydrate;
 
   async function runNow(verb: HydrateVerb) {
-    if (!repo.path) return;
+    if (verb === "hydrate" ? !canHydrate : !canDehydrate) return;
     const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
     if (resolved.matched.length === 0) {
       setConfirmVerb(null);
       return;
     }
     const id = nextJobId(verb);
-    startJob(id, verb);
     setJobId(id);
     setBusy(true);
     setError(null);
     try {
-      if (verb === "hydrate") await rpc.hydrate(repo.path, resolved.patterns, id);
-      else await rpc.dehydrate(repo.path, resolved.patterns, id);
+      if (verb === "hydrate" && repo.native_session_id) {
+        await materializeFile(repo.repo_id, resolved.matched.map(entry => entry.path), repo.native_session_id, id);
+      } else if (verb === "dehydrate" && repo.path) {
+        startJob(id, verb);
+        await rpc.dehydrate(repo.path, resolved.patterns, id);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -86,10 +91,10 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     }
   }
 
-  if (!repo.path) {
+  if (!enabled) {
     return (
       <div className="p-4 text-sm text-gx-muted">
-        Hydrate / dehydrate are only available for local repositories.
+        Hydration requires a repository with a working tree.
       </div>
     );
   }
@@ -98,7 +103,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   // crab. Without this the user sees a useless picker with all-zero
   // counts and disabled buttons.
   const noTrackedFilesYet =
-    entries.length === 0 && tracked.patterns.length === 0 && !tracked.loading;
+    entries.length === 0 && tracked.patterns.length === 0 && !tracked.loading && !loadingStatus && !statusError;
 
   return (
     <div className="flex h-full flex-col">
@@ -114,7 +119,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
 
         {noTrackedFilesYet ? (
           <div className="rounded border border-gx-border bg-gx-bg-sub p-4 text-xs text-gx-muted">
-            <p className="mb-1 text-gx-text">No crab-tracked files in this repo yet.</p>
+            <p className="mb-1 text-gx-text">No Crab or Git LFS files in this repository yet.</p>
             <p>
               Track large files via the <strong className="text-gx-text">Track &amp; Stage</strong>{" "}
               tab or by running <code className="kbd">crab track '*.bin'</code>. They'll show up
@@ -140,7 +145,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               <button
                 type="button"
                 className="btn btn-primary text-xs"
-                disabled={busy || resolvedHydrate.matched.length === 0}
+                disabled={busy || !canHydrate || resolvedHydrate.matched.length === 0}
                 onClick={() => requestRun("hydrate")}
                 title={
                   resolvedHydrate.matched.length === 0
@@ -154,12 +159,12 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               <button
                 type="button"
                 className="btn text-xs"
-                disabled={busy || resolvedDehydrate.matched.length === 0}
+                disabled={busy || !canDehydrate || resolvedDehydrate.matched.length === 0}
                 onClick={() => requestRun("dehydrate")}
                 title={
                   resolvedDehydrate.matched.length === 0
                     ? "Nothing in scope is currently hydrated"
-                    : `Dehydrate ${resolvedDehydrate.matched.length} file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
+                    : `Dehydrate ${resolvedDehydrate.matched.length} Crab file${resolvedDehydrate.matched.length === 1 ? "" : "s"}`
                 }
               >
                 <Upload size={12} />
@@ -169,9 +174,9 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
           </>
         )}
 
-        {error && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
-            {error}
+        {(error || statusError) && (
+          <div role="alert" className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+            {error || statusError}
           </div>
         )}
       </div>

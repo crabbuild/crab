@@ -98,6 +98,26 @@ pub(super) fn file_entry(bytes: &[u8], index: bool) -> Result<(Option<String>, O
     ))
 }
 
+pub(super) fn file_entry_at(
+    entries: &[u8],
+    path: &str,
+    index: bool,
+) -> Result<(Option<String>, Option<String>)> {
+    let matching = entries
+        .split_inclusive(|byte| *byte == 0)
+        .filter(|record| {
+            record
+                .splitn(2, |byte| *byte == b'\t')
+                .nth(1)
+                .and_then(|name| name.strip_suffix(&[0]))
+                == Some(path.as_bytes())
+        })
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    file_entry(&matching, index)
+}
+
 pub(super) async fn blob(
     root: &Path,
     oid: &str,

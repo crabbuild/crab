@@ -9,7 +9,10 @@ use crate::{AgentError, Result};
 const MAX_OPEN_FILES: usize = 128;
 
 #[derive(Clone, Default)]
-pub(crate) struct Files(Arc<Mutex<Registry>>);
+pub(crate) struct Files {
+    registry: Arc<Mutex<Registry>>,
+    pub(crate) materializing: Arc<Mutex<()>>,
+}
 
 #[derive(Default)]
 struct Registry {
@@ -24,7 +27,7 @@ pub(crate) struct OpenedFile {
 
 impl Files {
     pub(crate) async fn insert(&self, id: String, source: FileSource) -> Result<Arc<OpenedFile>> {
-        let mut registry = self.0.lock().await;
+        let mut registry = self.registry.lock().await;
         if registry.closed || registry.files.len() >= MAX_OPEN_FILES {
             let message = if registry.closed {
                 "repository file reads are closed"
@@ -44,7 +47,7 @@ impl Files {
     }
 
     pub(crate) async fn get(&self, id: &str) -> Result<Arc<OpenedFile>> {
-        let registry = self.0.lock().await;
+        let registry = self.registry.lock().await;
         if registry.closed {
             return Err(AgentError::Other("repository file reads are closed".into()));
         }
@@ -56,17 +59,18 @@ impl Files {
     }
 
     pub(crate) async fn remove(&self, id: &str) -> Result<()> {
-        let file = self.0.lock().await.files.get(id).cloned();
+        let file = self.registry.lock().await.files.get(id).cloned();
         if let Some(file) = file {
             file.close().await?;
-            self.0.lock().await.files.remove(id);
+            self.registry.lock().await.files.remove(id);
         }
         Ok(())
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
+        let _materializing = self.materializing.lock().await;
         let ids = {
-            let mut registry = self.0.lock().await;
+            let mut registry = self.registry.lock().await;
             registry.closed = true;
             registry.files.keys().cloned().collect::<Vec<_>>()
         };
