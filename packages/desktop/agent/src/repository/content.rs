@@ -11,8 +11,10 @@ pub(crate) mod diff;
 mod materialize;
 mod publication;
 mod restore;
+mod version;
 mod workspace;
 pub(crate) use restore::Restoration;
+pub(crate) use version::FileVersion;
 mod sqlite;
 pub(crate) use materialize::Dehydration;
 use materialize::MaterializationTarget;
@@ -145,6 +147,15 @@ enum Source {
 }
 
 impl FileSource {
+    pub(crate) fn version(&self) -> Result<FileVersion> {
+        match self.source.as_ref() {
+            Source::Pointer { identity, .. } => Ok(FileVersion::pointer(*identity, self.size)),
+            _ => Err(AgentError::Other(
+                "Transfer source is not a captured pointer".into(),
+            )),
+        }
+    }
+
     pub(crate) async fn capture(
         repo: &BrowseSession,
         path: &str,

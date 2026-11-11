@@ -80,6 +80,13 @@ jobs and every active job. A history-storage error blocks new transfers and offe
 **Reload Activity** after writable storage is restored. Native chunk resume and
 network-byte accounting remain open; bytes written are not a network measurement.
 
+Expand a transfer in **Activity** to inspect **Captured source versions**. Each
+record shows the literal path, content hash and logical size; ordinary Git
+restoration also records the index mode. These records survive restart and show
+what that attempt selected. They do not prove publication. An interrupted or
+older attempt may have no recorded source for a path; check the working file.
+A retry captures current versions in its own record and preserves the original.
+
 Hydration, dehydration and index restoration record ownership of private scratch
 files before writing payload bytes. After interruption, the next publication
 recovers matching recorded scratch. Recovery preserves foreign or replaced files

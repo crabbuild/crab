@@ -421,6 +421,11 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
 
   async function requestAgent(method: string, params: unknown): Promise<unknown> {
     if (method === "activity_file_transfers") return fileTransfers?.snapshot() ?? { version: 0, jobs: [], error: activityError };
+    if (method === "activity_file_sources") {
+      if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
+      const source = params as { job_id: string; start: number; limit: number };
+      return fileTransfers.sources(source.job_id, source.start, source.limit);
+    }
     if (method === "activity_file_transfers_recover") {
       if (!fileTransfers) initializeTransferActivity();
       if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
