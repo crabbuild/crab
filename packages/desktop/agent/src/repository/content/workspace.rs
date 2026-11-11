@@ -522,9 +522,14 @@ mod tests {
         let path = workspace.record.path.clone();
         let moved = root.join("moved");
         let name = file.path().file_name().unwrap().to_owned();
+        // Windows prevents moving a directory while its payload writer is open.
+        // Release that OS protection so this case reaches journal-owned cleanup.
+        #[cfg(windows)]
+        drop(file);
         fs::rename(&path, &moved).unwrap();
         fs::create_dir(&path).unwrap();
         fs::write(path.join("foreign"), b"retain foreign content").unwrap();
+        #[cfg(not(windows))]
         drop(file);
         assert!(workspace.finish(Ok(0)).await.is_err());
         assert_eq!(
