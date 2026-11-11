@@ -79,6 +79,7 @@ if (testing) {
   await run("cargo", ["test", "--release", "--locked", "-p", "crab-cache", "--lib", "--features", "local-cache", "namespace_"], env);
   await run("cargo", ["test", "--release", "-p", "crab-workflow", "--locked", "--lib"], env);
   await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity"], env);
+  await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::local_execution_does_not_resolve_the_repository_remote"], env);
   await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked"], env);
   for (const filter of ["native_crab_and_lfs_pointer_previews_use_staging_without_hydrating", "native_crab_comparison_", "materialization_", "restoration_", "native_cleanup_reports_usage_and_preserves_busy_and_retained_state"]) {
     await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked", filter, "--", "--ignored", "--test-threads=1"], env);
