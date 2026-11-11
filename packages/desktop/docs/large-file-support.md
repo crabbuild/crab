@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. Next: qualify SDK on-disk cache allocation/publication interruption and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. An intermittent final-file bulk hydration stall reproduced in the rebased package, then passed three unchanged diagnostic retries; its cause remains open. Exercise missing/corrupt objects and remaining component-owned publishing. |
+| P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. An actual pre-publication SDK cache-file crash now reproduces a retained 262,160-byte temporary after exact-content retry and Settings cleanup. Next: give fills durable exact identity and safe recovery, then qualify allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. An intermittent final-file bulk hydration stall reproduced in the rebased package, then passed three unchanged diagnostic retries; its cause remains open. Exercise missing/corrupt objects and remaining component-owned publishing. |
 | P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | Set and enforce one disk-retention budget across CLI and SDK namespaces, retain chosen offline content, and evict only unpinned verified cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Measure SDK namespace retention and actual disk reclamation. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | The Intel two-MiB transport deadline is resolved in focused CI without changing its deadline; its matching runtime download/deployment/startup case passed on the earlier head. Complete the final-head platform matrix. Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -114,6 +114,26 @@ catalog/query state and reopens byte-identical content with no origin writes.
 Cache coordination markers use private permissions so cleanup does not make
 subsequent usage inspection report its own marker unsafe. One enforced retention
 budget and cache-file interruption remain open in the priority table.
+
+### SDK on-disk fill crash gap
+
+A separate packaged macOS probe now pauses the actual native decoded-range fill
+immediately before `renameat`, after its private temporary contains 262,160 bytes.
+It verifies the sidecar's parent, kills that owned process, reopens through the
+UI and checks the complete source SHA-256. Retry succeeds with zero origin
+writes. Settings cleanup removes other eligible payloads but retains the
+unpublished temporary: 262,160 logical bytes and 520 allocated 512-byte blocks in
+this fixture. This is a failing recovery probe, not completion proof.
+
+The catalog reserves the final key, while the filesystem owner names an
+unpublished temporary. A normal Drop removes that temporary; process death skips
+Drop. Maintenance clears stale owner rows but does not establish temporary-file
+identity or deletion authority. Recovery must retain durable, exact fill ownership
+before writing payload bytes and conditionally reclaim that identity after its
+owner exits. Live fills, replaced roots/files and unknown data must survive.
+Allocation-before-record and power-loss qualification remain separate gaps.
+The fault library and diagnostic test remain external qualification artifacts;
+no production fault hook, cache-name deletion rule or new setting is added.
 
 ### Intel SFTP qualification boundary
 
