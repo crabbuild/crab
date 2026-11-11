@@ -8,6 +8,7 @@ const repository = { repository: "/work/repository", storageConnectionId: "saved
 const params = { repo_id: "logical", op_id: "attempt", native_session_id: "native:captured", paths: ["model[1].bin", "model1.bin"] };
 function setup(db = new Database(":memory:")) {
   if (!databases.includes(db)) databases.push(db);
+  db.pragma("foreign_keys = ON");
   const close = vi.fn().mockResolvedValue({}), cancel = vi.fn().mockResolvedValue({}), changed = vi.fn();
   const jobs = new FileTransfers(db, close, cancel, changed, message => message.replaceAll("FIXTURE_SECRET", "[redacted]"));
   return { db, jobs, close, cancel, changed };
@@ -188,13 +189,17 @@ describe("durable native file-transfer Activity", () => {
   });
 
   it("bounds finished history while retaining every active admission", async () => {
-    const { jobs } = setup(); const reply = deferred();
+    const { db, jobs } = setup(); const reply = deferred();
     const pending = jobs.run("files_materialize", { ...params, op_id: "still-running" }, repository, () => reply.promise);
-    for (let index = 0; index < 205; index++) await jobs.run("files_materialize", { ...params, op_id: `finished-${index}` }, repository, async () => ({ written_bytes: 8192 }));
+    for (let index = 0; index < 205; index++) await jobs.run("files_materialize", { ...params, op_id: `finished-${index}` }, repository, async () => {
+      jobs.observe("progress/source", { job_id: `finished-${index}`, position: 0, source: { kind: "crab", hash: "a".repeat(64), size: 8192, mode: null } });
+      return { written_bytes: 8192 };
+    });
     expect(jobs.snapshot().jobs).toHaveLength(201);
     expect(jobs.snapshot().jobs.find(job => job.job_id === "still-running")?.status).toBe("running");
     reply.resolve({ written_bytes: 8192 }); await pending;
     expect(jobs.snapshot().jobs).toHaveLength(200);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM file_transfer_sources WHERE job_id NOT IN (SELECT job_id FROM file_transfer_jobs)").get()).toEqual({ count: 0 });
   });
 
   it("rejects corrupt history without deleting it or silently resetting outcomes", async () => {
@@ -215,6 +220,87 @@ describe("durable native file-transfer Activity", () => {
     await expect(jobs.run("files_materialize", { ...params, op_id: "sibling" }, repository, vi.fn())).rejects.toThrow("Activity could not save");
     gate.resolve(undefined); await outcome;
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { kind: "crab", hash: "a".repeat(64), size: 8192, mode: null },
+    { kind: "lfs", hash: "b".repeat(64), size: 8192, mode: null },
+    { kind: "git", hash: "c".repeat(40), size: 4096, mode: "100755" },
+  ])("retains immutable $kind sources across restart and fresh retries", async source => {
+    const { db, jobs } = setup();
+    await jobs.run("files_materialize", params, repository, async () => {
+      jobs.observe("progress/source", { job_id: "unowned", position: 0, source });
+      jobs.observe("progress/source", { job_id: "attempt", repo_id: "sibling", position: 0, source });
+      expect(jobs.sources("attempt", 0, 50)).toEqual([]);
+      jobs.observe("progress/source", { job_id: "attempt", repo_id: "logical", position: 0, source });
+      jobs.observe("progress/source", { job_id: "attempt", position: 0, source });
+      return { written_bytes: source.size };
+    });
+    const restored = setup(db).jobs;
+    const original = [{ ...source, position: 0, path: "model[1].bin" }];
+    expect(restored.sources("attempt", 0, 50)).toEqual(original);
+    await restored.run("files_materialize", { ...params, op_id: "retry" }, repository, async () => {
+      restored.observe("progress/source", { job_id: "retry", position: 0, source: { ...source, hash: "d".repeat(source.hash.length) } });
+      return { written_bytes: source.size };
+    });
+    expect(restored.sources("attempt", 0, 50)).toEqual(original);
+    expect(restored.sources("retry", 0, 50)[0].hash).toBe("d".repeat(source.hash.length));
+  });
+
+  it("cancels on a source change instead of overwriting captured history", async () => {
+    const { jobs, cancel } = setup();
+    const source = { kind: "crab", hash: "a".repeat(64), size: 8192, mode: null };
+    await expect(jobs.run("files_materialize", params, repository, async () => {
+      jobs.observe("progress/source", { job_id: "attempt", position: 0, source });
+      jobs.observe("progress/source", { job_id: "attempt", position: 0, source: { ...source, hash: "b".repeat(64) } });
+      throw Object.assign(new Error("Cancelled"), { code: OP_CANCELLED_RPC_CODE });
+    })).rejects.toThrow("Cancelled");
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("logical", "attempt", "native:captured");
+    expect(jobs.sources("attempt", 0, 50)).toEqual([{ ...source, position: 0, path: "model[1].bin" }]);
+  });
+
+  it("retains known sources when SQLite fails and commits them on Activity reload", async () => {
+    const { db, jobs, cancel } = setup();
+    const source = { kind: "lfs", hash: "a".repeat(64), size: 8192, mode: null };
+    await expect(jobs.run("files_materialize", params, repository, async () => {
+      db.exec("CREATE TRIGGER deny_source BEFORE INSERT ON file_transfer_sources BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END");
+      jobs.observe("progress/source", { job_id: "attempt", position: 1, source });
+      throw Object.assign(new Error("Cancelled"), { code: OP_CANCELLED_RPC_CODE });
+    })).rejects.toThrow("Cancelled");
+    expect(cancel).toHaveBeenCalledOnce();
+    const known = [{ ...source, position: 1, path: "model1.bin" }];
+    expect(jobs.sources("attempt", 0, 50)).toEqual(known);
+    db.exec("DROP TRIGGER deny_source"); jobs.recover();
+    expect(setup(db).jobs.sources("attempt", 0, 50)).toEqual(known);
+  });
+
+  it("pages source records by literal selection position and rejects corrupt metadata", async () => {
+    const { db, jobs } = setup();
+    const source = { kind: "git", hash: "a".repeat(64), size: 8192, mode: "100644" };
+    const paths = Array.from({ length: 101 }, (_, index) => `model[${index}].bin`);
+    await jobs.run("files_restore", { ...params, paths }, repository, async () => {
+      for (let position = 0; position < paths.length; position++) jobs.observe("progress/source", { job_id: "attempt", position, source });
+      return { written_bytes: 8192 };
+    });
+    expect(jobs.sources("attempt", 50, 50).map(source => source.path)).toEqual(paths.slice(50, 100));
+    expect(jobs.sources("attempt", 100, 50)).toEqual([{ ...source, position: 100, path: paths[100] }]);
+    for (const [start, limit] of [[-1, 50], [0, 51], [0, 0], [0.5, 1]]) expect(() => jobs.sources("attempt", start, limit)).toThrow("Source pages");
+    db.prepare("UPDATE file_transfer_sources SET path=? WHERE position=100").run("unselected.bin");
+    expect(() => jobs.sources("attempt", 100, 50)).toThrow("invalid captured source");
+  });
+
+  it.each([
+    { kind: "lfs", hash: "x".repeat(64), size: 8192, mode: null },
+    { kind: "git", hash: "a".repeat(40), size: 8192, mode: "120000" },
+    { kind: "crab", hash: "a".repeat(64), size: -1, mode: null },
+  ])("cancels admitted work on malformed source metadata: $kind/$mode/$size", async source => {
+    const { jobs, cancel } = setup();
+    await expect(jobs.run("files_restore", params, repository, async () => {
+      jobs.observe("progress/source", { job_id: "attempt", position: 0, source });
+      throw Object.assign(new Error("Cancelled"), { code: OP_CANCELLED_RPC_CODE });
+    })).rejects.toThrow("Cancelled");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(jobs.sources("attempt", 0, 50)).toEqual([]);
   });
 
 });

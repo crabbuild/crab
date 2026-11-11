@@ -1,5 +1,5 @@
 use super::*;
-use crate::repository::{Dehydration, FileSource, ReadScope, Restoration};
+use crate::repository::{Dehydration, FileSource, FileVersion, ReadScope, Restoration};
 
 #[derive(Deserialize)]
 pub(super) struct FileMaterializeParams {
@@ -25,6 +25,8 @@ pub(super) async fn one(
         let file = repo.files.get(&p.file.file_id).await?;
         let (_guard, source) = file.materialization(scope.clone()).await?;
         let total_bytes = source.size;
+        let version = source.version()?;
+        job.source(0, version).await?;
         let result = source
             .materialize(job.reporter(0, total_bytes, Some((0, 1))))
             .await;
@@ -93,6 +95,14 @@ enum SelectedFile {
 }
 
 impl SelectedFile {
+    fn version(&self) -> Result<FileVersion> {
+        match self {
+            Self::Hydrate(source) => source.version(),
+            Self::Dehydrate(source) => source.version(),
+            Self::Restore(source) => source.version(),
+        }
+    }
+
     async fn capture(
         repo: &BrowseSession,
         path: &str,
@@ -172,11 +182,13 @@ pub(super) async fn many(
         .await?;
         let mut captures = Vec::new();
         let mut total = 0u64;
-        for path in paths {
+        for (position, path) in paths.into_iter().enumerate() {
             scope.check()?;
             let source = SelectedFile::capture(&repo, path, direction, scope.child())
                 .await
                 .map_err(|error| direction.file_error(path, error))?;
+            let version = source.version()?;
+            job.source(position, version).await?;
             total = total.saturating_add(source.work_bytes());
             captures.push((path, source));
         }
@@ -243,6 +255,14 @@ struct Materialization<'a> {
 }
 
 impl Materialization<'_> {
+    async fn source(&self, position: usize, version: FileVersion) -> Result<()> {
+        let source = json!({
+            "job_id": self.op_id, "repo_id": self.repo_id, "position": position,
+            "source": version,
+        });
+        crate::notify(&self.out, "progress/source", source).await
+    }
+
     fn reporter(
         &self,
         before: u64,

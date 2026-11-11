@@ -23,6 +23,18 @@ export interface FileTransferIntent {
   paths: string[];
 }
 
+interface FileTransferVersion {
+  kind: "git" | "crab" | "lfs";
+  hash: string;
+  size: number;
+  mode: string | null;
+}
+
+export interface FileTransferSource extends FileTransferVersion {
+  position: number;
+  path: string;
+}
+
 export interface FileTransferJob {
   job_id: string;
   repoId: string;
@@ -71,6 +83,24 @@ function fields(value: unknown): Params | null {
 
 function number(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 0; }
 
+function sourceVersion(value: unknown): FileTransferVersion | null {
+  const source = fields(value);
+  if (!source || !number(source.size) || typeof source.hash !== "string") return null;
+  const kind = source.kind;
+  if (kind === "git") {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(source.hash) || typeof source.mode !== "string" || !["100644", "100755"].includes(source.mode)) return null;
+  } else if ((kind !== "crab" && kind !== "lfs") || !/^[0-9a-f]{64}$/.test(source.hash) || source.mode !== null) return null;
+  return { kind, hash: source.hash, size: source.size, mode: kind === "git" ? String(source.mode) : null };
+}
+
+class SourceChanged extends Error {
+  constructor() { super("A transfer cannot replace an already captured source. Start a new attempt."); }
+}
+
+function sameSource(left: FileTransferSource, right: FileTransferSource): boolean {
+  return left.path === right.path && left.kind === right.kind && left.hash === right.hash && left.size === right.size && left.mode === right.mode;
+}
+
 function cancelledBeforeAdmission(): Error {
   return Object.assign(new Error("File transfer cancelled before native admission"), { code: OP_CANCELLED_RPC_CODE, data: { kind: "op_cancelled" } });
 }
@@ -79,6 +109,7 @@ function cancelledBeforeAdmission(): Error {
 export class FileTransfers {
   private jobs = new Map<string, FileTransferJob>();
   private captures = new Map<string, { repoId: string; session: string; path: string; fileId: string }>();
+  private pendingSources = new Map<string, Map<number, FileTransferSource>>();
   private active = new Map<string, { repoId: string; session: string; admitted: boolean; sent: boolean; cancelAttempted: boolean; cancelRequested: boolean; cancelBeforeSend: () => void; cancellation?: Promise<unknown> }>();
   private owner: FileTransferOwner;
   private version = 0;
@@ -96,6 +127,12 @@ export class FileTransfers {
     db.exec(`CREATE TABLE IF NOT EXISTS file_transfer_jobs (
       job_id TEXT PRIMARY KEY, intent TEXT NOT NULL, state TEXT NOT NULL,
       status TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS file_transfer_sources (
+      job_id TEXT NOT NULL REFERENCES file_transfer_jobs(job_id) ON DELETE CASCADE,
+      position INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+      hash TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT,
+      PRIMARY KEY(job_id,position)
     )`);
     const rows = db.prepare("SELECT job_id, intent, state FROM file_transfer_jobs ORDER BY updated_at DESC").all() as Array<{ job_id: string; intent: string; state: string }>;
     db.transaction(() => {
@@ -123,6 +160,19 @@ export class FileTransfers {
 
   snapshot(): FileTransferActivity {
     return { version: this.version, jobs: [...this.jobs.values()].map(job => structuredClone(job)), error: this.failure };
+  }
+
+  sources(jobId: string, start: number, limit: number): FileTransferSource[] {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error("This transfer is no longer in Activity history.");
+    if (!number(start) || !number(limit) || !number(start + limit) || limit < 1 || limit > 50) throw new Error("Source pages require a nonnegative start and 1–50 entries.");
+    const rows = this.db.prepare("SELECT position,path,kind,hash,size,mode FROM file_transfer_sources WHERE job_id=? AND position>=? AND position<? ORDER BY position").all(jobId, start, start + limit) as FileTransferSource[];
+    const sources = new Map(rows.map(row => {
+      if (!number(row.position) || job.intent.paths[row.position] !== row.path || !sourceVersion(row)) throw new Error("Activity contains an invalid captured source.");
+      return [row.position, row];
+    }));
+    for (const [position, source] of this.pendingSources.get(jobId) ?? []) if (position >= start && position < start + limit) sources.set(position, source);
+    return [...sources.values()].sort((a, b) => a.position - b.position);
   }
 
   capture(repoId: string, session: string, path: string, result: unknown): void {
@@ -216,7 +266,35 @@ export class FileTransfers {
     const current = this.jobs.get(jobId)!;
     const active = this.active.get(jobId)!;
     if (params.repo_id !== undefined && params.repo_id !== active.repoId) return;
-    if (method === "progress/transfer" && current.status === "running") {
+    if (method === "progress/source" && current.status === "running") {
+      active.admitted = true; active.sent = true;
+      const version = sourceVersion(params.source);
+      const position = params.position;
+      if (!version || !number(position) || position >= current.intent.paths.length) {
+        this.failedPersistence(new Error("Native transfer supplied an invalid captured source."));
+        return;
+      }
+      const source = { ...version, position, path: current.intent.paths[position] };
+      const previous = this.pendingSources.get(jobId)?.get(position);
+      if (previous && !sameSource(previous, source)) {
+        this.failedPersistence(new SourceChanged());
+        return;
+      }
+      try {
+        this.recordSource(jobId, source);
+        const pending = this.pendingSources.get(jobId);
+        pending?.delete(position);
+        if (!pending?.size) this.pendingSources.delete(jobId);
+      } catch (error) {
+        if (!(error instanceof SourceChanged)) {
+          let pending = this.pendingSources.get(jobId);
+          if (!pending) { pending = new Map(); this.pendingSources.set(jobId, pending); }
+          pending.set(position, source);
+        }
+        this.failedPersistence(error);
+      }
+      if (this.failure || active.cancelRequested) this.cancelUnrecorded();
+    } else if (method === "progress/transfer" && current.status === "running") {
       if (!number(params.written_bytes) || !(params.total_bytes === null || number(params.total_bytes))) return;
       const progress: ProgressTransfer = {
         op: current.op, job_id: jobId, repo_id: active.repoId,
@@ -267,7 +345,12 @@ export class FileTransfers {
   }
 
   recover(): FileTransferActivity {
-    this.db.transaction(() => { for (const job of this.jobs.values()) this.insert(job, true); this.prune(); })();
+    this.db.transaction(() => {
+      for (const job of this.jobs.values()) this.insert(job, true);
+      for (const [jobId, sources] of this.pendingSources) for (const source of sources.values()) this.recordSource(jobId, source);
+      this.prune();
+    })();
+    this.pendingSources.clear();
     this.failure = null;
     this.changed({ version: ++this.version, error: null });
     return this.snapshot();
@@ -299,13 +382,24 @@ export class FileTransfers {
     this.db.prepare("UPDATE file_transfer_jobs SET state=?,status=?,updated_at=? WHERE job_id=?").run(this.state(job), job.status, job.updatedAt, job.job_id);
   }
 
+  private recordSource(jobId: string, source: FileTransferSource): void {
+    const previous = this.db.prepare("SELECT position,path,kind,hash,size,mode FROM file_transfer_sources WHERE job_id=? AND position=?").get(jobId, source.position) as FileTransferSource | undefined;
+    // Recovery may retry an interrupted receipt write. A recorded version is
+    // immutable: another source belongs to a new attempt, never an overwrite.
+    if (previous) {
+      if (!sameSource(previous, source)) throw new SourceChanged();
+      return;
+    }
+    this.db.prepare("INSERT INTO file_transfer_sources(job_id,position,path,kind,hash,size,mode) VALUES(?,?,?,?,?,?,?)").run(jobId, source.position, source.path, source.kind, source.hash, source.size, source.mode);
+  }
+
   private prune(): void {
     const finished = this.db.prepare("SELECT job_id FROM file_transfer_jobs WHERE status != 'running' ORDER BY updated_at DESC,job_id").all() as Array<{ job_id: string }>;
     const removed = finished.filter(row => !this.active.has(row.job_id)).slice(HISTORY_LIMIT);
     this.db.transaction(() => {
       for (const row of removed) this.db.prepare("DELETE FROM file_transfer_jobs WHERE job_id=?").run(row.job_id);
     })();
-    for (const row of removed) this.jobs.delete(row.job_id);
+    for (const row of removed) { this.jobs.delete(row.job_id); this.pendingSources.delete(row.job_id); }
     if (removed.length) this.changed({ version: ++this.version, removed: removed.map(row => row.job_id), error: this.failure });
   }
 

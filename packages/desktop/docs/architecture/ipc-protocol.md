@@ -237,6 +237,22 @@ A transport error without a terminal result leaves the outcome unknown;
 reopening the working file establishes its representation. Resume/restart and
 long SSH request deadlines still require separate qualification.
 
+`progress/source {job_id, repo_id, position, source}` identifies each captured
+transfer input before publication. `position` is its zero-based position in the
+deduplicated literal selection. `source` contains `kind`, `hash`, logical `size`
+and `mode`: Crab BLAKE3 or LFS SHA-256 with a null mode, or an ordinary Git
+blob OID with its captured index mode. This is capture provenance, not a receipt
+that bytes were verified or published. Local and SSH forwarding use the owning
+pending operation; another repository, job or retired channel cannot contribute.
+
+The main Activity owner persists these immutable records in the existing profile
+database, separately from progress snapshots. A persistence failure requests
+cancellation and retains known records for **Reload Activity**. The main-only
+`activity_file_sources {job_id, start, limit}` reads 1–50 selection positions,
+including after restart with no open native repository. A missing record remains
+unknown. Retrying creates a new attempt with newly captured records; it cannot
+replace the earlier version. Pruning a finished job also removes its sources.
+
 The main process owns `media_open {repo_id, path, rev?, op_id?}` and
 `media_close {media_id}`. It captures a native file and exposes an opaque
 `crab-content://media/<id>` capability to the application window. Audio/video

@@ -1,5 +1,5 @@
 import { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
-import type { FileTransferActivity, ProgressTransfer } from "../electron/file-transfers";
+import type { FileTransferActivity, FileTransferSource, ProgressTransfer } from "../electron/file-transfers";
 export type { ProgressTransfer } from "../electron/file-transfers";
 import type { DeployProgress } from "../electron/ssh-deployer";
 import type { KnownHost } from "../electron/ssh-known-hosts";
@@ -1728,6 +1728,7 @@ export function nextJobId(op: string): string {
 
 export const rpc = {
   fileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers", {}),
+  fileTransferSources: (jobId: string, start: number, limit: number) => call<FileTransferSource[]>("activity_file_sources", { job_id: jobId, start, limit }),
   recoverFileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers_recover", {}),
   ping: () => call<{ pong: string }>("ping"),
 

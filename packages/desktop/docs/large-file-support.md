@@ -16,10 +16,10 @@ record historical evidence rather than separate work queues.
 | Format previews | Parquet schema/sample rows, safetensors headers/tensors, archives, NumPy, notebooks and existing media previews use the captured source. Expensive reads have explicit limits. | Parsers use captured ranges and respect `rev`; NPZ reads headers. Parquet and SQLite SQL use the same source selection and an owned snapshot. Packaged Crab/LFS/Git audio and VP9 video seeking, notebook recovery and local/Jupyter Server execution have bounded macOS proof. Additional decoded/output budgets and database profiles remain open. |
 | Diffs | Correct text/binary/pointer classification across working tree, index, commits, branches and reviews. Actual chunk reuse/change metrics and format comparisons; size delta is not changed bytes. | Captured Crab/LFS and nbformat 4 comparisons have packaged macOS and real RustFS proof. Notebook versions, errors, 40,000 cells, output paging and actual worker cancellation are qualified locally. Ordinary Git capture validation, inline reviews, modes, other formats and remaining profiles are open. |
 | Repository operations | Track, stage, commit, push, fetch, pull, clone, hydrate and dehydrate through the UI. Preserve attribute routing and LFS identity; explicit migration and supported lock/verification operations. | Exact-path tracking and scoped commits have packaged macOS and real-store local/SSH proof, including plain clones, partial retry, LFS routing, extensionless/literal paths and unrelated staging. Captured single-file and exact-selection Crab/LFS hydration have packaged macOS and real lazy-clone proof. Verified exact-selection dehydration has packaged macOS and real-store SSH proof, including protected/modified/corrupt content and partial retry. A continuous packaged macOS Crab/LFS track, stage, commit, push, lazy-clone, cold-hydrate, small-edit, fetch/pull, literal-path rename and removal sequence is qualified against writable RustFS. Nested missing-parent restoration now has packaged macOS local/SSH Crab/LFS proof. Confirmed index restoration now has packaged macOS Crab/LFS/Git and selected-identity SSH proof. Extensions/profiles remain open. |
-| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file and selection transfers now share main-process durable intent, native receipts, cancellation and repository drain. Packaged macOS Crab/LFS proof covers renderer reload, cancellation during preparation, process interruption and explicit Activity retry with a fresh session. Packaged selected-identity SSH proof cancels a held cold LFS request before storage release, preserves pointer/index state and retries exact bytes through Activity. Cold-response cancellation, native/main-process interruption and explicit retry now have bounded packaged macOS Crab/LFS proof. Owned scratch is recovered by the next publication; foreign/replaced objects are retained with visible errors and actual publication counts. Rename/receipt crash boundaries, network counters, version manifests and remaining publishing surfaces remain open. |
+| Transfers | Shared operation ownership, real logical/network counters, acknowledged cancellation, supported retry/resume, restart recovery and visible terminal failures. | Single-file and selection transfers now share main-process durable intent, native receipts, cancellation and repository drain. Packaged macOS Crab/LFS proof covers renderer reload, cancellation during preparation, process interruption and explicit Activity retry with a fresh session. Packaged selected-identity SSH proof cancels a held cold LFS request before storage release, preserves pointer/index state and retries exact bytes through Activity. Cold-response cancellation, native/main-process interruption and explicit retry now have bounded packaged macOS Crab/LFS proof. Owned scratch is recovered by the next publication; foreign/replaced objects are retained with visible errors and actual publication counts. Both native and main-process publication/receipt-loss boundaries have bounded Crab/LFS proof. Captured per-file versions have packaged local/SSH and restart proof, including source-record read errors and recovery. Measured network counters, SDK partial-cache recovery and remaining publishing surfaces remain open. |
 | Storage | Inspect usage/budget, retain offline content, pin active reads and safely evict cache. Never remove dirty working files or referenced staging. | Native usage/cleanup and packaged Settings preview/cleanup are qualified; retained workspace data and subsequent staged previews survive. Budget editing/enforcement, SDK namespace lifecycle and offline retention remain open. |
 | Connections | The same supported operations work through local and SSH connections with the selected storage identity. | Packaged macOS arm64 SSH trust, paired deployment, remote open, preview/materialization, independent sessions, reconnect replay, empty-start access and saved-repository restart/retry are qualified. Local/direct-SDK and SSH saved identities have real two-store proof, including replacement/removal and cold restoration. SDK GUI opening, separate same-URL identities, active/deferred restart and blocked cancellation are qualified. Device connection editing survives native startup and construction failure, including blocked shell discovery; repaired construction retries in the running app. Complete RPC parity, real multi-hop cancellation and other targets/providers remain open. |
-| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Whole-file restoration now has bounded macOS local/SSH proof. Cold storage response interruption/restart has bounded macOS proof. Publication/receipt boundaries and cross-platform/provider evidence remain required. |
+| Qualification | Native Crab and LFS byte-identical round trips; multi-GiB bounded previews; small-edit dedup; interruption/cancel/restart; missing/corrupt objects and changed range validators; visible app results. | Focused native, S3-compatible and packaged macOS preview/integrity/cleanup proof passed. The continuous macOS edit/rename/removal round trip and storage-measured small-edit dedup pass. Whole-file restoration now has bounded macOS local/SSH proof. Cold storage response interruption/restart has bounded macOS proof. Power-loss, allocation-before-record, SDK partial-cache and cross-platform/provider evidence remain required. |
 
 ## Remaining priorities
 
@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Finish transfer recovery and accounting | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Next: qualify the rename/receipt crash boundary, interrupted SDK cache namespaces and allocation-before-record gaps. Add per-file version provenance and measured network counters. Qualify missing/corrupt objects and remaining component-owned publishing. |
+| P0 | Finish transfer recovery and accounting | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Next: measure actual origin-response bytes across local/SSH CLI and direct SDK readers, then qualify interrupted SDK cache namespaces and allocation-before-record gaps. Exercise missing/corrupt objects and remaining component-owned publishing. |
 | P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | Set and enforce a budget, retain chosen offline content, and evict only unpinned verified cache. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Measure SDK namespace retention and actual disk reclamation. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
 | P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
@@ -48,10 +48,20 @@ and the cross-OS/provider matrix remain release gates for the whole feature.
 Consolidate each opportunity at its existing owner: keep selection and file
 details in Files, transfer outcomes and retry in Activity, and credentials,
 offline retention and budgets in Settings. The continuous lifecycle test reuses
-the writable RustFS qualification fixture. It includes confirmed whole-file restoration, renderer reload, preparation cancellation, process interruption and explicit Activity retry. The two-store fixture now also sends a real partial storage response before cancellation or process interruption, and verifies cleanup failures after publication. Extend those cases through the remaining rename/receipt crash boundary. Keep the read-only two-store proxy for identity
+the writable RustFS qualification fixture. It includes confirmed whole-file restoration, renderer reload, preparation cancellation, process interruption and explicit Activity retry. The two-store fixture now also sends a real partial storage response before cancellation or process interruption, and verifies cleanup failures after publication. The same fixture also kills the native writer after rename but before its receipt, and kills main before it stores a delivered publication frame. Keep the read-only two-store proxy for identity
 isolation. This keeps one ordered queue instead of separate feature, UI and
 platform backlogs. P1 work can reuse that fixture once its own P0 owner and
 failure behavior are qualified.
+
+The next accounting change belongs at actual origin-response consumption,
+shared by the CLI captured reader and direct SDK reads. The SDK's
+[`Delivered`](../../../crates/crab-sdk/src/progress.rs) update counts bytes returned
+to its consumer, including buffered content; the
+[`PointerRead.from_store`](../../../crates/crab-read/src/pointer_reader.rs) flag
+also includes runtime caches. Neither is a network measurement. Qualification must
+separate cold and warm reads, retries, partial bodies and cancellation, with
+explicit attribution for shared fetches. Count a verified cache hit as zero
+origin bytes, and retain unknown measurements as unknown.
 
 ### Closure order and proof boundary
 
@@ -64,7 +74,7 @@ failure behavior are qualified.
    receipts across renderer/app restart. A live native session is never persisted.
    Local/SSH send boundaries reject cancelled preparation. Native admission
    follows cancellation registration and precedes the publication queue and
-   filter setup. Cold-response cancellation and native/main-process interruption now extend that proof. The rename/receipt crash boundary and SDK cache namespace lifecycle remain open.
+   filter setup. Cold-response cancellation and native/main-process interruption now extend that proof. Both rename/receipt process boundaries are qualified for Crab/LFS. SDK cache namespace lifecycle and allocation-before-record gaps remain open.
    Budget eviction must respect active reads,
    staging references and explicit offline retention.
 2. **Qualify the remaining recovery consumers.** Exercise auxiliary worktrees,
@@ -124,20 +134,19 @@ that fixture-owned child, a subsequent verified dehydration recovers the workspa
 This is bounded process-interruption proof. A partial HTTP body does not prove
 that the second file already has logical bytes written: LFS may verify its entire
 object before returning a range, and Crab may be reading xorb metadata. The native
-ownership test separately recovers an abandoned 2 MiB payload. Atomic rename versus
-receipt loss, power loss, SDK partial-cache lifetime, eager cleanup on reopen,
+ownership test separately recovers an abandoned 2 MiB payload. Power loss, SDK partial-cache lifetime, eager cleanup on reopen,
 network filesystems, external Git-control replacement and cross-platform/provider
 qualification remain open. A crash between allocation and its ownership record can
 leave empty unclaimed objects; recovery deliberately does not guess their owner.
 No chunk resume or measured network-byte total is implied by the transfer counters.
 
-The focused native content gate passes 30 cases; all nine managed content cases
-and three file-write ownership cases pass with the matching CLI. The package
-passes eight cold-response/recovery cases, the ordinary Git restore regression,
-the continuous Crab/LFS lifecycle and selected-identity SSH regression. The 80
-focused Electron/renderer cases, project and touched-test types, scoped Clippy
-unwrap/expect gate, formatting, build/package and 857 asset/runtime hash checks
-pass. No dependency, lockfile or policy-baseline change is needed. The added native
+The focused native content gate passes 30 cases. Earlier matching-CLI runs
+qualified nine managed content cases and three file-write ownership cases. The
+current package passes 12 cold-response/receipt-loss recovery cases, the ordinary
+Git restore regression, the continuous Crab/LFS lifecycle and selected-identity
+SSH regression. The 123 focused Electron/renderer cases, project and touched-test
+types, desktop workflow Actionlint/ShellCheck, scoped Clippy unwrap/expect gate,
+formatting, build/package and 857 asset/runtime hash checks pass. No dependency, lockfile or policy-baseline change is needed. The added native
 owner pays for durable filesystem ownership and cross-process admission; it
 replaces the recursive checkout workspace and reuses the live writer registry.
 
@@ -146,6 +155,40 @@ mirror DNS resolution failed; the Windows runtime found the old checkout workspa
 weak directory identity check. The new owner's Windows file-ID path and replacement
 regression still require native Windows CI proof. These are open release gates,
 not evidence of cross-platform completion.
+The merged head also exposed a notebook qualification shell assignment that
+masked command failure; splitting assignment from export passes the pinned
+desktop workflow Actionlint and ShellCheck gates. Ubuntu mirror DNS failures
+prevented the NFS and protocol jobs from reaching their tests. Fresh provider
+and platform CI proof is still required.
+
+### Captured versions and lost publication receipts
+
+The native capture owner emits each literal selection position with its content
+identity before publication: Crab BLAKE3, LFS SHA-256, or the captured Git index
+blob OID/mode, plus logical size. The existing main Activity owner stores immutable
+source rows in the profile database. Progress snapshots do not resend the full
+manifest. Expanded Activity reads at most 50 selection positions; it works after
+restart without an open repository. Missing records remain explicitly unknown.
+A retry captures current sources in a new attempt and preserves the earlier rows.
+Source persistence failure requests cancellation, retains known rows in memory,
+and offers the existing **Reload Activity** recovery. Finished-history pruning
+also removes the associated rows. No separate transfer service or cache is added.
+
+Four packaged cases isolate the publication/receipt boundary for both formats.
+One holds the real native SQLite journal after payload allocation, lets rename
+publish the first file, then kills that owned native process before its receipt.
+The other kills the owned main process before its observer records the real
+published-file frame. Both preserve the published sibling and pending pointer,
+show **Outcome unknown** with last recorded counters, and retry only the remaining
+file with fresh authority. No application rollback or chunk resume is implied.
+The same rebuilt macOS arm64 package qualifies all 12 recovery cases with
+exact captured-version assertions, immutable original records and new retry
+records. Ordinary Git restoration records the staged blob OID, raw size and mode.
+Its GUI smoke also corrupts a real source row, verifies a visible read error,
+repairs that fixture row and recovers through **Reload sources**. Selected-identity
+SSH restoration records the actual remote LFS version and displays it in Activity.
+The continuous Crab/LFS lifecycle also passes; these 15 packaged cases remain
+bounded macOS evidence rather than cross-platform release qualification.
 
 ### Durable Activity and explicit retry
 
@@ -365,7 +408,7 @@ artifact as well as its native payload; the SSH fixtures require those exact
 hashed files. Earlier wiring uploaded them but did not supply them to the
 desktop job. No public-release download availability is claimed by these fixtures.
 
-## Current qualified boundary
+## Earlier qualification boundary
 
 The combined `crab-v2` native task/process runtime and this branch pass the
 packaged macOS arm64 writable-store lifecycle. Both Crab and LFS files pass
@@ -1689,7 +1732,7 @@ are needed.
   writes: 136 GET/HEAD requests, zero write attempts. Evidence:
   `large-files-proof.j0atfdgy/report.json` in the external build directory.
 
-## Open implementation details
+## Earlier implementation audit
 
 - One-shot RPC previews capture and close their source per operation. The new
   file inspector retains a source across metadata pages, with independent query

@@ -34,6 +34,10 @@ pub(crate) struct Dehydration {
 }
 
 impl Dehydration {
+    pub(crate) fn version(&self) -> Result<FileVersion> {
+        self.pointer.version()
+    }
+
     pub(crate) async fn capture(
         repo: &BrowseSession,
         path: &str,
