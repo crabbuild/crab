@@ -1,9 +1,12 @@
-import type { ElectronApplication, Page } from "@playwright/test";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { expect, type ElectronApplication, type Page } from "@playwright/test";
+import { createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Readable } from "node:stream";
 import { extractFile } from "@electron/asar";
+import { DaemonClient } from "../../electron/daemon/daemon-client";
+import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
+import { socketAddress } from "../../electron/daemon/socket-address";
 import type { StorageConnections } from "../../electron/storage-connections";
 import type { RemoteRuntimeStore } from "../../electron/ssh-runtime";
 
@@ -64,4 +67,31 @@ export async function call(page: Page, method: string, params: unknown): Promise
     const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
     return bridge.rpc(method, params);
   }, { method, params });
+}
+
+export async function closeFixtureDaemon(home: string): Promise<void> {
+  // Only callers that created this HOME own its daemon. Tests inheriting the
+  // developer's HOME must leave that durable process running.
+  const socketDir = path.join(home, ".crab", "desktop", "daemon");
+  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
+  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
+  const client = new DaemonClient({
+    socketDir, daemonEntryPath: "",
+    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
+  });
+  try {
+    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
+  } finally { client.disconnect(); }
+  await expect.poll(() => {
+    try { process.kill(pid, 0); return false; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      return true;
+    }
+  }, { timeout: 10_000 }).toBe(true);
+  const address = socketAddress(`${base}.sock`);
+  if (process.platform !== "win32" && address !== `${base}.sock`) {
+    rmSync(path.dirname(address), { recursive: true });
+  }
 }

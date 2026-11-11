@@ -144,24 +144,26 @@ pub async fn run_structured(
     job_id: &str,
     cwd: &std::path::Path,
     args: &[String],
-    env_vars: &[(String, String)],
     event_method: &str,
     out: SharedStdout,
+    cancel: Option<tokio_util::sync::WaitForCancellationFutureOwned>,
 ) -> Result<serde_json::Value> {
-    let mut child = command()?
+    let mut command = command()?;
+    command
         .args(args)
-        .envs(env_vars.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = crab_git::process::OwnedChild::spawn(command.into_std())?;
     let stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| AgentError::Other("Crab stdout unavailable".into()))?;
-    let stderr = child.stderr.take();
+    let stdout = tokio::process::ChildStdout::from_std(stdout)?;
+    let stderr = child
+        .take_stderr()
+        .map(tokio::process::ChildStderr::from_std)
+        .transpose()?;
     let read = async {
         let mut lines = BufReader::new(stdout).lines();
         let mut terminal = None;
@@ -183,15 +185,31 @@ pub async fn run_structured(
         }
         Ok::<_, AgentError>(terminal)
     };
-    let (status, result, stderr) = tokio::try_join!(
-        async { child.wait().await.map_err(AgentError::Io) },
-        read,
-        async {
-            Ok::<_, AgentError>(
-                pump_stream(op, job_id, Stream::Stderr, stderr, Arc::clone(&out)).await,
-            )
-        },
-    )?;
+    let wait = async {
+        let cancellation = async {
+            match cancel {
+                Some(cancel) => cancel.await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(cancellation);
+        let mut cancelled = false;
+        loop {
+            // Retain the process identity until tree cleanup and reaping.
+            // SIGTERM lets the workflow supervisor stop its own child groups;
+            // Windows uses the shared owner's job-object termination instead.
+            if child.has_exited()? {
+                return Ok::<_, AgentError>((child.stop()?, cancelled));
+            }
+            tokio::select! {
+                _ = &mut cancellation, if !cancelled => { child.request_shutdown()?; cancelled = true; }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+        }
+    };
+    let ((status, cancelled), result, stderr) = tokio::try_join!(wait, read, async {
+        Ok::<_, AgentError>(pump_stream(op, job_id, Stream::Stderr, stderr, Arc::clone(&out)).await)
+    },)?;
     let code = status.code().unwrap_or(-1);
     notify(
         &out,
@@ -203,6 +221,11 @@ pub async fn run_structured(
         },
     )
     .await?;
+    if cancelled {
+        return Err(AgentError::OpCancelled {
+            op_id: job_id.into(),
+        });
+    }
     if !status.success() {
         return Err(AgentError::Cli {
             status: code,

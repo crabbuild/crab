@@ -271,28 +271,28 @@ pub fn merge_with_provenance(
 
             let mut rewritten = stage.clone();
             rewritten.name = new_name.clone();
-            // Rewrite path-based deps and outs so they're repo-
-            // relative: every nested yaml declares paths relative
-            // to its own directory.
+            // An explicit wdir is repository-relative. Prefixing its paths
+            // again would make execution resolve the YAML directory twice.
+            let path_dir = if stage.wdir.is_some() { "" } else { &rel_dir };
             rewritten.deps = stage
                 .deps
                 .iter()
-                .map(|d| rewrite_dep(d, &rel_dir, &rename))
+                .map(|d| rewrite_dep(d, path_dir, &rel_dir, &rename, &wf.stages))
                 .collect();
             rewritten.outs = stage
                 .outs
                 .iter()
-                .map(|o| rewrite_out(o, &rel_dir))
+                .map(|o| rewrite_out(o, path_dir))
                 .collect();
             rewritten.metrics = stage
                 .metrics
                 .iter()
-                .map(|p| PathBuf::from(join_rel(&rel_dir, p)))
+                .map(|p| PathBuf::from(join_rel(path_dir, p)))
                 .collect();
             rewritten.plots = stage
                 .plots
                 .iter()
-                .map(|p| PathBuf::from(join_rel(&rel_dir, p)))
+                .map(|p| PathBuf::from(join_rel(path_dir, p)))
                 .collect();
 
             origins.insert(new_name.clone(), (*yaml_path).clone());
@@ -523,9 +523,15 @@ fn path_to_dot_prefix(rel_dir: &str) -> Result<String> {
 /// relative to the nested yaml's directory. `rename` maps original
 /// stage names in the nested file to their prefixed form for
 /// `Dep::StageOut`.
-fn rewrite_dep(dep: &Dep, rel_dir: &str, rename: &BTreeMap<StageName, StageName>) -> Dep {
+fn rewrite_dep(
+    dep: &Dep,
+    path_dir: &str,
+    yaml_dir: &str,
+    rename: &BTreeMap<StageName, StageName>,
+    stages: &BTreeMap<StageName, crate::Stage>,
+) -> Dep {
     match dep {
-        Dep::Path(p) => Dep::Path(PathBuf::from(join_rel(rel_dir, p))),
+        Dep::Path(p) => Dep::Path(PathBuf::from(join_rel(path_dir, p))),
         Dep::StageOut { stage, out } => {
             // Only rewrite when the referenced stage lives in the
             // same nested file. Anything else (unknown name, or a
@@ -535,7 +541,17 @@ fn rewrite_dep(dep: &Dep, rel_dir: &str, rename: &BTreeMap<StageName, StageName>
             let new_stage = rename.get(stage).cloned().unwrap_or_else(|| stage.clone());
             Dep::StageOut {
                 stage: new_stage,
-                out: PathBuf::from(join_rel(rel_dir, out)),
+                // StageOut names a physical artifact, independent of the
+                // consumer's wdir. Only local producers without wdir need
+                // their YAML directory added.
+                out: if stages
+                    .get(stage)
+                    .is_some_and(|producer| producer.wdir.is_none())
+                {
+                    PathBuf::from(join_rel(yaml_dir, out))
+                } else {
+                    out.clone()
+                },
             }
         }
         // Remote deps carry URLs / refs, never filesystem paths;
@@ -794,6 +810,40 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_keeps_explicit_working_directory_paths_repository_relative() {
+        let tmp = TempDir::new().unwrap();
+        write_yaml(
+            tmp.path(),
+            "pipelines/crab.yaml",
+            r#"
+stages:
+  a:
+    wdir: work
+    cmd: 'true'
+    outs: [a.bin]
+    metrics: [metrics.json]
+  b:
+    cmd: 'true'
+    deps: [{stage_out: {stage: a, out: work/a.bin}}]
+"#,
+        );
+        let paths = discover(tmp.path(), DiscoverMode::Recursive).unwrap();
+        let merged = parse_all(tmp.path(), &paths).unwrap();
+        let a = &merged.stages[&StageName::parse_effective("pipelines.a").unwrap()];
+        assert_eq!(a.outs[0].path, PathBuf::from("a.bin"));
+        assert_eq!(a.metrics, vec![PathBuf::from("metrics.json")]);
+        let b = &merged.stages[&StageName::parse_effective("pipelines.b").unwrap()];
+        assert_eq!(
+            b.deps[0],
+            Dep::StageOut {
+                stage: a.name.clone(),
+                out: "work/a.bin".into()
+            }
+        );
+        assert!(crate::Graph::build(&merged.stages).is_ok());
     }
 
     #[test]

@@ -715,12 +715,12 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::workflow::WorkflowRunParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             let run_id = p.run_id.clone();
-            run_cancellable(
-                state,
-                Some(run_id),
-                crate::workflow::workflow_run(&work_dir, p, out),
-            )
-            .await
+            // Cancellation signals the CLI and drains its supervised stages;
+            // dropping the RPC future would kill only the parent process.
+            let cancel = state.cancel_registry.register(run_id.clone()).await;
+            let result = crate::workflow::workflow_run(&work_dir, p, out, cancel).await;
+            state.cancel_registry.unregister(&run_id).await;
+            result
         },
         "workflow_cancel" => {
             let p: crate::workflow::WorkflowCancelParams = decode(&method, params)?;
@@ -4091,9 +4091,9 @@ async fn crab_add_structured(
         &p.job_id,
         work_dir,
         &args,
-        &[],
         "crab/add_progress",
         out,
+        None,
     )
     .await?;
     Ok(json!({ "status": 0, "job_id": p.job_id, "summary": summary }))
@@ -4126,9 +4126,9 @@ async fn crab_push_structured(
         &p.job_id,
         work_dir,
         &args,
-        &[],
         "crab/push_progress",
         out,
+        None,
     )
     .await?;
     // The v2 terminal contract reports refs and elapsed time, not transfer totals.

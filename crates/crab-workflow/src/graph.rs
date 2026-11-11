@@ -82,7 +82,7 @@ impl Graph {
 
         for (stage_name, stage) in stages {
             for out in &stage.outs {
-                let normalized = normalize_path(&out.path);
+                let normalized = stage_path(stage, &out.path);
                 // Reject duplicates across both maps: a file
                 // produced by stage A and a directory covering
                 // the same path produced by stage B would also
@@ -144,7 +144,7 @@ impl Graph {
                         edges.insert((producer_name.clone(), consumer_name.clone()));
                     }
                     Dep::Path(path) => {
-                        let normalized = normalize_path(path);
+                        let normalized = stage_path(stage, path);
                         if let Some(producer) = file_producers.get(&normalized) {
                             edges.insert((producer.clone(), consumer_name.clone()));
                         } else if let Some(producer) =
@@ -407,13 +407,25 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
+// Graph ownership must use the same repository-relative paths as execution
+// and the artifact cache; raw paths collide or miss edges across stage wdirs.
+fn stage_path(stage: &Stage, path: &Path) -> PathBuf {
+    normalize_path(
+        &stage
+            .wdir
+            .as_deref()
+            .unwrap_or_else(|| Path::new(""))
+            .join(path),
+    )
+}
+
 /// Whether `stage` declares an out at exactly `normalized_path`
 /// (of either kind).
 fn producer_declares(stage: &Stage, normalized_path: &Path) -> bool {
     stage
         .outs
         .iter()
-        .any(|out: &Out| normalize_path(&out.path) == normalized_path)
+        .any(|out: &Out| stage_path(stage, &out.path) == normalized_path)
 }
 
 /// Find the producer whose directory-kind out covers
@@ -484,6 +496,47 @@ mod tests {
             condition: None,
         };
         (stage_name, stage)
+    }
+
+    #[test]
+    fn working_directory_paths_order_producers_before_consumers() {
+        let mut producer = make_stage("produce", vec![], vec![file_out("out.txt")]);
+        producer.1.wdir = Some("work".into());
+        let consumer = make_stage("consume", vec![Dep::Path("work/out.txt".into())], vec![]);
+        let stages = make_workflow(vec![producer, consumer]);
+        let graph = Graph::build(&stages).unwrap();
+        assert_eq!(
+            graph
+                .toposort()
+                .iter()
+                .map(StageName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["produce", "consume"]
+        );
+    }
+
+    #[test]
+    fn working_directory_output_ownership_uses_physical_paths() {
+        let mut first = make_stage("first", vec![], vec![file_out("out.txt")]);
+        first.1.wdir = Some("one".into());
+        let mut second = make_stage("second", vec![], vec![file_out("out.txt")]);
+        second.1.wdir = Some("two".into());
+        assert!(Graph::build(&make_workflow(vec![first, second])).is_ok());
+    }
+
+    #[test]
+    fn working_directory_stage_out_uses_repository_relative_artifact_path() {
+        let mut producer = make_stage("produce", vec![], vec![file_out("out.txt")]);
+        producer.1.wdir = Some("work".into());
+        let consumer = make_stage(
+            "consume",
+            vec![Dep::StageOut {
+                stage: StageName::parse("produce").unwrap(),
+                out: "work/out.txt".into(),
+            }],
+            vec![],
+        );
+        assert!(Graph::build(&make_workflow(vec![producer, consumer])).is_ok());
     }
 
     fn make_workflow(stages: Vec<(StageName, Stage)>) -> BTreeMap<StageName, Stage> {

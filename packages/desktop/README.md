@@ -329,6 +329,22 @@ location; existing Unix addresses that fit the OS limit remain unchanged.
   The editor Output panel retains the current run's command logs and stage
   events, and displays execution errors even when the CLI fails before a stage
   starts. Structured CLI stdout and live command logs on stderr stay separate.
+  The workflow sidebar manages discoverable `crab.yaml` and `*.workflow.yaml`
+  files. File dependencies follow declared artifact paths, including stages
+  with explicit working directories. Foreach/matrix templates remain editable
+  source nodes; the parser supplies expanded artifact edges and execution counts.
+  Run All and Run Stage select actual expanded stage names. Template status
+  aggregates every execution; skipped stages appear separately from completed ones.
+  Arrange preserves dependency layers, Fit shows the graph, and Find stage zooms
+  to readable detail. New nodes avoid existing manual positions.
+  Edit YAML opens the working-tree file for iteration/axis changes and advanced
+  settings. Visual saves retain defaults, policies, named groups and output
+  metadata, validate through the runtime parser, and atomically replace the file.
+  Invalid definitions remain accessible through Edit YAML; failed saves preserve
+  the original file. Cancellation reserves the run identity before dispatch,
+  requests shutdown through the shared process owner, and keeps controls locked
+  until the native terminal response confirms cleanup. The UI reports Stopping
+  while this work drains; it does not treat signal acknowledgement as completion.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
 - Dashboard and dataset metadata refresh after native repository recovery while
   retaining view controls and selection. The Datasets tab under Large Files

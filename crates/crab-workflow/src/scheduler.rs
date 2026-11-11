@@ -92,7 +92,13 @@ impl DagScheduler {
         let topo = graph.toposort();
         for stage_name in &topo {
             let producers = graph.producers_of(stage_name);
-            remaining_deps.insert(stage_name.clone(), producers.len());
+            remaining_deps.insert(
+                stage_name.clone(),
+                producers
+                    .iter()
+                    .filter(|producer| !skip_stages.contains(*producer))
+                    .count(),
+            );
         }
 
         // Seed the ready queue with source nodes (in-degree 0) that
@@ -108,7 +114,7 @@ impl DagScheduler {
             config,
             ready_queue,
             in_flight: BTreeSet::new(),
-            succeeded: BTreeSet::new(),
+            succeeded: skip_stages.clone(),
             failed: BTreeSet::new(),
             not_started: BTreeSet::new(),
             semaphore,
@@ -123,10 +129,12 @@ impl DagScheduler {
         &self.semaphore
     }
 
-    /// Check if the scheduler is done (no in-flight, no ready stages,
-    /// and no resource-waiting stages).
+    /// Check whether no more results or dispatches are possible.
+    /// Default failure policy stops admission while in-flight stages drain.
     pub fn is_done(&self) -> bool {
-        self.in_flight.is_empty() && self.ready_queue.is_empty() && self.resource_waiting.is_empty()
+        self.in_flight.is_empty()
+            && ((!self.config.keep_going && !self.failed.is_empty())
+                || (self.ready_queue.is_empty() && self.resource_waiting.is_empty()))
     }
 
     /// Pop the next ready stage, if any, that should be dispatched.
@@ -190,15 +198,20 @@ impl DagScheduler {
     /// releases resources, and pushes newly-ready consumers to the
     /// ready queue. Also re-checks resource-waiting stages.
     pub fn handle_success(&mut self, stage_name: &StageName, graph: &Graph, resources: &Resources) {
-        self.in_flight.remove(stage_name);
-        self.succeeded.insert(stage_name.clone());
-        self.resource_pool.release(resources);
+        // Pre-committed stages already participate in constructor admission;
+        // completing them again must not enqueue excluded descendants.
+        if !self.succeeded.insert(stage_name.clone()) {
+            return;
+        }
+        if self.in_flight.remove(stage_name) {
+            self.resource_pool.release(resources);
+        }
 
         // Check consumers: decrement their remaining deps count.
         // If a consumer reaches 0, it's ready to execute.
         let consumers = graph.consumers_of(stage_name);
         for consumer in consumers {
-            if self.not_started.contains(&consumer) {
+            if self.not_started.contains(&consumer) || self.succeeded.contains(&consumer) {
                 continue;
             }
             if let Some(count) = self.remaining_deps.get_mut(&consumer) {
@@ -217,9 +230,10 @@ impl DagScheduler {
     /// policy to determine which downstream stages are blocked.
     /// Releases resources held by the failed stage.
     pub fn handle_failure(&mut self, stage_name: &StageName, graph: &Graph, resources: &Resources) {
-        self.in_flight.remove(stage_name);
         self.failed.insert(stage_name.clone());
-        self.resource_pool.release(resources);
+        if self.in_flight.remove(stage_name) {
+            self.resource_pool.release(resources);
+        }
 
         if self.config.ignore_errors {
             // Under --ignore-errors, downstream stages are still
@@ -228,7 +242,7 @@ impl DagScheduler {
             // if the output is actually needed).
             let consumers = graph.consumers_of(stage_name);
             for consumer in consumers {
-                if self.not_started.contains(&consumer) {
+                if self.not_started.contains(&consumer) || self.succeeded.contains(&consumer) {
                     continue;
                 }
                 if let Some(count) = self.remaining_deps.get_mut(&consumer) {
@@ -245,10 +259,18 @@ impl DagScheduler {
             for blocked_name in blocked {
                 self.not_started.insert(blocked_name);
             }
+        } else {
+            self.not_started.extend(
+                graph
+                    .stages()
+                    .filter(|name| {
+                        !self.succeeded.contains(*name)
+                            && !self.failed.contains(*name)
+                            && !self.in_flight.contains(*name)
+                    })
+                    .cloned(),
+            );
         }
-        // Under default mode (no keep-going), next_ready() will
-        // return None because failed is non-empty, effectively
-        // stopping new dispatches. In-flight stages finish naturally.
 
         // Re-check resource-waiting stages now that resources freed.
         self.requeue_resource_waiting();
@@ -442,5 +464,86 @@ impl ResourcePool {
         self.used_memory_bytes = self
             .used_memory_bytes
             .saturating_sub(resources.memory_bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(value: &str) -> StageName {
+        StageName::parse(value).unwrap()
+    }
+
+    fn fixture() -> Graph {
+        let workflow = crate::parse_yaml("stages:\n  active:\n    cmd: 'true'\n  ignored:\n    cmd: 'true'\n    outs: [unused]\n  ignored_child:\n    cmd: 'true'\n    deps: [unused]\n").unwrap();
+        Graph::build(&workflow.stages).unwrap()
+    }
+
+    #[test]
+    fn filtered_stages_never_reenter_ready_queue() {
+        let graph = fixture();
+        let skipped = BTreeSet::from([name("ignored"), name("ignored_child")]);
+        let mut scheduler = DagScheduler::new(
+            &graph,
+            SchedulerConfig {
+                parallelism: 2,
+                keep_going: false,
+                ignore_errors: false,
+            },
+            &skipped,
+        );
+        for stage in &skipped {
+            scheduler.handle_success(stage, &graph, &Resources::default());
+        }
+        let mut ready = Vec::new();
+        while let Some(stage) = scheduler.next_ready(&BTreeMap::new()) {
+            ready.push(stage);
+        }
+        assert_eq!(ready, vec![name("active")]);
+    }
+
+    #[test]
+    fn failure_with_no_remaining_children_to_reap_is_terminal() {
+        let graph = fixture();
+        let active = name("active");
+        let mut scheduler = DagScheduler::new(
+            &graph,
+            SchedulerConfig {
+                parallelism: 2,
+                keep_going: false,
+                ignore_errors: false,
+            },
+            &BTreeSet::new(),
+        );
+        assert_eq!(scheduler.next_ready(&BTreeMap::new()), Some(active.clone()));
+        scheduler.mark_dispatched(&active);
+        scheduler.handle_failure(&active, &graph, &Resources::default());
+        assert!(scheduler.is_done());
+    }
+
+    #[test]
+    fn skipped_stages_do_not_release_another_stages_resources() {
+        let graph = fixture();
+        let active = name("active");
+        let ignored = name("ignored");
+        let mut scheduler = DagScheduler::with_resource_pool(
+            &graph,
+            SchedulerConfig {
+                parallelism: 2,
+                keep_going: true,
+                ignore_errors: false,
+            },
+            &BTreeSet::new(),
+            ResourcePool::with_capacity(4, 0, 0),
+        );
+        scheduler.mark_dispatched(&active);
+        scheduler.acquire_resources(&Resources {
+            cpu: 2,
+            gpu: 0,
+            memory_bytes: 0,
+        });
+        scheduler.handle_success(&ignored, &graph, &Resources::default());
+        assert_eq!(scheduler.resource_pool.used_cpu, 2);
     }
 }

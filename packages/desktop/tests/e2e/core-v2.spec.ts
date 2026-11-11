@@ -6,10 +6,8 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parse } from "yaml";
-import { call, packagedExecutable } from "./packaged-app";
-import { DaemonClient } from "../../electron/daemon/daemon-client";
 import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
-import { socketAddress } from "../../electron/daemon/socket-address";
+import { call, closeFixtureDaemon, packagedExecutable } from "./packaged-app";
 
 const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
 const [coreVersion, prerelease] = desktopVersion.split("-");
@@ -38,32 +36,6 @@ async function closeFixtureTerminals(application: ElectronApplication, directory
   }).map(session => session.pid), { timeout: 10_000 }).toEqual([]);
 }
 
-async function closeFixtureDaemon(home: string): Promise<void> {
-  // Only callers that created this HOME own its daemon. Tests inheriting the
-  // developer's HOME must leave that durable process running.
-  const socketDir = path.join(home, ".crab", "desktop", "daemon");
-  const base = path.join(socketDir, `daemon-v${PROTOCOL_VERSION}`);
-  const { pid } = JSON.parse(readFileSync(`${base}.pid`, "utf8")) as { pid: number };
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Fixture daemon has no process identity");
-  const client = new DaemonClient({
-    socketDir, daemonEntryPath: "",
-    onSessionData: () => {}, onSessionExit: () => {}, onAgentStateChange: () => {},
-  });
-  try {
-    expect(await client.request("shutdown", { killSessions: true })).toEqual({ acknowledged: true });
-  } finally { client.disconnect(); }
-  await expect.poll(() => {
-    try { process.kill(pid, 0); return false; }
-    catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      return true;
-    }
-  }, { timeout: 10_000 }).toBe(true);
-  const address = socketAddress(`${base}.sock`);
-  if (process.platform !== "win32" && address !== `${base}.sock`) {
-    rmSync(path.dirname(address), { recursive: true });
-  }
-}
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
   test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
@@ -128,6 +100,138 @@ test("packaged updater handles CLI-only releases and genuine desktop updates", a
     await application?.close();
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workflow sidebar manages files, flushes edits, and runs cross-file dependencies", async () => {
+  test.setTimeout(120_000);
+  const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-workflow-management-"));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  mkdirSync(repo);
+  mkdirSync(home);
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: repo });
+  const command = (script: string) => JSON.stringify({ argv: ["node", "-e", script] });
+  writeFileSync(path.join(repo, "prepare.workflow.yaml"), `stages:
+  fetch:
+    cmd: ${command("require('fs').writeFileSync('raw.txt', 'raw')")}
+    outs: [raw.txt]
+  clean:
+    cmd: ${command("const fs=require('fs'); fs.writeFileSync('clean.txt', fs.readFileSync('raw.txt'))")}
+    deps: [raw.txt]
+    outs: [clean.txt]
+  enrich:
+    cmd: ${command("const fs=require('fs'); fs.writeFileSync('enriched.txt', fs.readFileSync('raw.txt'))")}
+    deps: [raw.txt]
+    outs: [enriched.txt]
+  package:
+    cmd: ${command("require('fs').writeFileSync('features.txt', 'prepared')")}
+    deps: [clean.txt, enriched.txt]
+    outs: [features.txt]
+`);
+  writeFileSync(path.join(repo, "train.workflow.yaml"), `stages:
+  fit:
+    cmd: ${command("const fs=require('fs'); fs.writeFileSync('model.txt', fs.readFileSync('features.txt'))")}
+    outs: [model.txt]
+`);
+  const application = await electron.launch({
+    executablePath: packagedExecutable(), args: [`--user-data-dir=${path.join(root, "profile")}`],
+    env: { ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache") },
+  });
+  try {
+    const page = await application.firstWindow();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.getByRole("button", { name: "Skip", exact: true }).click();
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+    const handle = await call(page, "open_local", { repo_id: "workflow-management", path: repo });
+    await page.evaluate(({ handle, repo }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: repo } })), { handle, repo });
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Data Workflows", exact: true }).click();
+    const sidebar = page.getByRole("complementary", { name: "Workflows", exact: true });
+    const files = sidebar.getByRole("navigation", { name: "Workflow files", exact: true });
+    const select = (name: string) => files.getByRole("button").filter({ hasText: name }).click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(4);
+    await expect.poll(async () => (await page.locator(".react-flow__node").first().boundingBox())?.width ?? 0).toBeGreaterThan(150);
+    const bounds = await page.locator(".react-flow__node").evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect(); return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }));
+    for (const a of bounds) for (const b of bounds) {
+      if (a === b) continue;
+      expect(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y).toBe(true);
+    }
+    await page.screenshot({ path: test.info().outputPath("workflow-layout-branches.png") });
+    await select("train.workflow.yaml");
+    await page.locator('.react-flow__node[data-id="fit"]').click();
+    const inspector = page.getByRole("complementary", { name: "Stage properties", exact: true });
+    await inspector.getByRole("combobox", { name: "Use a workflow output", exact: true }).selectOption("features.txt");
+    await inspector.getByRole("textbox", { name: "Stage command", exact: true }).fill(JSON.stringify(["node", "-e", "const fs=require('fs'); setTimeout(() => fs.writeFileSync('model.txt', fs.readFileSync('features.txt', 'utf8') + 'trained'), 2000)"]));
+    // Switch immediately, before the autosave debounce. Navigation must flush.
+    await select("prepare.workflow.yaml");
+    await expect(page.locator(".react-flow__node")).toHaveCount(4);
+    expect(readFileSync(path.join(repo, "train.workflow.yaml"), "utf8")).toContain("trained");
+    await expect(sidebar.getByRole("region", { name: "Used by", exact: true }).getByRole("button", { name: "train.workflow.yaml", exact: true })).toBeVisible();
+    await select("train.workflow.yaml");
+    await expect(page.getByRole("button", { name: "Undo (Ctrl+Z)", exact: true })).toBeDisabled();
+    await expect(sidebar.getByRole("region", { name: "Depends on", exact: true }).getByRole("button", { name: "prepare.workflow.yaml", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Run All", exact: true }).click();
+    await expect(sidebar.getByRole("button", { name: "New workflow", exact: true })).toBeDisabled();
+    await expect(files.getByRole("button").filter({ hasText: "prepare.workflow.yaml" })).toBeDisabled();
+    await expect(page.getByText("Completed", { exact: true })).toBeVisible({ timeout: 20_000 });
+    expect(readFileSync(path.join(repo, "model.txt"), "utf8")).toBe("preparedtrained");
+    await expect(page.getByRole("region", { name: "Workflow output", exact: true })).toContainText("prepare.package: Completed");
+    await page.screenshot({ path: test.info().outputPath("workflow-cross-file-run.png") });
+
+    await sidebar.getByRole("button", { name: "New workflow", exact: true }).click();
+    const form = sidebar.getByRole("form", { name: "New workflow", exact: true });
+    await form.getByRole("textbox", { name: "Workflow path", exact: true }).fill("a.yml");
+    await form.getByRole("button", { name: "Create workflow", exact: true }).click();
+    await expect(form.getByRole("alert")).toContainText("name.workflow.yaml");
+    expect(existsSync(path.join(repo, "a.yml"))).toBe(false);
+    await form.getByRole("textbox", { name: "Workflow path", exact: true }).fill("experiment.workflow.yaml");
+    await form.getByRole("button", { name: "Create workflow", exact: true }).click();
+    await expect(page.locator('.react-flow__node[data-id="example"]')).toBeVisible();
+    await page.locator('.react-flow__node[data-id="example"]').click();
+    await inspector.getByRole("textbox", { name: "Stage command", exact: true }).fill("printf managed");
+    await sidebar.getByRole("button", { name: "Rename experiment.workflow.yaml", exact: true }).click();
+    const rename = sidebar.getByRole("form", { name: "Rename workflow", exact: true });
+    await rename.getByRole("textbox", { name: "Workflow path", exact: true }).fill("report.workflow.yaml");
+    await rename.getByRole("button", { name: "Rename workflow", exact: true }).click();
+    await expect(files.getByRole("button").filter({ hasText: "report.workflow.yaml" })).toBeVisible();
+    expect(existsSync(path.join(repo, "experiment.workflow.yaml"))).toBe(false);
+    expect(readFileSync(path.join(repo, "report.workflow.yaml"), "utf8")).toContain("printf managed");
+    await sidebar.getByRole("button", { name: "Delete report.workflow.yaml", exact: true }).click();
+    await sidebar.getByRole("form", { name: "Delete workflow", exact: true }).getByRole("button", { name: "Delete workflow", exact: true }).click();
+    await expect(files.getByRole("button").filter({ hasText: "report.workflow.yaml" })).toHaveCount(0);
+    expect(existsSync(path.join(repo, "report.workflow.yaml"))).toBe(false);
+
+    writeFileSync(path.join(repo, "broken.workflow.yaml"), "stages: [");
+    await sidebar.getByRole("button", { name: "Refresh workflows", exact: true }).click();
+    await select("broken.workflow.yaml");
+    await expect(page.getByRole("alert", { name: "Workflow error", exact: true })).toContainText("YAML parse error");
+    await select("train.workflow.yaml");
+    await expect(page.locator('.react-flow__node[data-id="fit"]')).toBeVisible();
+    await sidebar.getByRole("textbox", { name: "Filter workflows", exact: true }).fill("no-match");
+    await expect(sidebar.getByText("No matching workflows.", { exact: true })).toBeVisible();
+    await sidebar.getByRole("textbox", { name: "Filter workflows", exact: true }).fill("");
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(page.getByRole("button", { name: "Run All", exact: true })).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath("workflow-sidebar-narrow.png") });
+    await page.evaluate(() => {
+      const settings = JSON.parse(localStorage.getItem("crab.settings.v1") ?? "{}");
+      localStorage.setItem("crab.settings.v1", JSON.stringify({ ...settings, theme: "light" }));
+    });
+    await page.reload();
+    await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Data Workflows", exact: true }).click();
+    await select("prepare.workflow.yaml");
+    await expect(page.locator("html")).toHaveClass(/theme-light/);
+    await expect(page.locator(".react-flow__node")).toHaveCount(4);
+    await page.screenshot({ path: test.info().outputPath("workflow-layout-light.png") });
+    expect(errors).toEqual([]);
+  } finally {
+    await application.close();
+    await closeFixtureDaemon(home);
     rmSync(root, { recursive: true, force: true });
   }
 });
