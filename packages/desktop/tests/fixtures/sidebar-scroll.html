@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Repository scroll persistence fixture</title></head>
+<body><div id="root"></div><script type="module">
+import React, { useLayoutEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
+import { StoreProvider, useStore } from "/src/state.tsx";
+import { SettingsProvider } from "/src/settings.tsx";
+import { Sidebar } from "/src/components/Sidebar.tsx";
+import { workspaceIdentity } from "/src/lib/workspace-sidebar.ts";
+import "/src/index.css";
+
+window.crab = {
+  onEvent: () => () => {}, updateMainSettings: async () => {}, setDevtools: async () => {},
+  keychain: { getPassword: async () => null },
+};
+const workspace = rootPath => ({
+  kind: "local", rootPath, name: rootPath.slice(1),
+  repos: Array.from({ length: 50 }, (_, index) => ({
+    relativePath: `repo-${index}`, absolutePath: `${rootPath}/repo-${index}`, name: `repo-${index}`,
+    level: 0, branch: null, dirtyCount: null, ahead: null, behind: null, error: null,
+    openRepoId: null, lastAccessedAt: 0,
+  })),
+  config: { version: 1, discovery: { maxDepth: 3, excludePatterns: [] }, repos: { removed: [] }, display: { tabBarState: [] } },
+});
+const first = workspace("/first");
+const second = workspace("/second");
+const key = value => `crab.repoSidebarScroll.${workspaceIdentity(value)}`;
+
+function Fixture() {
+  const { dispatch } = useStore();
+  const [visible, setVisible] = useState(true);
+  useLayoutEffect(() => {
+    dispatch({ type: "workspace-set", workspace: first });
+    dispatch({ type: "workspace-set", workspace: second });
+    window.sidebarScrollFixture = {
+      action(mode) {
+        if (mode === "discovery") {
+          flushSync(() => {
+            dispatch({ type: "workspace-set", workspace: { ...first, repos: [] } });
+            dispatch({ type: "workspace-set", workspace: { ...second, repos: [] } });
+            setVisible(false);
+          });
+          localStorage.setItem(key(first), "600");
+          flushSync(() => setVisible(true));
+        }
+        const list = document.querySelector('[aria-label="Repository list"]');
+        if (mode !== "discovery") list.scrollTop = 600;
+        let position = list.scrollTop;
+        // Commit the lifecycle change while the browser's scroll event is queued.
+        flushSync(() => {
+          if (mode === "workspace") dispatch({ type: "set-active-workspace", rootPath: second.rootPath });
+          if (mode === "unmount") document.querySelector('[aria-label="Collapse Repositories"]').click();
+          if (mode === "filter") {
+            const input = document.querySelector('[aria-label="Filter repositories"]');
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "repo-1");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          if (mode === "quit") window.dispatchEvent(new Event("beforeunload"));
+          if (mode === "refresh") dispatch({ type: "workspace-update-status", rootPath: first.rootPath,
+            statuses: [{ relativePath: "repo-0", branch: "main", dirtyCount: 1, ahead: 0, behind: 0, error: null }] });
+          if (mode === "discovery") dispatch({ type: "workspace-set", workspace: first });
+        });
+        if (mode === "refresh") window.dispatchEvent(new Event("beforeunload"));
+        if (mode === "discovery") position = list.scrollTop;
+        return { position, saved: Number(localStorage.getItem(key(first))) };
+      },
+    };
+    return () => { delete window.sidebarScrollFixture; };
+  }, [dispatch]);
+  return React.createElement("div", { style: { display: "flex", height: 360 } },
+    visible && React.createElement(Sidebar, { onCollapse: () => setVisible(false) }));
+}
+createRoot(document.getElementById("root")).render(React.createElement(SettingsProvider, null,
+  React.createElement(StoreProvider, null, React.createElement(Fixture))));
+</script></body></html>

@@ -108,6 +108,14 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
+      - name: Qualify repository sidebar scroll persistence
+        run: |
+          mkdir -p "$RUNNER_TEMP/crab-sidebar-scroll"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          else
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+          fi
       - name: Qualify local native process group ownership
         if: runner.os != 'Windows'
         run: |

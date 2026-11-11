@@ -2470,3 +2470,39 @@ and branch while reconciling the index. A real files/reftable probe confirms
 that both names remain locked until commit or abort.
 [Git reference transactions](https://git-scm.com/docs/git-update-ref) and
 [Git files-backend locking](https://github.com/git/git/blob/v2.50.1/refs/files-backend.c).
+
+## Sidebar persistence at list transitions
+
+A real browser fixture reproduces a pending scroll of 600 being saved as 0
+when the active workspace changes, the sidebar unmounts, or filtering begins.
+The existing quit correction passes the same fixture. The list now owns its
+position and captures the outgoing DOM before React mutates its rows.
+[React's snapshot lifecycle](https://react.dev/reference/react/Component#getsnapshotbeforeupdate)
+provides that boundary; the pinned React 18.3.1 reconciler calls it during
+the before-mutation phase. Layout cleanup alone cannot protect an offset
+already clamped by a shorter filtered list.
+
+The container retains its children and their state. It saves on workspace and
+filter transitions, unmount and quit, retains the unfiltered position while
+searching, and preserves a saved offset when discovery initially has too few
+rows to display it. Scroll events update memory without synchronous storage
+writes on every event. This replaces the previous effects and animation-frame
+suppression with one owner for standalone, local and SSH workspace lists.
+
+All six actual Electron cases pass: workspace change, collapse, filter, quit,
+status refresh and initially empty discovery. Each also verifies the visible
+position after renderer reload. The earlier browser baseline has three actual
+position mismatches, with quit passing. All 51 scoped workspace cases,
+production/fixture types, renderer/Electron builds, Rust formatting and diff
+checks pass. Evidence: `sidebar-pending-scroll-before-clean.json`,
+`sidebar-electron-scroll-six.json` and `sidebar-scoped-regressions.json`.
+Desktop CI now runs the isolated Electron fixture on all four desktop runners.
+This does not resolve the separate combined-package latency/quit investigation.
+
+At `020f412292e`, Linux ARM64 CI passes. Linux x64 and macOS ARM64 pass native,
+checkpoint/SSH and packaging qualification, then fail their broad suites with
+nine shared fixture failures: seven missing `currentBranch` mock exports and
+two calls to the retired `KnownHostsManager.computeFingerprint` method.
+macOS ARM64 additionally fails the small derive-turns timing ratio. Windows
+and macOS Intel are still running. These failures require investigation;
+the release matrix is not green.
