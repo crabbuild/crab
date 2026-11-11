@@ -1,12 +1,13 @@
-/** Keep an auxiliary repository alive until its admitted transfers settle. */
+/** Keep a repository alive until its admitted transfers settle. */
 export class FileTransferOwner {
   private pending = new Map<string, Set<Promise<void>>>();
   private retiring = new Set<string>();
+  private stopping = false;
 
   constructor(private release: (repoId: string) => Promise<unknown>) {}
 
   async run<T>(repoId: string, work: () => Promise<T>): Promise<T> {
-    if (this.retiring.has(repoId)) throw new Error("The worktree panel has closed. Reopen it to transfer files.");
+    if (this.stopping || this.retiring.has(repoId)) throw new Error("Repository file services are closing. Reopen the repository to transfer files.");
     let complete!: () => void;
     const completion = new Promise<void>(resolve => { complete = resolve; });
     const pending = this.pending.get(repoId) ?? new Set<Promise<void>>();
@@ -19,6 +20,11 @@ export class FileTransferOwner {
       if (pending.size === 0) this.pending.delete(repoId);
       complete();
     }
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    await Promise.all([...this.pending.values()].flatMap(pending => [...pending]));
   }
 
   async close(repoId: string): Promise<unknown> {

@@ -10,7 +10,7 @@ const fixture = vi.hoisted(() => ({
 vi.mock("../src/ipc", () => ({ onAgentEvent: (receive: typeof fixture.receive) => { fixture.receive = receive; return () => {}; } }));
 vi.mock("../src/settings", () => ({ getSettings: () => ({ notifications: fixture.notifications }) }));
 vi.mock("../src/lib/toasts", () => ({ publishToast: fixture.publish, dismissToast: fixture.dismiss }));
-import { setupAgentErrorPublisher } from "../src/lib/toast-publishers";
+import { setupAgentErrorPublisher, setupJobCompletionPublisher } from "../src/lib/toast-publishers";
 
 let unsubscribe: () => void;
 beforeEach(() => {
@@ -20,6 +20,12 @@ beforeEach(() => {
   unsubscribe = setupAgentErrorPublisher();
 });
 afterEach(() => unsubscribe());
+
+it("cancellation feedback preserves publication uncertainty for partial batches", () => {
+  unsubscribe(); unsubscribe = setupJobCompletionPublisher();
+  fixture.receive({ method: "progress/complete", params: { op: "hydrate", job_id: "partial", status: -1, outcome: "cancelled" } });
+  expect(fixture.publish).toHaveBeenCalledExactlyOnceWith({ kind: "info", title: "Hydrate cancelled", body: "The operation stopped. Files already published remain in place." });
+});
 
 it("negotiated local recovery clears the outage without dismissing unrelated errors", () => {
   fixture.publish.mockReturnValueOnce("outage").mockReturnValueOnce("other-error");

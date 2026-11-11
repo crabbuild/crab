@@ -205,6 +205,12 @@ export class StorageConnections {
     });
   }
 
+  repositoryContext(repoId: string): { repository: string; storageConnectionId: string | null } | undefined {
+    const session = this.sessions.get(repoId);
+    if (!session) return;
+    return { repository: session.location, storageConnectionId: this.cached?.bindings[session.key] ?? null };
+  }
+
   async request(method: string, params: unknown, nativeSend: Send, remoteProfileId?: string): Promise<unknown> {
     const changed: IdentityChanged = async (repositories, state) => {
       try { await this.identityChanged(repositories, state); }

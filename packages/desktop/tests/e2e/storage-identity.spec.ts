@@ -9,6 +9,7 @@ import type { AgentEvent } from "../../src/ipc";
 import { call, packagedExecutable, prepareFixtureSsh } from "./packaged-app";
 import { sshFixture } from "./ssh-fixture";
 import type { RepoHandle } from "../../src/ipc";
+import type { FileTransferActivity } from "../../electron/file-transfers";
 
 type S3Profile = StorageConnectionInput & { credentials: { provider: "s3"; access_key_id: string; secret_access_key: string } };
 interface Fixture {
@@ -208,12 +209,12 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     expect(remote.requests.some(request => request.method === "files_dehydrate" && request.repo_id === alphaId && request.storage_connection_id === alphaConnection)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("ssh-bulk-dehydration.png") });
 
-    const paletteFile = async (label: string) => {
+    const paletteFile = async (label: string, file = "lfs.safetensors") => {
       await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
       const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
       await palette.getByRole("combobox").fill(label);
       await palette.getByRole("option").filter({ hasText: label }).click();
-      await palette.getByRole("combobox").fill("lfs.safetensors");
+      await palette.getByRole("combobox").fill(file);
       await palette.getByRole("combobox").press("Enter");
       await expect(palette).toHaveCount(0);
     };
@@ -253,6 +254,12 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
     for (const file of nested) await page.getByRole("checkbox", { name: new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).check();
     await page.getByRole("button", { name: /^Hydrate 2 files/ }).click();
     await expect(page.getByRole("main").getByText(`Hydrated ${nested[1]}`, { exact: true })).toBeVisible();
+    // Per-file output precedes the terminal receipt. Join the owner before
+    // the fixture itself mutates the index to invalidate its stat shortcuts.
+    await expect.poll(async () => {
+      const activity = await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+      return activity.jobs.some(job => job.status === "done" && nested.every(file => job.intent.paths.includes(file)));
+    }).toBe(true);
     for (const file of nested) expect(sha(readFileSync(path.join(directories[0], file)))).toBe(source.payloads[0].sha256);
     expect(git(directories[0], ["ls-files", "--stage", "-z"])).toEqual(nestedIndex);
     for (const file of nested) {
@@ -356,6 +363,33 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
       await page.getByLabel("Repository list", { exact: true }).getByRole("button", { name: index === 0 ? "alpha-project" : "beta-project", exact: true }).click();
       await expect.poll(() => page.evaluate(() => localStorage.getItem("crab.activeRepoPath.v1"))).toBe(repoId);
       await expect.poll(() => Boolean(epoch(repoId))).toBe(true);
+      if (index === 0) {
+        const pointer = git(directories[index], ["show", ":cold.safetensors"]);
+        const indexBefore = git(directories[index], ["ls-files", "--stage", "-z"]);
+        const history = async () => await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+        await fetch(source.profiles[index].endpoint + "/__fixture_pause_lfs");
+        try {
+          await paletteFile("Crab: Hydrate File", "cold.safetensors");
+          await expect.poll(async () => (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBeGreaterThan(0);
+          await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+          await expect(page.getByRole("button", { name: "Cancel materialization", exact: true })).toBeInViewport();
+          await page.getByRole("button", { name: "Cancel materialization", exact: true }).click();
+          await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors"))?.status).toBe("cancelled");
+          await expect.poll(async () => (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json() as { blocked: number }).blocked).toBe(0);
+          expect(readFileSync(path.join(directories[index], "cold.safetensors"))).toEqual(pointer);
+          expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
+          await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-cancellation.png") });
+        } finally { await fetch(source.profiles[index].endpoint + "/__fixture_release"); }
+        await application!.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+        await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
+        await expect.poll(() => sha(readFileSync(path.join(directories[index], "cold.safetensors")))).toBe(source.cold_payloads[index].sha256);
+        await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors") && job.status === "done")?.transfer?.files_published).toBe(1);
+        expect(git(directories[index], ["ls-files", "--stage", "-z"])).toEqual(indexBefore);
+        await page.screenshot({ path: test.info().outputPath("ssh-activity-cold-retry.png") });
+        await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+        await paletteFile("Crab: Dehydrate File", "cold.safetensors");
+        await expect.poll(() => readFileSync(path.join(directories[index], "cold.safetensors")).equals(pointer)).toBe(true);
+      }
       const content = await call(page, "read_bytes", { repo_id: repoId, path: "cold.safetensors", max_bytes: source.cold_payloads[index].size + 1 });
       expect(sha(Buffer.from(String(content.bytes_b64), "base64"))).toBe(source.cold_payloads[index].sha256);
       expect(readFileSync(path.join(directories[index], "cold.safetensors"))).toEqual(git(directories[index], ["show", ":cold.safetensors"]));

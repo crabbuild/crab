@@ -93,6 +93,16 @@ describe("native agent process ownership", () => {
     if (vaultDirectory) { await rm(vaultDirectory, { recursive: true, force: true }); vaultDirectory = undefined; }
   });
 
+  it("checks transfer admission at the final local native write boundary", async () => {
+    const admit = vi.fn((method: string) => { if (method === "file_materialize") throw new Error("Preparation was cancelled"); });
+    agent = new Agent({ agent: "fixture", crab: "fixture-cli" }, process.env, [], undefined, admit);
+    await agent.start();
+    const opened = await agent.request("open_local", { repo_id: "repository", path: "/fixture/repository" }) as { native_session_id: string };
+    await expect(agent.request("file_materialize", { repo_id: "repository", file_id: "captured", op_id: "cancelled", native_session_id: opened.native_session_id })).rejects.toThrow("Preparation was cancelled");
+    expect(children[0].frames.filter(frame => frame.method === "file_materialize")).toEqual([]);
+    expect(admit).toHaveBeenCalledWith("file_materialize", expect.objectContaining({ op_id: "cancelled" }));
+  });
+
   async function storageAgent(start = true) {
     vaultDirectory = await mkdtemp(path.join(tmpdir(), "crab-agent-storage-"));
     // This fixture exercises lifecycle routing; vault encryption has its own

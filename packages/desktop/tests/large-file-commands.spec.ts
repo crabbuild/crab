@@ -3,7 +3,7 @@ import { executeCommand, getCommand, type CommandContext } from "../src/lib/comm
 import "../src/lib/view-commands";
 import "../src/lib/git-commands";
 
-vi.mock("../src/ipc", () => ({ rpc: {}, isStaleHunkError: () => false }));
+vi.mock("../src/ipc", () => ({ rpc: {}, isStaleHunkError: () => false, isCancelledError: (error: { code?: number }) => error?.code === 1010 }));
 vi.mock("../src/lib/toasts", () => ({ publishToast: vi.fn() }));
 vi.mock("../src/lib/operation-history", () => ({ recordOperation: vi.fn() }));
 const context: CommandContext = {
@@ -32,6 +32,11 @@ describe("large-file command admission", () => {
 
   it("retains a dismissed confirmation as cancellation rather than success", async () => {
     expect(await executeCommand("crab.dehydrate", { ...context, fileTransfers: { dehydrate: async () => null } })).toEqual({ success: false, cancelled: true, message: "File transfer cancelled" });
+  });
+
+  it("does not report acknowledged native cancellation as command failure", async () => {
+    const hydrate = vi.fn().mockRejectedValue(Object.assign(new Error("Native cancellation"), { code: 1010 }));
+    expect(await executeCommand("crab.hydrate", { ...context, fileTransfers: { hydrate } })).toEqual({ success: false, cancelled: true, message: "Operation cancelled" });
   });
 });
 

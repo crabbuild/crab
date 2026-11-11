@@ -11,6 +11,8 @@ import type { WebContents } from "electron";
 import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
 import type { CapabilitiesChangedEvent } from "./repo-provider";
 import { rpcReply } from "./rpc-transport";
+import type Database from "better-sqlite3";
+import { FileTransfers, isFileTransfer } from "./file-transfers";
 import { MediaResources } from "./media";
 import { registerAppShutdown } from "./app-shutdown";
 import { StorageConnections } from "./storage-connections";
@@ -83,6 +85,15 @@ import { StatusPoller,RepoStatus } from "./workspace-poller";
 
 const isDev = !app.isPackaged;
 
+// One main process owns each profile's transfer receipts. A second process
+// must not recover a live owner's jobs as interrupted before it opens SQLite.
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+});
+
 // Load credentials from ~/.config/crab/.env early so that the agent
 // subprocess (and any crab CLI invocations) inherit AWS/storage creds
 // even though macOS GUI apps don't get the user's shell environment.
@@ -90,15 +101,22 @@ loadEnvGlobal();
 
 protocol.registerSchemesAsPrivileged([{ scheme: "crab-content", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
 let media: MediaResources | null = null;
+let fileTransfers: FileTransfers | null = null;
+let activityError: string | null = null;
+let desktopDatabase: SshDatabase | null = null;
 
 let mainWindow: BrowserWindow | null = null;
 
+function admitFileTransfer(method: string, params: unknown): void { fileTransfers?.fence(method, params); }
+
 function sendAgentEvent(method: string, params: unknown): void {
+  fileTransfers?.observe(method, params);
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
   mainWindow.webContents.send("crab:event", { method, params });
 }
 
 function sendRepositoryCapabilities(event: CapabilitiesChangedEvent): void {
+  if (event.nativeSessionId === null) fileTransfers?.forget(event.repoId);
   if (event.nativeSessionId === null) void media?.invalidateRepo(event.repoId).catch(error => console.error("Media invalidation failed", error));
   sendAgentEvent("repo:capabilities-changed", { repo_id: event.repoId, capabilities: event.capabilities, native_session_id: event.nativeSessionId, error: event.error });
 }
@@ -360,7 +378,7 @@ function extractRepoIdFromParams(params: unknown): string | null {
   return null;
 }
 
-function registerIpc(skillManager: SkillManager, storageConnections: StorageConnections, localAgent: () => Promise<Agent>) {
+function registerIpc(skillManager: SkillManager, storageConnections: StorageConnections, localAgent: () => Promise<Agent>, db: Database.Database) {
   // Keychain handlers for secure credential storage.
   registerKeychainHandlers(ipcMain);
 
@@ -386,7 +404,55 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
   // ProviderRegistry based on the repo_id in params. For open_local
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
+  function initializeTransferActivity() {
+    try {
+      fileTransfers = new FileTransfers(db,
+        repoId => dispatchAgent("close", { repo_id: repoId }).finally(() => fileTransfers?.forget(repoId)),
+        (repoId, opId, session) => dispatchAgent("rpc/cancel", { repo_id: repoId, op_id: opId, native_session_id: session }),
+        change => sendAgentEvent("activity/file-transfer", change),
+        message => storageConnections.redactText(message));
+      activityError = null;
+    } catch (error) {
+      activityError = `File-transfer Activity is unavailable: ${storageConnections.redactText(error instanceof Error ? error.message : String(error))}`;
+      console.error(activityError);
+    }
+  }
+  initializeTransferActivity();
+
   async function requestAgent(method: string, params: unknown): Promise<unknown> {
+    if (method === "activity_file_transfers") return fileTransfers?.snapshot() ?? { version: 0, jobs: [], error: activityError };
+    if (method === "activity_file_transfers_recover") {
+      if (!fileTransfers) initializeTransferActivity();
+      if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
+      return fileTransfers.recover();
+    }
+    const repoId = extractRepoIdFromParams(params);
+    const control = params as Record<string, unknown> | null;
+    if (method === "rpc/cancel" && typeof control?.op_id === "string" && fileTransfers?.owns(control.op_id)) {
+      return fileTransfers.requestCancel(String(repoId), control.op_id, String(control.native_session_id));
+    }
+    if (method === "close" && repoId && fileTransfers) return fileTransfers.close(repoId);
+    if (isFileTransfer(method)) {
+      if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
+      const repository = repoId ? storageConnections.repositoryContext(repoId) : undefined;
+      if (!repository || !repoId) throw new Error("Reopen the repository before transferring files.");
+      const provider = getProviderRegistry().resolve(repoId);
+      const nativeSessionId = provider?.nativeSession(repoId) ?? null;
+      const payload = params as Record<string, unknown>;
+      const admitted = { ...payload, native_session_id: payload.native_session_id ?? nativeSessionId };
+      return fileTransfers.run(method, admitted, { ...repository, nativeSessionId }, () => dispatchAgent(method, admitted));
+    }
+    const session = repoId && method === "file_open" ? getProviderRegistry().resolve(repoId)?.nativeSession(repoId) : null;
+    const result = await dispatchAgent(method, params);
+    if (repoId && method === "file_open" && session && getProviderRegistry().resolve(repoId)?.nativeSession(repoId) === session) {
+      const payload = params as Record<string, unknown>;
+      if (typeof payload.path === "string") fileTransfers?.capture(repoId, session, payload.path, result);
+    }
+    if (repoId && method === "file_close") fileTransfers?.forget(repoId, String((params as Record<string, unknown>).file_id));
+    return result;
+  }
+
+  async function dispatchAgent(method: string, params: unknown): Promise<unknown> {
     if (method.startsWith("storage_connections_")) {
       if (method !== "storage_connections_test") {
         // Device metadata owns no native readiness. Identity changes still join
@@ -1732,6 +1798,7 @@ app.whenReady().then(async () => {
   const sshProfileManager = new SshProfileManager(path.join(sshDataDirectory, "ssh-profiles.json"));
   const sshDatabase = new SshDatabase(path.join(sshDataDirectory, "ssh-enhanced.db"));
   const db = sshDatabase.getDb();
+  desktopDatabase = sshDatabase;
 
   // Core SSH modules
   const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
@@ -1767,7 +1834,7 @@ app.whenReady().then(async () => {
     return construction;
   }
 
-  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager, storageConnections, localAgent);
+  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager, storageConnections, localAgent, db);
   registerSidecarIpc(sidecarManager);
   registerLspIpc(lspManager, () => mainWindow);
   registerFileWatcher(() => mainWindow);
@@ -1780,7 +1847,7 @@ app.whenReady().then(async () => {
     request: async (method: string, params: unknown) => {
       return (await localAgent()).request(method, params);
     },
-  }, storageConnections);
+  }, storageConnections, {}, admitFileTransfer);
   _rpcRouter = rpcRouter;
   orchestrator?.setRpcRouter(rpcRouter);
   const runtimeOptions = { packaged: app.isPackaged, appPath: app.getAppPath(), version: app.getVersion(), cacheDirectory: path.join(app.getPath("userData"), "remote-runtimes") };
@@ -2121,7 +2188,7 @@ app.whenReady().then(async () => {
     process.env.CRAB_BIN = runtime.crab;
     process.env.PATH = `${path.dirname(runtime.crab)}${path.delimiter}${process.env.PATH ?? ""}`;
     // The native process owns and retires its private metadata index.
-    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections);
+    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections, admitFileTransfer);
     if (logsDir) next.on("stderr", (line: string) => {
       const day = new Date().toISOString().slice(0, 10);
       fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {
@@ -2192,8 +2259,9 @@ registerAppShutdown(app, [
   stopJupyterRuntimeCommands,
   stopAllWatchers,
   () => shutdownAgentServices?.(),
+  () => fileTransfers?.stop(),
   async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } },
   () => _sshSessionManager && Promise.all(_sshSessionManager.getAllConnections().map(connection => _sshSessionManager!.disconnect(connection.profile.id))),
   () => sidecarManager.stopAll(),
   () => lspManager.stopAll(),
-]);
+], () => desktopDatabase?.close());

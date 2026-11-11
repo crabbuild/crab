@@ -1,3 +1,6 @@
+import { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
+import type { FileTransferActivity, ProgressTransfer } from "../electron/file-transfers";
+export type { ProgressTransfer } from "../electron/file-transfers";
 import type { DeployProgress } from "../electron/ssh-deployer";
 import type { KnownHost } from "../electron/ssh-known-hosts";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
@@ -539,16 +542,6 @@ export interface ProgressComplete {
   outcome?: "completed" | "failed" | "cancelled";
 }
 
-export interface ProgressTransfer {
-  op: string;
-  job_id: string;
-  repo_id: string;
-  written_bytes: number;
-  checked_bytes?: number | null;
-  total_bytes: number | null;
-  files_published?: number | null;
-  files_total?: number | null;
-}
 
 export type FileTransfer = { fileId: string } | { paths: string[]; verb: "hydrate" | "dehydrate" | "restore" };
 
@@ -1571,7 +1564,7 @@ export async function call<T>(method: string, params: unknown = {}, signal?: Abo
 // ── Cancellable RPC ─────────────────────────────────────────────────
 
 /** JSON-RPC error code the agent uses for cancelled operations. */
-export const OP_CANCELLED_RPC_CODE = 1010;
+export { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
 
 /**
  * Returns true when an RPC error represents a cancelled operation.
@@ -1729,12 +1722,13 @@ export function isStorageRepositoryUrl(value: string): boolean {
   return /^(crab|s3|gs|gcs|az|azure):\/\//.test(value);
 }
 
-let jobCounter = 1;
 export function nextJobId(op: string): string {
-  return `${op}-${Date.now()}-${jobCounter++}`;
+  return `${op}-${crypto.randomUUID()}`;
 }
 
 export const rpc = {
+  fileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers", {}),
+  recoverFileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers_recover", {}),
   ping: () => call<{ pong: string }>("ping"),
 
   managedProfiles: () => call<ManagedProfilesResponse>("managed_profiles"),

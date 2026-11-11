@@ -1,7 +1,7 @@
 /**
- * SQLite database for SSH enhanced features persistence.
+ * SQLite database for native file-transfer receipts and SSH persistence.
  *
- * Stores transfer history, resume state, scheduled transfers, bookmarks,
+ * Stores native file jobs, SSH transfer history, resume state, scheduled transfers, bookmarks,
  * recent files, workspace sync pairs, and sync conflicts.
  * Uses better-sqlite3 for synchronous, fast access from the Electron main process.
  *
@@ -34,7 +34,8 @@ export class SshDatabase {
 
     // Enable WAL mode for better concurrent read/write performance.
     this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    // File-transfer intent must reach durable storage before native mutation.
+    this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
 
     this.migrate();

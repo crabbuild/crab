@@ -1,3 +1,7 @@
+export type RequestAdmission = (method: string, params: unknown) => void;
+
+export const OP_CANCELLED_RPC_CODE = 1010;
+
 export interface RpcFailure {
   message: string;
   code?: number | string;

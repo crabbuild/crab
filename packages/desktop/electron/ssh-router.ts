@@ -1,3 +1,4 @@
+import type { RequestAdmission } from "./rpc-transport";
 import { parseRepoId, sameRemoteEndpoint, type RemoteEndpoint } from "./ssh-types";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -96,6 +97,7 @@ export class RpcRouter extends EventEmitter {
     private readonly localAgent: { request(method: string, params: unknown): Promise<unknown> },
     private readonly storageConnections: Pick<StorageConnections, "request" | "redactValue">,
     options: RpcRouterOptions = {},
+    private readonly admit?: RequestAdmission,
   ) {
     super();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
@@ -378,6 +380,7 @@ export class RpcRouter extends EventEmitter {
   private send(owner: ChannelOwner, method: string, params: unknown, timeoutMs: number | undefined): Promise<unknown> {
     const failure = owner.failure ?? owner.draining;
     if (failure) return Promise.reject(failure);
+    this.admit?.(method, params);
     const fields = params !== null && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
     const operation = method !== "rpc/cancel" && typeof fields?.op_id === "string"
       ? { op_id: fields.op_id, ...(typeof fields.repo_id === "string" ? { repo_id: fields.repo_id } : {}) } : undefined;

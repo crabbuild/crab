@@ -2,7 +2,7 @@
 
 Open **Large Files** from the activity bar to track, inspect, hydrate and
 dehydrate Crab and Git LFS files. **Files** provides previews and file details;
-**Activity** retains running transfer progress; **Settings → Storage & Cache**
+**Activity** retains transfer progress and outcomes; **Settings → Storage & Cache**
 manages saved storage connections, cache inspection and prefetch presets.
 
 ## Content and pointers
@@ -65,11 +65,19 @@ Selection transfers confirm every dehydration and hydration at 1 GiB or
 transfer controls. Local and SSH controls require the negotiated native methods;
 unavailable services disable the relevant direction.
 
-**Activity** shows actual work and provides cancellation. Navigating away keeps
-the repository-owned operation alive. Cancellation waits for cleanup; files
-already published by a multi-file operation remain published. Refresh the
-inventory before retrying. Durable restart/resume and network-byte accounting
-remain open; bytes written are not a network-transfer measurement.
+**Activity** shows actual work and provides cancellation. Navigating away or
+reloading the view keeps the main-process operation alive. Cancellation during
+setup prevents a late native send; admitted native work acknowledges cancellation
+after cleanup. Files already published by a multi-file operation remain published.
+
+Transfer selections and outcomes survive app restart. An operation without a
+terminal receipt shows **Outcome unknown**; check the working files before using
+**Retry transfer**. Retry uses current services, storage identity and eligible
+paths, and asks for confirmation. It starts a new attempt; it does not replay an
+old native session or undo published files. Activity keeps the latest 200 finished
+jobs and every active job. A history-storage error blocks new transfers and offers
+**Reload Activity** after writable storage is restored. Native chunk resume and
+network-byte accounting remain open; bytes written are not a network measurement.
 
 ## Discard whole-file changes
 

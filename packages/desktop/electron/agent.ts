@@ -1,3 +1,4 @@
+import type { RequestAdmission } from "./rpc-transport";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as readline from "node:readline";
@@ -55,7 +56,7 @@ export class Agent extends EventEmitter {
   private static readonly CRASH_WINDOW_MS = 30_000;
   private static readonly MAX_AUTO_RESTARTS = 1;
 
-  constructor(private readonly binaries: { agent: string; crab: string }, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections) { super(); }
+  constructor(private readonly binaries: { agent: string; crab: string }, private readonly env: NodeJS.ProcessEnv = process.env, private readonly extraArgs: string[] = [], private readonly storageConnections?: StorageConnections, private readonly admit?: RequestAdmission) { super(); }
 
   async start(reopen = false): Promise<void> {
     const existing = this.runtime;
@@ -329,6 +330,7 @@ export class Agent extends EventEmitter {
       }
       params = nativeParams;
     }
+    this.admit?.(method, params);
     const id = String(this.nextId++);
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve, reject) => {

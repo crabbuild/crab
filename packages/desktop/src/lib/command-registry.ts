@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { publishToast } from "./toasts";
 import { recordOperation } from "./operation-history";
-import { isStaleHunkError } from "../ipc";
+import { isCancelledError, isStaleHunkError } from "../ipc";
 import type { SelectionTransfers } from "../hooks/useFileTransfers";
 
 // --- Types & Interfaces ---
@@ -174,7 +174,9 @@ export async function executeCommand(
   try {
     result = await cmd.execute(ctx, input);
   } catch (err: unknown) {
-    if (isStaleHunkError(err)) {
+    if (isCancelledError(err)) {
+      result = { success: false, cancelled: true, message: "Operation cancelled" };
+    } else if (isStaleHunkError(err)) {
       result = {
         success: false,
         message: "File changed on disk since the diff was loaded. Please refresh and retry.",
@@ -185,7 +187,8 @@ export async function executeCommand(
     }
   }
 
-  // A dismissed confirmation starts no operation and must not report failure.
+  // Dismissal and acknowledged cancellation are not command failures.
+  // Admitted native transfers retain their actual receipts in Activity.
   if (result.cancelled) return result;
   const durationMs = Date.now() - startTime;
 

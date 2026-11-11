@@ -30,6 +30,8 @@ const ALLOWED_METHODS = new Set([
   "files_materialize",
   "files_dehydrate",
   "files_restore",
+  "activity_file_transfers",
+  "activity_file_transfers_recover",
   "read_text",
   "read_bytes",
   "read_range",

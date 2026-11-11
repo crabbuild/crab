@@ -1,5 +1,5 @@
 import { fileBuffers } from "./lib/file-buffer-store";
-import { FileTransferOwner } from "./lib/file-transfer-owner";
+import type { FileTransferActivity, FileTransferChange, FileTransferJob } from "../electron/file-transfers";
 import { retainNotebookRepositories } from "./lib/jupyter-ipc";
 import { invalidateFileQuerySources, retainFileQueryRepositories } from "./lib/file-query";
 import { workspaceDocuments } from "./lib/workspace-settings-store";
@@ -7,7 +7,7 @@ import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer"
 import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 import { parseRepoId } from "../electron/ssh-types";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, type FileTransfer, type ProgressTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isCancelledError, isStorageRepositoryUrl } from "./ipc";
+import { RepoHandle, ProgressLine, type FileTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isStorageRepositoryUrl } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -187,6 +187,8 @@ export interface AppState {
   // clone / hydrate.
   logs: ProgressLine[];
   jobs: Record<string, JobState>;
+  activityVersion: number;
+  activityError: string | null;
   // Ordering and pinning use physical paths or stable SDK snapshot identities.
   // Repos with an explicit sortIndex are shown in that order; repos
   // without one fall back to alphabetic order.
@@ -212,17 +214,13 @@ export function getActiveWorkspace(state: AppState): Workspace | null {
   return state.workspaces[0] ?? null;
 }
 
-export interface JobState {
+export type JobState = Omit<FileTransferJob, "job_id" | "op" | "intent" | "revision" | "repoId"> & {
   op: string;
-  nativeSessionId?: string;
-  status: "running" | "done" | "failed" | "cancelled" | "interrupted";
-  transfer?: ProgressTransfer;
-  interruption?: string;
-  exitCode?: number;
+  intent?: FileTransferJob["intent"];
   lines: number;
-  startedAt: number;
-  updatedAt: number;
-}
+  revision?: number;
+  repoId?: string;
+};
 
 // Logical SDK identities persist; native_session_id never does. A URL alone
 // cannot distinguish connections to identical bucket names on different stores.
@@ -356,12 +354,13 @@ export type Action =
   | { type: "pin-repo"; path: string }
   | { type: "unpin-repo"; path: string }
   | { type: "reorder-repos"; orderedPaths: string[] }
+  | { type: "file-transfer-state"; activity: FileTransferActivity }
+  | { type: "file-transfer-change"; change: FileTransferChange }
+  | { type: "file-transfer-error"; error: string }
   | { type: "job-start"; job_id: string; op: string; nativeSessionId?: string }
   | { type: "job-line"; line: ProgressLine }
   | { type: "job-lines-batch"; lines: ProgressLine[] }
   | { type: "job-complete"; job_id: string; status: number; outcome?: ProgressComplete["outcome"] }
-  | { type: "job-transfer"; transfer: ProgressTransfer }
-  | { type: "job-interrupted"; job_id: string; message: string }
   | { type: "set-max-log-lines"; value: number }
   | { type: "clear-logs" }
   | WorkspaceAction
@@ -440,6 +439,21 @@ function reducer(state: AppState, action: Action): AppState {
     case "reorder-repos": {
       return { ...state, repoOrder: action.orderedPaths };
     }
+    case "file-transfer-error": return { ...state, activityError: action.error };
+    case "file-transfer-state": {
+      if (action.activity.version < state.activityVersion) return state;
+      const jobs = { ...state.jobs };
+      for (const job of action.activity.jobs) jobs[job.job_id] = { ...job, lines: jobs[job.job_id]?.lines ?? 0 };
+      return { ...state, jobs, activityVersion: action.activity.version, activityError: action.activity.error };
+    }
+    case "file-transfer-change": {
+      const change = action.change;
+      if (change.version < state.activityVersion) return state;
+      const jobs = { ...state.jobs };
+      for (const id of change.removed ?? []) delete jobs[id];
+      if (change.job) jobs[change.job.job_id] = { ...change.job, lines: jobs[change.job.job_id]?.lines ?? 0 };
+      return { ...state, jobs, activityVersion: change.version, activityError: change.error };
+    }
     case "job-start": {
       const now = Date.now();
       return {
@@ -500,22 +514,9 @@ function reducer(state: AppState, action: Action): AppState {
       }
       return { ...state, logs, jobs };
     }
-    case "job-transfer": {
-      const transfer = action.transfer;
-      const now = Date.now();
-      const existing = state.jobs[transfer.job_id];
-      if (existing && existing.status !== "running") return state;
-      const job: JobState = existing ?? { op: transfer.op, status: "running", lines: 0, startedAt: now, updatedAt: now };
-      return { ...state, jobs: { ...state.jobs, [transfer.job_id]: { ...job, transfer, updatedAt: now } } };
-    }
-    case "job-interrupted": {
-      const job = state.jobs[action.job_id];
-      if (!job || job.status !== "running") return state;
-      return { ...state, jobs: { ...state.jobs, [action.job_id]: { ...job, status: "interrupted", interruption: action.message, updatedAt: Date.now() } } };
-    }
     case "job-complete": {
       const existing = state.jobs[action.job_id];
-      if (!existing) return state;
+      if (!existing || existing.intent) return state;
       return {
         ...state,
         jobs: {
@@ -653,6 +654,8 @@ function initialState(): AppState {
     activeRepoId: null,
     logs: [],
     jobs: {},
+    activityVersion: -1,
+    activityError: null,
     pinnedPaths: loadPinnedPaths(),
     repoOrder,
     workspaces: [],
@@ -707,8 +710,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", protectPendingEdits);
+    let loadingActivity = true;
+    const activityChanges: FileTransferChange[] = [];
     const off = onAgentEvent((evt) => {
-      if (evt.method === "progress/line") {
+      if (evt.method === "activity/file-transfer") {
+        const change = evt.params as FileTransferChange;
+        if (loadingActivity) activityChanges.push(change);
+        else dispatch({ type: "file-transfer-change", change });
+      } else if (evt.method === "progress/line") {
         lineBuf.push(evt.params as ProgressLine);
         if (!flushTimer) {
           flushTimer = setTimeout(flushLines, 100);
@@ -719,8 +728,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (lineBuf.length > 0) flushLines();
         const p = evt.params as ProgressComplete;
         dispatch({ type: "job-complete", job_id: p.job_id, status: p.status, outcome: p.outcome });
-      } else if (evt.method === "progress/transfer") {
-        dispatch({ type: "job-transfer", transfer: evt.params as ProgressTransfer });
       } else if (evt.method === "repo:storage-source-changed") {
         invalidateFileQuerySources((evt.params as { repo_ids: string[] }).repo_ids);
       } else if (evt.method === "repo:capabilities-changed") {
@@ -729,7 +736,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: "repo-runtime-changed", ...p });
       }
     });
+    let disposed = false;
+    void rpc.fileTransferHistory().then(activity => {
+      if (!disposed) dispatch({ type: "file-transfer-state", activity });
+    }).catch(error => {
+      if (!disposed) dispatch({ type: "file-transfer-error", error: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      loadingActivity = false;
+      if (!disposed) for (const change of activityChanges) dispatch({ type: "file-transfer-change", change });
+    });
     return () => {
+      disposed = true;
       window.removeEventListener("beforeunload", protectPendingEdits);
       off();
       if (flushTimer) clearTimeout(flushTimer);
@@ -842,9 +859,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // destructure only actions (e.g. `const { dispatch } = useStore()`) still
   // re-render when state changes due to Context limitations, but the batched
   // progress line dispatch (100ms throttle) keeps the frequency manageable.
-  const transferOwner = useRef<FileTransferOwner>();
-  if (!transferOwner.current) transferOwner.current = new FileTransferOwner(rpc.close);
-  const closeTransferRepo = useCallback((repoId: string) => transferOwner.current!.close(repoId), []);
+  const closeTransferRepo = useCallback((repoId: string) => rpc.close(repoId), []);
 
   const value = useMemo<Ctx>(
     () => ({
@@ -857,24 +872,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
-      runFileTransfer: (repoId, selection, nativeSessionId, jobId) => transferOwner.current!.run(repoId, async () => {
+      runFileTransfer: (repoId, selection, nativeSessionId, jobId) => {
         const op = "verb" in selection ? selection.verb : "hydrate";
-        const job_id = jobId ?? nextJobId(op);
-        dispatch({ type: "job-start", job_id, op, nativeSessionId });
-        try {
-          const result = await rpc.fileTransfer(repoId, selection, job_id, nativeSessionId);
-          dispatch({ type: "job-complete", job_id, status: 0 });
-          return result;
-        }
-        catch (error) {
-          // A lost terminal reply proves neither rollback nor publication.
-          // Keep the job inspectable after its originating view has unmounted.
-          if (isCancelledError(error)) dispatch({ type: "job-complete", job_id, status: -1, outcome: "cancelled" });
-          else if (error && typeof error === "object" && "code" in error && typeof error.code === "number") dispatch({ type: "job-complete", job_id, status: 1 });
-          else dispatch({ type: "job-interrupted", job_id, message: error instanceof Error ? error.message : String(error) });
-          throw error;
-        }
-      }),
+        return rpc.fileTransfer(repoId, selection, jobId ?? nextJobId(op), nativeSessionId);
+      },
       closeTransferRepo,
       setMaxLogLines: (value) => dispatch({ type: "set-max-log-lines", value }),
       clearLogs: () => dispatch({ type: "clear-logs" }),

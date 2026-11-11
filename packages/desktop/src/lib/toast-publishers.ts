@@ -39,7 +39,7 @@ export function setupJobCompletionPublisher(): () => void {
     const label = formatOpLabel(p.op);
 
     if (p.outcome === "cancelled") {
-      publishToast({ kind: "info", title: `${label} cancelled`, body: "The operation stopped before publication." });
+      publishToast({ kind: "info", title: `${label} cancelled`, body: "The operation stopped. Files already published remain in place." });
     } else if (p.status === 0) {
       publishToast({
         kind: "success",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { FileTransferOwner } from "../src/lib/file-transfer-owner";
+import { FileTransferOwner } from "../electron/file-transfer-owner";
 
 function pending() {
   let resolve!: (value: number) => void;
@@ -8,6 +8,15 @@ function pending() {
 }
 
 describe("repository transfer lifetime", () => {
+  it("drains all repository owners before shutdown and refuses later admission", async () => {
+    const owner = new FileTransferOwner(vi.fn()); const first = pending(), second = pending();
+    const a = owner.run("one", () => first.promise), b = owner.run("two", () => second.promise);
+    let stopped = false;
+    const stop = owner.stop().then(() => { stopped = true; });
+    await expect(owner.run("three", vi.fn())).rejects.toThrow("services are closing");
+    first.resolve(1); await a; expect(stopped).toBe(false);
+    second.resolve(2); await b; await stop; expect(stopped).toBe(true);
+  });
   it("keeps all admitted publishers alive after their view closes and rejects later intent", async () => {
     const release = vi.fn().mockResolvedValue({ closed: "worktree" });
     const owner = new FileTransferOwner(release);
@@ -16,7 +25,7 @@ describe("repository transfer lifetime", () => {
     const b = owner.run("worktree", () => second.promise);
     const closed = owner.close("worktree");
     const late = vi.fn();
-    await expect(owner.run("worktree", late)).rejects.toThrow("panel has closed");
+    await expect(owner.run("worktree", late)).rejects.toThrow("services are closing");
     expect(late).not.toHaveBeenCalled();
     first.resolve(1);
     expect(await a).toBe(1);

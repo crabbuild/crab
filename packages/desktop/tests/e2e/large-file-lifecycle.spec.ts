@@ -1,11 +1,12 @@
 import { test, expect, _electron as electron } from "@playwright/test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { call, packagedExecutable } from "./packaged-app";
 import type { ChunkDiffMetrics } from "../../src/ipc";
+import type { FileTransferActivity } from "../../electron/file-transfers";
 
 test("path staging preserves literal selection and safely unstages an unborn repository", async () => {
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-staging-paths-"));
@@ -99,7 +100,30 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await expect(page.getByText("2 of 2 files restored", { exact: true })).toBeInViewport();
     await page.screenshot({ path: test.info().outputPath("whole-file-restore-activity.png") });
     await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
-
+    const receiptFault = async (enabled: boolean) => application.evaluate(({ app }, enabled) => {
+      const modules = process.getBuiltinModule("node:module") as typeof import("node:module");
+      const require = modules.createRequire(`${app.getAppPath()}/package.json`);
+      const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+      const db = new Database(`${app.getPath("userData")}/ssh-enhanced.db`);
+      try {
+        db.exec(enabled ? "CREATE TRIGGER deny_transfer_admission BEFORE INSERT ON file_transfer_jobs BEGIN SELECT RAISE(ABORT,'Fixture receipt storage unavailable'); END" : "DROP TRIGGER deny_transfer_admission");
+      } finally { db.close(); }
+    }, enabled);
+    await receiptFault(true);
+    await discard(files[2]);
+    expect(readFileSync(path.join(source, files[2]))).toEqual(dirty);
+    await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+    const activityFailure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Reload Activity", exact: true }) });
+    await expect(activityFailure).toContainText("Activity could not save");
+    await expect(activityFailure).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath("ui-activity-storage-failure.png") });
+    await receiptFault(false);
+    await page.getByRole("button", { name: "Reload Activity", exact: true }).click();
+    await expect(activityFailure).toHaveCount(0);
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
+    await discard(files[2]);
+    await expect.poll(() => readFileSync(path.join(source, files[2])).equals(staged)).toBe(true);
+    expect(git(["ls-files", "--stage", "-z"])).toEqual(index);
 
     await primary.getByRole("button", { name: "Files", exact: true }).click();
     await page.locator('[role="treeitem"][data-item-path="note.md"]').click();
@@ -240,9 +264,85 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
       await dialog.getByRole("option").filter({ hasText: label }).click();
       await expect(dialog).toHaveCount(0);
     };
+    const holdPreparation = async () => application!.evaluate(({ app, dialog }) => {
+      const modules = process.getBuiltinModule("node:module") as typeof import("node:module");
+      const require = modules.createRequire(`${app.getAppPath()}/package.json`);
+      const { Agent } = require(`${app.getAppPath()}/dist-electron/agent.cjs`) as typeof import("../../electron/agent");
+      const original = Agent.prototype.request;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const state = globalThis as typeof globalThis & { transferPreparation: { arrivals: number; settled: number; release: () => void } };
+      state.transferPreparation = { arrivals: 0, settled: 0, release: () => { Agent.prototype.request = original; release(); } };
+      Agent.prototype.request = async function (method, params) {
+        if (method !== "files_materialize") return original.call(this, method, params);
+        state.transferPreparation.arrivals++;
+        await gate;
+        try { return await original.call(this, method, params); }
+        finally { state.transferPreparation.settled++; }
+      };
+      dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+    });
+    const history = async () => await call(page, "activity_file_transfers", {}) as unknown as FileTransferActivity;
+    const preparationEntered = async () => expect.poll(() => application!.evaluate(() =>
+      (globalThis as typeof globalThis & { transferPreparation: { arrivals: number } }).transferPreparation.arrivals)).toBe(1);
+    const activity = async () => {
+      await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+      await expect(page.getByRole("button", { name: "Close activity drawer", exact: true })).toBeInViewport();
+    };
+    await holdPreparation();
     await palette("Crab: Hydrate All");
-    await expect(page.getByText("Hydrated 2 files", { exact: true })).toBeVisible();
+    await preparationEntered();
+    const admitted = (await history()).jobs.find(job => job.status === "running")!;
+    expect(admitted.intent.paths.slice().sort()).toEqual(files.slice().sort());
+    expect(admitted.intent.storageConnectionId).not.toBeNull();
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Repository overview", exact: true })).toContainText("clone");
+    await activity();
+    await expect(page.getByText("Waiting for native admission…", { exact: true })).toBeInViewport();
+    await new Promise<void>((resolve, reject) => {
+      const second = spawn(executablePath, [`--user-data-dir=${profile}`], { env: appEnv, stdio: "ignore" });
+      const deadline = setTimeout(() => { second.kill("SIGKILL"); reject(new Error("Second profile owner did not exit")); }, 10_000);
+      second.once("error", error => { clearTimeout(deadline); reject(error); });
+      second.once("exit", code => { clearTimeout(deadline); if (code === 0) resolve(); else reject(new Error(`Second profile owner exited ${code}`)); });
+    });
+    expect((await history()).jobs.find(job => job.job_id === admitted.job_id)?.status).toBe("running");
+    await page.getByRole("button", { name: "Cancel materialization", exact: true }).click();
+    await expect.poll(async () => (await history()).jobs.find(job => job.job_id === admitted.job_id)?.status).toBe("cancelled");
+    await application.evaluate(() => (globalThis as typeof globalThis & { transferPreparation: { release: () => void } }).transferPreparation.release());
+    await expect.poll(() => application!.evaluate(() => (globalThis as typeof globalThis & { transferPreparation: { settled: number } }).transferPreparation.settled)).toBe(1);
+    for (let index = 0; index < files.length; index++) expect(readFileSync(path.join(clone, files[index]))).toEqual(pointers[index]);
+    await page.screenshot({ path: test.info().outputPath("ui-activity-preparation-cancelled.png") });
+
+    await holdPreparation();
+    await page.getByRole("button", { name: "Retry transfer", exact: true }).click();
+    await preparationEntered();
+    const interrupted = (await history()).jobs.find(job => job.status === "running")!;
+    expect(interrupted.job_id).not.toBe(admitted.job_id);
+    // Kill only this owned main process after its real SQLite intent commits.
+    // No native writer was sent; startup must retain unknown, never auto-replay.
+    const exited = application.waitForEvent("close");
+    application.process().kill("SIGKILL");
+    await exited;
+    application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], env: { ...appEnv, CRAB_CACHE_DIR: path.join(root, "cold-clone-cache") } });
+    page = await application.firstWindow();
+    await expect(page.getByRole("button", { name: "Repository overview", exact: true })).toContainText("clone", { timeout: 30_000 });
+    const recovered = (await history()).jobs.find(job => job.job_id === interrupted.job_id)!;
+    expect(recovered).toMatchObject({ status: "interrupted", intent: interrupted.intent });
+    expect(recovered.nativeSessionId).toBeUndefined();
+    for (let index = 0; index < files.length; index++) expect(readFileSync(path.join(clone, files[index]))).toEqual(pointers[index]);
+    await activity();
+    await expect(page.getByText("Outcome unknown. Check the working files.", { exact: true })).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath("ui-activity-restart-unknown.png") });
+    await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+    await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
     for (const file of files) await expect.poll(() => digest(readFileSync(path.join(clone, file))), { timeout: 40_000 }).toBe(digest(content));
+    await expect.poll(async () => (await history()).jobs.filter(job => job.op === "hydrate" && job.status === "done").length).toBe(1);
+    const completedTransfer = (await history()).jobs.find(job => job.op === "hydrate" && job.status === "done")!;
+    expect(completedTransfer.transfer).toMatchObject({ written_bytes: content.length * 2, files_published: 2 });
+    expect(completedTransfer.intent).toEqual(interrupted.intent);
+    expect(completedTransfer.nativeSessionId).not.toBe(interrupted.nativeSessionId);
+    await page.screenshot({ path: test.info().outputPath("ui-activity-explicit-retry-complete.png") });
+    await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
     expect(git(clone, ["status", "--porcelain", "--", ...files]).toString()).toBe("");
     await page.screenshot({ path: test.info().outputPath("ui-lifecycle-cold-hydration.png") });
 
