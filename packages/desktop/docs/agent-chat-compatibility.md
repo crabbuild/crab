@@ -2325,3 +2325,20 @@ branch at the same OID, it aborted the ref update and restored a clean checkout.
 Both cases preserved the other ref. The prototype still needs a durable record
 for interruption between writing files, publishing the ref and replacing the
 index. Evidence is recorded in `apply-active-shadow-publication-probe.json`.
+
+## Selected Apply index isolation (2026-11-10)
+
+Selected Apply now scopes the staged-diff check and commit to the literal
+selected paths. Git's path checkout already updates the index. A partial commit
+preserves other staged entries, and an unchanged selection leaves HEAD in place.
+[Git path checkout](https://git-scm.com/docs/git-checkout) and
+[partial commit](https://git-scm.com/docs/git-commit).
+
+Both regressions previously committed the user's separately staged change. They
+now preserve its staged and working-tree contents. All 249 scoped desktop tests
+passed. Evidence is recorded in `selected-apply-staged-before.json` and
+`selected-apply-staged-after.json`.
+
+The existing Claude CLI login passed real file-writing and cold-resume checks.
+The cold-resume check retained inference context across follow-up and process
+restart. Evidence is recorded in `claude-pr670-recheck.json`.

@@ -700,6 +700,31 @@ exec ${quote(git)} "$@"
   });
 
   describe("cherryPickFiles", () => {
+    it.each(["new selection", "unchanged selection"])("preserves unrelated staged changes for %s", async mode => {
+      const baseRef = await getHead(repoDir);
+      const taskId = `cherry-staged-${path.basename(repoDir)}`;
+      const worktreePath = await createAgentWorktree(repoDir, taskId, baseRef);
+      try {
+        const unchanged = mode === "unchanged selection";
+        const selection = unchanged ? "src/index.ts" : "src/new-feature.ts";
+        if (!unchanged) await makeAgentChanges(worktreePath);
+        const readme = path.join(repoDir, "README.md");
+        fs.writeFileSync(readme, "staged user work\n");
+        await execFile("git", ["add", "--", "README.md"], { cwd: repoDir });
+        fs.writeFileSync(readme, "unstaged user work\n");
+
+        await cherryPickFiles(createMockTask(repoDir, taskId, baseRef, worktreePath), [selection]);
+
+        const { stdout: committed } = await execFile("git", ["diff", "--name-only", baseRef, "HEAD"], { cwd: repoDir });
+        const { stdout: staged } = await execFile("git", ["show", ":README.md"], { cwd: repoDir });
+        expect({ committed, staged, working: fs.readFileSync(readme, "utf8") }).toEqual({
+          committed: unchanged ? "" : `${selection}\n`, staged: "staged user work\n", working: "unstaged user work\n",
+        });
+      } finally {
+        await execFile("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoDir });
+      }
+    });
+
     it("commits only the selected files from the agent branch", async () => {
       const baseRef = await getHead(repoDir);
       const taskId = `cherry-pick-${Date.now()}`;

@@ -601,11 +601,7 @@ async function getConflictFiles(repoPath: string): Promise<string[]> {
 // ─── Cherry-Pick ─────────────────────────────────────────────────────────────
 
 /**
- * Checks out selected files from the agent branch, stages, and commits them.
- *
- * Ensures the main repo is on the correct base branch before applying.
- * Uses `git checkout <branch> -- <file>` for each file, then stages
- * and commits all checked-out files into the base branch.
+ * Checks out and commits selected paths on the saved destination branch.
  */
 export async function cherryPickFiles(
   task: Task,
@@ -620,30 +616,17 @@ export async function cherryPickFiles(
     await execFile("git", ["checkout", targetBranch], { cwd: task.repoPath });
   }
 
-  // Checkout each file from the agent branch.
-  for (const file of files) {
-    await execFile(
-      "git",
-      ["checkout", source, "--", file],
-      { cwd: task.repoPath },
-    );
-  }
+  const paths = ["--", ...files];
+  await execFile("git", ["--literal-pathspecs", "checkout", source, ...paths], { cwd: task.repoPath });
 
-  // Stage all the checked-out files.
-  await execFile("git", ["add", ...files], { cwd: task.repoPath });
-
-  // Check if there are actually staged changes to commit.
-  // If the files are already identical (e.g., after a prior merge), git commit
-  // would fail with "nothing to commit". In that case, succeed silently.
+  // Checkout already stages the selection. Keep both the no-op check and the
+  // commit scoped to these paths so the user's other staged work stays private.
   const { stdout: diffStaged } = await execFile(
     "git",
-    ["diff", "--cached", "--name-only"],
+    ["--literal-pathspecs", "diff", "--cached", "--name-only", ...paths],
     { cwd: task.repoPath },
   );
-  if (!diffStaged.trim()) {
-    // Nothing to commit — files are already up to date.
-    return;
-  }
+  if (!diffStaged.length) return;
 
   // Commit the cherry-picked files.
   const fileList = files.length <= 3
@@ -652,7 +635,7 @@ export async function cherryPickFiles(
   const commitMessage = `Apply selected files from agent task: ${fileList}`;
   await execFile(
     "git",
-    ["commit", "-m", commitMessage],
+    ["--literal-pathspecs", "commit", "--only", "-m", commitMessage, ...paths],
     { cwd: task.repoPath },
   );
 }
