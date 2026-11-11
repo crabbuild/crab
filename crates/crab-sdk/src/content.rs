@@ -86,15 +86,7 @@ pub(crate) async fn open(
             }
             #[cfg(feature = "files")]
             if blob.metadata.classification == ContentClassification::LfsPointer {
-                return lfs::deliver(
-                    &runtime.layout,
-                    blob.bytes,
-                    options,
-                    &operation,
-                    send,
-                    ready,
-                )
-                .await;
+                return lfs::deliver(&runtime, blob.bytes, options, &operation, send, ready).await;
             }
             #[cfg(feature = "files")]
             if blob.metadata.classification == ContentClassification::CrabPointer {

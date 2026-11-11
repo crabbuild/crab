@@ -21,7 +21,7 @@ import * as path from "node:path";
 import type { Task } from "./orchestrator";
 import { assertWorkspace } from "./orchestrator-worktree";
 import { AgentProcessClosureError, runAgentCommand, spawnLocalAgent, type AgentProcessFactory } from "./agent-process";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

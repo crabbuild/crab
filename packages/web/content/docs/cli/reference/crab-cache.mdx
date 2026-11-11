@@ -16,7 +16,7 @@ Manage the local chunk cache.
 ```bash
 crab cache stats [--json]
 crab cache verify
-crab cache clean
+crab cache clean [--dry-run] [--json]
 ```
 
 ## Description
@@ -103,8 +103,12 @@ Wait for the active operation and retry; do not delete its coordination files.
 Admission scans for coordination markers, but does not make mirror repositories
 or other retained state eligible for removal.
 
-The current cache subcommands do not add command-specific selection flags;
-use `crab cache <command> --help` for global logging options.
+`--dry-run` reports eligible payloads without deleting them. `--json` emits a
+`cache.clean` version `1.0` envelope containing `files_removed`,
+`bytes_reclaimed`, `retained_entries`, `busy_entries`, `unsafe_entries`, and
+`dry_run`. Preview counts describe the current scan; concurrent activity can
+change a later cleanup result. `crab optimize cache clean` supports the same
+options and ownership checks.
 
 ### verify
 
@@ -114,8 +118,7 @@ Verification streams recognized private entries and holds locks through each
 check and removal. Unknown files and busy entries are retained and excluded
 from checked totals. Operational I/O failures fail the command, rather than
 authorizing deletion. SQLite/root ownership and full reservation protection
-remain hardening work. Neither
-`crab cache clean` nor `crab optimize cache clean` currently exposes a dry-run flag.
+remain hardening work.
 
 ## Remote Cache Service
 

@@ -1,63 +1,24 @@
+import { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
+import type { FileTransferActivity, ProgressTransfer } from "../electron/file-transfers";
+export type { ProgressTransfer } from "../electron/file-transfers";
 import type { DeployProgress } from "../electron/ssh-deployer";
 import type { KnownHost } from "../electron/ssh-known-hosts";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
+import { parseRepoId } from "../electron/ssh-types";
 // Typed wrapper around the `window.crab` bridge exposed by
 // `electron/preload.ts`. Centralising the types here keeps components
 // free of `unknown` assertions and makes the agent's RPC surface
 // self-documenting.
 
-// ── Capability Set (renderer-side mirror of electron/repo-provider.ts) ──
-
-/**
- * Feature flags describing what a given repository supports at this
- * moment. Determined at open time and updated on connection state
- * changes. The renderer uses these to enable/disable UI controls
- * instead of checking `is_remote`.
- */
-export interface CapabilitySet {
-  /** File writing (create, rename, delete, write). */
-  canEdit: boolean;
-  /** Real-time file change notifications. */
-  canWatch: boolean;
-  /** Hunk-level git staging. */
-  canStageHunks: boolean;
-  /** Git worktree management. */
-  canWorktree: boolean;
-  /** PR/forge operations (depends on forge_provider). */
-  canForge: boolean;
-  /** Crab hydrate/dehydrate. */
-  canHydrate: boolean;
-  /** Full-text search. */
-  canSearch: boolean;
-  /** Command execution (terminals, build/run). */
-  canExec: boolean;
-  /** Move to trash (local only — remote has no trash). */
-  canTrash: boolean;
-}
-
-/**
- * Returns a CapabilitySet with all flags set to true. Used as the
- * default for local repos which have full access.
- */
-export function fullCapabilities(): CapabilitySet {
-  return {
-    canEdit: true,
-    canWatch: true,
-    canStageHunks: true,
-    canWorktree: true,
-    canForge: true,
-    canHydrate: true,
-    canSearch: true,
-    canExec: true,
-    canTrash: true,
-  };
-}
+import type { CapabilitySet } from "../electron/repo-capabilities";
+import type { JupyterRuntime, KernelExecution, KernelOutput, KernelSpec, KernelStatus, KernelTarget } from "../electron/jupyter-types";
 
 export interface RepoHandle {
   repo_id: string;
   url: string;
   is_remote: boolean;
   cache_dir: string;
+  native_session_id: string | null;
   /** Present when an in-flight op (merge/rebase/cherry-pick) was
    *  found on disk at open time. The renderer can use this to show
    *  a resume banner without a second RPC. */
@@ -71,6 +32,34 @@ export interface RepoHandle {
    *  gitea). `null` when no forge could be identified — PR features
    *  should be hidden in that case. */
   forge_provider?: "github" | "gitlab" | "bitbucket" | "gitea" | null;
+}
+
+export interface CacheUsage {
+  files: number;
+  directories: number;
+  logical_bytes: number;
+  allocated_bytes: number;
+}
+
+export interface CacheStats {
+  root: string;
+  root_state: "missing" | "present" | "unavailable";
+  budget_bytes: number | null;
+  observed: CacheUsage;
+  scan_complete: boolean;
+  over_budget: boolean | null;
+  families: Record<string, CacheUsage & { complete: boolean; issues: number }>;
+  issues: Array<{ family: string | null; path: string; kind: string; error: string }>;
+  omitted_issues: number;
+}
+
+export interface CacheCleanResult {
+  files_removed: number;
+  bytes_reclaimed: number;
+  retained_entries: number;
+  busy_entries: number;
+  unsafe_entries: number;
+  dry_run: boolean;
 }
 
 export type EntryKind = "file" | "dir" | "pointer" | "lfs" | "submodule";
@@ -149,13 +138,34 @@ export interface FileStat {
   kind: PointerKind;
 }
 
-export interface PointerInfo {
+export interface CapturedFile {
+  file_id: string;
   size: number;
-  pointer_hash: string | null;
-  chunk_count: number | null;
-  xorb_count: number | null;
-  dedup_ratio: number | null;
   kind: PointerKind;
+  representation: "working_file" | "git_blob" | "pointer" | "remote_content";
+  content_hash: string | null;
+  git_oid: string | null;
+  can_materialize: boolean;
+}
+
+export interface MediaSource {
+  media_id: string;
+  url: string;
+  size: number;
+  kind: PointerKind;
+}
+
+export interface FileChunkPage {
+  chunk_count: number;
+  xorb_count: number | null;
+  chunks: Array<{
+    hash: string;
+    offset: number;
+    length: number;
+    xorb_hash: string | null;
+    xorb_chunk_index: number | null;
+  }>;
+  next: number | null;
 }
 
 export interface AuthStatus {
@@ -303,17 +313,16 @@ export interface ZipPreview {
   }>;
 }
 
-export interface DuckDbColumn {
+export interface FileQueryColumn {
   name: string;
   type: string;
 }
 
-export interface DuckDbQueryResult {
-  kind: "duckdb_result";
-  columns: DuckDbColumn[];
+export interface FileQueryResult {
+  kind: "file_query";
+  columns: FileQueryColumn[];
   rows: Array<Record<string, unknown>>;
   row_count: number;
-  total_rows: number;
   truncated: boolean;
   max_rows: number;
 }
@@ -530,7 +539,11 @@ export interface ProgressComplete {
   op: string;
   job_id: string;
   status: number;
+  outcome?: "completed" | "failed" | "cancelled";
 }
+
+
+export type FileTransfer = { fileId: string } | { paths: string[]; verb: "hydrate" | "dehydrate" | "restore" };
 
 /** Incremental chunk from a streaming read handler. */
 export interface ProgressPartial {
@@ -585,6 +598,7 @@ export function isStaleHunkError(err: unknown): boolean {
 export type AgentEvent =
   | { method: "progress/line"; params: ProgressLine }
   | { method: "progress/complete"; params: ProgressComplete }
+  | { method: "progress/transfer"; params: ProgressTransfer }
   | { method: "progress/partial"; params: ProgressPartial }
   | { method: "crab/add_progress"; params: AddProgressEvent }
   | { method: "crab/push_step"; params: PushStepEvent }
@@ -1058,6 +1072,16 @@ declare global {
   interface Window {
     crab: {
       rpc: (method: string, params: unknown) => Promise<unknown>;
+      jupyterCheck: (pythonPath?: string) => Promise<JupyterRuntime>;
+      jupyterListKernels: (pythonPath: string) => Promise<KernelSpec[]>;
+      jupyterInstall: (pythonPath: string) => Promise<string>;
+      jupyterStart: (id: string, repoId: string, pythonPath: string, target: KernelTarget) => Promise<void>;
+      jupyterExecute: (id: string, code: string, requestId: string, cell: number) => Promise<KernelExecution>;
+      jupyterInterrupt: (id: string) => Promise<void>;
+      jupyterRestart: (id: string) => Promise<void>;
+      jupyterShutdown: (id: string) => Promise<void>;
+      onJupyterOutput: (listener: (event: KernelOutput & { id: string }) => void) => () => void;
+      onJupyterStatus: (listener: (event: KernelStatus) => void) => () => void;
       pickRepoDirectory: () => Promise<string | null>;
       pickCloneDestination: () => Promise<string | null>;
       pickWorktreePath: () => Promise<string | null>;
@@ -1081,13 +1105,10 @@ declare global {
         (repoId: string, fullPath: string, useTrash?: boolean): Promise<{ deleted: string; trash: boolean }>;
       };
       fsOpenExternal: (fullPath: string) => Promise<void>;
-      fsWriteFile: {
-        (fullPath: string, content: string): Promise<{ path: string; written: number }>;
-        (repoId: string, fullPath: string, content: string): Promise<{ path: string; written: number }>;
-      };
+      fsWriteFile: (repoId: string, fullPath: string, content: string, nativeSessionId: string | null) => Promise<{ path: string; written: number }>;
       fsReadFile: {
         (fullPath: string): Promise<{ exists: boolean; content: string | null }>;
-        (repoId: string, fullPath: string): Promise<{ exists: boolean; content: string | null }>;
+        (repoId: string, fullPath: string, maxBytes: number | undefined, nativeSessionId: string | null): Promise<{ exists: boolean; content: string | null }>;
       };
       fsReadImage: (fullPath: string) => Promise<{
         exists: boolean;
@@ -1256,6 +1277,11 @@ declare global {
         onStatusChanged: (listener: (event: { profileId: string; status: string; error?: string }) => void) => () => void;
         openTerminal: (profileId: string, cols: number, rows: number, cwd?: string, resumeId?: string, ownerPath?: string) => Promise<{ terminalId: string }>;
         detachTerminal: (terminalId: string) => Promise<void>;
+        listProfiles: () => Promise<import("../electron/ssh-manager").SshProfile[]>;
+        saveProfile: (profile: Partial<import("../electron/ssh-manager").SshProfile> & { host: string; username: string; password?: string }) => Promise<import("../electron/ssh-manager").SshProfile>;
+        connect: (profileId: string) => Promise<void>;
+        disconnect: (profileId: string) => Promise<void>;
+        getStatus: (profileId: string) => Promise<import("../electron/ssh-manager").SshConnectionStatus>;
         listKnownHosts: () => Promise<KnownHost[]>;
         removeKnownHost: (hostname: string, port: number, keyType: string) => Promise<boolean>;
         openAsRepo: (profileId: string, path: string) => Promise<RepoHandle>;
@@ -1507,19 +1533,38 @@ declare global {
   }
 }
 
-async function call<T>(method: string, params: unknown = {}): Promise<T> {
-  return (await window.crab.rpc(method, params)) as T;
+async function request<T>(method: string, params: unknown): Promise<T> {
+  try {
+    return (await window.crab.rpc(method, params)) as T;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+      const failure = new Error(error.message);
+      if ("code" in error) Object.assign(failure, { code: error.code });
+      if ("data" in error) Object.assign(failure, { data: error.data });
+      throw failure;
+    }
+    throw error;
+  }
+}
+
+export async function call<T>(method: string, params: unknown = {}, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request<T>(method, params);
+  signal.throwIfAborted();
+  const operation = callCancellable<T>(method, params);
+  const cancel = () => operation.cancel();
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await operation.promise;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
 }
 
 // ── Cancellable RPC ─────────────────────────────────────────────────
 
 /** JSON-RPC error code the agent uses for cancelled operations. */
-export const OP_CANCELLED_RPC_CODE = 1010;
-
-let opIdCounter = 0;
-function nextOpId(): string {
-  return `op-${Date.now()}-${++opIdCounter}`;
-}
+export { OP_CANCELLED_RPC_CODE } from "../electron/rpc-transport";
 
 /**
  * Returns true when an RPC error represents a cancelled operation.
@@ -1541,48 +1586,28 @@ export interface CancellableCall<T> {
   cancel: () => void;
 }
 
-/**
- * Issue a cancellable RPC. The returned `cancel()` sends `rpc/cancel`
- * to the agent and rejects the promise with a recognizable cancelled
- * error. Long-running handlers (git_log, git_grep, git_diff_file)
- * cooperate by selecting on the cancel channel.
- */
+/** Request cancellation; the original native reply remains the terminal result. */
 export function callCancellable<T>(
   method: string,
   params: unknown = {},
 ): CancellableCall<T> {
-  const op_id = nextOpId();
+  const op_id = crypto.randomUUID();
   let cancelled = false;
-  let rejectFn: ((reason: unknown) => void) | null = null;
-
-  const promise = new Promise<T>((resolve, reject) => {
-    rejectFn = reject;
-    const enriched = typeof params === "object" && params !== null
-      ? { ...params, op_id }
-      : { op_id };
-    window.crab.rpc(method, enriched).then(
-      (result) => {
-        if (!cancelled) resolve(result as T);
-      },
-      (err) => {
-        if (!cancelled) reject(err);
-      },
-    );
-  });
-
+  let settled = false;
+  const enriched: Record<string, unknown> = typeof params === "object" && params !== null
+    ? { ...params, op_id }
+    : { op_id };
+  const cancellation: { op_id: string; repo_id?: string; native_session_id?: unknown } = { op_id };
+  if (typeof enriched.repo_id === "string") cancellation.repo_id = enriched.repo_id;
+  if (Object.hasOwn(enriched, "native_session_id")) cancellation.native_session_id = enriched.native_session_id;
+  const promise = request<T>(method, enriched).finally(() => { settled = true; });
   const cancel = () => {
-    if (cancelled) return;
+    if (cancelled || settled) return;
     cancelled = true;
-    // Fire-and-forget the cancel signal to the agent.
-    window.crab.rpc("rpc/cancel", { op_id }).catch(() => undefined);
-    // Reject the promise so callers can clean up immediately.
-    const err = Object.assign(new Error("Operation cancelled"), {
-      code: OP_CANCELLED_RPC_CODE,
-      data: { kind: "op_cancelled", op_id },
-    });
-    rejectFn?.(err);
+    // Sending the signal does not establish cancellation. The work may have
+    // already completed; only its reply establishes success, failure or cancel.
+    void request("rpc/cancel", cancellation).catch(() => undefined);
   };
-
   return { promise, cancel };
 }
 
@@ -1631,27 +1656,79 @@ export function searchReplaceCancellable(
   return callCancellable("search_replace", { repo_id, query, replacement, ...opts });
 }
 
-export function gitDiffFileCancellable(
-  repo_id: string,
-  path: string,
-  opts: { base?: string; head?: string } = {},
-): CancellableCall<{ path: string; patch: string }> {
-  return callCancellable("git_diff_file", { repo_id, path, ...opts });
+export type DiffVersion =
+  | { kind: "working" | "index" | "empty" }
+  | { kind: "revision"; rev: string };
+
+export interface ChunkDiffMetrics {
+  old_source: "committed" | "staged" | "worktree";
+  new_source: "committed" | "staged" | "worktree";
+  old_chunks: number;
+  new_chunks: number;
+  unchanged_chunks: number;
+  removed_chunks: number;
+  added_chunks: number;
+  old_bytes: number;
+  new_bytes: number;
+  unchanged_bytes: number;
+  removed_bytes: number;
+  added_bytes: number;
+  signed_delta_bytes: number;
+  reuse_ratio: number;
+  changed_byte_ranges_old: Array<[number, number]>;
+  changed_byte_ranges_new: Array<[number, number]>;
 }
 
-// Naive unique id for repo handles. Collisions are harmless (the
-// backend uses it as a map key) but we avoid them anyway.
+export interface LargeFileDiff {
+  kind: "large_file";
+  path: string;
+  status: "unchanged" | "added" | "deleted" | "modified";
+  before: { kind: "crab" | "lfs"; size: number; hash: string } | null;
+  after: { kind: "crab" | "lfs"; size: number; hash: string } | null;
+  before_exists: boolean;
+  after_exists: boolean;
+  old_size: number | null;
+  new_size: number | null;
+  chunk_metrics: ChunkDiffMetrics | null;
+  metrics_note: string;
+}
+
+export interface NotebookComparison {
+  kind: "notebook";
+  path: string;
+  /** Only a proven absent file is null. Empty or invalid content remains an error. */
+  before: string | null;
+  after: string | null;
+}
+
+export type FileComparison = { kind: "git"; path: string; patch: string } | LargeFileDiff | NotebookComparison;
+
+export function fileDiffCancellable(
+  repo_id: string,
+  path: string,
+  opts: { native_session_id: string; before: DiffVersion; after: DiffVersion; old_path?: string },
+): CancellableCall<FileComparison> {
+  return callCancellable("file_diff", { repo_id, path, ...opts });
+}
+
+// Logical repository identity is distinct from each native session's lifetime.
 let repoCounter = 1;
 function nextRepoId(prefix: string): string {
   return `${prefix}-${Date.now()}-${repoCounter++}`;
 }
 
-let jobCounter = 1;
+/** Recognize the object-storage schemes accepted by native SDK opening. */
+export function isStorageRepositoryUrl(value: string): boolean {
+  return /^(crab|s3|gs|gcs|az|azure):\/\//.test(value);
+}
+
 export function nextJobId(op: string): string {
-  return `${op}-${Date.now()}-${jobCounter++}`;
+  return `${op}-${crypto.randomUUID()}`;
 }
 
 export const rpc = {
+  fileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers", {}),
+  recoverFileTransferHistory: () => call<FileTransferActivity>("activity_file_transfers_recover", {}),
   ping: () => call<{ pong: string }>("ping"),
 
   managedProfiles: () => call<ManagedProfilesResponse>("managed_profiles"),
@@ -1683,11 +1760,18 @@ export const rpc = {
   managedCreateRepository: (service: string, repository: string) =>
     call<ManagedRepository>("managed_create_repository", { service, repository }),
 
-  openLocal: (path: string, storage_connection_id?: string | null) =>
-    call<RepoHandle>("open_local", { repo_id: nextRepoId("local"), path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+  openLocal: (path: string, storage_connection_id?: string | null, repo_id = nextRepoId("local")) =>
+    call<RepoHandle>("open_local", { repo_id, path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
 
-  openUrl: (url: string, storage_connection_id?: string | null) =>
-    call<RepoHandle>("open_url", { repo_id: nextRepoId("url"), url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
+  reopen: async (path: string, repository?: Pick<RepoHandle, "repo_id" | "is_remote" | "url">): Promise<RepoHandle> => {
+    const remote = parseRepoId(path);
+    if (remote) return window.crab.ssh.openAsRepo(remote.profileId, remote.remotePath);
+    if (isStorageRepositoryUrl(path)) return rpc.openUrl(path, undefined, repository?.repo_id);
+    return rpc.openLocal(path, undefined, repository?.repo_id);
+  },
+
+  openUrl: (url: string, storage_connection_id?: string | null, repo_id = nextRepoId("url"), signal?: AbortSignal) =>
+    call<RepoHandle>("open_url", { repo_id, url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }, signal),
 
   close: (repo_id: string) => call<{ closed: string }>("close", { repo_id }),
 
@@ -1704,14 +1788,31 @@ export const rpc = {
   stat: (repo_id: string, path: string, rev?: string) =>
     call<FileStat>("stat", { repo_id, path, rev }),
 
-  pointerInfo: (repo_id: string, path: string, rev?: string) =>
-    call<PointerInfo>("pointer_info", { repo_id, path, rev }),
+  openMedia: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
+    call<MediaSource>("media_open", { repo_id, path, ...opts }, signal),
 
-  readText: (repo_id: string, path: string, opts: { rev?: string; max_bytes?: number } = {}) =>
-    call<ReadTextResult>("read_text", { repo_id, path, ...opts }),
+  closeMedia: (media_id: string) => call<{ closed: string }>("media_close", { media_id }),
 
-  readBytes: (repo_id: string, path: string, opts: { rev?: string; max_bytes?: number } = {}) =>
-    call<ReadBytesResult>("read_bytes", { repo_id, path, ...opts }),
+  openFile: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
+    call<CapturedFile>("file_open", { repo_id, path, ...opts }, signal),
+
+  fileChunks: (repo_id: string, file_id: string, native_session_id: string, start: number, limit: number, signal?: AbortSignal) =>
+    call<FileChunkPage>("file_chunks", { repo_id, file_id, native_session_id, start, limit }, signal),
+
+  closeFile: (repo_id: string, file_id: string, native_session_id: string) => call<{ closed: string }>("file_close", { repo_id, file_id, native_session_id }),
+
+  fileTransfer: (repo_id: string, selection: FileTransfer, op_id: string, native_session_id: string) =>
+    "fileId" in selection
+      ? call<{ written_bytes: number }>("file_materialize", { repo_id, file_id: selection.fileId, op_id, native_session_id })
+      : call<{ written_bytes: number }>(selection.verb === "restore" ? "files_restore" : selection.verb === "dehydrate" ? "files_dehydrate" : "files_materialize", { repo_id, paths: selection.paths, op_id, native_session_id }),
+
+  cancelOperation: (repo_id: string, op_id: string, native_session_id: string) => call<{ ok: boolean }>("rpc/cancel", { repo_id, op_id, native_session_id }),
+
+  readText: (repo_id: string, path: string, { signal, ...opts }: { native_session_id?: string; rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+    call<ReadTextResult>("read_text", { repo_id, path, ...opts }, signal),
+
+  readBytes: (repo_id: string, path: string, { signal, ...opts }: { native_session_id?: string; rev?: string; max_bytes?: number; signal?: AbortSignal } = {}) =>
+    call<ReadBytesResult>("read_bytes", { repo_id, path, ...opts }, signal),
 
   writeText: (repo_id: string, path: string, content: string) =>
     call<{ written: boolean; size: number }>("write_text", { repo_id, path, content }),
@@ -1719,38 +1820,28 @@ export const rpc = {
   writeBytes: (repo_id: string, path: string, bytes_b64: string) =>
     call<{ written: boolean; size: number }>("write_bytes", { repo_id, path, bytes_b64 }),
 
-  readRange: (
-    repo_id: string,
-    path: string,
-    offset: number,
-    length: number,
-    opts: { rev?: string } = {},
-  ) =>
+  readRange: (repo_id: string, file_id: string, offset: number, length: number, signal?: AbortSignal) =>
     call<{ offset: number; length: number; bytes_b64: string; file_size: number }>("read_range", {
-      repo_id,
-      path,
-      offset,
-      length,
-      ...opts,
-    }),
+      repo_id, file_id, offset, length,
+    }, signal),
 
   previewParquet: (
     repo_id: string,
     path: string,
-    opts: { rev?: string; max_rows?: number } = {},
-  ) => call<ParquetPreview>("preview_parquet", { repo_id, path, ...opts }),
+    { signal, ...opts }: { native_session_id?: string; rev?: string; max_rows?: number; signal?: AbortSignal } = {},
+  ) => call<ParquetPreview>("preview_parquet", { repo_id, path, ...opts }, signal),
 
-  previewSafetensors: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<SafetensorsPreview>("preview_safetensors", { repo_id, path, ...opts }),
+  previewSafetensors: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<SafetensorsPreview>("preview_safetensors", { repo_id, path, ...opts }, signal),
 
-  previewNpy: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<NpyPreview>("preview_npy", { repo_id, path, ...opts }),
+  previewNpy: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<NpyPreview>("preview_npy", { repo_id, path, ...opts }, signal),
 
-  previewNpz: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<NpzPreview>("preview_npz", { repo_id, path, ...opts }),
+  previewNpz: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<NpzPreview>("preview_npz", { repo_id, path, ...opts }, signal),
 
-  previewZip: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
-    call<ZipPreview>("preview_zip", { repo_id, path, ...opts }),
+  previewZip: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
+    call<ZipPreview>("preview_zip", { repo_id, path, ...opts }, signal),
 
   repoSummary: (repo_id: string, opts: { rev?: string } = {}) =>
     call<RepoSummary>("repo_summary", { repo_id, ...opts }),
@@ -1758,23 +1849,13 @@ export const rpc = {
   gitStatus: (repo_id: string) =>
     call<{ entries: Array<{ path: string; code: string }> }>("git_status_porcelain", { repo_id }),
 
-  gitDiffFile: (repo_id: string, path: string, opts: { base?: string; head?: string } = {}) =>
-    call<{ path: string; patch: string }>("git_diff_file", { repo_id, path, ...opts }),
-
-  crabDiffFile: (repo_id: string, path: string, opts: { base?: string; head?: string } = {}) =>
-    call<{ path: string; patch: string; backend: string; crab_diff?: string }>("crab_diff_file", {
-      repo_id,
-      path,
-      ...opts,
-    }),
-
   /** Working-tree-vs-index diff as a single unified patch. Used by
    *  the Changes view's right pane so the user sees exactly what
    *  `git apply --cached` would stage. */
   gitDiffIndexPatch: (
     repo_id: string,
-    opts: { path?: string; include_untracked?: boolean } = {},
-  ) => call<{ patch: string }>("git_diff_index_patch", { repo_id, ...opts }),
+    { signal, ...opts }: { native_session_id?: string; path?: string; include_untracked?: boolean; signal?: AbortSignal } = {},
+  ) => call<{ patch: string }>("git_diff_index_patch", { repo_id, ...opts }, signal),
 
   /** Index-vs-HEAD diff as a single unified patch — the staged
    *  side of `git diff`. Paired with `gitDiffIndexPatch` to derive
@@ -1782,8 +1863,8 @@ export const rpc = {
    *  Changes view without a per-file round trip. */
   gitDiffCachedPatch: (
     repo_id: string,
-    opts: { path?: string } = {},
-  ) => call<{ patch: string }>("git_diff_cached_patch", { repo_id, ...opts }),
+    { signal, ...opts }: { native_session_id?: string; path?: string; signal?: AbortSignal } = {},
+  ) => call<{ patch: string }>("git_diff_cached_patch", { repo_id, ...opts }, signal),
 
   /** Low-level: apply a raw unified patch. `cached` stages it,
    *  `reverse` undoes it. The hunk-level verbs below are the
@@ -2001,8 +2082,10 @@ export const rpc = {
   indexerStatus: () =>
     call<IndexerStatus>("indexer_status"),
 
-  cacheClear: () =>
-    call<{ method: string; stdout?: string; reason?: string; cleared?: string }>("cache_clear"),
+  cacheStats: (repo_id?: string) => call<CacheStats>("cache_stats", { repo_id }),
+
+  cacheClean: (repo_id?: string, dry_run = false) =>
+    call<CacheCleanResult>("cache_clean", { repo_id, dry_run }),
 
   clone: (url: string, dest: string, jobId = nextJobId("clone"), token?: string, provider?: string, storage_connection_id?: string) =>
     call<{ status: number; dest: string }>("clone", {
@@ -2017,12 +2100,6 @@ export const rpc = {
   status: (cwd: string, jobId = nextJobId("status")) =>
     call<{ status: number }>("status", { job_id: jobId, cwd }),
 
-  hydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("hydrate")) =>
-    call<{ status: number }>("hydrate", { job_id: jobId, cwd, patterns }),
-
-  dehydrate: (cwd: string, patterns: string[] = [], jobId = nextJobId("dehydrate")) =>
-    call<{ status: number }>("dehydrate", { job_id: jobId, cwd, patterns }),
-
   push: (cwd: string, jobId = nextJobId("push")) =>
     call<{ status: number }>("push", { job_id: jobId, cwd }),
 
@@ -2031,7 +2108,7 @@ export const rpc = {
 
   // ---- Git write actions ----
 
-  gitCheckout: (repo_id: string, target: string, opts: { create?: boolean; detach?: boolean; pathspec?: boolean } = {}) =>
+  gitCheckout: (repo_id: string, target: string, opts: { detach?: boolean } = {}) =>
     call<{ ref_name: string; detached: boolean }>("git_checkout", { repo_id, ref_name: target, ...opts }),
 
   gitBranchCreate: (repo_id: string, name: string, opts: { start_point?: string; track?: boolean } = {}) =>
@@ -2099,6 +2176,7 @@ export const rpc = {
     repo_id: string,
     opts: {
       message: string;
+      paths?: string[];
       amend?: boolean;
       sign_off?: boolean;
       sign?: boolean;
@@ -2106,7 +2184,7 @@ export const rpc = {
       co_authored_by?: string[];
     },
   ) =>
-    call<{ sha: string; subject: string; amend: boolean }>("git_commit", {
+    call<{ sha: string; subject: string; amend: boolean }>(opts.paths === undefined ? "git_commit" : "git_commit_paths", {
       repo_id,
       ...opts,
     }),
@@ -2162,7 +2240,7 @@ export const rpc = {
   dedupSavings: (repo_id: string) =>
     call<DedupSavingsResult>("dedup_savings", { repo_id }),
 
-  previewSqlite: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
+  previewSqlite: (repo_id: string, path: string, { signal, ...opts }: { native_session_id: string; rev?: string; signal?: AbortSignal }) =>
     call<{
       kind: "sqlite";
       file_size: number;
@@ -2173,14 +2251,15 @@ export const rpc = {
         row_count: number;
         preview_rows: Array<Record<string, unknown>>;
       }>;
-    }>("preview_sqlite", { repo_id, path, ...opts }),
+    }>("preview_sqlite", { repo_id, path, ...opts }, signal),
 
-  duckdbQuery: (
+  fileQuery: (
     repo_id: string,
+    path: string,
     sql: string,
-    opts: { file_path?: string; max_rows?: number } = {},
+    opts: { native_session_id: string; rev?: string; max_rows?: number },
   ) =>
-    call<DuckDbQueryResult>("duckdb_query", { repo_id, sql, ...opts }),
+    callCancellable<FileQueryResult>("file_query", { repo_id, path, sql, ...opts }),
 
   previewOnnx: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
     call<{
@@ -2208,7 +2287,7 @@ export const rpc = {
       h5dump_available: boolean;
     }>("preview_hdf5", { repo_id, path, ...opts }),
 
-  previewTorchCheckpoint: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
+  previewTorchCheckpoint: (repo_id: string, path: string, { signal, ...opts }: { rev?: string; signal?: AbortSignal } = {}) =>
     call<{
       kind: "torch_checkpoint";
       file_size: number;
@@ -2216,7 +2295,7 @@ export const rpc = {
       tensor_count: number;
       has_optimizer_state: boolean;
       zip_entries: Array<{ name: string; size: number }>;
-    }>("preview_torch_checkpoint", { repo_id, path, ...opts }),
+    }>("preview_torch_checkpoint", { repo_id, path, ...opts }, signal),
 
   previewProtobuf: (repo_id: string, path: string, opts: { rev?: string } = {}) =>
     call<{
@@ -2331,9 +2410,6 @@ export const rpc = {
   notebookStripOutputs: (repo_id: string, path: string) =>
     call<{ ok: boolean; stripped_cells: number }>("notebook_strip_outputs", { repo_id, path }),
 
-  crabAddAuto: (repo_id: string, paths: string[]) =>
-    call<{ ok: boolean; tracked: string[]; patterns_added?: string[] }>("crab_add_auto", { repo_id, paths }),
-
   crabTrackAndAdd: (
     repo_id: string,
     paths: string[],
@@ -2378,17 +2454,18 @@ export const rpc = {
   storageConfigVerify: (repo_id: string, remote?: string) => call<StorageVerifyResult>("storage_config_verify", { repo_id, remote }),
 
   storageConnections: (repo_id?: string) => call<StorageConnectionStatus>("storage_connections_list", { repo_id }),
-  storageConnectionSave: (connection: StorageConnectionInput) => call<StorageConnectionInfo>("storage_connections_save", { connection }),
-  storageConnectionRemove: async (id: string) => {
-    const result = await call<{ ok: boolean }>("storage_connections_remove", { id });
-    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed"));
-    return result;
+  storageConnectionSave: async (connection: StorageConnectionInput) => {
+    try { return await call<StorageConnectionInfo>("storage_connections_save", { connection }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed")); }
   },
-  storageConnectionTest: (connection: StorageConnectionInput | string) => call<StorageVerifyResult>("storage_connections_test", typeof connection === "string" ? { id: connection } : { connection }),
+  storageConnectionRemove: async (id: string) => {
+    try { return await call<{ ok: boolean }>("storage_connections_remove", { id }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed")); }
+  },
+  storageConnectionTest: (connection: StorageConnectionInput | string, repo_id?: string) => call<StorageVerifyResult>("storage_connections_test", { ...(typeof connection === "string" ? { id: connection } : { connection }), repo_id }),
   storageConnectionBind: async (repo_id: string, id: string | null) => {
-    const result = await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id });
-    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } }));
-    return result;
+    try { return await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id }); }
+    finally { window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } })); }
   },
 
   storageSummary: (repo_id: string) => call<StorageSummary>("storage_summary", { repo_id }),
@@ -2703,6 +2780,7 @@ export interface TrackAndAddResult {
   ok: boolean;
   patterns_added: string[];
   files_tracked: Array<{ path: string; status: string }>;
+  commit_paths: string[];
   errors: Array<{ path: string; status?: number; stderr?: string }>;
   commit_sha: string | null;
 }
@@ -2929,10 +3007,9 @@ export const mainProcess = {
     (repoId: string, fullPath: string, useTrash?: boolean): Promise<{ deleted: string; trash: boolean }>;
   },
   fsOpenExternal: (fullPath: string) => window.crab.fsOpenExternal(fullPath),
-  fsWriteFile: (fullPath: string, content: string) =>
-    window.crab.fsWriteFile(fullPath, content),
-  fsReadFile: (fullPath: string) =>
-    window.crab.fsReadFile(fullPath),
+  fsWriteFile: (repoId: string, fullPath: string, content: string, nativeSessionId: string | null) => window.crab.fsWriteFile(repoId, fullPath, content, nativeSessionId),
+  fsReadFile: (...args: [string] | [string, string, number | undefined, string | null]) => args.length === 1
+    ? window.crab.fsReadFile(args[0]) : window.crab.fsReadFile(args[0], args[1], args[2], args[3]),
   fsReadImage: (fullPath: string) =>
     window.crab.fsReadImage(fullPath),
   // File system watcher

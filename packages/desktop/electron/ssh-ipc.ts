@@ -15,12 +15,11 @@ import type { SshProfileManager } from "./ssh-profiles";
 import type { SshSessionManager, SshProfile } from "./ssh-manager";
 import type { RemoteTerminalManager } from "./ssh-terminal";
 import type { PortForwardManager } from "./ssh-port-forward";
+import type { RpcRouter } from "./ssh-router";
 import type { RemoteFileBrowser } from "./ssh-file-browser";
 import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { SystemHealthMonitor, HealthAlert } from "./ssh-health";
 import type { SshLatencyMonitor } from "./ssh-latency-monitor";
-import type { RpcRouter } from "./ssh-router";
-import type { CapabilityNegotiator } from "./ssh-capabilities";
 import type { WorkspaceSyncEngine } from "./ssh-workspace-sync";
 import type { FileTransferManager } from "./ssh-file-transfer";
 
@@ -31,10 +30,10 @@ import type { FileTransferManager } from "./ssh-file-transfer";
 export function registerSshIpcHandlers(
   profileManager: SshProfileManager,
   sessionManager: SshSessionManager,
+  fileBrowser: RemoteFileBrowser,
   knownHosts: KnownHostsManager,
   terminalManager?: RemoteTerminalManager,
   portForwardManager?: PortForwardManager,
-  fileBrowser?: RemoteFileBrowser,
   fileEditor?: RemoteFileEditor,
 ): void {
   ipcMain.handle("ssh:list-known-hosts", () => knownHosts.list());
@@ -104,69 +103,6 @@ export function registerSshIpcHandlers(
   ipcMain.handle("ssh:import-config", async () => {
     const { parseSshConfig } = require("./ssh-profiles") as typeof import("./ssh-profiles.js");
     return parseSshConfig();
-  });
-
-  // ─── Remote File Browsing (SFTP-based) ───────────────────────────
-
-  // Cache a single SFTP session per profile to avoid channel exhaustion.
-  const sftpSessions = new Map<string, any>();
-
-  function getSftp(profileId: string): Promise<any> {
-    const existing = sftpSessions.get(profileId);
-    if (existing) return Promise.resolve(existing);
-
-    const conn = sessionManager.getConnection(profileId);
-    if (!conn || !conn.client) {
-      return Promise.reject(new Error(`No active SSH connection for profile: ${profileId}`));
-    }
-
-    return new Promise((resolve, reject) => {
-      conn.client.sftp((err: Error | undefined, sftp: any) => {
-        if (err) { reject(err); return; }
-        sftpSessions.set(profileId, sftp);
-        // Clean up when the connection closes
-        conn.client.once("close", () => { sftpSessions.delete(profileId); });
-        resolve(sftp);
-      });
-    });
-  }
-
-  ipcMain.handle("ssh:browse-path", async (_event, profileId: string, path: string) => {
-    const sftp = await getSftp(profileId);
-    return new Promise((resolve, reject) => {
-      sftp.readdir(path, (err: Error | null, list: any[]) => {
-        if (err) { reject(err); return; }
-        const entries = list
-          .map((item: any) => ({
-            name: item.filename,
-            path: path === "/" ? `/${item.filename}` : `${path}/${item.filename}`,
-            kind: item.attrs.isDirectory() ? "dir" : "file",
-            size: item.attrs.size,
-          }))
-          .sort((a: any, b: any) => {
-            if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
-            return a.name.localeCompare(b.name);
-          });
-        const hasGitDir = entries.some((e: any) => e.name === ".git" && e.kind === "dir");
-        resolve({ entries, path, hasGitDir });
-      });
-    });
-  });
-
-  ipcMain.handle("ssh:home-dir", async (_event, profileId: string) => {
-    const conn = sessionManager.getConnection(profileId);
-    if (!conn || !conn.client) {
-      throw new Error(`No active SSH connection for profile: ${profileId}`);
-    }
-    return new Promise((resolve, reject) => {
-      conn.client.exec("echo $HOME", (err: Error | undefined, stream: any) => {
-        if (err) { reject(err); return; }
-        let data = "";
-        stream.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-        stream.on("close", () => { resolve({ path: data.trim() || "/root" }); });
-        stream.stderr.on("data", () => {});
-      });
-    });
   });
 
   // ─── Forward SSH status events to renderer ───────────────────────
@@ -301,25 +237,36 @@ export function registerSshIpcHandlers(
 
   // ─── Remote File Browsing IPC ────────────────────────────────────
 
-  if (fileBrowser) {
-    ipcMain.handle(
-      "ssh:browse-path",
-      async (_event, profileId: string, path: string) => {
-        return fileBrowser.browsePath(profileId, path);
-      },
-    );
+  ipcMain.handle("ssh:deploy-agent", (_event, profileId: string) => sessionManager.ensureAgent(profileId));
+  ipcMain.handle("ssh:capabilities", (_event, profileId: string) => sessionManager.agentCapabilities(profileId));
+  ipcMain.handle("ssh:agent-status", (_event, profileId: string) => {
+    const capabilities = sessionManager.agentCapabilities(profileId);
+    return capabilities ? { deployed: true, version: capabilities.version, capabilities } : { deployed: false };
+  });
 
-    ipcMain.handle("ssh:home-dir", async (_event, profileId: string) => {
-      return { path: await fileBrowser.getHomeDir(profileId) };
-    });
+  ipcMain.handle(
+    "ssh:browse-path",
+    async (_event, profileId: string, path: string) => {
+      return fileBrowser.browsePath(profileId, path);
+    },
+  );
 
-    ipcMain.handle(
-      "ssh:open-as-repo",
-      async (_event, profileId: string, path: string) => {
-        return fileBrowser.openAsRepo(profileId, path);
-      },
-    );
-  }
+  ipcMain.handle("ssh:home-dir", async (_event, profileId: string) => {
+    return { path: await fileBrowser.getHomeDir(profileId) };
+  });
+
+  ipcMain.handle(
+    "ssh:open-as-repo",
+    async (_event, profileId: string, path: string) => {
+      const profile = profileManager.get(profileId);
+      if (!profile) throw new Error("The saved SSH connection no longer exists. Choose a connection in SSH Connections.");
+      await sessionManager.connect(profile);
+      // Opening a repository explicitly requests native services even when
+      // automatic deployment is disabled for an ordinary SFTP connection.
+      await sessionManager.ensureAgent(profileId);
+      return fileBrowser.openAsRepo(profileId, path);
+    },
+  );
 
   // ─── Remote File Editing IPC ─────────────────────────────────────
 
@@ -499,13 +446,8 @@ export type SshEnhancedPushChannel = (typeof SSH_ENHANCED_PUSH_CHANNELS)[number]
  * Call once during app initialization alongside `registerSshIpcHandlers()`.
  */
 export function registerSshEnhancedIpcHandlers(opts?: {
-  capabilityNegotiator?: CapabilityNegotiator;
-  rpcRouter?: RpcRouter;
-  sessionManager?: SshSessionManager;
   workspaceSyncEngine?: WorkspaceSyncEngine;
 }): void {
-  const capabilityNegotiator = opts?.capabilityNegotiator;
-  const sessionManager = opts?.sessionManager;
   const workspaceSyncEngine = opts?.workspaceSyncEngine;
   // ─── Transfer Panel ────────────────────────────────────────────
 
@@ -786,34 +728,9 @@ export function registerSshEnhancedIpcHandlers(opts?: {
 
   // ─── Capabilities ──────────────────────────────────────────────
 
-  ipcMain.handle("ssh:capabilities", async (_event, profileId: string) => {
-    if (!capabilityNegotiator) {
-      throw new Error("ssh:capabilities not available — CapabilityNegotiator not provided");
-    }
-    return capabilityNegotiator.negotiate(profileId);
-  });
 
   // ─── Agent Deployment ──────────────────────────────────────────
 
-  ipcMain.handle("ssh:deploy-agent", async (_event, profileId: string) => {
-    if (!sessionManager) throw new Error("ssh:deploy-agent not available — SessionManager not provided");
-    await sessionManager.deployAgent(profileId);
-  });
-
-  ipcMain.handle("ssh:agent-status", async (_event, profileId: string) => {
-    if (!capabilityNegotiator) {
-      throw new Error("ssh:agent-status not available — CapabilityNegotiator not provided");
-    }
-    const cached = capabilityNegotiator.getCached(profileId);
-    if (!cached) {
-      return { deployed: false };
-    }
-    return {
-      deployed: true,
-      version: cached.version,
-      capabilities: cached,
-    };
-  });
 
   // ─── Remote Workspace IDE ──────────────────────────────────────
 

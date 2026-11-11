@@ -127,9 +127,8 @@ describe("ProviderRegistry — resolution", () => {
     expect(resolved).toBe(localProvider);
   });
 
-  it("returns null for unregistered ssh:// repo_ids", () => {
-    const resolved = registry.resolve("ssh://unknown-server/repo");
-    expect(resolved).toBeNull();
+  it("rejects unregistered SSH repositories before a caller can use local handling", () => {
+    expect(() => registry.resolve("ssh://unknown-server/repo")).toThrow("SSH repository is not open");
   });
 
   it("returns null when LocalProvider is not set and repo_id is local", () => {

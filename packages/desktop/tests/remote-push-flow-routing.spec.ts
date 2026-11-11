@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verification test: Remote Push Flow Panel — staging_stats RPC routing.
  *
@@ -18,7 +19,9 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { RpcRouter, parseRepoId } from "../electron/ssh-router";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter } from "../electron/ssh-router";
 import { RemoteProvider } from "../electron/remote-provider";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -34,6 +37,8 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
+  agentSession() { return "ssh:1"; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
 
@@ -81,14 +86,14 @@ const TEST_PROFILE_ID = "gpu-server";
 const TEST_REPO_ID = `ssh://${TEST_PROFILE_ID}/home/dev/ml-project`;
 
 function createTestSetup() {
-  const sessionManager = new MockSessionManager();
+  const sessionManager = withRepositoryRuntimes(new MockSessionManager());
   const channel = new MockChannel();
   const localAgent = { request: vi.fn().mockResolvedValue({ ok: true }) };
 
   sessionManager.setStatus(TEST_PROFILE_ID, "connected");
   sessionManager.setConnection(TEST_PROFILE_ID, channel);
 
-  const router = new RpcRouter(sessionManager as any, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   router.attachChannel(TEST_PROFILE_ID, channel as any);
 
   const fileEditor = new MockFileEditor();
@@ -384,24 +389,6 @@ describe("Remote Push Flow Panel — staging_stats routing", () => {
       const remoteRepoId = "ssh://gpu-server/home/dev/ml-project";
       const parsed = parseRepoId(remoteRepoId);
       expect(parsed).not.toBeNull();
-    });
-  });
-
-  describe("staging_stats is queued during reconnection (not rejected)", () => {
-    it("queues staging_stats during reconnection since it is a read operation", async () => {
-      const { provider, sessionManager } = createTestSetup();
-
-      sessionManager.setStatus(TEST_PROFILE_ID, "reconnecting");
-
-      const params = { repo_id: TEST_REPO_ID };
-      const resultPromise = provider.request("staging_stats", params);
-
-      let settled = false;
-      resultPromise.then(() => { settled = true; }).catch(() => { settled = true; });
-
-      // Give microtasks a chance to run
-      await new Promise((r) => setTimeout(r, 10));
-      expect(settled).toBe(false);
     });
   });
 });

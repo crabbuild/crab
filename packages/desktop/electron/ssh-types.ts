@@ -6,6 +6,14 @@
  * quality monitoring, bookmarks, and agent capability negotiation.
  */
 
+/** Parse a saved SSH identity without URL-decoding its literal remote path. */
+export function parseRepoId(repoId: string): { profileId: string; remotePath: string } | null {
+  if (!repoId.startsWith("ssh://")) return null;
+  const value = repoId.slice(6);
+  const slash = value.indexOf("/");
+  return slash < 0 ? { profileId: value, remotePath: "/" } : { profileId: value.slice(0, slash), remotePath: value.slice(slash) };
+}
+
 /** The authenticated destination of a durable remote operation. */
 export interface RemoteEndpoint {
   readonly host: string;
@@ -160,18 +168,19 @@ export interface ConnectionQuality {
 // ── Agent Capabilities Types ─────────────────────────────────────
 
 export interface AgentCapabilities {
+  protocol: 1;
   version: string;
-  features: {
-    fileWatching: boolean;
-    deltaSync: boolean;
-    compression: boolean;
-    processManagement: boolean;
-    environmentManagement: boolean;
-    debugging: boolean;
-    search: boolean;
-    buildRun: boolean;
-    logTailing: boolean;
-  };
+  methods: string[];
+}
+
+/** Validate the protocol and method inventory returned by a native agent. */
+export function parseAgentCapabilities(value: unknown): AgentCapabilities {
+  if (!value || typeof value !== "object") throw new Error("Incompatible Crab agent capabilities");
+  const { protocol, version, methods } = value as Record<string, unknown>;
+  if (protocol !== 1 || typeof version !== "string" || !version.trim() ||
+      !Array.isArray(methods) || !methods.every((method): method is string => typeof method === "string" && !!method) ||
+      !methods.includes("capabilities") || new Set(methods).size !== methods.length) throw new Error("Incompatible Crab agent capabilities");
+  return { protocol, version, methods };
 }
 
 // ── Bookmark and Recent File Types ───────────────────────────────

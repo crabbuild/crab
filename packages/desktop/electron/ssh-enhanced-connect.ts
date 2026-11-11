@@ -67,29 +67,14 @@ async function onConnected(profileId: string, modules: ConnectionHookModules): P
   try {
     capabilities = await capabilityNegotiator.negotiate(profileId);
   } catch {
-    // If negotiation fails (e.g., old agent without capabilities RPC),
-    // fall back to a minimal capability set — all features disabled.
-    capabilities = {
-      version: "0.0.0",
-      features: {
-        fileWatching: false,
-        deltaSync: false,
-        compression: false,
-        processManagement: false,
-        environmentManagement: false,
-        debugging: false,
-        search: false,
-        buildRun: false,
-        logTailing: false,
-      },
-    };
+    capabilityNegotiator.clearCache(profileId);
   }
 
   // Step 2: Start connection quality monitoring
   connectionQualityMonitor.startMonitoring(profileId);
 
   // Step 3: Emit capabilities to the renderer so UI can gate features
-  broadcastCapabilities(profileId, capabilities);
+  if (capabilities) broadcastCapabilities(profileId, capabilities);
 }
 
 /**

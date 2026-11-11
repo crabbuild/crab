@@ -63,7 +63,12 @@ def main() -> None:
                 subprocess.run(["cargo", "test", "--release", "--locked", "-p", "crab-desktop-agent",
                                 "--", "--include-ignored"],
                                cwd=ROOT, env=env, check=True)
-                subprocess.run([node, "scripts/smoke.mjs"], cwd=DESKTOP, env=env, check=True)
+                identity_spec = importlib.util.spec_from_file_location("storage_identity_fixture", DESKTOP / "scripts/storage-identity-fixture.py")
+                identity_fixture = importlib.util.module_from_spec(identity_spec)
+                identity_spec.loader.exec_module(identity_fixture)
+                with identity_fixture.prepare(target, crab, server_binary) as descriptor:
+                    env["CRAB_DESKTOP_STORAGE_IDENTITY_FIXTURE"] = str(descriptor)
+                    subprocess.run([node, "scripts/smoke.mjs"], cwd=DESKTOP, env=env, check=True)
             finally:
                 server.terminate()
                 try:

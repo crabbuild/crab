@@ -1,6 +1,13 @@
+import { fileBuffers } from "./lib/file-buffer-store";
+import type { FileTransferActivity, FileTransferChange, FileTransferJob } from "../electron/file-transfers";
+import { retainNotebookRepositories } from "./lib/jupyter-ipc";
+import { invalidateFileQuerySources, retainFileQueryRepositories } from "./lib/file-query";
+import { workspaceDocuments } from "./lib/workspace-settings-store";
 import { workspaceReducer, type WorkspaceAction } from "./lib/workspace-reducer";
+import { noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
+import { parseRepoId } from "../electron/ssh-types";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { RepoHandle, ProgressLine, onAgentEvent, CapabilitySet, fullCapabilities, mainProcess } from "./ipc";
+import { RepoHandle, ProgressLine, type FileTransfer, type ProgressComplete, onAgentEvent, mainProcess, rpc, nextJobId, isStorageRepositoryUrl } from "./ipc";
 
 // ── Workspace types ─────────────────────────────────────────────────
 
@@ -98,7 +105,7 @@ export interface DetectedAgentCli {
 
 export interface SshConnectionState {
   profileId: string;
-  status: "disconnected" | "connecting" | "deploying" | "connected" | "reconnecting" | "error";
+  status: "disconnected" | "disconnecting" | "connecting" | "deploying" | "connected" | "reconnecting" | "error";
   error?: string;
   serverInfo?: {
     os: string;
@@ -154,11 +161,12 @@ export interface SshConnectionState {
 // Persistent slice of state: the recently opened repos. Everything
 // else (active tab, transient dialogs) stays in component state.
 export interface OpenRepo extends RepoHandle {
+  native_error?: string;
   label: string;
   path?: string;
   openedAt: number;
   /** When true, the repo was restored from localStorage but hasn't
-   *  been opened via `rpc.openLocal` yet. The sidebar triggers the
+   *  been reopened yet. The sidebar triggers the
    *  actual open on first selection. */
   deferred?: boolean;
   /** When set, RepoDetail switches to this view on first render for
@@ -179,11 +187,13 @@ export interface AppState {
   // clone / hydrate.
   logs: ProgressLine[];
   jobs: Record<string, JobState>;
-  // Repo ordering & pinning. Keyed by repo path (stable across sessions).
+  activityVersion: number;
+  activityError: string | null;
+  // Ordering and pinning use physical paths or stable SDK snapshot identities.
   // Repos with an explicit sortIndex are shown in that order; repos
   // without one fall back to alphabetic order.
   pinnedPaths: Set<string>;
-  repoOrder: string[]; // ordered list of repo paths
+  repoOrder: string[];
   /** All open workspaces (empty array when none are open) */
   workspaces: Workspace[];
   /** The workspace currently shown in the dashboard (by rootPath).
@@ -204,19 +214,16 @@ export function getActiveWorkspace(state: AppState): Workspace | null {
   return state.workspaces[0] ?? null;
 }
 
-export interface JobState {
+export type JobState = Omit<FileTransferJob, "job_id" | "op" | "intent" | "revision" | "repoId"> & {
   op: string;
-  status: "running" | "done" | "failed";
-  exitCode?: number;
+  intent?: FileTransferJob["intent"];
   lines: number;
-  startedAt: number;
-  updatedAt: number;
-}
+  revision?: number;
+  repoId?: string;
+};
 
-// Keys used to persist the recent-repos list for reopen-on-startup.
-// Only paths are persisted — repo ids are session-local because the
-// agent assigns them on `open_local`, and keeping stale ids in
-// localStorage would crater when the agent isn't aware of them.
+// Logical SDK identities persist; native_session_id never does. A URL alone
+// cannot distinguish connections to identical bucket names on different stores.
 const LS_RECENT_REPOS = "crab.recentRepos.v1";
 const LS_ACTIVE_PATH = "crab.activeRepoPath.v1";
 const LS_PINNED_REPOS = "crab.pinnedRepoPaths.v1";
@@ -229,12 +236,40 @@ interface PersistedRepo {
   path: string;
   label: string;
   openedAt: number;
+  repo_id?: string;
+}
+
+/** Identify UI state without mixing SDK connections at the same URL. */
+export function repositoryKey(repo: Pick<OpenRepo, "repo_id" | "path">): string {
+  return repo.path && !isStorageRepositoryUrl(repo.path) ? repo.path : repo.repo_id;
+}
+
+function loadPersistedRepos(): OpenRepo[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(LS_RECENT_REPOS) ?? "[]");
+    if (!Array.isArray(value)) return [];
+    const paths = new Set<string>();
+    const repos: OpenRepo[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") continue;
+      const { path, label, openedAt, repo_id } = entry as Record<string, unknown>;
+      if (typeof path !== "string" || !path || typeof label !== "string" || typeof openedAt !== "number" || !Number.isFinite(openedAt)) continue;
+      const snapshot = isStorageRepositoryUrl(path);
+      const id = snapshot && typeof repo_id === "string" && repo_id ? repo_id : `deferred-${path}`;
+      const key = repositoryKey({ repo_id: id, path });
+      if (paths.has(key)) continue;
+      paths.add(key);
+      const remote = snapshot || !!parseRepoId(path);
+      repos.push({ repo_id: id, url: remote ? path : "", is_remote: remote, cache_dir: "", native_session_id: null, path, label: label.replace(/^(↳\s*)wt:/, "$1worktree:"), openedAt, deferred: true });
+    }
+    return repos;
+  } catch { return []; }
 }
 
 function savePersistedRepos(repos: OpenRepo[]) {
   const persisted: PersistedRepo[] = repos
-    .filter((r) => typeof r.path === "string" && r.path.length > 0)
-    .map((r) => ({ path: r.path as string, label: r.label, openedAt: r.openedAt }));
+    .filter((r): r is OpenRepo & { path: string } => typeof r.path === "string" && r.path.length > 0)
+    .map((r) => ({ path: r.path, label: r.label, openedAt: r.openedAt, ...(isStorageRepositoryUrl(r.path) ? { repo_id: r.repo_id } : {}) }));
   try {
     localStorage.setItem(LS_RECENT_REPOS, JSON.stringify(persisted));
   } catch {
@@ -283,8 +318,8 @@ function loadRepoOrder(): string[] {
  * then unpinned in user-defined order (or alphabetic if no custom order).
  */
 export function sortRepos(repos: OpenRepo[], pinnedPaths: Set<string>, repoOrder: string[]): OpenRepo[] {
-  const pinned = repos.filter((r) => r.path && pinnedPaths.has(r.path));
-  const unpinned = repos.filter((r) => !r.path || !pinnedPaths.has(r.path));
+  const pinned = repos.filter((r) => pinnedPaths.has(repositoryKey(r)));
+  const unpinned = repos.filter((r) => !pinnedPaths.has(repositoryKey(r)));
 
   // Pinned: sort alphabetically by label
   pinned.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
@@ -293,8 +328,8 @@ export function sortRepos(repos: OpenRepo[], pinnedPaths: Set<string>, repoOrder
   if (repoOrder.length > 0) {
     const orderMap = new Map(repoOrder.map((p, i) => [p, i]));
     unpinned.sort((a, b) => {
-      const ia = a.path ? (orderMap.get(a.path) ?? Infinity) : Infinity;
-      const ib = b.path ? (orderMap.get(b.path) ?? Infinity) : Infinity;
+      const ia = orderMap.get(repositoryKey(a)) ?? Infinity;
+      const ib = orderMap.get(repositoryKey(b)) ?? Infinity;
       if (ia !== ib) return ia - ib;
       // Fallback: alphabetic for repos not in the order list
       return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
@@ -313,16 +348,19 @@ const MAX_LOG_LINES_HARD_CAP = 20_000;
 let runtimeMaxLogLines = 2000;
 
 export type Action =
-  | { type: "add-repo"; repo: OpenRepo }
+  | { type: "add-repo"; repo: OpenRepo; activation?: "if-empty" }
   | { type: "remove-repo"; repo_id: string }
   | { type: "set-active"; repo_id: string | null }
   | { type: "pin-repo"; path: string }
   | { type: "unpin-repo"; path: string }
   | { type: "reorder-repos"; orderedPaths: string[] }
-  | { type: "job-start"; job_id: string; op: string }
+  | { type: "file-transfer-state"; activity: FileTransferActivity }
+  | { type: "file-transfer-change"; change: FileTransferChange }
+  | { type: "file-transfer-error"; error: string }
+  | { type: "job-start"; job_id: string; op: string; nativeSessionId?: string }
   | { type: "job-line"; line: ProgressLine }
   | { type: "job-lines-batch"; lines: ProgressLine[] }
-  | { type: "job-complete"; job_id: string; status: number }
+  | { type: "job-complete"; job_id: string; status: number; outcome?: ProgressComplete["outcome"] }
   | { type: "set-max-log-lines"; value: number }
   | { type: "clear-logs" }
   | WorkspaceAction
@@ -335,24 +373,26 @@ export type Action =
   | { type: "ssh-high-latency-mode"; profileId: string; enabled: boolean }
   | { type: "ssh-bandwidth-update"; profileId: string; bytesIn: number; bytesOut: number }
   | { type: "ssh-connection-remove"; profileId: string }
-  | { type: "repo-capabilities-changed"; repo_id: string; capabilities: CapabilitySet };
+  | { type: "repo-runtime-changed"; repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string }
+  | { type: "repo-capabilities-loaded"; repo_id: string; capabilities: CapabilitySet; expected_session_id: string | null };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "add-repo": {
-      const repos = [action.repo, ...state.repos.filter((r) => r.repo_id !== action.repo.repo_id)];
+      const key = repositoryKey(action.repo);
+      const repos = [action.repo, ...state.repos.filter(r => r.repo_id !== action.repo.repo_id && !(r.deferred && repositoryKey(r) === key))];
       // If the new repo isn't in the order list yet, append it
       const repoOrder =
-        action.repo.path && !state.repoOrder.includes(action.repo.path)
-          ? [...state.repoOrder, action.repo.path]
+        !state.repoOrder.includes(key)
+          ? [...state.repoOrder, key]
           : state.repoOrder;
       // Deferred repos are sidebar placeholders — don't activate them
       // automatically. Activating a deferred repo causes every
-      // activeRepo-watching hook (useWorkspaceSettings, useWorkspaceTheme,
+      // activeRepo-watching hook (workspace settings, tracking patterns,
       // TimelineView, etc.) to fire RPCs against an id the agent has never
       // seen, producing "repository not open" errors and unbounded memory
       // growth from concurrent git_log / read_text calls.
-      const activeRepoId = action.repo.deferred
+      const activeRepoId = action.repo.deferred || (action.activation === "if-empty" && state.activeRepoId !== null)
         ? state.activeRepoId
         : action.repo.repo_id;
       return { ...state, repos, activeRepoId, repoOrder };
@@ -399,6 +439,21 @@ function reducer(state: AppState, action: Action): AppState {
     case "reorder-repos": {
       return { ...state, repoOrder: action.orderedPaths };
     }
+    case "file-transfer-error": return { ...state, activityError: action.error };
+    case "file-transfer-state": {
+      if (action.activity.version < state.activityVersion) return state;
+      const jobs = { ...state.jobs };
+      for (const job of action.activity.jobs) jobs[job.job_id] = { ...job, lines: jobs[job.job_id]?.lines ?? 0 };
+      return { ...state, jobs, activityVersion: action.activity.version, activityError: action.activity.error };
+    }
+    case "file-transfer-change": {
+      const change = action.change;
+      if (change.version < state.activityVersion) return state;
+      const jobs = { ...state.jobs };
+      for (const id of change.removed ?? []) delete jobs[id];
+      if (change.job) jobs[change.job.job_id] = { ...change.job, lines: jobs[change.job.job_id]?.lines ?? 0 };
+      return { ...state, jobs, activityVersion: change.version, activityError: change.error };
+    }
     case "job-start": {
       const now = Date.now();
       return {
@@ -407,6 +462,7 @@ function reducer(state: AppState, action: Action): AppState {
           ...state.jobs,
           [action.job_id]: {
             op: action.op,
+            nativeSessionId: action.nativeSessionId,
             status: "running",
             lines: 0,
             startedAt: now,
@@ -460,14 +516,14 @@ function reducer(state: AppState, action: Action): AppState {
     }
     case "job-complete": {
       const existing = state.jobs[action.job_id];
-      if (!existing) return state;
+      if (!existing || existing.intent) return state;
       return {
         ...state,
         jobs: {
           ...state.jobs,
           [action.job_id]: {
             ...existing,
-            status: action.status === 0 ? "done" : "failed",
+            status: action.outcome === "cancelled" ? "cancelled" : action.status === 0 ? "done" : "failed",
             exitCode: action.status,
             updatedAt: Date.now(),
           },
@@ -576,31 +632,38 @@ function reducer(state: AppState, action: Action): AppState {
 
     // ── Repo capabilities ────────────────────────────────────────────
 
-    case "repo-capabilities-changed": {
-      // Only create a new repos array if the capabilities actually changed.
+    case "repo-capabilities-loaded": {
       const target = state.repos.find((r) => r.repo_id === action.repo_id);
-      if (!target || target.capabilities === action.capabilities) return state;
-      const repos = state.repos.map((r) =>
-        r.repo_id === action.repo_id ? { ...r, capabilities: action.capabilities } : r,
-      );
-      return { ...state, repos };
+      // An initial query cannot re-enable controls after a later process loss.
+      if (!target || target.native_session_id !== action.expected_session_id) return state;
+      return { ...state, repos: state.repos.map(repo => repo.repo_id === action.repo_id ? { ...repo, capabilities: action.capabilities } : repo) };
+    }
+    case "repo-runtime-changed": {
+      return { ...state, repos: state.repos.map(repo => repo.repo_id === action.repo_id ? { ...repo, capabilities: action.capabilities, native_session_id: action.native_session_id, native_error: action.error } : repo) };
     }
 
   }
 }
 
-const initialState: AppState = {
-  repos: [],
-  activeRepoId: null,
-  logs: [],
-  jobs: {},
-  pinnedPaths: loadPinnedPaths(),
-  repoOrder: loadRepoOrder(),
-  workspaces: [],
-  activeWorkspaceRootPath: null,
-  tabBar: [],
-  sshConnections: new Map(),
-};
+function initialState(): AppState {
+  const repos = loadPersistedRepos();
+  const repoOrder = loadRepoOrder();
+  for (const repo of repos) if (!repoOrder.includes(repositoryKey(repo))) repoOrder.push(repositoryKey(repo));
+  return {
+    repos,
+    activeRepoId: null,
+    logs: [],
+    jobs: {},
+    activityVersion: -1,
+    activityError: null,
+    pinnedPaths: loadPinnedPaths(),
+    repoOrder,
+    workspaces: [],
+    activeWorkspaceRootPath: null,
+    tabBar: [],
+    sshConnections: new Map(),
+  };
+}
 
 interface Ctx {
   state: AppState;
@@ -612,6 +675,8 @@ interface Ctx {
   unpinRepo: (path: string) => void;
   reorderRepos: (orderedPaths: string[]) => void;
   startJob: (job_id: string, op: string) => void;
+  runFileTransfer: (repoId: string, selection: FileTransfer, nativeSessionId: string, jobId?: string) => Promise<{ written_bytes: number }>;
+  closeTransferRepo: (repoId: string) => Promise<unknown>;
   setMaxLogLines: (value: number) => void;
   clearLogs: () => void;
 }
@@ -619,7 +684,11 @@ interface Ctx {
 const StoreContext = createContext<Ctx | null>(null);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  useEffect(() => { retainNotebookRepositories(new Set(state.repos.map(repo => repo.repo_id))); }, [state.repos]);
+  useEffect(() => {
+    retainFileQueryRepositories(new Map(state.repos.map(repo => [repo.repo_id, repo.native_session_id])));
+  }, [state.repos]);
 
   useEffect(() => {
     // Batch progress lines to avoid re-rendering the entire tree on every
@@ -635,8 +704,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: "job-lines-batch", lines: batch });
     };
 
+    const protectPendingEdits = (event: BeforeUnloadEvent) => {
+      if (!fileBuffers.pendingCount() && !workspaceDocuments.pendingCount()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protectPendingEdits);
+    let loadingActivity = true;
+    const activityChanges: FileTransferChange[] = [];
     const off = onAgentEvent((evt) => {
-      if (evt.method === "progress/line") {
+      if (evt.method === "activity/file-transfer") {
+        const change = evt.params as FileTransferChange;
+        if (loadingActivity) activityChanges.push(change);
+        else dispatch({ type: "file-transfer-change", change });
+      } else if (evt.method === "progress/line") {
         lineBuf.push(evt.params as ProgressLine);
         if (!flushTimer) {
           flushTimer = setTimeout(flushLines, 100);
@@ -645,14 +726,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // Flush any pending lines before marking complete so the UI
         // sees the final lines before the job transitions to done.
         if (lineBuf.length > 0) flushLines();
-        const p = evt.params as { job_id: string; status: number };
-        dispatch({ type: "job-complete", job_id: p.job_id, status: p.status });
+        const p = evt.params as ProgressComplete;
+        dispatch({ type: "job-complete", job_id: p.job_id, status: p.status, outcome: p.outcome });
+      } else if (evt.method === "repo:storage-source-changed") {
+        invalidateFileQuerySources((evt.params as { repo_ids: string[] }).repo_ids);
       } else if (evt.method === "repo:capabilities-changed") {
-        const p = evt.params as { repo_id: string; capabilities: CapabilitySet };
-        dispatch({ type: "repo-capabilities-changed", repo_id: p.repo_id, capabilities: p.capabilities });
+        const p = evt.params as { repo_id: string; capabilities: CapabilitySet; native_session_id: string | null; error?: string };
+        fileBuffers.runtime(p.repo_id, p.capabilities.canEdit, p.native_session_id);
+        dispatch({ type: "repo-runtime-changed", ...p });
       }
     });
+    let disposed = false;
+    void rpc.fileTransferHistory().then(activity => {
+      if (!disposed) dispatch({ type: "file-transfer-state", activity });
+    }).catch(error => {
+      if (!disposed) dispatch({ type: "file-transfer-error", error: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      loadingActivity = false;
+      if (!disposed) for (const change of activityChanges) dispatch({ type: "file-transfer-change", change });
+    });
     return () => {
+      disposed = true;
+      window.removeEventListener("beforeunload", protectPendingEdits);
       off();
       if (flushTimer) clearTimeout(flushTimer);
       // Flush remaining lines on unmount.
@@ -665,39 +760,44 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Fetch capabilities for repos that don't have them yet. This runs
   // whenever the repo list changes and picks up newly-opened repos.
   // Deferred repos (not yet opened via the agent) are skipped.
-  // Uses a ref to track in-flight fetches to avoid re-fetching on every
-  // state.repos reference change (which would cause an infinite loop).
-  const capsFetchedRef = useRef<Set<string>>(new Set());
+  // Only pending queries are shared. Reopening the same logical repository
+  // must fetch for its new native session, not reuse a completed admission.
+  const capabilitiesPending = useRef(new Map<string, { nativeSessionId: string | null }>());
   useEffect(() => {
     for (const repo of state.repos) {
       if (repo.deferred) continue;
       if (repo.capabilities !== undefined) continue;
-      if (capsFetchedRef.current.has(repo.repo_id)) continue;
-      capsFetchedRef.current.add(repo.repo_id);
+      if (capabilitiesPending.current.get(repo.repo_id)?.nativeSessionId === repo.native_session_id) continue;
+      const request = { nativeSessionId: repo.native_session_id };
+      capabilitiesPending.current.set(repo.repo_id, request);
       // Fire-and-forget: fetch capabilities and dispatch the result.
       mainProcess.getCapabilities(repo.repo_id).then(
         (caps) => {
-          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: caps });
+          dispatch({ type: "repo-capabilities-loaded", repo_id: repo.repo_id, capabilities: caps, expected_session_id: repo.native_session_id });
         },
         () => {
-          // On failure (e.g., repo not yet fully open), default to full
-          // capabilities so the UI remains functional.
-          dispatch({ type: "repo-capabilities-changed", repo_id: repo.repo_id, capabilities: fullCapabilities() });
+          // A failed query does not establish native availability.
+          dispatch({ type: "repo-capabilities-loaded", repo_id: repo.repo_id, capabilities: noCapabilities(), expected_session_id: repo.native_session_id });
         },
-      );
+      ).finally(() => {
+        if (capabilitiesPending.current.get(repo.repo_id) === request) capabilitiesPending.current.delete(repo.repo_id);
+      });
     }
   }, [state.repos]);
 
-  // Persist the open-repo paths so we can reopen them on the next
-  // launch. Whenever the list changes we mirror it to localStorage;
-  // the active path is tracked separately so a re-launch can restore
-  // focus on the same repo.
+  // The active key matches the same physical path or logical SDK identity
+  // used by sidebar state; two endpoints may share the exact same URL.
   useEffect(() => {
     savePersistedRepos(state.repos);
-    const activePath =
-      state.repos.find((r) => r.repo_id === state.activeRepoId)?.path ?? null;
+    const activeRepo = state.repos.find((r) => r.repo_id === state.activeRepoId);
+    const activePath = activeRepo ? repositoryKey(activeRepo) : null;
     if (activePath) localStorage.setItem(LS_ACTIVE_PATH, activePath);
-    else localStorage.removeItem(LS_ACTIVE_PATH);
+    else {
+      const pendingPath = localStorage.getItem(LS_ACTIVE_PATH);
+      // Startup may be waiting for host trust or a recoverable connection error.
+      // Keep the selected path while its deferred entry remains available to retry.
+      if (!state.repos.some(repo => repo.deferred && repositoryKey(repo) === pendingPath)) localStorage.removeItem(LS_ACTIVE_PATH);
+    }
   }, [state.repos, state.activeRepoId]);
 
   // Persist pin and order state
@@ -759,6 +859,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // destructure only actions (e.g. `const { dispatch } = useStore()`) still
   // re-render when state changes due to Context limitations, but the batched
   // progress line dispatch (100ms throttle) keeps the frequency manageable.
+  const closeTransferRepo = useCallback((repoId: string) => rpc.close(repoId), []);
+
   const value = useMemo<Ctx>(
     () => ({
       state,
@@ -770,10 +872,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       unpinRepo: (path) => dispatch({ type: "unpin-repo", path }),
       reorderRepos: (orderedPaths) => dispatch({ type: "reorder-repos", orderedPaths }),
       startJob: (job_id, op) => dispatch({ type: "job-start", job_id, op }),
+      runFileTransfer: (repoId, selection, nativeSessionId, jobId) => {
+        const op = "verb" in selection ? selection.verb : "hydrate";
+        return rpc.fileTransfer(repoId, selection, jobId ?? nextJobId(op), nativeSessionId);
+      },
+      closeTransferRepo,
       setMaxLogLines: (value) => dispatch({ type: "set-max-log-lines", value }),
       clearLogs: () => dispatch({ type: "clear-logs" }),
     }),
-    [state],
+    [state, closeTransferRepo],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useSettings } from "../settings";
-import { useWorkspaceTheme } from "./useWorkspaceTheme";
 
 /**
  * Resolve the effective theme into the concrete rendering mode
@@ -15,14 +14,13 @@ import { useWorkspaceTheme } from "./useWorkspaceTheme";
  */
 export function useEffectiveTheme(): "dark" | "light" {
   const { settings } = useSettings();
-  const { workspaceTheme } = useWorkspaceTheme();
   const [sysLight, setSysLight] = useState<boolean>(() =>
     typeof window !== "undefined" &&
     window.matchMedia("(prefers-color-scheme: light)").matches,
   );
 
   // The resolved theme value: workspace override wins over user setting.
-  const resolvedTheme = workspaceTheme ?? settings.theme;
+  const resolvedTheme = settings.theme;
 
   useEffect(() => {
     if (resolvedTheme !== "system") return;

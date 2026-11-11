@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { StorageConnections } from "../electron/storage-connections";
-import type { SafeStorage } from "electron";
 import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
+import type { SafeStorage } from "electron";
 
 const fixture = (name = "Store", endpoint = "http://127.0.0.1:9000"): StorageConnectionInput => ({
   name, provider: "s3", bucket: "test-bucket", region: "test-region", endpoint,
@@ -42,7 +42,9 @@ describe("built-in storage connections", () => {
   let file: string;
   let crypto: ReturnType<typeof encryption>;
   let store: StorageConnections;
-  let send: ReturnType<typeof sender>;
+  let send: Mock<(method: string, params: unknown) => Promise<unknown>>;
+  let changed: Mock<(keys: string[], state: "changed" | "removed") => Promise<void>>;
+  let sourceChanged: Mock<(repoIds: string[]) => void>;
   const call = (method: string, params: unknown = {}) => store.request(method, params, send);
   const save = (connection = fixture()) => call("storage_connections_save", { connection }) as Promise<StorageConnectionInfo>;
   const list = (repo_id?: string) => call("storage_connections_list", { repo_id }) as Promise<StorageConnectionStatus>;
@@ -51,10 +53,26 @@ describe("built-in storage connections", () => {
     directory = await mkdtemp(path.join(tmpdir(), "crab-storage-auth-"));
     file = path.join(directory, "connections.enc");
     crypto = encryption();
-    store = new StorageConnections(file, crypto, "darwin");
-    send = sender();
+    sourceChanged = vi.fn();
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state), sourceChanged);
+    changed = vi.fn(async (_keys: string[], _state: "changed" | "removed"): Promise<void> => {});
+    send = vi.fn(async (method: string, params: unknown): Promise<unknown> => {
+      const payload = params as Record<string, unknown>;
+      if (method === "open_local" || method === "open_url") return { repo_id: payload.repo_id, url: payload.url ?? "crab://test-bucket/repo", is_remote: method === "open_url" };
+      return { ok: true, latency_ms: 2 };
+    });
   });
   afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
+
+  it("isolates storage bindings for identical remote paths on different SSH profiles", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    await call("open_local", { repo_id: "ssh://first/data/repo", path: "/data/repo", storage_connection_id: first.id });
+    await call("open_local", { repo_id: "ssh://second/data/repo", path: "/data/repo", storage_connection_id: second.id });
+    send.mockClear();
+    await call("file_open", { repo_id: "ssh://first/data/repo", path: "weights.bin" });
+    expect(send).toHaveBeenCalledWith("file_open", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: first.id }) }));
+  });
 
   it("encrypts saved credentials and returns only connection metadata", async () => {
     const saved = await save();
@@ -68,13 +86,86 @@ describe("built-in storage connections", () => {
 
   it("loads encrypted connections after an application restart", async () => {
     const saved = await save();
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     expect((await list()).connections).toEqual([saved]);
   });
 
-  it.each(["basic_text", "unknown"] as const)("rejects Linux's %s backend while preserving local browsing", async backend => {
-    crypto.getSelectedStorageBackend.mockReturnValue(backend);
-    store = new StorageConnections(file, crypto, "linux");
+  it("retains a snapshot binding after close and restores it through a cold vault", async () => {
+    const saved = await save();
+    await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
+    await call("close", { repo_id: "saved-snapshot" });
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
+    send.mockClear();
+    await call("open_url", { repo_id: "saved-snapshot", url: "crab://test-bucket/repo" });
+    expect(send).toHaveBeenCalledWith("open_url", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
+  });
+
+  it("reopens a native repository with its current binding instead of its original selection", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    await call("open_local", { repo_id: "local", path: directory, storage_connection_id: first.id });
+    await call("storage_connections_bind", { repo_id: "local", id: second.id });
+    send.mockClear();
+    await call("open_local", { repo_id: "local", path: directory });
+    expect(send).toHaveBeenCalledWith("open_local", expect.objectContaining({ repo_id: "local", __storage_auth: expect.objectContaining({ id: second.id }) }));
+  });
+
+  it("retires SQL admissions and pending replies for every alias of a replaced source", async () => {
+    const first = await save(fixture("First"));
+    const second = await save(fixture("Second"));
+    for (const repo_id of ["repo", "alias"]) {
+      await call("open_local", { repo_id, path: directory, storage_connection_id: first.id });
+    }
+    await call("open_url", { repo_id: "other", url: "crab://test-bucket/other", storage_connection_id: first.id });
+    const query = (repo_id: string) => call("file_query", { repo_id, path: "data.parquet", sql: "SELECT * FROM data" });
+    let finish!: (result: unknown) => void;
+    send.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = query("repo");
+    const stale = expect(pending).rejects.toThrow("Repository storage changed");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await call("storage_connections_bind", { repo_id: "alias", id: second.id });
+    expect(sourceChanged.mock.calls).toEqual([[["repo", "alias"]]]);
+    send.mockClear();
+    await expect(query("alias")).rejects.toThrow("Repository storage changed");
+    expect(send).not.toHaveBeenCalled();
+    finish({ rows: [{ value: "old source" }] });
+    await stale;
+    await expect(query("other")).resolves.toEqual({ ok: true, latency_ms: 2 });
+    await call("open_local", { repo_id: "repo", path: directory });
+    await expect(query("repo")).resolves.toEqual({ ok: true, latency_ms: 2 });
+    expect(sourceChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves source identity on display-name edits and retires same-ID endpoint replacements", async () => {
+    const original = fixture();
+    const saved = await save(original);
+    await call("open_url", { repo_id: "snapshot", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
+    await save({ ...original, id: saved.id, name: "Renamed" });
+    expect(sourceChanged).not.toHaveBeenCalled();
+    await save({ ...original, id: saved.id, endpoint: "https://other.invalid" });
+    expect(sourceChanged.mock.calls).toEqual([[["snapshot"]]]);
+  });
+
+  it("does not reopen a removed storage identity with ambient credentials", async () => {
+    const saved = await save();
+    await call("open_local", { repo_id: "local", path: directory, storage_connection_id: saved.id });
+    await call("storage_connections_remove", { id: saved.id });
+    send.mockClear();
+    await expect(call("open_local", { repo_id: "local", path: directory })).rejects.toThrow("saved connection was removed");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("reopens unbound local browsing while the keyring is locked", async () => {
+    await call("open_local", { repo_id: "local", path: directory });
+    crypto.isAsyncEncryptionAvailable.mockResolvedValue(false);
+    send.mockClear();
+    await call("open_local", { repo_id: "local", path: directory });
+    expect(send).toHaveBeenCalledWith("open_local", { repo_id: "local", path: directory });
+  });
+
+  it("rejects Linux's plaintext-key backend while preserving local browsing", async () => {
+    crypto.getSelectedStorageBackend.mockReturnValue("basic_text");
+    store = new StorageConnections(file, crypto, "linux", (keys, state) => changed(keys, state));
     await expect(save()).rejects.toThrow("keyring");
     await call("open_local", { repo_id: "local", path: directory });
     await call("list", { repo_id: "local" });
@@ -86,7 +177,7 @@ describe("built-in storage connections", () => {
     const previous = await readFile(file);
     const decrypt = crypto.decryptStringAsync.getMockImplementation()!;
     crypto.decryptStringAsync.mockImplementationOnce(async bytes => ({ ...await decrypt(bytes), shouldReEncrypt: true }));
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     const connections = (await list()).connections;
     expect({ connections, rotated: !previous.equals(await readFile(file)) }).toEqual({ connections: [saved], rotated: true });
   });
@@ -100,13 +191,13 @@ describe("built-in storage connections", () => {
       await ready;
       return { ...await decrypt(bytes), shouldReEncrypt: true };
     });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     const reading = list();
     await vi.waitFor(() => expect(crypto.decryptStringAsync).toHaveBeenCalledOnce());
     const saving = save(fixture("Second"));
     release();
     await Promise.all([reading, saving]);
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     expect((await list()).connections.map(item => item.name)).toEqual(["First", "Second"]);
   });
 
@@ -116,7 +207,7 @@ describe("built-in storage connections", () => {
     const decrypt = crypto.decryptStringAsync.getMockImplementation()!;
     crypto.decryptStringAsync.mockImplementationOnce(async bytes => ({ ...await decrypt(bytes), shouldReEncrypt: true }));
     crypto.encryptStringAsync.mockRejectedValueOnce(new Error("Key provider unavailable"));
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     await expect(list()).rejects.toThrow("Key provider unavailable");
     expect(await readFile(file)).toEqual(previous);
   });
@@ -146,7 +237,7 @@ describe("built-in storage connections", () => {
     { name: "Azure SAS", provider: "azure", credentials: { provider: "azure", account: "account", sas_token: "?sp=rl&sig=fixture-signature" } },
   ] as const)("persists and tests $name using its own provider context", async provider => {
     const saved = await save({ ...fixture(), ...provider, region: "", endpoint: "" });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     await call("storage_connections_test", { id: saved.id });
     const payload = send.mock.calls.at(-1)![1] as { __storage_auth: StorageConnectionInput };
     expect(payload.__storage_auth.credentials.provider).toBe(provider.provider);
@@ -175,10 +266,30 @@ describe("built-in storage connections", () => {
     const saved = await save();
     const dest = path.join(directory, "checkout");
     await call("clone", { url: "crab://test-bucket/repo", dest, storage_connection_id: saved.id });
-    store = new StorageConnections(file, crypto, "darwin");
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
     await call("open_local", { repo_id: "new-renderer-id", path: dest });
     await call("crab_push_structured", { repo_id: "new-renderer-id" });
     expect(send).toHaveBeenLastCalledWith("crab_push_structured", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
+  });
+
+  it("selects the destination worktree binding when an existing handle changes path", async () => {
+    const first = await save(fixture("First")), second = await save(fixture("Second"));
+    const destination = path.join(directory, "destination");
+    await call("open_local", { repo_id: "replaced", path: directory, storage_connection_id: first.id });
+    await call("open_local", { repo_id: "destination", path: destination, storage_connection_id: second.id });
+    send.mockClear();
+    await call("open_local", { repo_id: "replaced", path: destination });
+    expect(send).toHaveBeenCalledWith("open_local", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: second.id }) }));
+  });
+
+  it("restores the logical snapshot binding when replacing a local owner", async () => {
+    const first = await save(fixture("First")), second = await save(fixture("Second"));
+    await call("open_url", { repo_id: "replaced", url: "crab://test-bucket/repo", storage_connection_id: second.id });
+    await call("close", { repo_id: "replaced" });
+    await call("open_local", { repo_id: "replaced", path: directory, storage_connection_id: first.id });
+    send.mockClear();
+    await call("open_url", { repo_id: "replaced", url: "crab://test-bucket/repo" });
+    expect(send).toHaveBeenCalledWith("open_url", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: second.id }) }));
   });
 
   it("never accepts the renderer's private credential-context field", async () => {
@@ -193,11 +304,11 @@ describe("built-in storage connections", () => {
     expect(send).toHaveBeenLastCalledWith("storage_connection_test", { __storage_auth: expect.objectContaining({ credentials: fixture().credentials }) });
   });
 
-  it("reopens an SDK session when its selected connection changes", async () => {
+  it("delegates selected-identity replacement to the repository lifecycle owner", async () => {
     const first = await save(fixture("First")), second = await save(fixture("Second"));
     await call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: first.id });
     await call("storage_connections_bind", { repo_id: "repo", id: second.id });
-    expect(send).toHaveBeenLastCalledWith("open_url", expect.objectContaining({ repo_id: "repo", __storage_auth: expect.objectContaining({ id: second.id }) }));
+    expect(changed).toHaveBeenLastCalledWith(["repo"], "changed");
     expect((await list("repo")).selected_id).toBe(second.id);
   });
 
@@ -205,14 +316,21 @@ describe("built-in storage connections", () => {
     const saved = await save();
     await call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: saved.id });
     await call("storage_connections_remove", { id: saved.id });
-    expect(send).toHaveBeenLastCalledWith("close", { repo_id: "repo" });
+    expect(changed).toHaveBeenLastCalledWith(["repo"], "removed");
     await expect(call("crab_push_structured", { repo_id: "repo" })).rejects.toThrow("removed");
   });
 
   it("redacts selected credentials and signed URLs from public IPC errors", async () => {
     const saved = await save();
-    send.mockRejectedValueOnce(new Error("rejected fixture-secret-Store at https://storage.invalid?sig=private-signature"));
-    await expect(call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: saved.id })).rejects.toThrow("rejected [redacted] at https://storage.invalid?sig=[redacted]");
+    send.mockRejectedValueOnce(Object.assign(new Error("rejected fixture-secret-Store at https://storage.invalid?sig=private-signature"), {
+      code: 1012,
+      data: { kind: "content_read", code: "integrity", sources: [{ message: "fixture-secret-Store", url: "https://storage.invalid?sig=private-signature&x=1" }], "fixture-access-Store": "detail" },
+    }));
+    await expect(call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: saved.id })).rejects.toMatchObject({
+      message: "rejected [redacted] at https://storage.invalid?sig=[redacted]",
+      code: 1012,
+      data: { kind: "content_read", code: "integrity", sources: [{ message: "[redacted]", url: "https://storage.invalid?sig=[redacted]&x=1" }], "[redacted]": "detail" },
+    });
   });
   it("redacts saved credentials from errors emitted by an already-open SDK session", async () => {
     const saved = await save();
@@ -234,7 +352,7 @@ describe("built-in storage connections", () => {
   it("keeps the requested identity selected after an SDK reconnect fails", async () => {
     const first = await save(fixture("First")), second = await save(fixture("Second"));
     await call("open_url", { repo_id: "repo", url: "crab://test-bucket/repo", storage_connection_id: first.id });
-    send.mockRejectedValueOnce(new Error("provider unavailable"));
+    changed.mockRejectedValueOnce(new Error("provider unavailable"));
     await expect(call("storage_connections_bind", { repo_id: "repo", id: second.id })).rejects.toThrow("unavailable");
     expect((await list("repo")).selected_id).toBe(second.id);
   });
@@ -260,6 +378,29 @@ describe("built-in storage connections", () => {
     await call("storage_connections_remove", { id: saved.id });
     rejectOperation(new Error("provider rejected fixture-secret-Store"));
     await rejected;
+  });
+
+  it("keeps retired credentials redacted through repository cleanup after a profile replacement", async () => {
+    const saved = await save(fixture("First"));
+    await call("open_local", { repo_id: "repo", path: directory, storage_connection_id: saved.id });
+    changed.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("cleanup failed fixture-secret-First"), { code: 1012, data: { source: "fixture-secret-First" } });
+    });
+    await expect(save({ ...fixture("Replacement"), id: saved.id })).rejects.toMatchObject({ message: "cleanup failed [redacted]", code: 1012, data: { source: "[redacted]" } });
+  });
+
+  it("allows cold local metadata while locked but never captures content with ambient credentials", async () => {
+    const saved = await save();
+    await call("open_local", { repo_id: "old", path: directory, storage_connection_id: saved.id });
+    store = new StorageConnections(file, crypto, "darwin", (keys, state) => changed(keys, state));
+    crypto.isAsyncEncryptionAvailable.mockResolvedValue(false);
+    await call("open_local", { repo_id: "new", path: directory });
+    send.mockClear();
+    await expect(call("file_open", { repo_id: "new", path: "weights.bin" })).rejects.toThrow("keyring");
+    expect(send).not.toHaveBeenCalled();
+    crypto.isAsyncEncryptionAvailable.mockResolvedValue(true);
+    await call("file_open", { repo_id: "new", path: "weights.bin" });
+    expect(send).toHaveBeenLastCalledWith("file_open", expect.objectContaining({ __storage_auth: expect.objectContaining({ id: saved.id }) }));
   });
 
 });

@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Unit tests for connection timeout configuration (task 19.6).
  *
@@ -31,6 +32,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { profile: SshProfile; channels: { agent?: MockChannel } }>();
 
@@ -115,7 +117,7 @@ describe("Connection timeout configuration — RpcRouter uses operationTimeoutMs
     sm.setStatus("test-profile", "connected");
     sm.setConnection("test-profile", channel, profile);
 
-    const router = new RpcRouter(sm as any, new MockLocalAgent());
+    const router = new RpcRouter(sm as any, new MockLocalAgent(), mockStorageConnections);
     router.attachChannel("test-profile", channel.asChannel());
 
     // Send a request that will timeout
@@ -134,7 +136,7 @@ describe("Connection timeout configuration — RpcRouter uses operationTimeoutMs
     sm.setConnection("test-profile", channel, profile);
 
     // Create router with a short default for testing
-    const router = new RpcRouter(sm as any, new MockLocalAgent(), { requestTimeoutMs: 75 });
+    const router = new RpcRouter(sm as any, new MockLocalAgent(), mockStorageConnections, { requestTimeoutMs: 75 });
     router.attachChannel("test-profile", channel.asChannel());
 
     const promise = router.route("ssh://test-profile/repo", "slow_method", {});
@@ -152,7 +154,7 @@ describe("Connection timeout configuration — RpcRouter uses operationTimeoutMs
     sm.setStatus("test-profile", "connected");
     sm.setConnection("test-profile", channel, profile);
 
-    const router = new RpcRouter(sm as any, new MockLocalAgent(), { requestTimeoutMs: 200 });
+    const router = new RpcRouter(sm as any, new MockLocalAgent(), mockStorageConnections, { requestTimeoutMs: 200 });
     router.attachChannel("test-profile", channel.asChannel());
 
     const promise = router.route("ssh://test-profile/repo", "method", {});
@@ -168,7 +170,7 @@ describe("Connection timeout configuration — RpcRouter uses operationTimeoutMs
     sm.setStatus("test-profile", "connected");
     sm.setConnection("test-profile", channel, profile);
 
-    const router = new RpcRouter(sm as any, new MockLocalAgent());
+    const router = new RpcRouter(sm as any, new MockLocalAgent(), mockStorageConnections);
     router.attachChannel("test-profile", channel.asChannel());
 
     const promise = router.route("ssh://test-profile/repo", "fast_method", {});

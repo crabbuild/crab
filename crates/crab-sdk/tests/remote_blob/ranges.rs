@@ -61,6 +61,12 @@ pub(super) async fn verify(snapshot: &Snapshot, name: &[u8], original: &[u8]) {
     invalid(snapshot.commit().with_options(options.clone()).await);
     invalid(
         snapshot
+            .file_metadata(path.clone())
+            .with_options(options.clone())
+            .await,
+    );
+    invalid(
+        snapshot
             .tree(GitPath::root(), PageRequest::new(1, None).unwrap())
             .with_options(options.clone())
             .await,
@@ -101,6 +107,15 @@ pub(super) async fn verify_limits(snapshot: &Snapshot, name: &[u8]) {
             ..ReadLimits::default()
         })
         .unwrap();
+    assert_eq!(
+        snapshot
+            .file_metadata(path.clone())
+            .with_options(options.clone())
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::LimitExceeded,
+    );
     assert_eq!(
         snapshot
             .read_blob(path.clone())
@@ -217,6 +232,16 @@ pub(super) async fn verify_controls(snapshot: &Snapshot, name: &[u8]) {
         assert_eq!(
             snapshot
                 .commit()
+                .with_options(options.clone())
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            expected
+        );
+        assert_eq!(
+            snapshot
+                .file_metadata(path.clone())
                 .with_options(options.clone())
                 .await
                 .err()

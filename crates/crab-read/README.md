@@ -5,6 +5,14 @@ turns a Git/Xet pointer into verified bytes by combining manifest metadata,
 replica selection, cache-aware storage, shard coverage checks, and Xet file
 reconstruction.
 
+`ShardHydrator::chunk_page` inspects bounded ordered chunk metadata through an
+explicit or runtime-bound captured catalog. Pointer hints do not select its
+authority. Pages retain repeated occurrences, validate file byte coverage and
+expand actual chunk identities without reconstructing payloads.
+`PointerReader::chunk_page` uses retained local recipe pages for unpublished
+content and the same captured remote owner for published content. Local recipe
+inspection leaves published xorb placement unknown.
+
 ## Feature boundaries
 
 The default `hydration` feature supplies verified content reconstruction,
@@ -188,6 +196,9 @@ lifetime. A staged source transfers a recipe pin without retaining staging's
 global shared lock; a captured remote source needs no local pin. The caller
 retains the returned pin until the open file closes or successfully acquires
 native backing. This local ownership does not retain remote objects against GC.
+Cancellation-aware owners use `pin_file_with_cancel`. Chunk, range and complete
+reads share cancellable staging admission, queuing behind a clean writer without
+blocking the async runtime. Contention never selects a different source.
 
 `install_git_packs_with_candidates_from_store` combines a captured view's
 origin-backed packs with verified candidate capsules. Candidates participate

@@ -9,7 +9,7 @@ interface BatchActionBarProps {
   count: number;
   onStage: () => void;
   onUnstage: () => void;
-  onDiscard: () => void;
+  onDiscard?: () => void;
   onClear: () => void;
   /** True while a batch operation is in flight. */
   busy?: boolean;
@@ -59,7 +59,7 @@ export function BatchActionBar({
         <button
           type="button"
           onClick={onDiscard}
-          disabled={busy}
+          disabled={busy || !onDiscard}
           className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-gx-error hover:bg-gx-error/10 disabled:opacity-50 transition"
           title="Discard selected files (Delete)"
         >

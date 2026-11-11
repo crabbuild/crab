@@ -202,15 +202,8 @@ async fn hydrate(
                     .await
             }
             ContentClassification::LfsPointer => {
-                crate::content::lfs::deliver(
-                    &runtime.layout,
-                    bytes,
-                    options,
-                    operation,
-                    chunks,
-                    ready,
-                )
-                .await
+                crate::content::lfs::deliver(runtime, bytes, options, operation, chunks, ready)
+                    .await
             }
             ContentClassification::OrdinaryGit => Ok(()),
         }

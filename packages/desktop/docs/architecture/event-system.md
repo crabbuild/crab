@@ -12,11 +12,11 @@ the application and how each layer participates in change detection.
 │  Filesystem                                                     │
 │  (user edits, external tools, git operations)                   │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ FSEvents (macOS) / inotify (Linux)
+                             │ Metadata inventory in a worker
 ┌────────────────────────────▼────────────────────────────────────┐
-│  File Watcher (electron/file-watcher.ts)                        │
-│  • Recursive fs.watch per repo                                  │
-│  • Debounce: 300ms coalescing window                            │
+│  Local metadata monitor (worker per physical root)              │
+│  • Paths, inode, mode, size, mtime and ctime; no file payloads   │
+│  • One scan at a time, followed by a 1 second idle interval     │
 │  • Ignore: node_modules, .git/objects, target, __pycache__      │
 │  • Pass-through: .git/index, .git/HEAD, .git/refs/*             │
 └────────────────────────────┬────────────────────────────────────┘
@@ -31,10 +31,31 @@ the application and how each layer participates in change detection.
 
 ## File Watcher Architecture
 
-The file watcher runs in the Electron main process using Node's
-built-in `fs.watch` with `recursive: true`. On macOS this is backed
-by FSEvents, providing efficient kernel-level change notifications
-without polling.
+`electron/file-watcher.ts` routes IPC; `electron/local-file-watcher.ts` owns
+shared subscriptions and worker lifetimes. Both IPC and `LocalProvider` use the
+same monitor for a physical directory. SSH continues through its admitted
+remote provider and native/polling owner.
+
+A worker inventories paths and file metadata. It reads no file payloads and
+keeps a fixed-size, order-independent fingerprint rather than a file-sized
+cache. It skips artifact subtrees, reports an initial invalidation, then emits
+`fs/changed` when a completed inventory differs. Only one scan runs at a time;
+the next begins after a one-second idle interval. Notifications remain advisory:
+file reads use their captured native source and integrity/version checks.
+
+The prior local paths duplicated `fs.watch` and synchronously closed its handles
+on Electron's main thread. On the qualification host this blocked repository
+switches in libuv's FSEvents deinitialization semaphore, while native directory
+notifications were also absent in direct dependency probes. The single metadata
+path avoids that dependency. See the upstream
+[libuv close implementation](https://github.com/libuv/libuv/blob/v1.46.0/src/unix/fsevents.c#L811).
+
+Stopping a subscription removes its callback immediately. The last subscriber
+requests worker shutdown and waits for the current metadata scan to release
+its directory handles. A new subscriber cannot join an owner already draining;
+application shutdown joins active and draining workers together. There is no
+forced worker termination, polling fallback mode or backend-selection setting.
+Local monitoring remains independent of native agent construction/readiness.
 
 ### Ignored Paths
 
@@ -67,20 +88,14 @@ views need to react to:
 | `refs/heads/*` | Branch created/deleted/updated |
 | `refs/tags/*` | Tag created/deleted |
 
-### Debouncing Strategy
+### Coalescing and Bounds
 
-Filesystem events arrive in bursts (a `git checkout` can trigger
-hundreds of file change events). The watcher coalesces these into a
-single notification using a 300ms debounce window:
-
-```
-Events:  ─●─●●●──●─────────────────●●─────────
-Timer:   ─[====]──[====]────────────[====]──────
-Notify:  ─────────X─────────────────────────X───
-```
-
-Only one "fs/changed" IPC message is sent per debounce window,
-regardless of how many individual file events occurred.
+A snapshot folds each eligible path's identity and timestamps into a fixed-size
+fingerprint; it does not retain an entry map or read large-file contents. Changes
+during a scan are rechecked by subsequent scans, with no overlapping inventories
+or retry queue. Subscriber callbacks are also debounced in the renderer. Very
+large file-count and network-filesystem scan costs still require profile-specific
+qualification; file payload size does not determine scan allocation.
 
 ## Renderer-Side Event Handling
 
@@ -89,17 +104,10 @@ regardless of how many individual file events occurred.
 Views subscribe to filesystem changes via the `useFileWatcher` hook:
 
 ```typescript
-function useFileWatcher(repoPath: string | undefined, callback: () => void) {
-  useEffect(() => {
-    if (!repoPath) return;
-    const handler = (_event: unknown, payload: { path: string }) => {
-      // Only refresh if the change is in our repo
-      if (payload.path.startsWith(repoPath)) callback();
-    };
-    window.crab.on("fs/changed", handler);
-    return () => window.crab.off("fs/changed", handler);
-  }, [repoPath, callback]);
-}
+// The repository owner starts/stops one subscription.
+useFileWatcherRoot(getWatchPath(repo));
+// Views subscribe without managing worker lifetimes.
+useFileWatcher(getWatchPath(repo), reload);
 ```
 
 ### View Refresh Patterns

@@ -1,3 +1,4 @@
+import type { RemoteFileBrowser } from "../electron/ssh-file-browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -22,7 +23,7 @@ describe("SSH host settings IPC", () => {
       if (key instanceof Error || Array.isArray(key)) throw new Error("Invalid owned key");
       const hosts = new KnownHostsManager(path.join(directory, "pins.json"), path.join(directory, "user"), path.join(directory, "global"));
       hosts.accept("fixture.invalid", 22, key.getPublicSSH()); hosts.accept("fixture.invalid", 2222, key.getPublicSSH());
-      registerSshIpcHandlers(new SshProfileManager(path.join(directory, "profiles.json")), new SshSessionManager(async () => {}), hosts);
+      registerSshIpcHandlers(new SshProfileManager(path.join(directory, "profiles.json")), new SshSessionManager(async () => {}), {} as RemoteFileBrowser, hosts);
       await handlers.get("ssh:remove-known-host")!(undefined, "fixture.invalid", 22, "ssh-rsa");
       expect(await handlers.get("ssh:list-known-hosts")!(undefined)).toEqual([expect.objectContaining({ hostname: "fixture.invalid", port: 2222, keyType: "ssh-rsa" })]);
     } finally { rmSync(directory, { recursive: true, force: true }); }

@@ -19,6 +19,8 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -130,7 +132,7 @@ describe("CodexAppServerAdapter — Graceful shutdown (CA-P6, D7)", () => {
     adapter.onEvent((event) => events.push(event));
 
     // Spawn the adapter
-    adapter.spawn("Do something", "/tmp/test-shutdown");
+    await adapter.spawn("Do something", "/tmp/test-shutdown");
 
     // Complete the handshake (uses real-ish async but fake timers)
     // We need to advance timers for the setTimeout calls in completeHandshake

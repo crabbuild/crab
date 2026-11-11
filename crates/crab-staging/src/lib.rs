@@ -827,23 +827,7 @@ fn acquire_flock_exclusive_blocking(root: &Path, budget: std::time::Duration) ->
 /// if the file doesn't exist yet (creates it), but this is rare — the
 /// writer normally creates it first.
 fn acquire_flock_shared(root: &Path) -> Result<File> {
-    let lock_path = root.join(LOCKFILE_NAME);
-
-    // Try read-only first (avoids needing write permission).
-    let file = match std::fs::OpenOptions::new().read(true).open(&lock_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Lockfile doesn't exist yet — create it. This is the only
-            // case where the shared path needs write access.
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)?
-        }
-        Err(e) => return Err(StagingError::Io(e)),
-    };
+    let file = open_shared_lock_file(root)?;
 
     let mut delay = FLOCK_BASE_DELAY;
     for attempt in 0..=FLOCK_MAX_RETRIES {
@@ -879,17 +863,7 @@ fn acquire_flock_shared(root: &Path) -> Result<File> {
 /// `LOCK_EX`, instead of bouncing off after a 3-second retry budget.
 fn acquire_flock_shared_blocking(root: &Path, budget: std::time::Duration) -> Result<File> {
     let lock_path = root.join(LOCKFILE_NAME);
-
-    let mut file = match std::fs::OpenOptions::new().read(true).open(&lock_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)?,
-        Err(e) => return Err(StagingError::Io(e)),
-    };
+    let mut file = open_shared_lock_file(root)?;
 
     let start = std::time::Instant::now();
     let mut delay = FLOCK_BASE_DELAY;
@@ -934,6 +908,59 @@ fn acquire_flock_shared_blocking(root: &Path, budget: std::time::Duration) -> Re
                 delay = std::cmp::min(delay * 2, FLOCK_BLOCKING_MAX_SLEEP);
             }
             Err(e) => return Err(StagingError::Io(e)),
+        }
+    }
+}
+
+fn open_shared_lock_file(root: &Path) -> Result<File> {
+    let path = root.join(LOCKFILE_NAME);
+    // Existing shared opens need no write permission. Only first creation writes.
+    match std::fs::OpenOptions::new().read(true).open(&path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn acquire_file_read_lock(
+    root: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<File> {
+    let path = root.to_owned();
+    let file = tokio::task::spawn_blocking(move || open_shared_lock_file(&path))
+        .await
+        .map_err(|error| StagingError::Io(std::io::Error::other(error)))??;
+    let started = tokio::time::Instant::now();
+    let mut delay = FLOCK_BASE_DELAY;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
+        match try_flock(&file, StagingLockKind::Shared) {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= FLOCK_BLOCKING_DEFAULT_BUDGET {
+                    return Err(StagingError::StagingLocked {
+                        holder_pid: read_lock_holder(root),
+                    });
+                }
+                // File reads share the existing writer-queue budget, but never
+                // block a runtime worker or delay cancellation behind its sleeps.
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(StagingError::Cancelled),
+                    () = tokio::time::sleep(delay) => {},
+                }
+                delay = std::cmp::min(delay * 2, FLOCK_BLOCKING_MAX_SLEEP);
+            }
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -3764,6 +3791,26 @@ impl StagingAreaReadOnly {
             LockAcquisition::Blocking(budget) => acquire_flock_shared_blocking(&root, budget)?,
         };
 
+        Self::open_with_acquired_lock(root, lock_file)
+    }
+
+    async fn open_for_file(
+        root: PathBuf,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        let lock = acquire_file_read_lock(&root, cancel).await?;
+        let staging =
+            tokio::task::spawn_blocking(move || Self::open_with_acquired_lock(root, lock))
+                .await
+                .map_err(|error| StagingError::Io(std::io::Error::other(error)))??;
+        complete_recipe_payload_validation(&staging.root, &staging.index, &staging.readers).await?;
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
+        Ok(staging)
+    }
+
+    fn open_with_acquired_lock(root: PathBuf, lock_file: File) -> Result<Self> {
         let db_path = root.join("index.db");
         if !db_path.exists() {
             return Err(StagingError::NotFound {

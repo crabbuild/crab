@@ -16,7 +16,7 @@
     "build:icons": "bash scripts/generate-icons.sh",
     "build:agent": "node scripts/build-native.mjs",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json && node scripts/rename-to-cjs.mjs",
+    "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json && node scripts/rename-to-cjs.mjs",
     "build": "npm run build:agent && npm run build:renderer && npm run build:electron",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "lint": "eslint 'src/**/*.{ts,tsx}' 'electron/**/*.ts'",
@@ -31,7 +31,7 @@
     "start": "electron .",
     "postinstall": "node scripts/install-native.mjs",
     "package:dir": "npm run build && node scripts/package.mjs --dir",
-    "test:build": "node --test scripts/native-build.test.mjs scripts/assemble-release.test.mjs scripts/version-bump.test.mjs scripts/remote-runtime.test.mjs"
+    "test:build": "npm run build:electron && node --test scripts/native-build.test.mjs scripts/assemble-release.test.mjs scripts/version-bump.test.mjs scripts/local-file-watcher.test.mjs scripts/remote-runtime.test.mjs"
   },
   "dependencies": {
     "@bufbuild/cel": "^0.5.0",
@@ -79,7 +79,6 @@
     "typescript-language-server": "^5.1.3",
     "web-tree-sitter": "^0.22.0",
     "yaml": "^2.9.0",
-    "zeromq": "^6.5.0",
     "zstd-napi": "^0.0.12"
   },
   "devDependencies": {

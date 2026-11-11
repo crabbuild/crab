@@ -1,6 +1,6 @@
 import crabLogo from "../assets/crab.svg";
 
-export function EmptyState() {
+export function EmptyState({ onConnectSsh }: { onConnectSsh: () => void }) {
   return (
     <div className="flex h-full w-full items-center justify-center p-10">
       <div className="max-w-md text-center">
@@ -19,6 +19,9 @@ export function EmptyState() {
           <code className="kbd">gs://</code>, or{" "}
           <code className="kbd">az://</code> using the sidebar.
         </p>
+        <button type="button" className="btn mt-5 text-sm" onClick={onConnectSsh}>
+          SSH Connections
+        </button>
       </div>
     </div>
   );

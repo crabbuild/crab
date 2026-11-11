@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { OpenRepo } from "../state";
-import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, rpc } from "../ipc";
+import { OpenRepo, repositoryKey } from "../state";
+import { CommitRow, DirEntry, HydratedWorktreeEntry, WorktreeStatus, isStorageRepositoryUrl, rpc } from "../ipc";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { isSidebarView, type SidebarView } from "../lib/navigation";
@@ -44,10 +44,6 @@ interface RepoDetailProps {
   repo: OpenRepo;
   restoreEntry?: NavEntry;
   onNavigate?: (entry: NavEntry) => void;
-  /** Whether the activity drawer is open. */
-  activityDrawerOpen?: boolean;
-  /** Toggle the activity drawer. */
-  onToggleActivityDrawer?: () => void;
 }
 
 /**
@@ -59,15 +55,26 @@ interface RepoDetailProps {
  * render editor tabs (path+rev) and diff tabs (path+base/head) side
  * by side. That mirrors VS Code's mixed "editor group" behaviour.
  */
-export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen, onToggleActivityDrawer }: RepoDetailProps) {
+export function RepoDetail({ repo, restoreEntry, onNavigate }: RepoDetailProps) {
   const sessionManager = useSession();
+  const sessionKey = repositoryKey(repo);
+  const defaultView = isStorageRepositoryUrl(repo.path ?? repo.url) ? "explorer" : "dashboard";
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  useEffect(() => setReopenError(null), [repo.native_session_id]);
+  async function reopenRepository() {
+    setReopening(true); setReopenError(null);
+    try { await rpc.reopen(repo.path ?? repo.url, repo); }
+    catch (error) { setReopenError(error instanceof Error ? error.message : String(error)); }
+    finally { setReopening(false); }
+  }
 
   const [rev, setRev] = useState<string | null>(null);
   const [activeView, setActiveViewRaw] = useState<SidebarView>(() => {
     // Priority: 1) repo.initialView (deferred open), 2) saved session, 3) "dashboard"
     if (repo.initialView && isSidebarView(repo.initialView)) return repo.initialView;
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeView && isSidebarView(session.activeView)) {
         const savedView = session.activeView;
         // If the saved view is a non-full-pane view (e.g. "explorer") but
@@ -79,12 +86,12 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
           "pull-requests", "branches", "worktrees",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
-          return "dashboard";
+          return defaultView;
         }
         return savedView;
       }
     }
-    return "dashboard";
+    return defaultView;
   });
   const [timelineConflictsTab, setTimelineConflictsTabRaw] = useState<"timeline" | "conflicts">(() => {
     const stored = localStorage.getItem("crab.timelineConflicts.tab");
@@ -123,7 +130,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     // Restore selectedCommit from session if the view is "timeline"
     // so the user returns to the exact commit they were looking at.
     if (activeView === "timeline" && repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       const savedCommit = session?.viewState?.selectedCommit;
       if (typeof savedCommit === "string" && savedCommit.length > 0) {
         return savedCommit;
@@ -136,7 +143,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
   const [selectedBranch, setSelectedBranch] = useState<string | null>(() => {
     // Branch selection belongs to its own route, independently of worktrees.
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       const savedBranch = session?.viewState?.selectedBranch;
       if (typeof savedBranch === "string" && savedBranch.length > 0) {
         return savedBranch;
@@ -170,12 +177,12 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     const handler = (e: Event) => {
       const view = (e as CustomEvent<{ view: string }>).detail?.view;
       if (view && repo.path) {
-        sessionManager.update(repo.path, { activeView: view });
+        sessionManager.update(sessionKey, { activeView: view });
       }
     };
     window.addEventListener("crab:active-view-changed", handler);
     return () => window.removeEventListener("crab:active-view-changed", handler);
-  }, [repo.path, sessionManager]);
+  }, [sessionKey, sessionManager]);
 
   const terminalReturnView = useRef<SidebarView>("dashboard");
   useEffect(() => {
@@ -235,7 +242,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     // Editor tabs require a DirEntry (loaded async), so those are
     // restored in an effect after entries load.
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeFile) {
         // Restore as a diff key — the diff tab will be created below.
         return `diff::${session.activeFile}`;
@@ -249,7 +256,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     // If we have a saved activeFile, pre-populate a diff tab so the
     // file is visible on first render (zero-flicker restore).
     if (repo.path) {
-      const session = sessionManager.activate(repo.path);
+      const session = sessionManager.activate(sessionKey);
       if (session?.activeFile) {
         const key = `diff::${session.activeFile}`;
         return [{ key, path: session.activeFile }];
@@ -364,9 +371,10 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
   useFileWatcher(watchPath, useCallback(() => {
     refreshBranchInfo();
     refreshGitStatus();
+    hydration.refresh();
     // Also refresh conflict count for the activity bar badge.
     rpc.conflictList(repo.repo_id).then((r) => setConflictCount(r.files.length)).catch(() => {});
-  }, [refreshBranchInfo, refreshGitStatus, repo.repo_id]));
+  }, [refreshBranchInfo, refreshGitStatus, hydration.refresh, repo.repo_id]));
 
   // Initial conflict count fetch.
   useEffect(() => {
@@ -401,11 +409,11 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     }
   }, [refreshBranchInfo, refreshGitStatus, repo.repo_id, repo.deferred]);
 
-  // Fetch the flat listing once per repo+rev; both Explorer and the
+  // Fetch the flat listing for each native session+rev; both Explorer and the
   // quick-open finder reuse it. Explorer also re-fetches on refresh,
   // and that's fine — setState on `entries` here would be stale.
   useEffect(() => {
-    if (repo.deferred) return;
+    if (repo.deferred || !repo.native_session_id) return;
     let cancelled = false;
     (async () => {
       let pinned: string | undefined;
@@ -422,12 +430,12 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
         .then((r) => {
           if (!cancelled) setEntries(r.entries);
         })
-        .catch(() => setEntries([]));
+        .catch(() => { if (!cancelled) setEntries([]); });
     })();
     return () => {
       cancelled = true;
     };
-  }, [repo.repo_id, rev]);
+  }, [repo.repo_id, repo.native_session_id, rev]);
 
   // Validate the restored activeFile after entries load. If the file
   // no longer exists in the repo, clear the diff tab and activeKey so
@@ -439,7 +447,6 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
 
     restoredFileValidated.current = true;
 
-    const sessionKey = repo.path ?? repo.repo_id;
     const session = sessionManager.activate(sessionKey);
     const savedFile = session?.activeFile;
     if (!savedFile) return;
@@ -455,7 +462,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
       });
       sessionManager.update(sessionKey, { activeFile: undefined });
     }
-  }, [entries, repo.path, repo.repo_id, sessionManager]);
+  }, [entries, sessionKey, sessionManager]);
 
   // RepoDetail is keyed by repo_id in App; changing identity remounts its state.
   const entryByPath = useMemo(() => {
@@ -498,7 +505,9 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
     const key = `diff::${path}`;
     setDiffTabs((prev) => (prev.some((t) => t.key === key) ? prev : [...prev, { key, path }]));
     setActiveKey(key);
-  }, []);
+    // Changes occupies the main pane; selecting a tab alone leaves it hidden.
+    setActiveView("explorer");
+  }, [setActiveView]);
 
   // --- Tab context menu operations ---
 
@@ -694,7 +703,6 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
         gitStatus={gitStatus}
         onRefreshGitStatus={refreshGitStatus}
         hydrationByPath={hydration.byPath}
-        onHydrateComplete={hydration.refresh}
       />
     ),
     search: (
@@ -796,6 +804,10 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
 
   return (
     <div className="flex h-full min-w-0 flex-col">
+      {repo.native_session_id === null && <div role={reopenError || repo.native_error ? "alert" : "status"} className="flex shrink-0 items-center justify-between gap-3 border-b border-gx-border bg-gx-surface px-3 py-2 text-xs">
+        <span className="min-w-0 break-words text-gx-muted">{reopenError ?? repo.native_error ?? "Restoring repository services…"}</span>
+        {(reopenError || repo.native_error) && <button type="button" className="btn shrink-0 text-xs" disabled={reopening} onClick={() => void reopenRepository()}>{reopening ? "Reopening…" : "Retry reopening repository"}</button>}
+      </div>}
       <div className="flex min-h-0 flex-1">
         <WorkspaceShell
           views={views}
@@ -1004,6 +1016,7 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
         <StatusBar
           summary={hydration.summary}
           loading={hydration.loading}
+          error={hydration.error}
           onRefresh={hydration.refresh}
           syncToolbar={branchInfo ? {
             repoId: repo.repo_id,
@@ -1013,8 +1026,6 @@ export function RepoDetail({ repo, restoreEntry, onNavigate, activityDrawerOpen,
             upstream: branchInfo.upstream,
           } : null}
           onCommandExecuted={handleCommandExecuted}
-          activityDrawerOpen={activityDrawerOpen}
-          onToggleActivityDrawer={onToggleActivityDrawer}
         />
       </div>
       <QuickOpen

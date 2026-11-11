@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verification tests for remote git operations over the SSH router.
  *
@@ -10,7 +11,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter } from "../electron/ssh-router";
 
 // ─── Mock Infrastructure ─────────────────────────────────────────
 
@@ -28,6 +30,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -61,7 +64,7 @@ class MockLocalAgent {
 function createRouter(): { router: RpcRouter; channel: MockChannel; sessionManager: MockSessionManager; localAgent: MockLocalAgent } {
   const sessionManager = new MockSessionManager() as any;
   const localAgent = new MockLocalAgent();
-  const router = new RpcRouter(sessionManager, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   const channel = new MockChannel();
 
   sessionManager.setStatus("gpu-server", "connected");
@@ -104,9 +107,9 @@ describe("Remote Git Operations via RPC Router", () => {
       expect(written.method).toBe("git_status_porcelain");
     });
 
-    it("routes git_diff_file to remote agent", async () => {
+    it("routes file_diff to remote agent", async () => {
       const repoId = "ssh://gpu-server/home/user/repo";
-      const promise = router.route(repoId, "git_diff_file", { repo_id: repoId, path: "src/main.rs" });
+      const promise = router.route(repoId, "file_diff", { repo_id: repoId, path: "src/main.rs" });
 
       const written = JSON.parse(channel.written[0]);
       simulateResponse(channel, written.id, { diff: "@@ -1,3 +1,4 @@\n+new line" });
@@ -357,7 +360,7 @@ describe("Remote Git Operations via RPC Router", () => {
     it("handles large diff responses without truncation at router level", async () => {
       const repoId = "ssh://gpu-server/home/user/repo";
       const largeDiff = "a".repeat(10_000_000); // 10MB
-      const promise = router.route(repoId, "git_diff_file", { repo_id: repoId, path: "big.rs" });
+      const promise = router.route(repoId, "file_diff", { repo_id: repoId, path: "big.rs" });
 
       const written = JSON.parse(channel.written[0]);
       simulateResponse(channel, written.id, { diff: largeDiff });

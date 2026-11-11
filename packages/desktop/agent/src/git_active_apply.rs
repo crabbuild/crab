@@ -285,7 +285,7 @@ impl Stage<'_> {
             File::open(parent)?.sync_all()?;
         }
 
-        let mut hook = shellout::git_command();
+        let mut hook = shellout::git_command()?;
         hook.current_dir(self.root).args([
             "hook",
             "run",
@@ -328,7 +328,7 @@ impl Stage<'_> {
         let hook_config = format!("core.hooksPath={}", hook_path.display());
         let named_hooks = hooks::disabled_named_hooks(&worktree, &planning).await?;
         let planning_git = async |args: &[&str]| {
-            let mut command = private_git(&worktree, &planning);
+            let mut command = private_git(&worktree, &planning)?;
             hooks::save_git_config(&mut command);
             command.args([
                 "-c",
@@ -406,7 +406,7 @@ impl Stage<'_> {
 
         // Conditional includes resolve in the real checkout. Carry its merge
         // and signing policy into Git's detached, empty planning checkout.
-        let mut command = shellout::git_command();
+        let mut command = shellout::git_command()?;
         command.current_dir(self.root).args([
             "config",
             "--null",
@@ -449,7 +449,7 @@ impl Stage<'_> {
     }
 
     async fn config_value(&self, key: &str, options: &[&str]) -> Result<String> {
-        let mut command = shellout::git_command();
+        let mut command = shellout::git_command()?;
         command
             .current_dir(self.root)
             .args(["config", "--null"])
@@ -528,7 +528,7 @@ impl Stage<'_> {
     }
 
     async fn shadow(&self, args: &[&str]) -> Result<Output> {
-        let mut command = projection_git(self.root, &self.dir);
+        let mut command = projection_git(self.root, &self.dir)?;
         command.args(args);
         shellout::output(&mut command).await
     }
@@ -568,14 +568,14 @@ impl Stage<'_> {
     }
 }
 
-fn private_git(root: &Path, git_dir: &Path) -> tokio::process::Command {
-    let mut command = shellout::git_command();
+fn private_git(root: &Path, git_dir: &Path) -> Result<tokio::process::Command> {
+    let mut command = shellout::git_command()?;
     command
         .current_dir(root)
         .env("GIT_DIR", git_dir)
         .env("GIT_WORK_TREE", root)
         .env("GIT_INDEX_FILE", git_dir.join("index"));
-    command
+    Ok(command)
 }
 
 async fn initialize_private_head(
@@ -593,15 +593,15 @@ async fn initialize_private_head(
     // that stack initialized before it can read the private detached ref.
     if common.join("reftable").is_dir() {
         fs::create_dir(directory.join("reftable"))?;
-        let mut command = projection_git(root, directory);
+        let mut command = projection_git(root, directory)?;
         command.args(["update-ref", "--no-deref", "HEAD", old]);
         output_text(shellout::output(&mut command).await?)?;
     }
     Ok(())
 }
 
-fn projection_git(root: &Path, git_dir: &Path) -> tokio::process::Command {
-    let mut command = private_git(root, git_dir);
+fn projection_git(root: &Path, git_dir: &Path) -> Result<tokio::process::Command> {
+    let mut command = private_git(root, git_dir)?;
     command.args([
         "-c",
         "core.hooksPath=/dev/null",
@@ -612,7 +612,7 @@ fn projection_git(root: &Path, git_dir: &Path) -> tokio::process::Command {
         "-c",
         "hook.post-index-change.enabled=false",
     ]);
-    command
+    Ok(command)
 }
 
 fn verify_lock(path: &Path, device: u64, inode: u64) -> Result<()> {

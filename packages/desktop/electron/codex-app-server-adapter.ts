@@ -100,6 +100,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
   private pendingApprovals: Map<string, PendingApproval> = new Map();
   private pendingInputs = new Map<string, { rpcId: CodexRequestId; elicitation?: PendingElicitation }>();
   private initialization: Promise<void> | null = null;
+  private initialized = false;
   private metrics: ConnectionMetrics = {
     initMs: 0,
     turnCount: 0,
@@ -264,6 +265,9 @@ export class CodexAppServerAdapter extends AgentAdapter {
     this.cancelInProgress = true;
     const child = this.proc;
     this.cancellation = this.processClosed;
+    // Before initialization there is no turn to interrupt; retire a pending
+    // environment launch immediately instead of letting it start after cancel.
+    if (!this.initialized) child?.kill("SIGTERM");
 
     void this.doCancel().catch(() => {
       child?.kill("SIGKILL");
@@ -277,6 +281,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
     if (this.proc || this.cancelInProgress) throw new Error("Codex is already connected or closing");
     this.cwd = cwd;
     this.exitEmitted = false;
+    this.initialized = false;
     const args = ["app-server", "--listen", "stdio://", ...this.extraArgs];
 
     const owner = this.processFactory(this.binary, args, { cwd, env });
@@ -387,6 +392,7 @@ export class CodexAppServerAdapter extends AgentAdapter {
       }, action ? { timeoutMs: 0 } : undefined);
       if (this.cancelInProgress) throw new Error("Codex startup was cancelled");
       this.rpc.notify("initialized");
+      this.initialized = true;
       this.metrics.initMs = Date.now() - initStart;
       if (!action) return;
       if (action.kind === "goal" && this.resumeThreadId) {

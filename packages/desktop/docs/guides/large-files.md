@@ -1,198 +1,133 @@
-# Large Files View
+# Large files
 
-The Large Files view (labeled "Large Files" in the activity bar) is
-the control center for Crab's large-file management. It handles
-tracking, hydration, dehydration, and storage inspection for files
-managed by the Crab chunking engine.
+Open **Large Files** from the activity bar to track, inspect, hydrate and
+dehydrate Crab and Git LFS files. **Files** provides previews and file details;
+**Activity** in the app header retains transfer progress and outcomes, including
+when no repository is open; **Settings → Storage & Cache**
+manages saved storage connections, cache inspection and prefetch presets.
 
-## Accessing the Large Files View
+## Content and pointers
 
-- Click the **Package** icon in the activity bar
-- This view is specific to Crab — it manages files that are too
-  large for standard git (models, datasets, binaries, media)
+Git stores a small pointer for a managed large file. Crab pointers identify
+logical content with Blake3; Git LFS pointers use SHA-256. Chunk and xorb
+metadata lives separately from the pointer and is available through file
+details. Crab uses content-defined chunks, so unchanged chunks can be reused
+after a small edit. Git LFS objects retain their LFS identity and routing.
 
-## Concepts
+A working file can contain full content, a pointer, or be missing. The hydration
+inventory distinguishes those states. Cached content and working content are
+different: a pointer on disk does not imply that its content is unavailable in
+cache. Unavailable measurements must not be interpreted as zero.
 
-### Pointer Files
+## Track and publish
 
-When a large file is tracked by Crab, git stores a small pointer
-blob instead of the full content. The pointer contains:
-- Content hash (Blake3)
-- Original file size
-- Chunk references
+1. Open **Large Files → Track & Stage** and select the intended files.
+2. Use the tracking wizard to stage them. Existing Crab/LFS attribute routing
+   is preserved; newly tracked exact paths receive literal attribute rules.
+3. Enter a commit message and commit the selected paths. Unrelated staging is
+   retained.
+4. Push to publish the Git commit and its required large-file data.
 
-### Hydration States
+The ordinary Changes view also stages whole files through the configured Git
+filters. Fetch/pull and lazy clone remain ordinary repository workflows; hydrate
+the working files you need after synchronization.
 
-- **Hydrated** — full file content is available locally
-- **Dehydrated** — only the pointer blob exists; content is in cloud
-  storage
-- **Partial** — some chunks are cached locally
+## Preview without hydrating
 
-### Tracking
+Open a file in **Files**, then use its preview or **File details**. Previews
+capture one version and use bounded native reads, including index and historical
+versions. Opening a preview does not replace a working pointer.
 
-Files must be explicitly tracked by Crab before they're managed as
-large files. Tracking tells the clean/smudge filter to handle them.
+Audio/video playback and seeking use that captured source. A first LFS read can
+require verification of the complete object. Failures remain visible; **Reopen
+media** captures a fresh version. Codec support follows Electron's decoder.
+Format-specific input/output limits and the remaining qualification matrix are
+recorded in [Desktop large-file completion](../large-file-support.md).
 
-## Layout
+## Hydrate and dehydrate
 
-The view has multiple tabs:
+For one pointer, use **File details → Hydrate to disk**. In **Large Files →
+Hydrate**, select all eligible files, a pattern, folder, extension, preset or
+custom exact paths. Both Crab and Git LFS are supported. File-tree context
+menus and the command palette use the same verified repository transfer owner.
+Local auxiliary worktrees use their own repository handle and selected storage
+identity. For an SSH worktree, use **Open worktree as full workspace**; the
+auxiliary SSH panel reports its remaining handle-ownership limitation.
 
-### Files Tab
+Hydration streams content into a private temporary file, verifies its identity,
+then publishes only if the captured working target is unchanged. Missing parent
+directories are created after verification; a concurrently created file wins.
+Dehydration verifies both the working content and saved reconstruction before
+replacing a committed regular file with its pointer. Dirty files, changed index
+entries and unavailable saved content fail visibly. Unrelated staging is retained.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  [List] [Tree] [Card]    Filter: ________    [Refresh]  │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  📦 model-00001.safetensors    4.2 GB    ● Hydrated     │
-│  📦 model-00002.safetensors    4.2 GB    ○ Pointer      │
-│  📦 dataset.parquet            1.8 GB    ● Hydrated     │
-│  📦 training-data.tar.gz       12 GB     ○ Pointer      │
-│                                                         │
-│  ─── Untracked Large Files ───                          │
-│  ⚠️  new-model.bin             3.1 GB    [Track]        │
-│  ⚠️  raw-data.csv              800 MB    [Track]        │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
+Selection transfers confirm every dehydration and hydration at 1 GiB or
+100 files. History and read-only snapshots do not expose working-tree
+transfer controls. Local and SSH controls require the negotiated native methods;
+unavailable services disable the relevant direction.
 
-Features:
-- **View modes** — List, Tree (hierarchical), or Card (grid with
-  previews)
-- **File type icons** — distinct icons for archives, images, video,
-  audio, data files, ML models
-- **Size display** — human-readable sizes
-- **Hydration status** — per-file indicator
-- **Untracked section** — large files not yet tracked by Crab,
-  with a one-click Track button
+**Activity** shows actual work and provides cancellation. Navigating away or
+reloading the view keeps the main-process operation alive. Cancellation during
+setup prevents a late native send; admitted native work acknowledges cancellation
+after cleanup. Files already published by a multi-file operation remain published.
 
-### Storage Map Tab
+Transfer selections and outcomes survive app restart. An operation without a
+terminal receipt shows **Outcome unknown**; check the working files before using
+**Retry transfer**. Retry uses current services, storage identity and eligible
+paths, and asks for confirmation. It starts a new attempt; it does not replay an
+old native session or undo published files. Activity keeps the latest 200 finished
+jobs and every active job. A history-storage error blocks new transfers and offers
+**Reload Activity** after writable storage is restored. Native chunk resume and
+network-byte accounting remain open; bytes written are not a network measurement.
 
-Visual representation of storage usage:
-- Xorb distribution across cloud storage
-- Deduplication savings
-- Storage cost estimates
+Hydration, dehydration and index restoration record ownership of private scratch
+files before writing payload bytes. After interruption, the next publication
+recovers matching recorded scratch. Recovery preserves foreign or replaced files
+and reports the retained path for inspection. A cleanup failure can occur after
+content was published: Activity retains that published count and reports failure.
+Interrupted counters are labeled **Last recorded progress**; check the actual
+working files before retrying. Recovery does not infer ownership from filenames
+or automatically resume an old download.
 
-### Hydrate Tab
+## Discard whole-file changes
 
-Bulk hydration controls:
-- **Hydrate all** — download all pointer files
-- **Hydrate by pattern** — glob-based selection (e.g., `*.safetensors`)
-- **Dehydrate all** — replace all hydrated files with pointers
-- **Selective hydrate** — checkbox selection for individual files
+In **Git → Changes**, discard a file from its row, its binary/pointer card,
+selected rows, or **Discard All**. The palette also provides **Git: Discard File
+Changes** and **Git: Discard All Unstaged Changes**. Every whole-file restore
+requires confirmation and restores the current index version. Staged changes
+and untracked files are preserved. No Undo is offered for this operation.
 
-Progress is shown inline with per-file download status.
+Crab/LFS content is reconstructed and verified through the same native owner as
+hydration. Ordinary Git files retain Git's checkout conversions. The owner
+rechecks captured working-file and index identities before publication and rejects
+observed changes. Missing parent directories
+are created only after preparation succeeds. Pending editor buffers must first
+be saved or reloaded; clean editors remain reserved until restoration finishes,
+then read the restored file. **Activity** retains actual publication counts and
+errors, including partial multi-file outcomes. Cancellation leaves already
+published files in place. Read-only snapshots and older native runtimes do not
+admit this mutation.
 
-### Datasets Tab
+## Storage presets and recovery
 
-For repositories containing structured datasets:
-- Parquet file previews (schema + sample rows)
-- Dataset statistics
-- Column-level metadata
+In **Settings → Storage & Cache**, save a prefetch preset with a name and
+patterns. **Run** resolves the current Crab/LFS inventory, hydrates the eligible
+exact paths and reports the resulting file count. It uses the selected
+repository, including SSH repositories with verified transfers available.
 
-## Operations
+If repository services fail, use the visible recovery error and **Retry reopening
+repository**. A healthy sibling repository remains usable. Reader sessions are
+revoked on recovery or storage-identity replacement; reopen details to capture
+fresh content. Cache inspection/cleanup has its own Settings controls. Editable
+cache budgets, offline retention and measured network accounting remain
+work, rather than implied by those controls.
 
-### Tracking a File
+## Qualification boundary
 
-1. The "Untracked Large Files" section shows files above the size
-   threshold that aren't tracked
-2. Click **Track** next to a file (or select multiple + batch track)
-3. Crab runs `crab add` which:
-   - Chunks the file using content-defined chunking (gearhash)
-   - Deduplicates chunks against the session/shard/DB index
-   - Stages chunks in `.crab/staging/`
-   - Writes a pointer blob to the git index
-
-### Hydrating Files
-
-1. Select files to hydrate (or use "Hydrate All")
-2. Click **Hydrate** — the agent runs `crab hydrate`
-3. Progress shows per-file download status
-4. Hydrated files replace pointer blobs with full content
-5. The file is now readable by any tool
-
-### Dehydrating Files
-
-1. Select hydrated files (or use "Dehydrate All")
-2. Click **Dehydrate** — replaces content with pointer blobs
-3. Frees local disk space while keeping files in cloud storage
-4. Dehydrate skips dirty files (uncommitted changes)
-
-### Push Flow
-
-After tracking new files:
-1. The **Push Flow Panel** appears showing staged chunks
-2. Displays upload size estimate and xorb count
-3. Click **Push** to upload chunks to cloud storage
-4. Progress shows upload status with retry on failure
-
-## Staging Stats
-
-The view shows staging area statistics:
-- Number of staged chunks
-- Total staged size
-- Segment file count
-- Option to clean abandoned staging data
-
-## Context Menu
-
-Right-click a file for:
-- Hydrate / Dehydrate
-- Preview (opens format-specific preview)
-- Copy pointer hash
-- Show in Explorer
-- Remove tracking
-
-## Integration
-
-- The Explorer view shows hydration decorations on pointer files
-- The Changes view shows Crab-staged files in a separate section
-- The Dashboard shows overall hydration progress
-- Push operations coordinate between git push and Crab push
-
-## Understanding the Data Model
-
-### Content-Defined Chunking
-
-When you track a file with Crab, it is split into variable-size
-chunks using a gearhash algorithm. This means:
-- Small edits to a large file only produce new chunks for the changed
-  regions
-- Identical content across files is stored only once (deduplication)
-- Chunks are compressed and stored as "xorbs" in cloud storage
-
-### Three-Tier Deduplication
-
-Crab deduplicates at three levels:
-1. **Session** — within the current add operation
-2. **Shard** — against recently pushed data
-3. **DB Index** — against the entire repository history
-
-This means re-adding a slightly modified 10 GB file might only upload
-a few megabytes of new chunks.
-
-### Pointer Blob Format
-
-A pointer blob stored in git looks like:
-```
-crab/v1
-hash: blake3:abc123...
-size: 4294967296
-chunks: 1024
-```
-
-This tiny blob (< 200 bytes) replaces the multi-gigabyte file in git,
-keeping the repository fast to clone and browse.
-
-## Tips and Best Practices
-
-- **Track early** — track large files before your first commit to
-  avoid bloating the git history
-- **Hydrate selectively** — only hydrate files you need to work with;
-  keep the rest as pointers to save disk space
-- **Dehydrate before pulling** — dehydrate all files before `git pull`
-  to avoid merge conflicts on hydrated content
-- **Use patterns** — hydrate by glob pattern (e.g., `*.py`) to get
-  just the files relevant to your current task
-- **Check staging stats** — monitor the staging area size before
-  pushing to estimate upload time
+Packaged macOS arm64 and owned S3-compatible fixtures qualify the Crab/LFS
+track/publish/lazy-clone/hydrate/edit/synchronize/rename/removal workflow, nested
+missing-file restoration, confirmed index restoration, pending-editor protection,
+selected identities and bounded local/SSH recovery.
+The [completion record](../large-file-support.md) separates that evidence from
+restartable transfers, storage budgets, larger workload
+profiles and cross-platform/provider release gates.

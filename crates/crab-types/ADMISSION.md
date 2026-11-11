@@ -49,6 +49,8 @@ Dependency budget:
 
 | Public surface | Contract kind | Why it belongs here |
 |----------------|---------------|---------------------|
+| `file_layout::{Chunk, ChunkPage}` | wire | Ordered file-chunk metadata is shared by `crab-read`, SDK clients, and native helper readers. Occurrences, byte coverage and optional xorb placement have one representation; producer limits, catalog selection and storage reads stay with those owners. |
+| `pointer_read::{Request, Response}` | wire | The CLI native reader and desktop sidecar share one file-session command/acknowledgement protocol. These serialization-only messages carry no credential types, store clients or execution policy; native owners enforce read bounds, error mapping, cancellation drain and close. |
 | `error::ErrorCategory` | category | Coarse machine-readable error classes can be shared by output/protocol envelopes without importing rich owner-domain errors or CLI `CrabError`. |
 | `pointer::{Pointer, PointerParseError, VERSION_LINE, LEGACY_VERSION_LINE, MAX_POINTER_SIZE, is_pointer, is_supported_version_line, hex_encode}` | wire | The Crab pointer file format is consumed by CLI, SDK, LFS/read paths, and server helpers as a stable wire payload. Parsing helpers are deterministic and perform no I/O. |
 | `replication::{ReplicationConfig, ReplicationMode, ReplicationProviderKind, ReplicationRpo, ReplicationCoordinatorKind, ReplicationCoordinatorConsistency, ReplicationCoordinatorConfig, WriterConfig, ReplicaConfig, ReplicationParseError}` | persisted | Replication configuration is shared by CLI, SDK projection, read selection, and auth/server paths as a persisted config shape. Runtime coordinator/store construction stays in owner crates. |

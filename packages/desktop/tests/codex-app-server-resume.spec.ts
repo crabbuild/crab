@@ -3,6 +3,8 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -55,6 +57,7 @@ describe("Codex thread resume", () => {
 
   async function initialize() {
     startup = adapter.spawn("Continue the task", "/tmp/test-project");
+    await vi.advanceTimersByTimeAsync(0);
     const init = drainFrames(stdin).find(frame => frame.method === "initialize");
     const frames = await reply(init?.id, { result: {} });
     expect(frames.map(frame => frame.method)).toEqual(["initialized", "thread/resume"]);
@@ -104,6 +107,7 @@ describe("Codex thread resume", () => {
   it("captures thread/started before the thread/start response without emitting it twice", async () => {
     adapter.resumeThreadId = null;
     adapter.spawn("Start a task", "/tmp/test-project");
+    await vi.advanceTimersByTimeAsync(0);
     const init = drainFrames(stdin).find(frame => frame.method === "initialize");
     const frames = await reply(init?.id, { result: {} });
     const start = frames.find(frame => frame.method === "thread/start");

@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -18,7 +19,8 @@ import { ChatDatabase } from "../electron/orchestrator-chat-db";
 import { registerChatIpc } from "../electron/orchestrator-chat";
 import { registerModelDiscoveryIpc } from "../electron/orchestrator-models";
 import { AgentDetector, registerAgentDetectionIpc } from "../electron/ssh-agent-detection";
-import { getExpandedEnv, type AgentEvent, type AgentModel } from "../electron/orchestrator-adapters";
+import type { AgentEvent, AgentModel } from "../electron/orchestrator-adapters";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
 import { terminalSshServer } from "./fixtures/ssh-terminal-server";
 
 const liveRoot = process.env.CRAB_AGENT_LIVE_ROOT;
@@ -39,7 +41,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
     await run("git", ["commit", "-m", "baseline"], { cwd: repo });
     const platform = process.platform === "darwin" ? "mac" : "linux";
     const runtime = path.resolve(`resources/native/${platform}-${process.arch}`);
-    const server = await terminalSshServer(root, getExpandedEnv().PATH);
+    const server = await terminalSshServer(root, (await getExpandedEnv()).PATH);
     const bin = path.join(root, "bin");
     if (mode === "availability") {
       await mkdir(bin);
@@ -61,7 +63,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("shared remote native
       hostKey: `SHA256:${Buffer.from(server.connection.fingerprint, "hex").toString("base64").replace(/=+$/, "")}` };
     let connectedAgent = channel;
     const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, endpoint, channels: { agent: connectedAgent } }) } as unknown as SshSessionManager;
-    const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } });
+    const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } }, mockStorageConnections);
     router.attachChannel("fixture", channel);
     const repoId = `ssh://fixture${repo}`;
     const persistPath = path.join(root, "tasks.sqlite");
@@ -357,7 +359,7 @@ exit 1
           try {
             connectedAgent = replacement;
             router.attachChannel("fixture", replacement);
-            await router.restoreRepositories("fixture");
+            await router.sendToRemoteAgent("fixture", "open_local", { repo_id: repoId, path: repo });
             await vi.waitFor(() => expect(router.sendToRemoteAgent("fixture", "task_discard", discard)).rejects.toMatchObject({ data: { kind: "task_apply_pending" } }), { timeout: 10_000 });
             await expect(router.sendToRemoteAgent("fixture", "native_process_open", {
               process_id: randomUUID(), task_id: task.id, executable: "/bin/true", args: [], cwd: worktree,

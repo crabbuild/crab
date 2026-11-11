@@ -320,6 +320,75 @@ async fn verify_native_reads(bucket: Option<String>) {
         .await
         .unwrap();
     assert_eq!(current.commit_id().unwrap().to_string(), second);
+    let metadata_options = ReadOptions::default()
+        .with_limits(crab_sdk::operation::ReadLimits {
+            max_inflated_bytes: 64 * 1024,
+            ..Default::default()
+        })
+        .unwrap();
+    let metadata = current
+        .file_metadata(path.clone())
+        .with_options(metadata_options.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (metadata.kind, metadata.git_size, metadata.size),
+        (
+            crab_sdk::remote::ContentKind::Git,
+            second_bytes.len() as u64,
+            second_bytes.len() as u64,
+        )
+    );
+    assert_eq!(
+        current
+            .read_blob(path.clone())
+            .with_options(metadata_options.clone())
+            .await
+            .unwrap_err()
+            .kind(),
+        crab_sdk::ErrorKind::LimitExceeded
+    );
+    for (name, kind, pointer, size) in [
+        (
+            "z-crab",
+            crab_sdk::remote::ContentKind::Crab,
+            &crab_pointer,
+            {
+                #[cfg(feature = "files")]
+                {
+                    second_bytes.len() as u64
+                }
+                #[cfg(not(feature = "files"))]
+                {
+                    32
+                }
+            },
+        ),
+        (
+            "z-lfs",
+            crab_sdk::remote::ContentKind::Lfs,
+            &lfs_pointer,
+            second_bytes.len() as u64,
+        ),
+    ] {
+        let metadata = current
+            .file_metadata(GitPath::new(name).unwrap())
+            .with_options(metadata_options.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (metadata.kind, metadata.git_size, metadata.size),
+            (kind, pointer.len() as u64, size)
+        );
+    }
+    assert_eq!(
+        snapshot
+            .file_metadata(GitPath::new(filename.clone()).unwrap())
+            .await
+            .unwrap()
+            .size,
+        first_bytes.len() as u64
+    );
     assert_eq!(
         current.read_blob(path.clone()).await.unwrap().as_ref(),
         second_bytes

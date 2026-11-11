@@ -75,6 +75,45 @@ pub struct StagedFileReader {
 }
 
 impl StagedFileReader {
+    /// Return the verified recipe's number of ordered chunk occurrences.
+    #[must_use]
+    pub fn chunk_count(&self) -> u64 {
+        self.recipe.chunk_count()
+    }
+
+    /// Inspect at most 512 ordered occurrences without reading chunk payloads.
+    ///
+    /// Rejects an out-of-range cursor or a limit outside `1..=512`. Recipe
+    /// ownership stays pinned while canonical page hashes and offsets are checked.
+    pub fn chunk_page(&self, start: u64, limit: u32) -> Result<Vec<crate::recipe::RecipeChunk>> {
+        if start > self.recipe.chunk_count() || !(1..=512).contains(&limit) {
+            return Err(StagingError::Configuration {
+                key: "invalid chunk page cursor or limit".into(),
+                origin: "staged recipe inspection".into(),
+            });
+        }
+        let end = start
+            .saturating_add(u64::from(limit))
+            .min(self.recipe.chunk_count());
+        let mut chunks = Vec::with_capacity((end - start) as usize);
+        let mut cursor = start;
+        while cursor < end {
+            let page_start = cursor / RECIPE_PAGE_ENTRIES as u64 * RECIPE_PAGE_ENTRIES as u64;
+            let page = self.staging.recipe_page(&self.recipe, page_start)?;
+            let offset = (cursor - page_start) as usize;
+            let count =
+                (end - cursor).min(page.chunks.len().saturating_sub(offset) as u64) as usize;
+            if count == 0 {
+                return Err(StagingError::StagingCorrupt(
+                    "recipe page does not cover its occurrence".into(),
+                ));
+            }
+            chunks.extend_from_slice(&page.chunks[offset..offset + count]);
+            cursor += count as u64;
+        }
+        Ok(chunks)
+    }
+
     /// Transfer this operation's recipe ownership into a lifetime pin without reading bytes.
     pub fn into_pin(self) -> Result<StagedFilePin> {
         self._snapshot.into_read_pin()
@@ -85,13 +124,41 @@ impl StagedFileReader {
     /// Existing but corrupt staging and size mismatches remain errors. The shared
     /// handle lasts for this operation, so it cannot block writers for a mount's lifetime.
     pub async fn open(root: PathBuf, hash: MerkleHash, size: u64) -> Result<Option<Self>> {
+        Self::open_with_cancel(root, hash, size, &CancellationToken::new()).await
+    }
+
+    /// Queue behind a staging writer while observing the caller's cancellation.
+    ///
+    /// Uses the existing staging admission deadline; cancellation releases queued
+    /// admission and awaits any started metadata work before returning.
+    pub async fn open_with_cancel(
+        root: PathBuf,
+        hash: MerkleHash,
+        size: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Self>> {
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
         match tokio::fs::metadata(&root).await {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        let staging = Arc::new(StagingAreaReadOnly::open(root).await?);
-        Self::capture(staging, hash, size)
+        let staging = Arc::new(StagingAreaReadOnly::open_for_file(root, cancel).await?);
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            if cancel.is_cancelled() {
+                return Err(StagingError::Cancelled);
+            }
+            let reader = Self::capture(staging, hash, size)?;
+            if cancel.is_cancelled() {
+                return Err(StagingError::Cancelled);
+            }
+            Ok(reader)
+        })
+        .await
+        .map_err(|error| StagingError::Io(std::io::Error::other(error)))?
     }
 
     fn capture(

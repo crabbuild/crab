@@ -128,7 +128,11 @@ impl RpcError {
 impl From<crate::AgentError> for RpcError {
     fn from(err: crate::AgentError) -> Self {
         use crate::AgentError as E;
-        let (code, data) = match &err {
+        let mut detail = &err;
+        while let E::Shared(source) = detail {
+            detail = source;
+        }
+        let (code, data) = match detail {
             E::UnknownMethod(_) => (-32601, None),
             E::InvalidParams { .. } => (-32602, None),
             E::Sdk(_) => (1001, Some(serde_json::json!({ "kind": "sdk" }))),
@@ -141,6 +145,26 @@ impl From<crate::AgentError> for RpcError {
                 })),
             ),
             E::Io(_) => (1003, None),
+            E::Command {
+                status, details, ..
+            } => (
+                1002,
+                Some(serde_json::json!({ "kind": "cli", "status": status, "error": details })),
+            ),
+            E::NativeRead { code, .. } => (
+                1012,
+                Some(serde_json::json!({ "kind": "content_read", "code": code })),
+            ),
+            E::Integrity {
+                algorithm,
+                expected,
+                actual,
+            } => (
+                1012,
+                Some(
+                    serde_json::json!({ "kind": "content_read", "code": "integrity", "algorithm": algorithm, "expected": expected, "actual": actual }),
+                ),
+            ),
             E::Decode(_) => (-32700, None),
             E::RepoNotOpen(_) => (1004, None),
             E::StaleHunk {
@@ -179,7 +203,7 @@ impl From<crate::AgentError> for RpcError {
                     "remediation": remediation,
                 })),
             ),
-            E::PathNotFound { .. } => (1004, None),
+            E::PathNotFound { .. } => (1004, Some(serde_json::json!({ "kind": "path_not_found" }))),
             E::Storage(_)
             | E::Cache(_)
             | E::Utf8(_)
@@ -189,6 +213,10 @@ impl From<crate::AgentError> for RpcError {
             | E::Config(_)
             | E::Workflow(_)
             | E::Yaml(_)
+            | E::Shared(_)
+            | E::Cleanup { .. }
+            | E::PublicationCleanup { .. }
+            | E::Preview { .. }
             | E::Other(_) => (1000, None),
             #[cfg(unix)]
             E::ApplyWorker(error) => return error.clone(),
@@ -198,5 +226,37 @@ impl From<crate::AgentError> for RpcError {
             message: err.to_string(),
             data,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentError;
+
+    #[test]
+    fn missing_file_is_distinct_from_an_unavailable_repository() {
+        let missing = RpcError::from(AgentError::PathNotFound {
+            path: "settings.json".into(),
+        });
+        let unavailable = RpcError::from(AgentError::RepoNotOpen("workspace".into()));
+        assert_ne!(missing.data, unavailable.data);
+        assert_eq!(
+            missing.data,
+            Some(serde_json::json!({ "kind": "path_not_found" }))
+        );
+    }
+
+    #[test]
+    fn cancelled_setup_with_failed_cleanup_remains_a_terminal_failure() {
+        let error = AgentError::Cleanup {
+            operation: Box::new(AgentError::OpCancelled {
+                op_id: "opening".into(),
+            }),
+            cleanup: Box::new(AgentError::Io(std::io::Error::other("close failed"))),
+        };
+        let cancelled = error.is_cancelled();
+        let response = RpcError::from(error);
+        assert!(!cancelled && response.code == 1000 && response.message.contains("close failed"));
     }
 }

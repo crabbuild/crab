@@ -12,12 +12,15 @@ path = "src/main.rs"
 [dependencies]
 # Read-side verbs go through the SDK.
 crab-sdk = { workspace = true, features = ["files", "service", "local"] }
-crab-git = { workspace = true }
+crab-git = { workspace = true, features = ["process", "facade"] }
+crab-types = { workspace = true }
 crab-storage = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
 crab-auth = { workspace = true }
 crab-auth-store = { workspace = true, features = ["managed-service"] }
 crab-workflow = { workspace = true }
+crab-diff = { workspace = true }
+crab-xet = { workspace = true, features = ["chunker"] }
 
 # Async runtime. We pin the same major as the rest of the workspace so
 # the shared lock stays narrow.
@@ -54,8 +57,6 @@ async-trait = { workspace = true }
 
 # Unique identifiers for operation records.
 uuid = { version = "1", features = ["v4", "serde"] }
-# Private preview indexes are removed on errors and cancellation too.
-tempfile = { workspace = true }
 
 # Timestamps for operation records.
 chrono = { version = "0.4", features = ["serde"] }
@@ -84,6 +85,10 @@ notify = "7"
 # back over JSON-RPC, but we do base64-encode small previews.
 base64 = "0.22"
 bytes = { workspace = true }
+blake3 = { workspace = true }
+sha2 = "0.10"
+# Scoped native artifacts are removed on cancellation and shutdown.
+tempfile = { workspace = true }
 
 # Stream adapters for `walk()` consumers (used by `list_stream`).
 futures-util = { workspace = true }
@@ -110,10 +115,10 @@ arrow = { version = "55", default-features = false, features = ["json"] }
 safetensors = "0.4"
 
 # SQLite table listing + query preview.
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "limits"] }
 
-# DuckDB for SQL analytics over SQLite / Parquet / CSV files.
-duckdb = { version = "1.20000.1", features = ["bundled"] }
+# DuckDB scans Parquet without downloading extensions at runtime.
+duckdb = { version = "1.20000.1", features = ["bundled", "parquet"] }
 
 # ONNX model + protobuf descriptor parsing.
 prost = "0.13"

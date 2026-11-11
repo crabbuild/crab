@@ -3,7 +3,7 @@ import { createAdapter, type AgentAdapter } from "./orchestrator-adapters";
 import { loadAgentConfig, type StoredAgentConfig } from "./orchestrator-settings";
 import type { AgentProcessFactory } from "./agent-process";
 import type { Orchestrator } from "./orchestrator";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 import { remoteAgentProcessFactory } from "./ssh-native-process";
 
 /** Own discovery processes until physical closure, including on app quit. */

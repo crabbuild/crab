@@ -1,14 +1,4 @@
-/**
- * LargeFileWizard — Guided Track → Commit → Push flow for large files.
- *
- * Replaces the disconnected Track/Push UX with a linear wizard that:
- * 1. Shows untracked large files with pattern registration preview
- * 2. Tracks files (crab track + crab add + git add)
- * 3. Commits the pointer files with an inline commit composer
- * 4. Pushes xorbs to the remote via the 14-step pipeline
- *
- * Each step unlocks the next, showing clear status badges and progress.
- */
+/** Guided tracking, selected-file commit and push through the existing owners. */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
@@ -46,16 +36,6 @@ interface FileStatus {
   error?: string;
 }
 
-/** Derive unique extension patterns from a list of file paths. */
-function derivePatterns(paths: string[]): string[] {
-  const exts = new Set<string>();
-  for (const p of paths) {
-    const ext = p.split(".").pop()?.toLowerCase();
-    if (ext) exts.add(`*.${ext}`);
-  }
-  return Array.from(exts).sort();
-}
-
 export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
   const [step, setStep] = useState<WizardStep>("review");
   const [fileStatuses, setFileStatuses] = useState<FileStatus[]>(() =>
@@ -66,9 +46,6 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
   const [committing, setCommitting] = useState(false);
   const [commitSha, setCommitSha] = useState<string | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
-
-  // Derive patterns that will be registered.
-  const patterns = useMemo(() => derivePatterns(files.map((f) => f.path)), [files]);
 
   // Auto-generate commit message.
   useEffect(() => {
@@ -90,29 +67,10 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
     setFileStatuses((prev) => prev.map((f) => ({ ...f, status: "tracking" })));
 
     try {
-      const result = await rpc.crabAddAuto(
-        repo.repo_id,
-        files.map((f) => f.path),
-      );
-
-      // crabAddAuto returns { ok, tracked, patterns_added?, errors? }
-      const resultAny = result as Record<string, unknown>;
-      const errors = (resultAny.errors as Array<{ path: string; stderr?: string }>) ?? [];
-      const patternsAdded = (resultAny.patterns_added as string[]) ?? [];
-
-      // Build a TrackAndAddResult-compatible shape for the UI.
-      const errorPaths = new Set(errors.map((e) => e.path));
-      const trackedFiles = files
-        .filter((f) => !errorPaths.has(f.path))
-        .map((f) => ({ path: f.path, status: "ok" }));
-
-      setTrackResult({
-        ok: true,
-        patterns_added: patternsAdded,
-        files_tracked: trackedFiles,
-        errors,
-        commit_sha: null,
-      });
+      const result = await rpc.crabTrackAndAdd(repo.repo_id, files.map((file) => file.path));
+      const errors = result.errors;
+      const trackedPaths = new Set(result.files_tracked.map((file) => file.path));
+      setTrackResult(result);
 
       // Update per-file statuses.
       setFileStatuses((prev) =>
@@ -121,12 +79,12 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
           if (err) {
             return { ...f, status: "error", error: err.stderr ?? "Unknown error" };
           }
-          return { ...f, status: "tracked" };
+          return { ...f, status: trackedPaths.has(f.path) ? "tracked" : "error" };
         }),
       );
 
       // Move to commit step if any files succeeded.
-      if (trackedFiles.length > 0) {
+      if (errors.length === 0 && trackedPaths.size > 0) {
         setStep("commit");
       }
     } catch (e) {
@@ -142,13 +100,18 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
 
   // Step 2 → 3: Commit.
   const handleCommit = useCallback(async () => {
-    if (!commitMessage.trim()) return;
+    if (!commitMessage.trim() || committing || !trackResult?.files_tracked.length) return;
+    if (!trackResult.commit_paths?.length) {
+      setCommitError("The tracking service returned no commit selection. Retry tracking with the current desktop agent.");
+      return;
+    }
     setCommitting(true);
     setCommitError(null);
 
     try {
       const result = await rpc.gitCommit(repo.repo_id, {
         message: commitMessage.trim(),
+        paths: trackResult.commit_paths,
       });
       setCommitSha(result.sha);
       setStep("push");
@@ -157,7 +120,7 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
     } finally {
       setCommitting(false);
     }
-  }, [repo.repo_id, commitMessage]);
+  }, [repo.repo_id, commitMessage, committing, trackResult]);
 
   // Step 3 → done: Push completed.
   const handlePushComplete = useCallback(() => {
@@ -208,10 +171,10 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
             <div className="rounded-lg border border-gx-accent/20 bg-gx-accent/5 p-4">
               <div className="flex items-center gap-2 text-xs font-medium text-gx-accent">
                 <HardDrive size={12} />
-                Patterns to register in .gitattributes
+                Selected paths
               </div>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {patterns.map((p) => (
+                {files.map(({ path: p }) => (
                   <span
                     key={p}
                     className="rounded-full bg-gx-accent/10 px-2.5 py-0.5 font-mono text-[11px] text-gx-accent"
@@ -221,8 +184,7 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                 ))}
               </div>
               <p className="mt-2 text-[10px] text-gx-muted">
-                These patterns tell git to route matching files through the crab filter for
-                chunking and deduplication.
+                Tracking configures repository-local Crab and Git LFS drivers with Crab. New paths use Crab chunking. Existing file routing is retained.
               </p>
             </div>
 
@@ -245,7 +207,7 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                     1
                   </span>
                   <span>
-                    Register patterns ({patterns.join(", ")}) in{" "}
+                    Register selected paths in{" "}
                     <code className="font-mono text-gx-text">.gitattributes</code>
                   </span>
                 </li>
@@ -254,21 +216,20 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                     2
                   </span>
                   <span>
-                    Chunk &amp; deduplicate each file into the staging area (
-                    <code className="font-mono text-gx-text">.crab/staging/</code>)
+                    Store each file through its configured filter
                   </span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-accent/10 text-[9px] font-bold text-gx-accent">
                     3
                   </span>
-                  <span>Replace working tree files with lightweight pointer blobs in git's index</span>
+                  <span>Stage lightweight pointers while keeping the working files</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gx-accent/10 text-[9px] font-bold text-gx-accent">
                     4
                   </span>
-                  <span>Commit the pointers, then push chunks to the remote</span>
+                  <span>Commit the selected files and tracking rules, then push to the remote</span>
                 </li>
               </ol>
             </div>
@@ -358,6 +319,8 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
               </div>
             )}
 
+            {errorCount > 0 && <button type="button" className="btn w-full justify-center" onClick={handleTrack}>Retry tracking</button>}
+
             {/* Continue to commit (if any files succeeded) */}
             {trackedCount > 0 && (
               <button
@@ -387,15 +350,15 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                   <Check size={10} className="text-gx-success" />
                   {trackedCount} pointer file{trackedCount > 1 ? "s" : ""} staged
                 </div>
-                {trackResult && trackResult.patterns_added.length > 0 && (
+                {trackResult?.commit_paths.includes(".gitattributes") && (
                   <div className="flex items-center gap-1.5">
                     <Check size={10} className="text-gx-success" />
-                    .gitattributes updated ({trackResult.patterns_added.join(", ")})
+                    Tracking rules in .gitattributes
                   </div>
                 )}
                 <div className="flex items-center gap-1.5">
                   <HardDrive size={10} className="text-gx-accent" />
-                  {formatBytes(totalSize)} chunked in staging area
+                  {formatBytes(fileStatuses.filter(file => file.status === "tracked").reduce((sum, file) => sum + file.size, 0))} tracked
                 </div>
               </div>
             </div>
@@ -424,7 +387,7 @@ export function LargeFileWizard({ repo, files, onComplete, onBack }: Props) {
                 aria-label="Commit message for tracked files"
               />
               <p className="mt-1 text-[10px] text-gx-muted">
-                Ctrl+Enter to commit. This creates a git commit with the pointer files.
+                Ctrl+Enter commits the current contents of these selected files and their tracking rules.
               </p>
             </div>
 

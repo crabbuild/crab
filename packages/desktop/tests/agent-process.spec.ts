@@ -3,8 +3,9 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
-vi.mock("../electron/orchestrator-adapters", () => ({ getExpandedEnv: () => ({ PATH: "/usr/bin" }) }));
+vi.mock("../electron/env/userShellEnv", () => ({ getExpandedEnv: vi.fn(async () => ({ PATH: "/usr/bin" })) }));
 import { spawn } from "node:child_process";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
 import { AgentProcessClosureError, runAgentCommand, spawnLocalAgent } from "../electron/agent-process";
 
 describe.skipIf(process.platform === "win32")("local native process closure", () => {
@@ -12,6 +13,7 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
   let child: EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; pid: number; kill: ReturnType<typeof vi.fn> };
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
     child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 42, kill: vi.fn() });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   });
@@ -21,6 +23,7 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
     let present = true;
     const signal = vi.spyOn(process, "kill").mockImplementation(() => { if (!present) throw missing(); return true; });
     const owner = spawnLocalAgent("provider", [], { cwd: "/project" });
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
     const closed = vi.fn();
     owner.process.on("close", closed);
     child.emit("exit", 0, null); child.emit("close", 0, null);
@@ -37,6 +40,7 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
     let denied = true;
     vi.spyOn(process, "kill").mockImplementation(() => { throw denied ? Object.assign(new Error("Permission denied"), { code: "EPERM" }) : missing(); });
     const owner = spawnLocalAgent("provider", [], { cwd: "/project" });
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
     const closed = vi.fn(); owner.process.on("close", closed);
     child.emit("exit", 0, null); child.emit("close", 0, null);
     await vi.advanceTimersByTimeAsync(100);
@@ -50,6 +54,7 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
   it("rejects unconfirmed closure without releasing the writer", async () => {
     vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("Permission denied"), { code: "EPERM" }); });
     const owner = spawnLocalAgent("provider", [], { cwd: "/project" });
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
     const closed = vi.fn(); owner.process.on("close", closed); owner.process.on("error", () => {});
     const failure = expect(owner.closed).rejects.toThrow("closure is unconfirmed");
     child.emit("exit", 0, null); child.emit("close", 0, null);
@@ -57,6 +62,39 @@ describe.skipIf(process.platform === "win32")("local native process closure", ()
     await failure;
     expect(closed).not.toHaveBeenCalled();
   });
+
+  it("acknowledges buffered initialization only after the native pipe accepts it", async () => {
+    let prepared!: (env: Record<string, string>) => void;
+    vi.mocked(getExpandedEnv).mockReturnValueOnce(new Promise(resolve => { prepared = resolve; }));
+    let written!: (error?: Error | null) => void;
+    vi.spyOn(child.stdin, "write").mockImplementation((_bytes, _encoding, done) => { written = done!; return false; });
+    vi.spyOn(process, "kill").mockImplementation(() => { throw missing(); });
+    const owner = spawnLocalAgent("provider", [], { cwd: "/project" });
+    let acknowledged = false;
+    owner.process.stdin!.write("initialization", () => { acknowledged = true; });
+    expect(spawn).not.toHaveBeenCalled();
+    prepared({ PATH: "/usr/bin" });
+    await vi.waitFor(() => expect(written).toBeTypeOf("function"));
+    expect(acknowledged).toBe(false);
+    written();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acknowledged).toBe(true);
+    child.emit("exit", 0, null); child.emit("close", 0, null);
+    await vi.advanceTimersByTimeAsync(25);
+    await owner.closed;
+  });
+
+  it("cancels pending discovery without spawning from its late reply", async () => {
+    let finish!: (env: Record<string, string>) => void;
+    vi.mocked(getExpandedEnv).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const owner = spawnLocalAgent("provider", [], { cwd: "/project" });
+    owner.process.kill("SIGTERM");
+    await owner.closed;
+    finish({ PATH: "/usr/bin" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("owned workspace command capture", () => {

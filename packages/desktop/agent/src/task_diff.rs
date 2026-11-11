@@ -102,7 +102,7 @@ pub(crate) async fn compare(p: Params) -> Result<Value> {
 }
 
 async fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String> {
-    let mut command = crate::shellout::git_command();
+    let mut command = crate::shellout::git_command()?;
     command
         .args(args)
         .current_dir(cwd)

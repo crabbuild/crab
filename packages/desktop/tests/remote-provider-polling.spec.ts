@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { RemoteProvider } from "../electron/remote-provider";
 
 // ── Mock factories ───────────────────────────────────────────────
@@ -38,22 +39,24 @@ function makeMockGitManager() {
 function makeMockCapabilityNegotiator(supportsFileWatching = false) {
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return supportsFileWatching;
+      if (feature === "watch_start") return supportsFileWatching;
       return false;
     }),
     getCached: vi.fn().mockReturnValue({
-      version: "1.0.0",
-      features: { fileWatching: supportsFileWatching },
+      protocol: 1,
+      version: "2.0.0-alpha.1",
+      methods: supportsFileWatching ? ["capabilities", "watch_start", "watch_stop"] : ["capabilities"],
     }),
   };
 }
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
-  });
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
+  }));
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -86,9 +89,64 @@ describe("RemoteProvider polling fallback", () => {
     vi.useRealTimers();
   });
 
-  it("does not advertise repository operations without a negotiated agent", async () => {
-    mockCapNegotiator.getCached.mockReturnValueOnce(null);
-    expect(Object.values(await provider.capabilities(REPO_ID))).toEqual(Array(9).fill(false));
+  it("reads complete text through its admitted repository with a relative path and limit", async () => {
+    mockRouter.route.mockResolvedValue({ truncated: false, text: "🦀 café" });
+    expect(await provider.fsRead(REPO_ID, "/home/user/project/settings.json", 64 * 1024, "ssh:1")).toEqual({ exists: true, content: "🦀 café" });
+    expect(mockRouter.route).toHaveBeenCalledWith(REPO_ID, "read_text", {
+      repo_id: REPO_ID, path: "settings.json", max_bytes: 64 * 1024, native_session_id: "ssh:1",
+    });
+  });
+
+  it("only typed path absence is a missing document, not repository or transport failure", async () => {
+    const missing = Object.assign(new Error("Fixture file missing"), { code: 1004, data: { kind: "path_not_found" } });
+    mockRouter.route.mockRejectedValueOnce(missing);
+    expect(await provider.fsRead(REPO_ID, "/home/user/project/settings.json", undefined, "ssh:1")).toEqual({ exists: false, content: null });
+    const unavailable = Object.assign(new Error("Fixture repo unavailable"), { code: 1004 });
+    mockRouter.route.mockRejectedValueOnce(unavailable);
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json", undefined, "ssh:1")).rejects.toBe(unavailable);
+  });
+
+  it("truncated remote text cannot become mutable document content", async () => {
+    mockRouter.route.mockResolvedValue({ truncated: true, text: null, reason: "Fixture limit exceeded" });
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json", 10, "ssh:1")).rejects.toThrow("Fixture limit exceeded");
+  });
+
+  it("reconnection cannot return stale mutable content from a previous write", async () => {
+    mockRouter.route.mockResolvedValue({ written: true, size: 4 });
+    await provider.fsWrite(REPO_ID, "/home/user/project/settings.json", "text", "ssh:1");
+    mockSessionManager.getStatus.mockReturnValue("reconnecting");
+    mockRouter.route.mockClear();
+    await expect(provider.fsRead(REPO_ID, "/home/user/project/settings.json", undefined, "ssh:1")).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+    expect(mockRouter.route).not.toHaveBeenCalled();
+  });
+
+  it("writes through the admitted repository session with a relative path and UTF-8 acknowledgement", async () => {
+    mockRouter.route.mockResolvedValue({ written: true, size: Buffer.byteLength("🦀 café", "utf8") });
+    const result = await provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "🦀 café", "ssh:1");
+    expect(mockRouter.route).toHaveBeenCalledWith(REPO_ID, "write_text", {
+      repo_id: REPO_ID, path: "note.txt", content: "🦀 café", native_session_id: "ssh:1",
+    });
+    expect(result).toEqual({ path: "/home/user/project/note.txt", written: 10 });
+  });
+
+  it("rejects writes outside the repository before dispatch", async () => {
+    await expect(provider.fsWrite(REPO_ID, "/home/user/project-other/note.txt", "text", "ssh:1")).rejects.toThrow("inside the selected repository");
+    expect(mockRouter.route).not.toHaveBeenCalled();
+  });
+
+  it("retains caller sessions for the wire guard instead of choosing a replacement", async () => {
+    mockSessionManager.agentSession.mockReturnValue("ssh:replacement");
+    mockRouter.route.mockResolvedValueOnce({ written: true, size: 4 }).mockResolvedValueOnce({ truncated: false, text: "text" });
+    await provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "text", "ssh:1");
+    await provider.fsRead(REPO_ID, "/home/user/project/note.txt", undefined, "ssh:1");
+    expect(mockRouter.route.mock.calls.map(call => call[2].native_session_id)).toEqual(["ssh:1", "ssh:1"]);
+  });
+
+  it("does not publish a successful file change for a partial remote acknowledgement", async () => {
+    const changed = vi.fn(); provider.on("fs/changed", changed);
+    mockRouter.route.mockResolvedValue({ written: true, size: 1 });
+    await expect(provider.fsWrite(REPO_ID, "/home/user/project/note.txt", "text", "ssh:1")).rejects.toThrow("complete buffer");
+    expect(changed).not.toHaveBeenCalled();
   });
 
   it("starts polling when agent does not support fileWatching", async () => {
@@ -114,7 +172,7 @@ describe("RemoteProvider polling fallback", () => {
 
   it("uses native watch_start when agent supports fileWatching", async () => {
     mockCapNegotiator.isSupported.mockImplementation((_: string, feature: string) => {
-      return feature === "fileWatching";
+      return feature === "watch_start";
     });
 
     await provider.watchStart(REPO_ID);

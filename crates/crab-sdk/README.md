@@ -124,6 +124,27 @@ recovery token before calling `execute`. See the
 [`remote_edit`](examples/remote_edit.rs) example for streamed Git and hydrated
 file edits, commit creation, atomic ref updates, and result handling.
 
+`Snapshot::file_metadata` returns the Git object identity, Git representation
+size, logical size and `remote::ContentKind` without reconstructing Crab/LFS
+payloads or decoding large ordinary Git blobs. Read metadata and ranges from the
+same snapshot to keep their revision consistent. `open_file` accepts
+`operation::ReadOptions::with_range` for verified logical ranges. LFS may need a
+complete verification pass before its first range; range output size does not
+promise an equally small network transfer. Snapshot-owned LFS proof retention
+can reuse checked canonical objects across streams when fresh metadata and the
+strong GET validator match. Each stream still drains its own verification jobs;
+retention never crosses storage-target or key authority. Routed/unbound sources
+retain fresh verification. Reads do not write remote receipts.
+
+With `files`, `Snapshot::file_chunks(path, start, limit)` inspects up to 512
+ordered Crab chunk occurrences through that snapshot's captured catalog.
+It returns hashes, file offsets/lengths, published xorb placement, total counts
+and the next occurrence index. Metadata inspection does not reconstruct file
+payloads or verify their complete bytes. Repeated hashes remain separate
+occurrences. Git and LFS files have no Crab chunk recipe; those calls return
+`UnsupportedCapability`. Requests honor cancellation, deadlines and fetch/response
+budgets. Keep the same snapshot and path when following a continuation.
+
 ## Local repositories
 
 Enable `local` and provide absolute paths to compatible Git and Crab

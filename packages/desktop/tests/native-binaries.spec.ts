@@ -7,7 +7,7 @@ import { nativeBinaries } from "../electron/native-binaries";
 let directory: string | undefined;
 afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
-it.each(["darwin", "linux", "win32"] as const)("resolves the bundled %s CLI and agent together", platform => {
+it.each(["darwin", "linux", "win32"] as const)("locates the bundled %s pair before native availability is checked", platform => {
   directory = mkdtempSync(path.join(tmpdir(), "crab-native-"));
   const agentDirectory = path.join(directory, "agent");
   mkdirSync(agentDirectory);
@@ -16,5 +16,5 @@ it.each(["darwin", "linux", "win32"] as const)("resolves the bundled %s CLI and 
   const layout = { packaged: true, appPath: directory, resourcesPath: directory, platform, arch: "x64" };
   expect(nativeBinaries(layout).crab).toBe(path.join(agentDirectory, "crab" + extension));
   rmSync(path.join(agentDirectory, "crab" + extension));
-  expect(() => nativeBinaries(layout)).toThrow("Missing Crab v2 runtime");
+  expect(nativeBinaries(layout)).toEqual({ agent: path.join(agentDirectory, "crab-desktop-agent" + extension), crab: path.join(agentDirectory, "crab" + extension) });
 });

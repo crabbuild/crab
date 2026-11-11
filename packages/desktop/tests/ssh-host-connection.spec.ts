@@ -1,3 +1,4 @@
+import type { RemoteFileBrowser } from "../electron/ssh-file-browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -125,7 +126,7 @@ describe("real SSH host verification", () => {
 
   it.skipIf(!process.env.CRAB_AGENT_LIVE_ROOT)("shows command timeout, closes SSH, and recovers on Retry in the real form", async () => {
     const remote = await server(first.pem, false, "hang"); const owner = manager(async () => true);
-    registerSshIpcHandlers(new SshProfileManager(path.join(directory, "profiles.json")), owner, hosts);
+    registerSshIpcHandlers(new SshProfileManager(path.join(directory, "profiles.json")), owner, {} as RemoteFileBrowser, hosts);
     const handler = ipcHandlers.get("ssh:test-connection");
     if (!handler) throw new Error("Connection test IPC not registered");
     const operations = new Set<Promise<void>>();

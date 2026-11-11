@@ -22,12 +22,18 @@ use tracing::{debug, warn};
 
 use crate::{AgentError, Result, SharedStdout, notify};
 
-pub(crate) fn git_command() -> Command {
+pub(crate) fn git_command() -> Result<Command> {
     let mut command = Command::new("git");
     // The agent owns stdin for NDJSON. Git must never inherit that pipe;
     // commands that consume data supply their own stdin explicitly.
     command.stdin(Stdio::null());
-    command
+    // Inspection must not take optional index-refresh locks while the user
+    // stages or commits. Git's mandatory mutation locks remain enabled.
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    // Status and diff can invoke clean filters too. Every Git child needs the
+    // selected repository's credentials, without changing the process environment.
+    crate::storage_auth::configure_command(&mut command)?;
+    Ok(command)
 }
 
 pub(crate) async fn output(command: &mut Command) -> Result<Output> {
@@ -365,4 +371,91 @@ pub fn resolve_crab_bin() -> std::path::PathBuf {
         }
     }
     name.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[tokio::test]
+    async fn inspection_keeps_index_bytes_unchanged_after_a_metadata_change() {
+        async fn git(root: &std::path::Path, args: &[&str]) -> Vec<u8> {
+            let output = git_command()
+                .expect("command")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .await
+                .expect("Git runs");
+            assert!(output.status.success(), "{:?}", output);
+            output.stdout
+        }
+        let directory = tempfile::tempdir().expect("repository");
+        let root = directory.path();
+        git(root, &["init", "--quiet"]).await;
+        git(root, &["config", "user.name", "Fixture"]).await;
+        git(root, &["config", "user.email", "test@example.invalid"]).await;
+        std::fs::write(root.join("file.txt"), "original\n").expect("file");
+        git(root, &["add", "file.txt"]).await;
+        git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        )
+        .await;
+        let before = std::fs::read(root.join(".git/index")).expect("index");
+        // Same bytes with a different inode require a stat-cache refresh.
+        std::fs::rename(root.join("file.txt"), root.join("previous.txt")).expect("replace");
+        std::fs::write(root.join("file.txt"), "original\n").expect("replacement");
+        let status = git(root, &["status", "--porcelain", "--", "file.txt"]).await;
+        assert_eq!(
+            (
+                status,
+                std::fs::read(root.join(".git/index")).expect("index")
+            ),
+            (Vec::new(), before)
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commands_carry_scoped_storage_without_leaking_to_siblings() {
+        let connection: crate::storage_auth::Connection = serde_json::from_value(serde_json::json!({
+            "bucket": "fixture-bucket", "region": "us-east-1", "endpoint": "http://127.0.0.1:9",
+            "credentials": { "provider": "s3", "access_key_id": "fixture-access", "secret_access_key": "fixture-secret", "session_token": null }
+        })).expect("fixture connection");
+        crate::storage_auth::scope(Some(connection), async {
+            let command = git_command().expect("scoped command");
+            let overrides = command
+                .as_std()
+                .get_envs()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(
+                (
+                    overrides.get(OsStr::new("AWS_ACCESS_KEY_ID")),
+                    overrides.get(OsStr::new("AWS_ENDPOINT_URL")),
+                    overrides.get(OsStr::new("AWS_SESSION_TOKEN"))
+                ),
+                (
+                    Some(&Some(OsStr::new("fixture-access"))),
+                    Some(&Some(OsStr::new("http://127.0.0.1:9"))),
+                    Some(&None)
+                ),
+            );
+        })
+        .await;
+        let command = git_command().expect("unscoped command");
+        assert!(
+            !command
+                .as_std()
+                .get_envs()
+                .any(|(name, _)| name == "AWS_ACCESS_KEY_ID")
+        );
+    }
 }

@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -11,7 +12,7 @@ import { AgentDeployer } from "../electron/ssh-deployer";
 import { CapabilityNegotiator } from "../electron/ssh-capabilities";
 import { Orchestrator } from "../electron/orchestrator";
 import { computeRemoteDiff } from "../electron/orchestrator-diff";
-import { getExpandedEnv } from "../electron/orchestrator-adapters";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
 import { terminalSshServer } from "./fixtures/ssh-terminal-server";
 
 vi.mock("../electron/keychain", () => ({ getPassword: async () => "fixture-only" }));
@@ -30,7 +31,7 @@ it.skipIf(!liveRoot || process.platform === "win32")("binds warm and cold tasks 
   const manager = new SshSessionManager(async (host, port, key) => {
     if (host !== "127.0.0.1" || keys.get(port) !== createHash("sha256").update(key).digest("hex")) throw new Error("Unexpected fixture host key");
   });
-  const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } });
+  const router = new RpcRouter(manager, { request: async () => { throw new Error("Remote task cannot use local RPC"); } }, mockStorageConnections);
   const deployer = new AgentDeployer(async () => { throw new Error("The fixture uses the already built runtime"); });
   // Exercise production connection, verification, attachment and capability
   // ownership. Upload qualification has its own real-SFTP fixture.
@@ -54,7 +55,7 @@ it.skipIf(!liveRoot || process.platform === "win32")("binds warm and cold tasks 
     await run("git", ["commit", "-m", "baseline"], { cwd: repo });
     for (const name of ["original", "replacement"]) {
       const home = path.join(root, name); await mkdir(home);
-      const server = await terminalSshServer(home, getExpandedEnv().PATH); servers.push(server);
+      const server = await terminalSshServer(home, (await getExpandedEnv()).PATH); servers.push(server);
       keys.set(server.connection.port, server.connection.fingerprint);
       Object.assign(server.env, { CRAB_BIN: path.join(runtime, "crab"), TMPDIR: home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
     }

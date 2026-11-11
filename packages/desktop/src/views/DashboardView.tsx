@@ -42,7 +42,10 @@ interface Contributor {
  *   - Recent commits
  */
 export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
-  const [summary, setSummary] = useState<RepoSummary | null>(null);
+  // An old summary must not enable metric reads against a replacement owner
+  // before its own commit count and repository admission are known.
+  const [summarySource, setSummarySource] = useState<{ session: OpenRepo["native_session_id"]; value: RepoSummary } | null>(null);
+  const summary = summarySource?.session === repo.native_session_id ? summarySource?.value ?? null : null;
   const [commits, setCommits] = useState<CommitRow[] | null>(null);
   const [activity, setActivity] = useState<ActivityDay[] | null>(null);
   const [contributors, setContributors] = useState<Contributor[] | null>(null);
@@ -74,12 +77,16 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
   );
 
   useEffect(() => {
+    setSummarySource(null); setCommits(null); setActivity(null);
+    setContributors(null); setRefs(null); setPulse(null);
+    setDedupSavings(null); setBranchHealth(null); setReleaseTimeline(null);
+    setErr(null);
     // Deferred repos haven't been opened via the agent yet — skip RPC
     // calls entirely to avoid "repository not open" errors. The
     // dashboard will show loading placeholders until the repo is
     // actually opened (which happens when the user selects it in the
     // sidebar).
-    if (repo.deferred) return;
+    if (repo.deferred || repo.native_session_id === null) return;
 
     let cancelled = false;
 
@@ -101,7 +108,7 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
         .repoSummary(repo.repo_id)
         .then((s) => {
           if (cancelled) return;
-          setSummary(s);
+          setSummarySource({ session: repo.native_session_id, value: s });
           const isLarge = (s.total_commits ?? 0) >= LARGE_REPO_COMMIT_THRESHOLD;
           kickOffSecondaryFetches(isLarge);
         })
@@ -175,19 +182,20 @@ export function DashboardView({ repo, onSelectCommit, onSelectBranch }: Props) {
       clearTimeout(summaryTimer);
       if (deferredTimer != null) window.clearTimeout(deferredTimer);
     };
-  }, [repo.repo_id, repo.deferred]);
+  }, [repo.repo_id, repo.deferred, repo.native_session_id]);
 
   // Commit frequency is re-fetched independently when the granularity
   // toggle changes — the other 9 RPCs above don't depend on it.
   useEffect(() => {
-    if (repo.deferred) return;
+    setCommitFreq(null);
+    if (repo.deferred || repo.native_session_id === null) return;
     let cancelled = false;
     rpc
       .gitCommitFrequency(repo.repo_id, { granularity: commitFreqGranularity })
       .then((r) => { if (!cancelled) setCommitFreq(r); })
       .catch(() => { if (!cancelled) setCommitFreq({ buckets: [] }); });
     return () => { cancelled = true; };
-  }, [repo.repo_id, repo.deferred, commitFreqGranularity]);
+  }, [repo.repo_id, repo.deferred, repo.native_session_id, commitFreqGranularity]);
 
   return (
     <div className="h-full overflow-auto bg-gx-bg-sub p-6">

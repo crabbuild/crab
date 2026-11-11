@@ -26,7 +26,7 @@ pub(super) fn install(planning: &Path) -> Result<PathBuf> {
 }
 
 pub(super) async fn disabled_named_hooks(root: &Path, planning: &Path) -> Result<Vec<String>> {
-    let mut command = private_git(root, planning);
+    let mut command = private_git(root, planning)?;
     command.args([
         "config",
         "--null",
@@ -97,10 +97,10 @@ async fn run(name: &str, args: Vec<OsString>, planning: &Path, journal: &Path) -
                 "Commit or unstage the target checkout's staged changes before Apply".into(),
             ));
         }
-        let mut tree = private_git(&planning.join("worktree"), planning);
+        let mut tree = private_git(&planning.join("worktree"), planning)?;
         tree.arg("write-tree");
         let tree = output_text(shellout::output(&mut tree).await?)?;
-        let mut commit = projection_git(&intent.worktree, journal);
+        let mut commit = projection_git(&intent.worktree, journal)?;
         restore_git_config(&mut commit);
         commit.args([
             "commit-tree",
@@ -116,7 +116,7 @@ async fn run(name: &str, args: Vec<OsString>, planning: &Path, journal: &Path) -
 
         // Git's checkout protects ignored files. The sparse merge calculates
         // the result without writing into the real checkout.
-        let mut checkout = projection_git(&intent.worktree, journal);
+        let mut checkout = projection_git(&intent.worktree, journal)?;
         restore_git_config(&mut checkout);
         checkout.args(["checkout", "--no-overwrite-ignore", "--detach", &commit]);
         let result = shellout::output(&mut checkout).await?;
@@ -127,7 +127,7 @@ async fn run(name: &str, args: Vec<OsString>, planning: &Path, journal: &Path) -
 
     // Git owns the merge metadata and computed tree. The real hook sees the
     // original worktree and can stage edits in its index without changing that tree.
-    let mut hook = private_git(&intent.worktree, planning);
+    let mut hook = private_git(&intent.worktree, planning)?;
     restore_git_config(&mut hook);
     hook.env("GIT_INDEX_FILE", journal.join("index"))
         .args(["-c", &format!("core.hooksPath={}", intent.hooks.display())])

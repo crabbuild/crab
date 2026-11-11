@@ -232,10 +232,14 @@ export class RemoteCache {
         const method = methods[i];
         const result = results[i];
         if (result.result !== undefined) {
+          const data = result.result;
+          // Reconnect fallback is an observation of the old cache, not a fetch.
+          // Refreshing its TTL here would present stale repository state as new.
+          if (data !== null && typeof data === "object" && "__stale" in data && data.__stale === true) continue;
           const key = `${repoId}:${method}`;
           const ttl = this.getDefaultTtl(key);
           this.cache.set(key, {
-            data: result.result,
+            data,
             expiresAt: Date.now() + ttl,
             fetchedAt: Date.now(),
           });

@@ -1,11 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { themeToTreeStyles, prepareFileTreeInput } from "@pierre/trees";
 import clsx from "clsx";
 import { Clipboard, ClipboardPaste, Clock, Copy, Download, Edit3, ExternalLink, FileX, FilePlus, FolderOpen, FolderPlus, Scissors, Trash2 } from "lucide-react";
-import { DirEntry, HydrationEntry, mainProcess, rpc } from "../ipc";
+import { DirEntry, HydrationEntry, mainProcess } from "../ipc";
 import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
 // Module-level clipboard for cut/copy operations within the tree.
 let clipboardPath: string | null = null;
@@ -17,13 +18,10 @@ interface Props {
   gitStatus?: Record<string, string>;
   /** Hydration state keyed by path, for tree-row decorations. */
   hydrationByPath?: Map<string, HydrationEntry>;
+  /** Native working-tree transfers. An empty map disables mutation in history. */
+  fileTransfers?: Partial<Record<HydrateVerb, (paths: string[]) => Promise<unknown>>>;
   onOpenFile: (path: string, entry: DirEntry) => void;
-  /** Callback after a hydrate/dehydrate runs so the caller can
-   *  refresh status data. Fired once the RPC promise resolves. */
-  onHydrateComplete?: () => void;
-  /** Workspace root path — required to run hydrate/dehydrate, since
-   *  those are CLI shell-outs that need a `cwd`. `undefined` for
-   *  URL-opened repos: we hide the affected context-menu items. */
+  /** Workspace root for filesystem actions. */
   workspacePath: string | undefined;
   /** Repo ID passed to file system operations for provider routing. */
   repoId?: string;
@@ -119,8 +117,8 @@ export const FileTree = memo(function FileTree({
   entries,
   gitStatus,
   hydrationByPath,
+  fileTransfers,
   onOpenFile,
-  onHydrateComplete,
   workspacePath,
   repoId,
   canEdit = true,
@@ -130,6 +128,7 @@ export const FileTree = memo(function FileTree({
   onRefresh,
   scrollContainerRef,
 }: Props) {
+  const [transferError, setTransferError] = useState<string | null>(null);
   const paths = useMemo(
     () =>
       entries
@@ -258,22 +257,15 @@ export const FileTree = memo(function FileTree({
   const themeStyles = useMemo(() => getCachedTreeThemeStyles(effective), [effective]);
 
   const runHydrate = useCallback(
-    async (paths: string[], verb: "hydrate" | "dehydrate") => {
-      if (!workspacePath) return;
+    async (paths: string[], verb: HydrateVerb) => {
+      setTransferError(null);
       try {
-        if (verb === "hydrate") {
-          await rpc.hydrate(workspacePath, paths);
-        } else {
-          await rpc.dehydrate(workspacePath, paths);
-        }
-      } catch {
-        // The Activity drawer surfaces RPC errors; we don't need to
-        // double-render here.
-      } finally {
-        onHydrateComplete?.();
+        await fileTransfers?.[verb]?.(paths);
+      } catch (error) {
+        setTransferError(error instanceof Error ? error.message : String(error));
       }
     },
-    [workspacePath, onHydrateComplete],
+    [fileTransfers],
   );
 
   // Context menu with full file operations.
@@ -284,10 +276,17 @@ export const FileTree = memo(function FileTree({
     ) => {
       const isDir = item.kind === "directory";
       const entry = entryByPath.get(item.path);
-      const isPointer =
-        entry?.kind === "pointer" ||
-        entry?.kind === "lfs" ||
-        isDir;
+      const transferPaths = (verb: HydrateVerb) => {
+        if (!fileTransfers?.[verb] || !hydrationByPath) return [];
+        if (isDir) {
+          const prefix = `${item.path.replace(/\/$/, "")}/`;
+          return Array.from(hydrationByPath.values()).filter(entry => entry.path.startsWith(prefix) && isEligible(entry, verb)).map(entry => entry.path);
+        }
+        const status = hydrationByPath.get(item.path);
+        return status && isEligible(status, verb) ? [item.path] : [];
+      };
+      const hydratePaths = transferPaths("hydrate");
+      const dehydratePaths = transferPaths("dehydrate");
 
       const fullPath = workspacePath ? `${workspacePath}/${item.path}` : null;
 
@@ -504,27 +503,25 @@ export const FileTree = memo(function FileTree({
           )}
 
           {/* Hydrate / Dehydrate */}
-          {isPointer && workspacePath && (
+          {(hydratePaths.length > 0 || dehydratePaths.length > 0) && (
             <>
               <Divider />
-              <MenuItem
+              {hydratePaths.length > 0 && <MenuItem
                 icon={<Download size={12} />}
                 label={isDir ? "Hydrate Subtree" : "Hydrate File"}
-                hint="crab hydrate"
                 onClick={() => {
                   context.close();
-                  void runHydrate([isDir ? `${item.path}/**` : item.path], "hydrate");
+                  void runHydrate(hydratePaths, "hydrate");
                 }}
-              />
-              <MenuItem
+              />}
+              {dehydratePaths.length > 0 && <MenuItem
                 icon={<FileX size={12} />}
                 label={isDir ? "Dehydrate Subtree" : "Dehydrate File"}
-                hint="crab dehydrate"
                 onClick={() => {
                   context.close();
-                  void runHydrate([isDir ? `${item.path}/**` : item.path], "dehydrate");
+                  void runHydrate(dehydratePaths, "dehydrate");
                 }}
-              />
+              />}
             </>
           )}
 
@@ -545,11 +542,12 @@ export const FileTree = memo(function FileTree({
         </ContextMenuBody>
       );
     },
-    [entryByPath, runHydrate, workspacePath, repoId, canEdit, onRefresh],
+    [entryByPath, fileTransfers, hydrationByPath, runHydrate, workspacePath, repoId, canEdit, onRefresh],
   );
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
+      {transferError && <div role="alert" className="px-3 py-2 text-xs text-gx-error">{transferError}</div>}
       <SelectionHandler model={model} entryByPath={entryByPath} onOpenFile={onOpenFile} />
       <PierreFileTree
         model={model}

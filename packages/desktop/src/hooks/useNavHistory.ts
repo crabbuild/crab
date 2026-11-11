@@ -67,6 +67,13 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
     forceRender((n) => n + 1);
   }, []);
 
+  // Shell commands must also reach the mounted repository. Observed local
+  // view changes only record history, or an older observation can undo a click.
+  const navigate = useCallback((entry: NavEntry) => {
+    push(entry);
+    setRestoreEntry({ ...entry });
+  }, [push]);
+
   const back = useCallback(() => {
     if (indexRef.current > 0) {
       const prevEntry = stackRef.current[indexRef.current];
@@ -151,6 +158,7 @@ export function useNavHistory(options?: UseNavHistoryOptions) {
     canBack: indexRef.current > 0,
     canForward: indexRef.current < stackRef.current.length - 1,
     push,
+    navigate,
     back,
     forward,
     getState,

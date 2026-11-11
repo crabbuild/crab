@@ -1,17 +1,19 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Tests for graceful degradation during SSH reconnection.
  *
  * Verifies that:
- * - Read-only operations return cached data with `__stale: true` during reconnection
+ * - Explicitly cacheable metadata returns cached data with `__stale: true` during reconnection
  * - Write operations are rejected immediately with SSH_RECONNECTING code
- * - Non-cacheable read operations are queued for replay
+ * - Live operations are rejected; only cacheable metadata is queued for replay
  * - The StaleBadge and WriteBlockedOverlay components render correctly
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, isCacheableReadMethod } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, isCacheableReadMethod } from "../electron/ssh-router";
 import { RemoteCache } from "../electron/ssh-cache";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -31,6 +33,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -62,7 +65,7 @@ class MockLocalAgent {
 function createRouterWithCache() {
   const sm = new MockSessionManager();
   const la = new MockLocalAgent();
-  const router = new RpcRouter(sm as any, la);
+  const router = new RpcRouter(sm as any, la, mockStorageConnections);
   const cache = new RemoteCache();
   router.setCache(cache);
   return { router, sessionManager: sm, localAgent: la, cache };
@@ -74,13 +77,13 @@ describe("isCacheableReadMethod", () => {
   it("identifies cacheable read methods", () => {
     expect(isCacheableReadMethod("git_status_porcelain")).toBe(true);
     expect(isCacheableReadMethod("git_log")).toBe(true);
-    expect(isCacheableReadMethod("git_diff_file")).toBe(true);
     expect(isCacheableReadMethod("list_refs")).toBe(true);
     expect(isCacheableReadMethod("repo_summary")).toBe(true);
     expect(isCacheableReadMethod("hydration_status")).toBe(true);
   });
 
   it("rejects non-cacheable methods", () => {
+    expect(isCacheableReadMethod("file_diff")).toBe(false);
     expect(isCacheableReadMethod("git_commit")).toBe(false);
     expect(isCacheableReadMethod("ping")).toBe(false);
     expect(isCacheableReadMethod("git_stash_list")).toBe(false);
@@ -163,13 +166,8 @@ describe("RpcRouter — graceful degradation during reconnection", () => {
 
     sessionManager.setStatus("gpu-server", "reconnecting");
 
-    try {
-      await router.route(repoId, "git_commit", { repo_id: repoId, message: "test" });
-      expect.fail("Should have thrown");
-    } catch (err: any) {
-      expect(err.message).toContain("Connection lost");
-      expect(err.code).toBe("SSH_RECONNECTING");
-    }
+    await expect(router.route(repoId, "git_commit", { repo_id: repoId, message: "test" }))
+      .rejects.toMatchObject({ code: "SSH_RECONNECTING" });
   });
 
   it("rejects git_push during reconnection", async () => {
@@ -194,33 +192,6 @@ describe("RpcRouter — graceful degradation during reconnection", () => {
     ).rejects.toThrow("Connection lost");
   });
 
-  it("queues non-cacheable read operations during reconnection when no cache hit", async () => {
-    const { router, sessionManager, cache } = createRouterWithCache();
-    const repoId = "ssh://gpu-server/repo";
-
-    sessionManager.setStatus("gpu-server", "reconnecting");
-
-    // git_stash_list is not in CACHEABLE_READ_METHODS, so it gets queued
-    const promise = router.route(repoId, "git_stash_list", { repo_id: repoId });
-
-    // Simulate reconnection success
-    const channel = new MockChannel();
-    sessionManager.setStatus("gpu-server", "connected");
-    sessionManager.setConnection("gpu-server", channel);
-    router.attachChannel("gpu-server", channel.asChannel());
-
-    // Replay the queue
-    const replayPromise = router.replayQueue("gpu-server");
-
-    // Respond to the replayed call
-    const response = JSON.stringify({ jsonrpc: "2.0", id: 1, result: [] }) + "\n";
-    channel.emit("data", Buffer.from(response));
-    await replayPromise;
-
-    const result = await promise;
-    expect(result).toEqual([]);
-  });
-
   it("queues cacheable read operations when no cached data exists", async () => {
     const { router, sessionManager } = createRouterWithCache();
     const repoId = "ssh://gpu-server/repo";
@@ -237,6 +208,7 @@ describe("RpcRouter — graceful degradation during reconnection", () => {
     router.attachChannel("gpu-server", channel.asChannel());
 
     const replayPromise = router.replayQueue("gpu-server");
+    await vi.waitFor(() => expect(channel.written).toHaveLength(1));
     const response = JSON.stringify({ jsonrpc: "2.0", id: 1, result: "?? new.txt" }) + "\n";
     channel.emit("data", Buffer.from(response));
     await replayPromise;

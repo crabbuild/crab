@@ -10,7 +10,7 @@
  *
  * For files < 1 MB: skips delta entirely, delegates to full transfer.
  *
- * Checks CapabilityNegotiator.isSupported("deltaSync") before attempting
+ * Checks the delta RPC handlers before attempting
  * any delta operation.
  */
 
@@ -90,7 +90,7 @@ export class DeltaTransferHandler {
     direction: TransferDirection,
   ): Promise<DeltaTransferResult> {
     // Check capability support
-    if (!this.capabilityNegotiator.isSupported(profileId, "deltaSync")) {
+    if (!this.capabilityNegotiator.isSupported(profileId, "chunk_signatures", "write_chunks", "read_chunks")) {
       return {
         usedDelta: false,
         savingsPercent: 0,
@@ -136,7 +136,7 @@ export class DeltaTransferHandler {
    * Useful for pre-flight checks without performing the transfer.
    */
   shouldAttemptDelta(profileId: string, localPath: string, direction: TransferDirection): boolean {
-    if (!this.capabilityNegotiator.isSupported(profileId, "deltaSync")) {
+    if (!this.capabilityNegotiator.isSupported(profileId, "chunk_signatures", "write_chunks", "read_chunks")) {
       return false;
     }
 

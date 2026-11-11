@@ -43,16 +43,13 @@ pub struct BranchRenameParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckoutParams {
     pub repo_id: String,
     pub ref_name: String,
     /// `true` → `--detach`.
     #[serde(default)]
     pub detach: bool,
-    /// `true` → insert `--` before `ref_name` so git treats it as a
-    /// path (file discard) rather than a branch name.
-    #[serde(default)]
-    pub pathspec: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,17 +106,21 @@ pub async fn git_branch_rename(work_dir: &Path, params: &BranchRenameParams) -> 
 }
 
 /// Checkout a ref. Returns `{ ref_name, detached }`.
-/// When `pathspec` is true, inserts `--` before the target so git
-/// treats it as a file path (used for discarding working-tree changes).
+/// File restoration uses the separately verified publication owner.
 pub async fn git_checkout(work_dir: &Path, params: &CheckoutParams) -> Result<Value> {
+    if params.ref_name.starts_with('-') && params.ref_name != "-" {
+        return Err(AgentError::Other(
+            "Checkout requires a ref, not a Git option".into(),
+        ));
+    }
     let mut args: Vec<&str> = vec!["checkout"];
     if params.detach {
         args.push("--detach");
     }
-    if params.pathspec {
-        args.push("--");
-    }
     args.push(&params.ref_name);
+    // A trailing separator prevents Git from interpreting a missing ref as a
+    // working path and silently discarding its unstaged content.
+    args.push("--");
     run_git(work_dir, &args).await?;
     Ok(json!({ "ref_name": params.ref_name, "detached": params.detach }))
 }
@@ -135,7 +136,7 @@ pub async fn git_set_upstream(work_dir: &Path, params: &SetUpstreamParams) -> Re
 
 /// Run a git command and return stdout on success, or an error on failure.
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -332,7 +333,6 @@ mod tests {
             repo_id: "test".into(),
             ref_name: "other".into(),
             detach: false,
-            pathspec: false,
         };
 
         let result = git_checkout(&root, &params).await.unwrap();
@@ -345,6 +345,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkout_never_treats_a_missing_ref_as_a_file_discard() {
+        let (_td, root) = git_init_with_commit();
+        let path = root.join("file.txt");
+        std::fs::write(&path, "indexed").unwrap();
+        sh(&root, &["add", "file.txt"]);
+        std::fs::write(&path, "unstaged work").unwrap();
+        for target in ["file.txt", "--force"] {
+            let params = CheckoutParams {
+                repo_id: "test".into(),
+                ref_name: target.into(),
+                detach: false,
+            };
+            assert!(git_checkout(&root, &params).await.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"unstaged work");
+        }
+        assert!(
+            serde_json::from_value::<CheckoutParams>(json!({
+                "repo_id": "test", "ref_name": "file.txt", "pathspec": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn checkout_detach() {
         let (_td, root) = git_init_with_commit();
 
@@ -354,7 +378,6 @@ mod tests {
             repo_id: "test".into(),
             ref_name: "main".into(),
             detach: true,
-            pathspec: false,
         };
 
         let result = git_checkout(&root, &params).await.unwrap();

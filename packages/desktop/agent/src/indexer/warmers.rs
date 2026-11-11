@@ -16,6 +16,8 @@ use super::store::IndexStore;
 /// Errors specific to warmer execution.
 #[derive(Debug, thiserror::Error)]
 pub enum WarmerError {
+    #[error("Git command configuration failed")]
+    Command(#[source] Box<crate::AgentError>),
     #[error("git command failed: {0}")]
     Git(String),
 
@@ -29,6 +31,12 @@ pub enum WarmerError {
     Cancelled,
 }
 
+impl From<crate::AgentError> for WarmerError {
+    fn from(source: crate::AgentError) -> Self {
+        Self::Command(Box::new(source))
+    }
+}
+
 type Result<T> = std::result::Result<T, WarmerError>;
 
 // ---------------------------------------------------------------------------
@@ -37,7 +45,7 @@ type Result<T> = std::result::Result<T, WarmerError>;
 
 /// Resolve HEAD to a short sha for use as the cache revision key.
 async fn resolve_head(work_dir: &Path) -> Result<String> {
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .kill_on_drop(true)
         .args(["rev-parse", "HEAD"])
         .current_dir(work_dir)
@@ -107,7 +115,7 @@ pub async fn warm_file_summaries(
     let head = resolve_head(work_dir).await?;
     check_cancelled(cancel)?;
 
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .kill_on_drop(true)
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
@@ -205,7 +213,7 @@ pub async fn warm_git_log(
     // Use a record separator (%x1e) between fields and %x1f between entries
     // to avoid ambiguity with commit messages containing newlines.
     let format = "%H%x1e%an%x1e%aI%x1e%s";
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .kill_on_drop(true)
         .args(["log", "--format", format, "-n", "500"])
         .current_dir(work_dir)
@@ -280,7 +288,7 @@ pub async fn warm_pointer_metadata(
     check_cancelled(cancel)?;
 
     // Get the list of tracked files.
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .kill_on_drop(true)
         .args(["ls-files", "-z"])
         .current_dir(work_dir)

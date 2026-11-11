@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { mainProcess, rpc } from "../ipc";
 import { OpenRepo } from "../state";
+import { repositoryWorktree } from "../lib/repository-worktree";
 
-/** A pattern parsed from `.gitattributes` that has `filter=crab`. */
+/** A Crab or Git LFS pattern parsed from `.gitattributes`. */
 export interface TrackedPattern {
   /** The glob as written in `.gitattributes` (e.g. `*.bin`). */
   pattern: string;
@@ -23,13 +24,13 @@ export interface UseTrackedPatterns {
 }
 
 /**
- * Read the repo's `.gitattributes` patterns marked with `filter=crab`
+ * Read the repo's `.gitattributes` patterns marked with `filter=crab` or `filter=lfs`
  * and any prefetch profiles defined in `.crab/prefetch.toml`. Local
- * repos read from disk via `mainProcess.fsReadFile`; remote repos
- * fall back to `rpc.readText`.
+ * worktrees use their filesystem provider; SDK snapshots use captured native
+ * reads. Failed or truncated reads remain visible instead of becoming defaults.
  *
- * Both files are optional — a missing file yields an empty result
- * rather than an error. The hook refreshes on mount and exposes a
+ * Missing physical files yield an empty result. Snapshot failures remain
+ * visible until their native source establishes absence. The hook exposes a
  * manual `refresh()` for callers that just edited tracking state.
  */
 export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPatterns {
@@ -57,7 +58,7 @@ export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPa
     // us from re-fetching `.gitattributes` every time another piece
     // of repo state ticks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.repo_id, repo.path, repo.is_remote, enabled]);
+  }, [repo.repo_id, repo.path, repo.is_remote, repo.native_session_id, enabled]);
 
   useEffect(() => {
     refresh();
@@ -69,19 +70,14 @@ export function useTrackedPatterns(repo: OpenRepo, enabled = true): UseTrackedPa
 // ── File reading ────────────────────────────────────────────────────
 
 async function readRepoFile(repo: OpenRepo, relPath: string): Promise<string | null> {
-  if (repo.path) {
-    const res = await mainProcess.fsReadFile(`${repo.path}/${relPath}`);
+  const root = repositoryWorktree(repo);
+  if (root) {
+    const res = await mainProcess.fsReadFile(repo.repo_id, `${root.replace(/[\\/]$/, "")}/${relPath}`, 256 * 1024, repo.native_session_id);
     return res.exists ? res.content : null;
   }
-  if (repo.is_remote) {
-    try {
-      const res = await rpc.readText(repo.repo_id, relPath, { max_bytes: 256 * 1024 });
-      return res.text ?? null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  const result = await rpc.readText(repo.repo_id, relPath, { max_bytes: 256 * 1024 });
+  if (result.truncated || result.text === null) throw new Error(result.reason ?? "The tracking configuration was not read completely.");
+  return result.text;
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────
@@ -98,7 +94,7 @@ export function parseGitattributes(content: string): TrackedPattern[] {
   for (const raw of content.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    if (!line.includes("filter=crab")) continue;
+    if (!/(?:^|\s)filter=(?:crab|lfs)(?:\s|$)/.test(line)) continue;
     const pattern = extractFirstToken(line);
     if (pattern && !seen.has(pattern)) {
       seen.add(pattern);
@@ -114,13 +110,34 @@ export function parseGitattributes(content: string): TrackedPattern[] {
  * spaces survive).
  */
 function extractFirstToken(line: string): string | null {
-  if (line.startsWith('"')) {
-    const end = line.indexOf('"', 1);
-    if (end === -1) return null;
-    return line.slice(1, end);
+  if (!line.startsWith('"')) return line.match(/^\S+/)?.[0] ?? null;
+  const quoted = line.match(/^"(?:[^"\\]|\\.)*"/);
+  if (!quoted) throw new Error("Unterminated quoted tracking pattern.");
+  const source = new TextEncoder().encode(quoted[0].slice(1, -1));
+  const decoded = new Uint8Array(source.length);
+  const escapes: Record<number, number> = { 97: 7, 98: 8, 102: 12, 110: 10, 114: 13, 116: 9, 118: 11, 34: 34, 92: 92 };
+  let written = 0;
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] !== 92) {
+      decoded[written++] = source[index];
+      continue;
+    }
+    const next = source[++index];
+    if (next >= 48 && next <= 55) {
+      let value = next - 48;
+      let digits = 1;
+      while (digits < 3 && source[index + 1] >= 48 && source[index + 1] <= 55) {
+        value = value * 8 + source[++index] - 48;
+        digits++;
+      }
+      if (value > 255) throw new Error("Invalid octal byte in tracking pattern.");
+      decoded[written++] = value;
+      continue;
+    }
+    if (escapes[next] === undefined) throw new Error("Invalid escape in tracking pattern.");
+    decoded[written++] = escapes[next];
   }
-  const m = line.match(/^\S+/);
-  return m ? m[0] : null;
+  return new TextDecoder("utf-8", { fatal: true }).decode(decoded.subarray(0, written));
 }
 
 /**

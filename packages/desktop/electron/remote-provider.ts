@@ -8,7 +8,7 @@
  *
  * Connection loss handling:
  * - Write operations reject immediately with SSH_RECONNECTING
- * - Read operations return stale cached data when available
+ * - Mutable reads reject unavailable sessions rather than returning stale data
  * - Capabilities downgrade to noCapabilities() on disconnect
  *
  * File watching:
@@ -18,17 +18,18 @@
  * - Stops watching on connection loss, restarts on reconnection
  */
 
+import { posix } from "node:path";
 import {
   BaseProvider,
-  noCapabilities,
-  type CapabilitySet,
   type FsCreateResult,
   type FsDeleteResult,
   type FsReadResult,
   type FsRenameResult,
   type FsWriteResult,
 } from "./repo-provider";
-import { parseRepoId, type RpcRouter } from "./ssh-router";
+import { noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
+import { parseRepoId } from "./ssh-types";
+import { isCacheableReadMethod, type RpcRouter } from "./ssh-router";
 import type { RemoteFileEditor } from "./ssh-file-editor";
 import type { RemoteGitManager } from "./ssh-remote-git";
 import type { CapabilityNegotiator } from "./ssh-capabilities";
@@ -64,9 +65,6 @@ export class RemoteProvider extends BaseProvider {
   private readonly capabilityNegotiator: CapabilityNegotiator;
   private readonly sessionManager: SshSessionManager;
 
-  /** Cached read results for stale fallback during reconnection. */
-  private readCache = new Map<string, { content: string; timestamp: number }>();
-
   /** Polling interval handle for agents that don't support native file watching. */
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -87,6 +85,8 @@ export class RemoteProvider extends BaseProvider {
 
   /** Bound handler for SSH connection status changes (stored for cleanup). */
   private readonly onStatusChanged: (payload: { profileId: string; status: SshConnectionStatus; error?: string }) => void;
+  private readonly onAgentUnavailable: (payload: { profileId: string; message?: string }) => void;
+  private readonly onRepositoryRuntime: (payload: RepositoryRuntime & { profileId: string }) => void;
 
   constructor(options: RemoteProviderOptions) {
     super();
@@ -102,6 +102,16 @@ export class RemoteProvider extends BaseProvider {
     // Subscribe to connection status changes to stop/restart watching
     this.onStatusChanged = this.handleStatusChanged.bind(this);
     this.sessionManager.on("ssh:status-changed", this.onStatusChanged);
+    this.onAgentUnavailable = ({ profileId, message }) => {
+      this.stopWatchingProfile(profileId);
+      void this.emitCapabilityChanges(profileId, message ?? "Desktop services are unavailable.");
+    };
+    this.sessionManager.on("ssh:agent-unavailable", this.onAgentUnavailable);
+    this.onRepositoryRuntime = event => {
+      if (event.sessionId && this.watchedRepos.has(event.repoId)) void this.restartWatching(event.repoId, event.profileId);
+      void this.emitRepositoryCapabilities(event.repoId);
+    };
+    this.sessionManager.on("ssh:repository-runtime", this.onRepositoryRuntime);
   }
 
   // ── Core Dispatch ────────────────────────────────────────────
@@ -113,7 +123,23 @@ export class RemoteProvider extends BaseProvider {
       throw new Error(`RemoteProvider.request() called with non-remote repo_id: ${repoId}`);
     }
 
+    if (method === "close") {
+      this.sessionManager.forgetRepository(parsed.profileId, repoId);
+      if (!this.sessionManager.agentSession(parsed.profileId)) return {};
+    } else if (method !== "rpc/cancel" && this.getConnectionStatus(parsed.profileId) === "connected") {
+      if (isCacheableReadMethod(method)) {
+        const pending = this.sessionManager.repositoryWork(repoId);
+        if (pending) await pending;
+      }
+      const runtime = this.sessionManager.repositoryRuntime(parsed.profileId, repoId);
+      if (!runtime.sessionId) throw new Error(runtime.error ?? "SSH repository is unavailable. Retry reopening it.");
+    }
     return this.router.route(repoId, method, params);
+  }
+
+  nativeSession(repoId: string): string | null {
+    const remote = parseRepoId(repoId);
+    return remote ? this.sessionManager.repositoryRuntime(remote.profileId, repoId).sessionId : null;
   }
 
   // ── File Watching ────────────────────────────────────────────
@@ -132,8 +158,9 @@ export class RemoteProvider extends BaseProvider {
       profileId: parsed.profileId,
       debounceTimer: null,
     });
+    if (!this.nativeSession(repoId)) return;
 
-    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop");
 
     if (canWatch) {
       // Agent supports native file watching — use watch_start RPC
@@ -168,7 +195,7 @@ export class RemoteProvider extends BaseProvider {
     const status = this.getConnectionStatus(parsed.profileId);
     if (status !== "connected") return;
 
-    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop");
     if (canWatch) {
       try {
         await this.router.route(repoId, "watch_stop", { repo_id: repoId });
@@ -214,56 +241,44 @@ export class RemoteProvider extends BaseProvider {
     return { deleted: path, trash: false };
   }
 
-  async fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult> {
+  async fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult> {
     const parsed = this.assertRemoteAndConnected(repoId);
 
-    const result = await this.fileEditor.writeFile(parsed.profileId, path, content);
-
-    // Cache the write for stale fallback
-    this.readCache.set(`${repoId}:${path}`, { content, timestamp: Date.now() });
+    const relativePath = posix.relative(parsed.remotePath, path);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
+      throw new Error("The file must be inside the selected repository.");
+    }
+    // Keep the caller's session through credential preparation and wire
+    // admission. Substituting the current owner can publish an obsolete read.
+    const result = await this.request("write_text", {
+      repo_id: repoId, path: relativePath, content, native_session_id: nativeSessionId,
+    }) as { written: boolean; size: number };
+    if (result.written !== true || result.size !== Buffer.byteLength(content, "utf8")) {
+      throw new Error("The remote file save did not write the complete buffer.");
+    }
 
     this.emit("fs/changed", { type: "fs/changed" as const, repoPath: repoId });
-    return { path, written: result.success ? content.length : 0 };
+    return { path, written: result.size };
   }
 
-  async fsRead(repoId: string, path: string): Promise<FsReadResult> {
-    const parsed = parseRepoId(repoId);
-    if (!parsed) {
-      throw new Error(`RemoteProvider.fsRead() called with non-remote repo_id: ${repoId}`);
+  async fsRead(repoId: string, path: string, maxBytes = 512 * 1024, nativeSessionId: string | null): Promise<FsReadResult> {
+    const parsed = this.assertRemoteAndConnected(repoId);
+    const relativePath = posix.relative(parsed.remotePath, path);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || !posix.isAbsolute(path)) {
+      throw new Error("The file must be inside the selected repository.");
     }
-
-    const status = this.getConnectionStatus(parsed.profileId);
-
-    // During reconnection, return stale cache if available
-    if (status === "reconnecting") {
-      const cached = this.readCache.get(`${repoId}:${path}`);
-      if (cached) {
-        return { exists: true, content: cached.content };
-      }
-      // No cache available — reject
-      const err = new Error("Connection lost: file read unavailable during reconnection");
-      (err as Error & { code?: string }).code = "SSH_RECONNECTING";
-      throw err;
-    }
-
-    if (status !== "connected") {
-      throw new Error(`SSH connection not available (status: ${status})`);
-    }
-
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 4 * 1024 * 1024) throw new Error("Invalid text read limit.");
     try {
-      const result = await this.fileEditor.readFile(parsed.profileId, path);
-
-      // Cache the read for stale fallback
-      this.readCache.set(`${repoId}:${path}`, { content: result.content, timestamp: Date.now() });
-
-      return { exists: true, content: result.content };
-    } catch (err) {
-      // If the error indicates file not found, return exists: false
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("ENOENT") || message.includes("not found") || message.includes("No such file")) {
-        return { exists: false, content: null };
-      }
-      throw err;
+      // Mutable documents must never merge a stale reconnect cache or a
+      // truncated prefix into a new write. Read through the live repo owner.
+      const result = await this.request("read_text", {
+        repo_id: repoId, path: relativePath, max_bytes: maxBytes, native_session_id: nativeSessionId,
+      }) as { text: string | null; truncated: boolean; reason?: string };
+      if (result.truncated !== false || typeof result.text !== "string") throw new Error(result.reason ?? "The remote file was not read completely.");
+      return { exists: true, content: result.text };
+    } catch (error) {
+      if (error instanceof Error && "data" in error && error.data && typeof error.data === "object" && "kind" in error.data && error.data.kind === "path_not_found") return { exists: false, content: null };
+      throw error;
     }
   }
 
@@ -277,41 +292,21 @@ export class RemoteProvider extends BaseProvider {
 
     const status = this.getConnectionStatus(parsed.profileId);
 
-    // No capabilities when disconnected or in error state
-    if (status !== "connected" && status !== "reconnecting") {
-      return noCapabilities();
-    }
-
-    // During reconnection, report limited capabilities (reads may work
-    // from cache, but writes are unavailable)
-    if (status === "reconnecting") {
-      return {
-        canEdit: false,
-        canWatch: false,
-        canStageHunks: false,
-        canWorktree: false,
-        canForge: false,
-        canHydrate: false,
-        canSearch: false,
-        canExec: false,
-        canTrash: false,
-      };
-    }
-
-    // Connected — resolve capabilities from the negotiator
-    const agentCaps = this.capabilityNegotiator.getCached(parsed.profileId);
-
-    if (!agentCaps) return noCapabilities();
+    if (status !== "connected" || !this.nativeSession(repoId)) return noCapabilities();
 
     return {
       canEdit: true,
-      canWatch: this.capabilityNegotiator.isSupported(parsed.profileId, "fileWatching"),
+      canWatch: this.capabilityNegotiator.isSupported(parsed.profileId, "watch_start", "watch_stop"),
       canStageHunks: true,
       canWorktree: true,
       canForge: true,
       canHydrate: false, // Remote repos don't support crab hydrate/dehydrate
-      canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "search"),
-      canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "buildRun"),
+      canHydrateSelection: this.capabilityNegotiator.isSupported(parsed.profileId, "files_materialize"),
+      canDehydrateSelection: this.capabilityNegotiator.isSupported(parsed.profileId, "files_dehydrate"),
+      canRestoreSelection: this.capabilityNegotiator.isSupported(parsed.profileId, "files_restore", "git_status_porcelain"),
+      canMaterialize: this.capabilityNegotiator.isSupported(parsed.profileId, "file_open", "file_materialize", "file_close"),
+      canSearch: this.capabilityNegotiator.isSupported(parsed.profileId, "git_grep"),
+      canExec: this.capabilityNegotiator.isSupported(parsed.profileId, "exec_command"),
       canTrash: false, // Remote servers have no trash concept
     };
   }
@@ -324,6 +319,8 @@ export class RemoteProvider extends BaseProvider {
 
     // Unsubscribe from connection status changes
     this.sessionManager.off("ssh:status-changed", this.onStatusChanged);
+    this.sessionManager.off("ssh:agent-unavailable", this.onAgentUnavailable);
+    this.sessionManager.off("ssh:repository-runtime", this.onRepositoryRuntime);
 
     // Clear all watch debounce timers
     for (const state of this.watchedRepos.values()) {
@@ -332,7 +329,6 @@ export class RemoteProvider extends BaseProvider {
     this.watchedRepos.clear();
 
     this.stopPolling();
-    this.readCache.clear();
     this.removeAllListeners();
   }
 
@@ -372,31 +368,12 @@ export class RemoteProvider extends BaseProvider {
   private handleStatusChanged(payload: { profileId: string; status: SshConnectionStatus; error?: string }): void {
     const { profileId, status } = payload;
 
-    if (status === "reconnecting" || status === "disconnected" || status === "error") {
-      // Connection lost — stop emitting events for repos on this profile.
-      // Clear debounce timers but keep the repos in the watched set so
-      // we can restart watching on reconnection.
-      for (const state of this.watchedRepos.values()) {
-        if (state.profileId !== profileId) continue;
-        if (state.debounceTimer) {
-          clearTimeout(state.debounceTimer);
-          state.debounceTimer = null;
-        }
-      }
-
-      // Stop polling if it's for a repo on this profile
-      if (this.pollingRepoId) {
-        const parsed = parseRepoId(this.pollingRepoId);
-        if (parsed && parsed.profileId === profileId) {
-          this.stopPolling();
-        }
-      }
-    }
+    if (status !== "connected") this.stopWatchingProfile(profileId);
 
     if (status === "connected") {
       // Connection restored — restart watching for all repos on this profile.
       for (const state of this.watchedRepos.values()) {
-        if (state.profileId !== profileId) continue;
+        if (state.profileId !== profileId || !this.nativeSession(state.repoId)) continue;
         // Fire-and-forget: restart watching in the background
         void this.restartWatching(state.repoId, profileId);
       }
@@ -404,7 +381,29 @@ export class RemoteProvider extends BaseProvider {
 
     // Re-resolve capabilities for all watched repos on this profile and
     // emit capabilities-changed events so the renderer updates UI controls.
-    void this.emitCapabilityChanges(profileId);
+    const error = ["error", "disconnected"].includes(status) ? payload.error ?? "SSH connection is unavailable." : undefined;
+    void this.emitCapabilityChanges(profileId, error);
+  }
+
+  private stopWatchingProfile(profileId: string): void {
+    // Connection lost — stop emitting events for repos on this profile.
+    // Clear debounce timers but keep the repos in the watched set so
+    // we can restart watching on reconnection.
+    for (const state of this.watchedRepos.values()) {
+      if (state.profileId !== profileId) continue;
+      if (state.debounceTimer) {
+        clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+      }
+    }
+
+    // Stop polling if it's for a repo on this profile
+    if (this.pollingRepoId) {
+      const parsed = parseRepoId(this.pollingRepoId);
+      if (parsed && parsed.profileId === profileId) {
+        this.stopPolling();
+      }
+    }
   }
 
   /**
@@ -412,17 +411,23 @@ export class RemoteProvider extends BaseProvider {
    * `capabilities-changed` events for each one. Called when the SSH
    * connection state transitions (connected ↔ disconnected ↔ reconnecting).
    */
-  private async emitCapabilityChanges(profileId: string): Promise<void> {
-    for (const state of this.watchedRepos.values()) {
-      if (state.profileId !== profileId) continue;
+  private async emitCapabilityChanges(profileId: string, error?: string): Promise<void> {
+    // Native availability belongs to opened repositories, including inactive
+    // views that stopped watching. Watching cannot own recovery notifications.
+    await Promise.all(this.sessionManager.repositoryRuntimes(profileId).map(runtime => this.emitRepositoryCapabilities(runtime.repoId, error)));
+  }
 
-      const caps = await this.capabilities(state.repoId);
-      this.emit("capabilities-changed", {
-        type: "capabilities-changed" as const,
-        repoId: state.repoId,
-        capabilities: caps,
-      });
-    }
+  private async emitRepositoryCapabilities(repoId: string, error?: string): Promise<void> {
+    const remote = parseRepoId(repoId);
+    if (!remote) return;
+    const runtime = this.sessionManager.repositoryRuntime(remote.profileId, repoId);
+    const caps = await this.capabilities(repoId);
+    const current = this.sessionManager.repositoryRuntime(remote.profileId, repoId);
+    if (runtime.sessionId !== current.sessionId || runtime.error !== current.error) return;
+    this.emit("capabilities-changed", {
+      type: "capabilities-changed" as const, repoId, capabilities: caps,
+      nativeSessionId: runtime.sessionId, error: error ?? runtime.error,
+    });
   }
 
   /**
@@ -431,7 +436,7 @@ export class RemoteProvider extends BaseProvider {
    * older agents).
    */
   private async restartWatching(repoId: string, profileId: string): Promise<void> {
-    const canWatch = this.capabilityNegotiator.isSupported(profileId, "fileWatching");
+    const canWatch = this.capabilityNegotiator.isSupported(profileId, "watch_start", "watch_stop");
 
     if (canWatch) {
       try {
@@ -504,7 +509,7 @@ export class RemoteProvider extends BaseProvider {
 
   /**
    * Assert that the repo_id is remote and the connection is active.
-   * Throws SSH_RECONNECTING for write operations during reconnection.
+   * Mutable-file reads and writes fail closed while the connection is unavailable.
    */
   private assertRemoteAndConnected(repoId: string): { profileId: string; remotePath: string } {
     const parsed = parseRepoId(repoId);
@@ -515,7 +520,7 @@ export class RemoteProvider extends BaseProvider {
     const status = this.getConnectionStatus(parsed.profileId);
 
     if (status === "reconnecting") {
-      const err = new Error("Connection lost: write operations are unavailable during reconnection");
+      const err = new Error("Connection lost: file operations are unavailable during reconnection");
       (err as Error & { code?: string }).code = "SSH_RECONNECTING";
       throw err;
     }

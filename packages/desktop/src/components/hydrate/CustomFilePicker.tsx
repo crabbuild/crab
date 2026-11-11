@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { HydrationEntry } from "../../ipc";
 import { formatBytes } from "../../lib/format";
@@ -15,8 +15,7 @@ interface Props {
  * search filter and a row cap so very large repos don't render
  * thousands of DOM nodes at once.
  *
- * Selection is stored as a flat path list — the resolver maps it to
- * literal patterns when the action runs.
+ * Selection is stored by path and resolves against the current inventory.
  */
 export function CustomFilePicker({ entries, selected, onChange }: Props) {
   const [query, setQuery] = useState("");
@@ -37,17 +36,6 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
   const visible = truncated ? filtered.slice(0, MAX_ROWS) : filtered;
 
   const selSet = useMemo(() => new Set(selected), [selected]);
-
-  // Drop selections that no longer correspond to a tracked file
-  // (e.g. user untracked something between renders). Keeps the
-  // "X selected · Y bytes" header honest. Done as an effect so we
-  // don't fight the controlled-input invariant during render.
-  useEffect(() => {
-    const validPaths = new Set(entries.map((e) => e.path));
-    const pruned = selected.filter((p) => validPaths.has(p));
-    if (pruned.length !== selected.length) onChange(pruned);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries]);
 
   const visiblePaths = useMemo(() => visible.map((e) => e.path), [visible]);
   const allVisibleSelected =
@@ -70,10 +58,16 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
     onChange(Array.from(next));
   }
 
-  const selectedBytes = useMemo(() => {
-    let sum = 0;
-    for (const e of entries) if (selSet.has(e.path)) sum += e.logical;
-    return sum;
+  const selection = useMemo(() => {
+    let count = 0;
+    let bytes = 0;
+    for (const entry of entries) {
+      if (selSet.has(entry.path)) {
+        count += 1;
+        bytes += entry.logical;
+      }
+    }
+    return { count, bytes };
   }, [entries, selSet]);
 
   return (
@@ -125,7 +119,7 @@ export function CustomFilePicker({ entries, selected, onChange }: Props) {
 
       <div className="flex items-center justify-between text-[11px] text-gx-muted">
         <span>
-          {selSet.size.toLocaleString()} selected · {formatBytes(selectedBytes)} ·{" "}
+          {selection.count.toLocaleString()} selected · {formatBytes(selection.bytes)} ·{" "}
           {filtered.length.toLocaleString()} match{filtered.length === 1 ? "" : "es"}
         </span>
         <div className="flex items-center gap-2">

@@ -348,49 +348,6 @@ export class EventNormalizer {
 // ─── ManifestAdapter ─────────────────────────────────────────────────────────
 
 /**
- * Builds an expanded PATH environment for spawning agent binaries.
- * On macOS, GUI apps don't inherit the user's shell PATH, so we add
- * common tool directories where agent CLIs are typically installed.
- */
-function getExpandedEnv(extraEnv?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { ...process.env as Record<string, string>, ...extraEnv };
-  const home = os.homedir();
-  const extraPaths = [
-    path.join(home, ".cargo", "bin"),
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    path.join(home, ".local", "bin"),
-    path.join(home, ".npm-global", "bin"),
-    path.join(home, ".nvm", "versions", "node"),
-    "/opt/homebrew/opt/node/bin",
-  ];
-
-  const nvmDir = process.env.NVM_DIR ?? path.join(home, ".nvm");
-  try {
-    if (fs.existsSync(nvmDir)) {
-      const versions = path.join(nvmDir, "versions", "node");
-      if (fs.existsSync(versions)) {
-        const dirs = fs.readdirSync(versions) as string[];
-        const sorted = dirs.sort().reverse();
-        if (sorted.length > 0) {
-          extraPaths.push(path.join(versions, sorted[0], "bin"));
-        }
-      }
-    }
-  } catch {
-    // nvm detection is best-effort
-  }
-
-  const currentPath = env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
-  const pathSet = new Set(currentPath.split(":"));
-  for (const p of extraPaths) {
-    if (!pathSet.has(p)) pathSet.add(p);
-  }
-  env.PATH = [...pathSet].join(":");
-  return env;
-}
-
-/**
  * A generic adapter that interprets an AgentManifest at runtime,
  * eliminating the need to write TypeScript adapter code for each new agent.
  *
@@ -413,11 +370,12 @@ export class ManifestAdapter extends AgentAdapter {
     this.normalizer = new EventNormalizer(manifest.eventMapping);
   }
 
-  spawn(prompt: string, cwd: string, env?: Record<string, string>): void {
+  async spawn(prompt: string, cwd: string, env?: Record<string, string>): Promise<void> {
     const resolvedArgs = this.manifest.args.map(arg =>
       arg.replace("{prompt}", prompt).replace("{cwd}", cwd)
     );
-    const mergedEnv = { ...this.manifest.env, ...env };
+    const mergedEnv = await this.prepareEnvironment({ ...this.manifest.env, ...env });
+    if (!mergedEnv) return;
 
     switch (this.manifest.interactionModel) {
       case "stdio":
@@ -452,7 +410,7 @@ export class ManifestAdapter extends AgentAdapter {
   private spawnStdio(args: string[], cwd: string, env: Record<string, string>): void {
     this.proc = spawn(this.binary, args, {
       cwd,
-      env: getExpandedEnv(env),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -492,7 +450,7 @@ export class ManifestAdapter extends AgentAdapter {
   private spawnText(args: string[], cwd: string, env: Record<string, string>): void {
     this.proc = spawn(this.binary, args, {
       cwd,
-      env: getExpandedEnv(env),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -523,7 +481,7 @@ export class ManifestAdapter extends AgentAdapter {
   private spawnHttp(args: string[], cwd: string, env: Record<string, string>, prompt: string): void {
     this.proc = spawn(this.binary, args, {
       cwd,
-      env: getExpandedEnv(env),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -613,7 +571,7 @@ export class ManifestAdapter extends AgentAdapter {
 
     this.proc = spawn(this.binary, args, {
       cwd,
-      env: getExpandedEnv(fileEnv),
+      env: fileEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
 

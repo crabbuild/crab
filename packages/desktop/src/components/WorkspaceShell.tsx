@@ -116,9 +116,8 @@ export function WorkspaceShell({
     }
   }, [open, sidebarVisible]);
 
-  // Cmd-B / Ctrl-B toggle, matching VS Code's accelerator. Scoped
-  // to window so it works regardless of focus. Cmd+, jumps to
-  // Settings, also VS Code-native.
+  // Cmd-B / Ctrl-B toggles this workspace's sidebar. The app shell owns
+  // Settings navigation so it also works before any repository is open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (
@@ -129,20 +128,11 @@ export function WorkspaceShell({
       ) {
         e.preventDefault();
         setOpen((o) => !o);
-      } else if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.altKey &&
-        !e.shiftKey &&
-        e.key === ","
-      ) {
-        e.preventDefault();
-        onViewChange("settings");
-        setOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onViewChange]);
+  }, []);
 
   const onActivitySelect = (view: SidebarView) => {
     const selectedGroup = navigationGroup(view);

@@ -55,12 +55,50 @@ Right-click a file or folder for context menu actions:
 - **New file** — create a new file in the selected directory
 - **New folder** — create a new folder
 
+### Tracking and selected commits
+
+In **Large Files → Track & Stage**, select files and review their paths. Tracking
+configures repository-local Crab and Git LFS drivers with the bundled Crab
+executable. New paths get exact Crab tracking rules; existing Crab/LFS routing
+stays in effect. Spaces, literal glob characters and extensionless filenames
+stay within the selection. Each staged blob must be the expected pointer before
+the wizard reports success. Failed files show their errors and can be retried;
+you can also continue with the successful files.
+
+The wizard commits the current working contents of those successful files plus
+any pending `.gitattributes` file. This includes edits made after tracking and
+user edits within that attributes file. Other staged files remain staged. The
+Crab staging section uses the same selected-path commit operation; the ordinary
+Changes composer continues to commit the staged index. Push is a separate step.
+
+In **Git → Changes**, whole-file Stage and Unstage operate on exact paths,
+including Crab and Git LFS binary files. Inline text hunk actions remain
+separate. Track & Stage includes file recipes with no new local segment chunks;
+reused content can still have a changed pointer to commit. Refreshing the file
+list retains the commit message. The Large Files toolbar's **Push** opens the
+same destination and result panel as the staging section.
+
 ### Hydration Decorations
 
-Files tracked by Crab show their hydration state:
+Crab and Git LFS files show their working-tree state:
 - 🟢 **Hydrated** — full content available locally
 - 🔵 **Pointer** — only the pointer blob is present (content in cloud)
-- 🟡 **Partial** — some chunks cached, not fully hydrated
+- 🟡 **Partial** — working content differs in size from the expected file
+
+Use **Large Files → Hydrate** to select files by folder, type, pattern, profile,
+or individual path. Desktop verifies each selected Crab or Git LFS file before
+placing it on disk. For a missing file whose parent directory exists, it uses
+the resolved index pointer. Activity shows written bytes and how many files
+have reached disk. If the operation stops partway, the completed files stay
+available and you can retry the remaining selection.
+
+**Dehydrate** checks each working file and its saved content against the
+committed pointer before freeing disk space. Commit staged pointer changes
+first. Modified files, unavailable content and files protected by the `always`
+prefetch profile stay hydrated, and Desktop shows the reason. Activity reports
+the bytes checked and files dehydrated. The same selection can then hydrate the
+files again. Both directions are available over SSH when its agent supports
+them. Explorer file/subtree actions and Storage Map use the same native owner.
 
 ### Live Refresh
 
@@ -86,16 +124,32 @@ Opening a file in the editor pane triggers format-specific rendering:
 | File Type | Preview |
 |-----------|---------|
 | Text/Code | Syntax-highlighted editor (Monaco) |
-| Parquet | Schema + sample rows table |
+| Parquet | Schema, sample rows and SQL |
 | SafeTensors | Tensor names, shapes, dtypes |
 | Jupyter (.ipynb) | Rendered notebook cells |
 | Images | Inline image preview |
-| SQLite/DuckDB | Table list + query interface |
+| SQLite | Table list, sample rows and SQL |
 | ZIP archives | File listing with sizes |
 | NumPy (.npy/.npz) | Array shape and dtype |
 
 Previews are generated server-side by the Rust agent, keeping the
 renderer lightweight even for multi-gigabyte files.
+
+Choose **SQL** in the preview to query the file at the selected revision. In
+Parquet SQL, `data` is the selected file. In SQLite SQL, use the database's table
+names. Drafts, results and recent queries stay with the file and revision while
+the repository remains open. **Cancel query** stops native work and waits for
+cleanup. Results indicate when they reach the row or byte limit.
+
+SQLite Browse and SQL include committed write-ahead log (WAL) changes. An active
+working-tree database uses a read-only SQLite transaction. SQLite may maintain
+its shared-memory index while the reader is open. For an index or committed
+selection, keep the database and its `-wal` companion in that same selection to
+include commits that have yet to be checkpointed.
+
+Parquet and captured SQLite copies use private temporary storage. The combined
+input snapshot is limited to 8 GiB. Source capture and execution share a
+60-second budget.
 
 ## Drag and Drop
 

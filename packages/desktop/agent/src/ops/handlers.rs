@@ -265,7 +265,7 @@ pub async fn worktree_cherry_pick(work_dir: &Path, p: WorktreeCherryPickParams) 
 
 /// Run a git command and return (exit_code, stdout, stderr).
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<(i32, String, String)> {
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -488,7 +488,8 @@ fn detect_conflicts_sync(_op_id: Uuid, ops_dir: &Path) -> Result<Vec<String>> {
         .and_then(|p| p.parent()) // work_dir
         .ok_or_else(|| AgentError::Other("cannot resolve work_dir from ops_dir".to_owned()))?;
 
-    let output = std::process::Command::new("git")
+    let output = crate::shellout::git_command()?
+        .into_std()
         .args(["status", "--porcelain"])
         .current_dir(work_dir)
         .output()

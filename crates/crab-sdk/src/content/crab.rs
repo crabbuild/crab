@@ -42,6 +42,7 @@ impl ContentCache {
 
 pub(crate) struct ContentRuntime {
     pub(crate) layout: StoreLayout<Store>,
+    pub(crate) lfs_proofs: crab_lfs::LfsReadCache,
     cache: Option<ContentCache>,
     namespace: String,
     catalog: Arc<crab_metadata::capsule_protocol::PointerCatalogLookup>,
@@ -49,6 +50,41 @@ pub(crate) struct ContentRuntime {
 }
 
 impl ContentRuntime {
+    pub(crate) async fn chunks(
+        &self,
+        pointer: &crab_types::pointer::Pointer,
+        start: u64,
+        limit: u32,
+        operation: &OperationContext,
+    ) -> Result<crab_types::file_layout::ChunkPage> {
+        let hydrator = self
+            .hydrator()
+            .await?
+            .clone()
+            .with_read_admission(operation.read_admission());
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            StoreLayout::new(
+                self.layout
+                    .store()
+                    .clone()
+                    .with_read_admission(operation.read_admission()),
+                self.layout.repo_prefix().to_owned(),
+            ),
+            Arc::clone(&self.catalog),
+        );
+        let result = hydrator
+            .chunk_page(
+                pointer,
+                Some(&lookup),
+                start,
+                limit,
+                operation.cancellation(),
+            )
+            .await
+            .map_err(read_error);
+        finish_lookup(lookup, result).await.map(Into::into)
+    }
+
     pub(crate) fn new(
         cache: Option<ContentCache>,
         layout: StoreLayout<Store>,
@@ -60,6 +96,7 @@ impl ContentRuntime {
         hash.update(layout.repo_prefix().as_bytes());
         Self {
             layout,
+            lfs_proofs: crab_lfs::LfsReadCache::default(),
             cache,
             catalog: Arc::new(catalog),
             namespace: hash.finalize().to_hex().to_string(),
@@ -179,18 +216,7 @@ impl ContentRuntime {
         // The lookup belongs to this reconstruction, including fallback from a
         // stale hint. Finish it before finalizing the Git operation.
         let result = result.map(|_| ()).map_err(read_error);
-        let close = lookup.close().await.map_err(|source| {
-            Error::with_source(
-                metadata_kind(&source),
-                "content lookup close failed",
-                source,
-            )
-        });
-        let result = match (result, close) {
-            (Ok(()), result) => result,
-            (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(close)) => Err(error.with_cleanup(close)),
-        };
+        let result = finish_lookup(lookup, result).await;
         result.map_err(|error| {
             if error.kind() == ErrorKind::Cancelled && error.cleanup_error().is_none() {
                 crab_remote_git::Error::Cancelled
@@ -198,6 +224,26 @@ impl ContentRuntime {
                 consumer_error(error)
             }
         })
+    }
+}
+
+// Each operation owns a separate lookup over the same immutable catalog.
+// Finish that lookup before the Git owner finalizes, including both failures.
+async fn finish_lookup<T>(
+    lookup: crab_metadata::file_index_lookup::SharedFileIndexLookup,
+    result: Result<T>,
+) -> Result<T> {
+    let close = lookup.close().await.map_err(|source| {
+        Error::with_source(
+            metadata_kind(&source),
+            "content lookup close failed",
+            source,
+        )
+    });
+    match (result, close) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(close)) => Err(error.with_cleanup(close)),
     }
 }
 

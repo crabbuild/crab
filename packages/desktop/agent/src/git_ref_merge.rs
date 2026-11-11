@@ -302,7 +302,7 @@ async fn ref_transaction(
     run_hooks: bool,
     validate: impl AsyncFnOnce() -> Result<bool>,
 ) -> Result<bool> {
-    let mut command = crate::shellout::git_command();
+    let mut command = crate::shellout::git_command()?;
     if !run_hooks {
         command.args([
             "-c",
@@ -429,7 +429,7 @@ impl GitOutput {
 }
 
 async fn git_output(work_dir: &Path, args: &[&str]) -> Result<GitOutput> {
-    let mut command = crate::shellout::git_command();
+    let mut command = crate::shellout::git_command()?;
     let output = crate::shellout::output(command.args(args).current_dir(work_dir)).await?;
 
     Ok(GitOutput {

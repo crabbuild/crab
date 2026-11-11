@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -64,10 +64,9 @@ export function StagedSection({
   const [commitMessage, setCommitMessage] = useState("");
   const [commitError, setCommitError] = useState<string | null>(null);
 
-  const files = useMemo(
-    () => (stats?.files ?? []).filter((f) => f.total_chunks > 0),
-    [stats?.files],
-  );
+  // A staged recipe can reuse every payload chunk already in storage.
+  // Zero local chunks still requires committing its changed Git pointer.
+  const files = stats?.files ?? [];
 
   // Don't render at all when the agent hasn't responded yet AND we have
   // no cached files — avoids a flash of "empty" before the first fetch.

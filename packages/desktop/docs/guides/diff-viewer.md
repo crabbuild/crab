@@ -111,12 +111,22 @@ For Jupyter notebook files (`.ipynb`), a specialized diff view shows:
 - Code cells with syntax highlighting
 - Output changes (images, tables)
 
-### Crab Pointer Diffs
+### Large-file comparisons
 
-When a Crab pointer file changes, the diff shows:
-- Pointer metadata comparison (hash, size)
-- Chunk-level diff (which chunks changed)
-- Option to view the full content diff (requires hydration)
+Standalone file diffs offer **HEAD → Working tree**, **Index → Working tree**,
+and **HEAD → Index**. Commit details compare the selected commit with its parent;
+a root commit uses an empty baseline.
+
+Crab comparisons show captured identities/sizes and actual ordered chunk reuse,
+added/removed chunk bytes, and changed byte ranges on both sides. Range tables
+page through every reported range. A same-size edit can have nonzero changed
+chunk bytes. Xorb repacking does not turn reused chunks into new content.
+
+LFS comparisons show SHA-256 identities and sizes. They do not report Crab chunk
+reuse or transfer cost. Matching identities show **Content unchanged** without
+fetching a chunk recipe. Missing recipes, integrity failures and finite resource
+limits remain visible errors. Ordinary empty Git patches show **No changes**.
+These comparisons do not hydrate or replace working files.
 
 ## Hunk Staging Controls
 

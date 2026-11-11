@@ -10,7 +10,7 @@ import {
   parseGitStatus,
   type RepoStatus,
 } from "../electron/workspace-poller";
-import { parseRepoId } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
 
 const execFile = promisify(execFileCb);
 

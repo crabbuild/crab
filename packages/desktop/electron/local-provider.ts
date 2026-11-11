@@ -3,7 +3,7 @@
  * user's local filesystem.
  *
  * Delegates RPC calls to the local crab-desktop-agent (stdio JSON-RPC),
- * file watching to Node's built-in recursive `fs.watch`, and file
+ * file change monitoring to the shared metadata-worker owner, and file
  * system mutations to `node:fs`. This is the default provider when no
  * SSH prefix is present in the repo_id.
  */
@@ -12,170 +12,72 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { shell } from "electron";
 
+import { fullCapabilities, noCapabilities, type CapabilitySet, type RepositoryRuntime } from "./repo-capabilities";
 import { Agent } from "./agent";
+import { captureFilePublications, writeTextAtomically } from "./file-write";
+import { readTextFile } from "./file-read";
+import { localFileWatchers } from "./local-file-watcher";
 import {
   BaseProvider,
-  CapabilitySet,
   FsCreateResult,
   FsDeleteResult,
   FsReadResult,
   FsRenameResult,
   FsWriteResult,
-  fullCapabilities,
 } from "./repo-provider";
-
-// ── File Watcher Internals ───────────────────────────────────────
-//
-// Mirrors the debounce logic from file-watcher.ts: 350ms debounce
-// with a 2s max-wait ceiling. Uses Node's built-in `fs.watch` with
-// `recursive: true` (FSEvents on macOS, ReadDirectoryChangesW on
-// Windows).
-
-const DEBOUNCE_MS = 350;
-const MAX_WAIT_MS = 2000;
-
-/** Directories to ignore — changes here don't affect git status. */
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git/objects",
-  ".git/logs",
-  ".git/hooks",
-  ".git/info",
-  ".crab/staging",
-  ".crab/cache",
-  ".crab/slatedb",
-  "target",
-  "__pycache__",
-  ".venv",
-  ".venv-crab-py",
-  "dist",
-  "build",
-  ".next",
-  ".turbo",
-]);
-
-/** Files inside .git that signal meaningful state changes. */
-const GIT_INTERESTING = new Set([
-  "index",
-  "HEAD",
-  "MERGE_HEAD",
-  "REBASE_HEAD",
-  "CHERRY_PICK_HEAD",
-  "FETCH_HEAD",
-  "ORIG_HEAD",
-  "COMMIT_EDITMSG",
-]);
-
-interface WatcherState {
-  watcher: fs.FSWatcher;
-  debounceTimer: ReturnType<typeof setTimeout> | null;
-  firstEventAt: number | null;
-}
-
-function shouldIgnore(relativePath: string): boolean {
-  const normalized = relativePath.replace(/\\/g, "/");
-
-  for (const dir of IGNORED_DIRS) {
-    if (normalized.startsWith(dir + "/") || normalized === dir) {
-      return true;
-    }
-  }
-
-  if (normalized.startsWith(".git/")) {
-    const basename = path.basename(normalized);
-    if (normalized.startsWith(".git/refs/")) return false;
-    return !GIT_INTERESTING.has(basename);
-  }
-
-  return false;
-}
-
-// ── LocalProvider ────────────────────────────────────────────────
 
 export class LocalProvider extends BaseProvider {
   private agent: Agent;
-  private watchers = new Map<string, WatcherState>();
+  private watchers = new Map<string, Promise<() => Promise<void>>>();
+  private readonly onRuntime = (event: RepositoryRuntime) => {
+    const nativeSessionId = this.agent.repositorySession(event.repoId);
+    void this.capabilities(event.repoId).then(capabilities => {
+      if (this.agent.repositorySession(event.repoId) !== nativeSessionId) return;
+      this.emit("capabilities-changed", { type: "capabilities-changed", repoId: event.repoId, nativeSessionId, capabilities, error: event.error });
+    });
+  };
 
   constructor(agent: Agent) {
     super();
     this.agent = agent;
+    agent.on("repository-runtime", this.onRuntime);
   }
 
   // ── Core RPC dispatch ──────────────────────────────────────────
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
-    return this.agent.request(method, params);
+    const root = method === "git_status_porcelain" ? this.agent.worktreePath(String(params.repo_id)) : undefined;
+    if (!root) return this.agent.request(method, params);
+    const physical = await fs.promises.realpath(root);
+    const snapshot = captureFilePublications(physical);
+    let owned: Set<string>;
+    let result: { entries: Array<{ path: string; code: string }> };
+    try { result = await this.agent.request(method, params) as typeof result; }
+    finally { owned = await snapshot.finish(); }
+    return { ...result, entries: result.entries.filter(entry => entry.code !== "??" || !owned.has(path.join(physical, entry.path))) };
   }
+
+  nativeSession(repoId: string): string | null { return this.agent.repositorySession(repoId); }
 
   // ── File Watching ──────────────────────────────────────────────
 
   async watchStart(repoId: string): Promise<void> {
-    // repoId for local repos is the absolute filesystem path.
-    if (this.watchers.has(repoId)) return;
-
-    try {
-      const stat = fs.statSync(repoId);
-      if (!stat.isDirectory()) return;
-    } catch {
-      return;
+    let pending = this.watchers.get(repoId);
+    if (!pending) {
+      const root = this.agent.worktreePath(repoId);
+      if (!root) throw new Error("The repository has no physical working tree.");
+      pending = localFileWatchers.watch(root, () => this.emit("fs/changed", { type: "fs/changed", repoPath: repoId }));
+      this.watchers.set(repoId, pending);
     }
-
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    let firstEventAt: number | null = null;
-
-    const emitChange = () => {
-      const state = this.watchers.get(repoId);
-      if (state) state.firstEventAt = null;
-      this.emit("fs/changed", {
-        type: "fs/changed" as const,
-        repoPath: repoId,
-      });
-    };
-
-    const watcher = fs.watch(
-      repoId,
-      { recursive: true, persistent: false },
-      (_eventType, filename) => {
-        if (!filename) return;
-        if (shouldIgnore(filename)) return;
-
-        const now = Date.now();
-        const state = this.watchers.get(repoId);
-        if (!state) return;
-
-        if (state.firstEventAt === null) state.firstEventAt = now;
-
-        // Max-wait ceiling: fire at least once every MAX_WAIT_MS.
-        if (now - state.firstEventAt >= MAX_WAIT_MS) {
-          if (state.debounceTimer) clearTimeout(state.debounceTimer);
-          state.debounceTimer = null;
-          emitChange();
-          return;
-        }
-
-        // Debounce: reset timer on each event.
-        if (state.debounceTimer) clearTimeout(state.debounceTimer);
-        state.debounceTimer = setTimeout(emitChange, DEBOUNCE_MS);
-      },
-    );
-
-    watcher.on("error", () => {
-      this.watchStop(repoId);
-    });
-
-    this.watchers.set(repoId, { watcher, debounceTimer, firstEventAt });
+    try { await pending; }
+    catch (error) { if (this.watchers.get(repoId) === pending) this.watchers.delete(repoId); throw error; }
   }
 
   async watchStop(repoId: string): Promise<void> {
-    const state = this.watchers.get(repoId);
-    if (!state) return;
-    if (state.debounceTimer) clearTimeout(state.debounceTimer);
-    try {
-      state.watcher.close();
-    } catch {
-      // Already closed.
-    }
+    const pending = this.watchers.get(repoId);
+    if (!pending) return;
     this.watchers.delete(repoId);
+    await (await pending)();
   }
 
   // ── File System Operations ─────────────────────────────────────
@@ -235,35 +137,35 @@ export class LocalProvider extends BaseProvider {
     fullPath: string,
     content: string,
   ): Promise<FsWriteResult> {
-    const dir = path.dirname(fullPath);
-    await fs.promises.mkdir(dir, { recursive: true });
-    await fs.promises.writeFile(fullPath, content, "utf8");
-    return { path: fullPath, written: content.length };
+    const written = await writeTextAtomically(fullPath, content);
+    return { path: fullPath, written };
   }
 
   async fsRead(
     _repoId: string,
     fullPath: string,
+    maxBytes?: number,
   ): Promise<FsReadResult> {
-    try {
-      const stat = await fs.promises.stat(fullPath);
-      if (stat.isDirectory()) {
-        return { exists: true, content: null };
-      }
-      const content = await fs.promises.readFile(fullPath, "utf8");
-      return { exists: true, content };
-    } catch (err: unknown) {
-      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
-        return { exists: false, content: null };
-      }
-      throw err;
-    }
+    return readTextFile(fullPath, maxBytes);
   }
 
   // ── Capabilities ───────────────────────────────────────────────
 
-  async capabilities(_repoId: string): Promise<CapabilitySet> {
-    const caps = fullCapabilities();
+  async capabilities(repoId: string): Promise<CapabilitySet> {
+    // Direct SDK snapshots have no physical workspace for Node filesystem or
+    // CLI mutation services, even while their native readers remain available.
+    if (!this.agent.hasWorktree(repoId)) return noCapabilities();
+    const available = this.agent.repositorySession(repoId) !== null;
+    const caps = available ? fullCapabilities() : noCapabilities();
+    // Node filesystem services survive sidecar exit, so editor buffers can
+    // still save. Native features wait for this repository's recovered session.
+    caps.canEdit = true;
+    caps.canWatch = true;
+    caps.canMaterialize = available && this.agent.supports("file_open", "file_materialize", "file_close");
+    caps.canHydrate = available && this.agent.supports("hydrate", "dehydrate");
+    caps.canHydrateSelection = available && this.agent.supports("files_materialize");
+    caps.canDehydrateSelection = available && this.agent.supports("files_dehydrate");
+    caps.canRestoreSelection = available && this.agent.supports("files_restore") && this.agent.supports("git_status_porcelain");
     // Electron's shell.trashItem works on macOS and Windows but is
     // unreliable on Linux (depends on desktop environment).
     caps.canTrash = process.platform !== "linux";
@@ -272,9 +174,8 @@ export class LocalProvider extends BaseProvider {
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
-  dispose(): void {
-    for (const repoId of [...this.watchers.keys()]) {
-      this.watchStop(repoId);
-    }
+  async dispose(): Promise<void> {
+    this.agent.removeListener("repository-runtime", this.onRuntime);
+    await Promise.all([...this.watchers.keys()].map(repoId => this.watchStop(repoId)));
   }
 }

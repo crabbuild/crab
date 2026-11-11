@@ -326,7 +326,7 @@ fn build_all_filter() -> Result<PatternFilter> {
 /// doesn't exist, or the `always` profile has no patterns. If loading
 /// or parsing the prefetch file fails, logs a warning and returns `None`
 /// so dehydrate is never blocked by a broken config.
-fn build_profile_protection(root: &Path, ignore_profiles: bool) -> Option<GlobSet> {
+pub(crate) fn build_profile_protection(root: &Path, ignore_profiles: bool) -> Option<GlobSet> {
     if ignore_profiles {
         debug!("--ignore-profiles set, skipping profile protection");
         return None;

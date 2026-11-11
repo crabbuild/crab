@@ -21,10 +21,11 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewSafetensors(repoId, path, { rev: rev ?? undefined })
+      .previewSafetensors(repoId, path, { rev: rev ?? undefined, signal: controller.signal })
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -33,6 +34,7 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [repoId, path, rev]);
 
@@ -71,7 +73,7 @@ export function SafetensorsView({ repoId, path, rev }: Props) {
         </div>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <Stat label="Parameters" value={humanParams(totalParams)} />
-          <Stat label="On disk" value={formatBytes(totalBytes)} />
+          <Stat label="Logical size" value={formatBytes(totalBytes)} />
           <Stat label="Tensors" value={data.tensor_count.toLocaleString()} />
           <Stat label="Header" value={formatBytes(data.header_bytes)} />
         </div>

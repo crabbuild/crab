@@ -90,8 +90,9 @@ The main process is the privileged coordinator. It owns:
 A single-binary async server (`crab-desktop-agent`) that processes
 RPC requests concurrently via tokio tasks. Design choices:
 
-- **Read verbs** (list, stat, read_text, pointer_info) call directly
-  into `crab-sdk` for zero-overhead access to the object store
+- **Read verbs** use pinned SDK snapshots for remote objects and captured local,
+  Git or native pointer sources for worktrees. Retained file handles keep chunk
+  pages on one source; each query owns cancellation and close drains its work.
 - **Write verbs** (clone, push, hydrate, dehydrate) shell out to the
   installed `crab` CLI so the desktop app inherits identical
   behavior to the command line
@@ -126,7 +127,7 @@ App Launch
 App Shutdown
     │
     ├─ Renderer persists state to localStorage
-    ├─ Main process stops file watchers
+    ├─ Main process stops local save admission and joins saves/cleanup and metadata-monitor workers
     ├─ Orchestrator persists task metadata
     ├─ Agent receives stdin EOF → graceful shutdown
     └─ Terminal pool kills all PTY processes
@@ -148,7 +149,7 @@ App Shutdown
 | Main | Electron 45 / Node 24 | Desktop shell |
 | Main | node-pty | Terminal PTY |
 | Main | better-sqlite3 | Local persistence |
-| Main | zeromq | Inter-process messaging |
+| Kernel runtime | Jupyter Client (user's Python) | Authenticated protocol, readiness and kernel process ownership |
 | Agent | Rust 2024 | Systems language |
 | Agent | tokio | Async runtime |
 | Agent | crab-sdk | Object store access |

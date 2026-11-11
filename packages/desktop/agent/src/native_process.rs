@@ -144,8 +144,12 @@ impl NativeProcesses {
             // The registry owns the worker past RPC cancellation. On hard
             // sidecar death, the worker observes its lifetime pipe closing.
             let stop = registry.stop_mutations.child_token();
+            // Task locals do not follow spawned futures. Preserve this request's
+            // selected store until its detached worker configures its children.
+            let connection = crate::storage_auth::current();
             registry.tasks.spawn(async move {
-                let _ = send.send(mutation::worker::run(stop, repo, params).await);
+                let work = mutation::worker::run(stop, repo, params);
+                let _ = send.send(crate::storage_auth::scope(connection, work).await);
             });
         }
         receive.await.map_err(io::Error::other)?

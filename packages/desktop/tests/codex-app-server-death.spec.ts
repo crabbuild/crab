@@ -13,6 +13,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PassThrough } from "node:stream";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -85,7 +87,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     adapter.onExit((code) => { exitCode = code; });
 
     // Spawn the adapter
-    adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
+    await adapter.spawn("Fix the bug in main.ts", "/tmp/test-project");
 
     // --- Complete the initialization handshake ---
 
@@ -184,7 +186,7 @@ describe("CodexAppServerAdapter — Process Death Mid-Turn", () => {
     adapter.onExit((code) => { exitCode = code; });
 
     // Spawn the adapter
-    adapter.spawn("Hello", "/tmp/test-project");
+    await adapter.spawn("Hello", "/tmp/test-project");
 
     // Complete initialization handshake
     let frames = await waitForFrames(stdin);

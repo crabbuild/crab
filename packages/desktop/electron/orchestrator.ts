@@ -37,7 +37,7 @@ import { editHunk as editWorkspaceHunk, type HunkPatch } from "./orchestrator-hu
 import { applyAll, cherryPickFiles, computeDiff, requireApplyWorkspace, type ApplyResult } from "./orchestrator-diff";
 import { createWorktree, currentBranch, removeWorktree, restoreWorktree, readTaskMetadata, migrateWorktreeMetadata } from "./orchestrator-worktree";
 import { WorkspaceScripts, WorkspaceScriptCancelledError, type WorkspaceScriptEvent, type WorkspaceScriptOptions, type ScriptResult } from "./orchestrator-scripts";
-import { parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 import type { RpcRouter } from "./ssh-router";
 import { sameRemoteEndpoint, type RemoteEndpoint } from "./ssh-types";
 import { confirmRemoteTaskOperation } from "./ssh-task-outcome";

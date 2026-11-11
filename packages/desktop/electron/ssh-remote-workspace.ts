@@ -797,6 +797,7 @@ export class RemoteWorkspaceManager extends EventEmitter {
     };
 
     const entries: RemoteDirEntry[] = (response.entries ?? []).map((entry) => ({
+      name: entry.path.split("/").pop() ?? entry.path,
       path: entry.path,
       kind: entry.kind as RemoteDirEntry["kind"],
       size: entry.size,

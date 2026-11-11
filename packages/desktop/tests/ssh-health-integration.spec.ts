@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Integration tests for the SSH health monitoring pipeline.
  *
@@ -32,6 +33,7 @@ class MockSshChannel extends EventEmitter {
 // ── Mock Session Manager ─────────────────────────────────────────
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockSshChannel } }>();
 
@@ -165,7 +167,7 @@ function setupPipeline(healthResponse: SystemHealth, profileId = "gpu-server") {
   sessionManager.setStatus(profileId, "connected");
   sessionManager.setConnection(profileId, channel);
 
-  const router = new RpcRouter(sessionManager as any, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   router.attachChannel(profileId, channel as any);
 
   // Auto-respond to system_health RPC requests on the channel

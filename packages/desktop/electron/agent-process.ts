@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import type { Readable, Writable } from "node:stream";
-import { getExpandedEnv } from "./orchestrator-adapters";
+import { PassThrough, Writable, type Readable } from "node:stream";
+import { getExpandedEnv } from "./env/userShellEnv";
 
 export interface AgentProcess extends EventEmitter {
   stdin: Writable | null;
@@ -21,43 +21,108 @@ export type AgentProcessFactory = (binary: string, args: string[], options: {
 }) => OwnedAgentProcess;
 
 class LocalAgentProcess extends EventEmitter implements AgentProcess {
-  readonly stdin: Writable | null;
-  readonly stdout: Readable | null;
-  readonly stderr: Readable | null;
+  readonly stdin: Writable;
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
   readonly closed: Promise<void>;
+  private child?: ChildProcess;
+  private group?: number;
   private groupGone = false;
+  private finished = false;
   private failure?: Error;
   private stdioExit?: [number | null, NodeJS.Signals | null];
+  private resolveClosed!: () => void;
   private rejectClosed!: (error: Error) => void;
+  private resolveStarted!: (child: ChildProcess) => void;
+  private rejectStarted!: (error: Error) => void;
 
-  constructor(child: ChildProcess, private readonly group: number) {
+  constructor(binary: string, args: string[], options: { cwd: string; env?: Record<string, string> }) {
     super();
-    this.stdin = child.stdin; this.stdout = child.stdout; this.stderr = child.stderr;
-    this.closed = new Promise<void>((resolve, reject) => {
-      this.rejectClosed = reject;
-      child.once("close", (code, signal) => { this.stdioExit = [code, signal]; });
-      child.once("exit", (code, signal) => {
-        this.emit("exit", code, signal);
-        // A dead provider cannot service the conversation. Retire its group
-        // even when inherited stdio prevents Node from emitting child.close.
-        void this.retire().then(() => {
-          if (this.failure) return;
-          this.emit("close", ...this.stdioExit!);
-          resolve();
-        }).catch(error => this.fail(error));
-      });
+    const started = new Promise<ChildProcess>((resolve, reject) => { this.resolveStarted = resolve; this.rejectStarted = reject; });
+    void started.catch(() => {});
+    // Keep write acknowledgement at the real pipe, including while discovery
+    // is pending. Buffered initialization must not claim delivery before spawn.
+    this.stdin = new Writable({
+      write: (bytes, encoding, done) => { void started.then(child => {
+        if (!child.stdin) { done(new Error("Agent stdin unavailable")); return; }
+        child.stdin.write(bytes, encoding, done);
+      }, done); },
+      final: done => { void started.then(child => {
+        if (!child.stdin) { done(); return; }
+        child.stdin.end(done);
+      }, done); },
     });
+    this.closed = new Promise<void>((resolve, reject) => { this.resolveClosed = resolve; this.rejectClosed = reject; });
     void this.closed.catch(() => {});
+    void this.start(binary, args, options).catch(reason => {
+      if (this.finished) return;
+      if (this.child) { this.kill("SIGKILL"); this.fail(reason); return; }
+      const error = reason instanceof Error ? reason : new Error("Agent environment preparation failed", { cause: reason });
+      this.stdin.destroy();
+      this.rejectStarted(error);
+      this.emit("error", error);
+      this.complete(1, null, true);
+    });
+  }
+
+  private async start(binary: string, args: string[], options: { cwd: string; env?: Record<string, string> }): Promise<void> {
+    const env = await getExpandedEnv(options.env);
+    if (this.finished) return;
+    const child = spawn(binary, args, { cwd: options.cwd, env, detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    this.child = child;
+    this.group = process.platform === "win32" ? undefined : child.pid;
+    child.stdout?.pipe(this.stdout);
+    child.stderr?.pipe(this.stderr);
+    // The owned writable forwards write failures through its callback. The
+    // raw pipe must not emit an unhandled second error during process exit.
+    child.stdin?.on("error", () => {});
     child.on("error", error => this.emit("error", error));
+    child.once("close", (code, signal) => {
+      this.stdioExit = [code, signal];
+      // Failed spawn has no group. Windows retains its existing leader-only
+      // boundary; descendant closure there still needs job-object ownership.
+      if (this.group === undefined) this.complete(code, signal);
+    });
+    child.once("exit", (code, signal) => {
+      this.emit("exit", code, signal);
+      if (this.group === undefined) return;
+      // A dead provider cannot service the conversation. Retire its group even
+      // when inherited stdio prevents Node from emitting child.close.
+      void this.retire().then(() => {
+        if (!this.failure && this.stdioExit) this.complete(...this.stdioExit);
+      }).catch(error => this.fail(error));
+    });
+    this.resolveStarted(child);
+  }
+
+  private complete(code: number | null, signal: NodeJS.Signals | null, emitExit = false): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.groupGone = true;
+    this.stdin.destroy();
+    for (const stream of [this.stdout, this.stderr]) if (!stream.writableEnded) stream.end();
+    if (emitExit) this.emit("exit", code, signal);
+    this.emit("close", code, signal);
+    this.resolveClosed();
   }
 
   kill(signal: NodeJS.Signals | number = "SIGTERM"): boolean {
-    if (this.groupGone) return false;
+    if (this.finished || this.groupGone) return false;
+    if (!this.child) {
+      if (signal === 0) return false;
+      // Discovery is shared; revoke only this launch and never spawn from its
+      // late reply. No physical process exists to wait for in this phase.
+      this.stdin.destroy();
+      this.rejectStarted(new Error("Agent process launch was cancelled"));
+      this.complete(null, typeof signal === "string" ? signal : null, true);
+      return true;
+    }
+    if (this.group === undefined) return this.child.kill(signal);
     try { return this.signal(signal); } catch (error: unknown) { this.fail(error); return false; }
   }
 
   private signal(signal: NodeJS.Signals | number): boolean {
-    if (this.groupGone) return false;
+    if (this.groupGone || this.group === undefined) return false;
     try { process.kill(-this.group, signal); return true; } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       this.groupGone = true;
@@ -98,15 +163,7 @@ class LocalAgentProcess extends EventEmitter implements AgentProcess {
 
 /** Expands local credentials/PATH only at the local process boundary. */
 export const spawnLocalAgent: AgentProcessFactory = (binary, args, options) => {
-  const env = getExpandedEnv(options.env);
-  const child = spawn(binary, args, { cwd: options.cwd, env, detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-  // Failed spawn has no PID/group. Windows still requires job-object ownership;
-  // its existing leader-only boundary does not establish descendant closure.
-  if (process.platform === "win32" || child.pid === undefined) {
-    const closed = new Promise<void>(resolve => { child.once("close", () => resolve()); });
-    return { process: child, closed };
-  }
-  const owner = new LocalAgentProcess(child, child.pid);
+  const owner = new LocalAgentProcess(binary, args, options);
   return { process: owner, closed: owner.closed };
 };
 

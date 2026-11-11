@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AddFlowFileProgress, AddFlowSummary, AddProgressEvent, onAgentEvent, rpc } from "../ipc";
+import { AddFlowFileProgress, AddFlowSummary, AddProgressEvent, onAgentEvent, rpc, call } from "../ipc";
 
 export type AddFlowState =
   | { phase: "idle" }
@@ -50,7 +50,7 @@ export function useCrabAddFlow() {
   const cancel = useCallback(() => {
     const id = jobId.current;
     jobId.current = null;
-    if (id) void window.crab.rpc("rpc/cancel", { op_id: id }).catch(() => undefined);
+    if (id) void call("rpc/cancel", { op_id: id }).catch(() => undefined);
     setState(previous => ({ phase: "error", message: "Cancelled by user", files: previous.phase === "idle" ? [] : previous.files }));
   }, []);
   const reset = useCallback(() => { jobId.current = null; setState({ phase: "idle" }); }, []);

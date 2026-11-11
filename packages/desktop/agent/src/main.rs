@@ -10,12 +10,12 @@
 
 mod audit;
 mod batch_git_status;
+mod cache;
 mod cancel;
-#[cfg(test)]
-mod cancel_test;
 mod conflicts;
 mod credential_store;
 mod experiments;
+mod file_publications;
 mod forge;
 #[cfg(unix)]
 mod git_active_apply;
@@ -99,6 +99,50 @@ pub enum AgentError {
     #[error("crab CLI exited with status {status}: {stderr}")]
     Cli { status: i32, stderr: String },
 
+    #[error("{message} ({code})")]
+    Command {
+        status: i32,
+        code: String,
+        message: String,
+        details: serde_json::Value,
+    },
+
+    #[error("native content read failed ({code}): {message}")]
+    NativeRead { code: String, message: String },
+
+    #[error(
+        "complete file {algorithm} hash differs from its captured pointer: expected {expected}, got {actual}"
+    )]
+    Integrity {
+        algorithm: &'static str,
+        expected: String,
+        actual: String,
+    },
+
+    #[error(transparent)]
+    Shared(Arc<AgentError>),
+
+    #[error("{operation}; cleanup failed: {cleanup}")]
+    Cleanup {
+        #[source]
+        operation: Box<AgentError>,
+        cleanup: Box<AgentError>,
+    },
+
+    #[error("published {written_bytes} bytes; cleanup failed: {cleanup}")]
+    PublicationCleanup {
+        written_bytes: u64,
+        #[source]
+        cleanup: Box<AgentError>,
+    },
+
+    #[error("{context}: {source}")]
+    Preview {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("unknown method: {0}")]
     UnknownMethod(String),
 
@@ -146,6 +190,28 @@ pub enum AgentError {
 
 pub type Result<T> = std::result::Result<T, AgentError>;
 
+impl AgentError {
+    pub(crate) fn published_bytes(&self) -> Option<u64> {
+        match self {
+            Self::PublicationCleanup { written_bytes, .. } => Some(*written_bytes),
+            Self::Shared(error) => error.published_bytes(),
+            Self::Cleanup { operation, .. } => operation.published_bytes(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::OpCancelled { .. } => true,
+            Self::Shared(error) => error.is_cancelled(),
+            Self::Sdk(error) => {
+                error.kind() == crab_sdk::ErrorKind::Cancelled && error.cleanup_error().is_none()
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Writer shared between the request dispatch loop and long-running
 /// streaming handlers. `Mutex` keeps NDJSON frames from interleaving
 /// when a `hydrate` notification races with a `list` response.
@@ -173,12 +239,18 @@ fn main() -> std::io::Result<()> {
 
 #[tokio::main]
 async fn run_sidecar() -> std::io::Result<()> {
-    let log_file = parse_log_file_arg();
+    if std::env::args().nth(1).as_deref() == Some("--sqlite-live-query") {
+        return preview::query::run_live_worker().await;
+    }
+    let log_file = path_argument("--log-file")?;
     init_tracing(log_file.as_deref());
     info!(
         version = env!("CARGO_PKG_VERSION"),
         "crab-desktop-agent starting"
     );
+    if let Err(error) = preview::query::reclaim_abandoned_snapshot() {
+        warn!(%error, "could not reclaim the database query snapshot");
+    }
 
     let stdin = tokio::io::stdin();
     let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::stdout()));
@@ -207,6 +279,35 @@ async fn run_sidecar() -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
+        let request: Request = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                warn!(%error, "malformed request");
+                if let Err(error) = write_frame(
+                    &stdout,
+                    &Response::error(None, RpcError::parse_error(&error)),
+                )
+                .await
+                {
+                    break Err(std::io::Error::other(error));
+                }
+                continue;
+            }
+        };
+        let operation = (request.method != "rpc/cancel")
+            .then(|| {
+                request
+                    .params
+                    .get("op_id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_owned)
+            })
+            .flatten();
+        if let Some(id) = &operation {
+            // Reserve before spawning: a following cancel frame can otherwise
+            // run before the handler subscribes and lose the signal entirely.
+            drop(state.cancel_registry.register(id.clone()).await);
+        }
         let out = Arc::clone(&stdout);
         let state = state.clone();
         while let Some(result) = requests.try_join_next() {
@@ -215,22 +316,25 @@ async fn run_sidecar() -> std::io::Result<()> {
             }
         }
         requests.spawn(async move {
-            if let Err(err) = dispatch(line, state, out).await {
+            if let Err(err) = dispatch(request, state, out, operation).await {
                 error!(%err, "failed to dispatch request");
             }
         });
     };
 
     info!("agent shutting down");
-    requests.abort_all();
+    // Stop child owners before joining dispatch; dropping request futures would
+    // skip their explicit captured-read and SDK cleanup.
+    state.cancel_registry.close().await;
+    state.stop_reads().await;
+    #[cfg(unix)]
+    if let Err(error) = state.native_processes.shutdown().await {
+        error!(%error, "native process shutdown failed");
+    }
     while let Some(result) = requests.join_next().await {
         if let Err(error) = result {
             error!(%error, "request task failed");
         }
-    }
-    #[cfg(unix)]
-    if let Err(error) = state.native_processes.shutdown().await {
-        error!(%error, "native process shutdown failed");
     }
     indexer_handle.shutdown().await;
     if let Err(error) = state.shutdown().await {
@@ -254,17 +358,12 @@ async fn shutdown_signal() -> std::io::Result<()> {
     std::future::pending().await
 }
 
-/// Parse one NDJSON line as a JSON-RPC request, dispatch it, and
-/// write back a single response frame.
-async fn dispatch(line: String, state: handlers::State, out: SharedStdout) -> Result<()> {
-    let req: Request = match serde_json::from_str(&line) {
-        Ok(req) => req,
-        Err(e) => {
-            warn!(error = %e, "malformed request");
-            write_frame(&out, &Response::error(None, RpcError::parse_error(&e))).await?;
-            return Ok(());
-        }
-    };
+async fn dispatch(
+    req: Request,
+    state: handlers::State,
+    out: SharedStdout,
+    operation: Option<String>,
+) -> Result<()> {
     debug!(method = %req.method, id = ?req.id, "dispatching");
     let id = req.id.clone();
     let method = req.method.clone();
@@ -280,6 +379,11 @@ async fn dispatch(line: String, state: handlers::State, out: SharedStdout) -> Re
             ResponseBody::err(RpcError::from(err))
         }
     };
+    // Release admission before publishing the reply; a peer may reuse an ID
+    // immediately after observing completion, while this writer is flushing.
+    if let Some(id) = operation {
+        state.cancel_registry.unregister(&id).await;
+    }
     write_frame(&out, &Response::new(id, body)).await?;
     Ok(())
 }
@@ -330,18 +434,23 @@ pub(crate) async fn emit_partial(
     .await
 }
 
-/// Parse `--log-file <path>` from process arguments. When present,
-/// the agent writes logs to a rolling file appender at the given path
-/// in addition to stderr.
-fn parse_log_file_arg() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut iter = args.iter();
+fn path_argument(flag: &str) -> std::io::Result<Option<String>> {
+    let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
-        if arg == "--log-file" {
-            return iter.next().cloned();
+        if arg == flag {
+            return iter
+                .next()
+                .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                .map(Some)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{flag} requires a path"),
+                    )
+                });
         }
     }
-    None
+    Ok(None)
 }
 
 fn init_tracing(log_file: Option<&str>) {

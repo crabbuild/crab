@@ -5,7 +5,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 
 /**
  * Persists a sub-view state value to the session's viewState map.
@@ -17,7 +17,7 @@ import { useSession, useActiveRepoPath } from "../lib/session-context";
  */
 export function useSessionSubView(key: string, value: string | null | undefined): void {
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
   const prevValueRef = useRef<string | null | undefined>(value);
 
   useEffect(() => {

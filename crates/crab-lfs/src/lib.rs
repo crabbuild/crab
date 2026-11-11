@@ -8,7 +8,9 @@
 pub mod local;
 pub mod lock;
 pub mod object_store;
+mod read_cache;
 mod read_session;
+pub use read_cache::LfsReadCache;
 pub use read_session::LfsReadSession;
 
 pub use lock::{LfsLockError, LfsLockManager, LockRecord, LockResult};

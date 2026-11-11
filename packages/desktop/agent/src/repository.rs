@@ -5,19 +5,28 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use crab_sdk::remote::{EntryMode, PageRequest, Snapshot};
+use crab_sdk::remote::{ContentKind, EntryMode, PageRequest, Snapshot};
 use crab_sdk::storage::{ContentCache, DirectStoreOptions};
 use crab_sdk::{Client, GitPath, OpenOptions, RepositoryLocator, Revision};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::{AgentError, Result, shellout};
+use crate::{AgentError, Result};
+
+mod content;
+mod files;
+mod native;
+pub(crate) use content::command::output as git_output;
+pub(crate) use content::diff;
+pub(crate) use content::{Dehydration, FileSource, MAX_COMPLETE_BYTES, ReadScope, Restoration};
 
 #[derive(Clone)]
 pub struct BrowseSession {
     pub url: String,
     pub work_dir: Option<PathBuf>,
     remote: Option<Arc<RemoteSession>>,
+    readers: native::NativeReads,
+    pub(crate) files: files::Files,
 }
 
 struct RemoteSession {
@@ -31,13 +40,6 @@ pub enum EntryKind {
     Submodule,
     File,
     Pointer,
-    Lfs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentKind {
-    Git,
-    Crab,
     Lfs,
 }
 
@@ -75,15 +77,18 @@ pub fn token_cache_directory() -> Result<PathBuf> {
 }
 
 impl BrowseSession {
-    pub async fn open_local(path: &Path) -> Result<Self> {
-        let root = git(path, &["rev-parse", "--show-toplevel"]).await?;
+    pub(crate) fn stop_reads(&self) {
+        self.readers.cancel();
+    }
+
+    pub(crate) fn read_scope(&self) -> ReadScope {
+        ReadScope::new(self.readers.read_token())
+    }
+
+    pub(crate) async fn open_local(path: &Path, scope: &ReadScope) -> Result<Self> {
+        let root = content::command::run(path, &["rev-parse", "--show-toplevel"], scope).await?;
         let root = PathBuf::from(String::from_utf8(root)?.trim());
-        let origin = crate::shellout::git_command()
-            .args(["remote", "get-url", "origin"])
-            .current_dir(&root)
-            .kill_on_drop(true)
-            .output()
-            .await?;
+        let origin = git_output(&root, &["remote", "get-url", "origin"], scope).await?;
         let url = if origin.status.success() {
             String::from_utf8(origin.stdout)?.trim().to_owned()
         } else {
@@ -93,10 +98,13 @@ impl BrowseSession {
             url,
             work_dir: Some(root),
             remote: None,
+            readers: native::NativeReads::default(),
+            files: files::Files::default(),
         })
     }
 
-    pub async fn open_url(url: &str) -> Result<Self> {
+    pub(crate) async fn open_url(url: &str, scope: &ReadScope) -> Result<Self> {
+        scope.check()?;
         let cache = token_cache_directory()?;
         let managed = crab_sdk::managed::Options::new(&cache)?;
         let content_root = crab_cache::default_cache_root().join("desktop-content");
@@ -168,28 +176,42 @@ impl BrowseSession {
             RepositoryLocator::new(&prefix)?
         };
         let client = builder.build()?;
-        let repository = match client.open(OpenOptions::remote(locator)).await {
+        let repository = match client
+            .open(OpenOptions::remote(locator))
+            .with_options(scope.options())
+            .await
+        {
             Ok(repository) => repository,
             Err(error) => {
-                let close = client.close().await;
-                if let Err(cleanup) = close {
-                    tracing::error!(%cleanup, "SDK cleanup failed after open");
-                }
-                return Err(error.into());
+                return match client.close().await {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(AgentError::Cleanup {
+                        operation: Box::new(error.into()),
+                        cleanup: Box::new(cleanup.into()),
+                    }),
+                };
             }
         };
         Ok(Self {
             url: url.to_owned(),
             work_dir: None,
             remote: Some(Arc::new(RemoteSession { client, repository })),
+            readers: native::NativeReads::default(),
+            files: files::Files::default(),
         })
     }
 
     pub async fn close(&self) -> Result<()> {
-        if let Some(remote) = &self.remote {
-            remote.client.close().await?;
-        }
-        Ok(())
+        // Materialization owns a repository scope even after its view closes.
+        // Stop it before waiting for file guards, otherwise close can deadlock.
+        self.stop_reads();
+        let files = self.files.close().await;
+        let native = self.readers.close().await;
+        let remote = match &self.remote {
+            Some(remote) => remote.client.close().await.map_err(AgentError::from),
+            None => Ok(()),
+        };
+        files.and(native).and(remote)
     }
 
     pub async fn refs(&self) -> Result<crab_sdk::remote::References> {
@@ -200,7 +222,11 @@ impl BrowseSession {
         Ok(remote.repository.remote()?.refs().await?)
     }
 
-    async fn snapshot(&self, rev: Option<&str>) -> Result<Snapshot> {
+    async fn snapshot(
+        &self,
+        rev: Option<&str>,
+        options: crab_sdk::operation::Options,
+    ) -> Result<Snapshot> {
         let remote = self
             .remote
             .as_ref()
@@ -208,7 +234,7 @@ impl BrowseSession {
         let repository = remote.repository.remote()?;
         let revision = match rev {
             None | Some("HEAD") => {
-                let refs = repository.refs().await?;
+                let refs = repository.refs().with_options(options.clone()).await?;
                 revision(
                     refs.head()
                         .ok_or_else(|| AgentError::Other("remote has no HEAD".into()))?,
@@ -216,7 +242,7 @@ impl BrowseSession {
             }
             Some(rev) => revision(rev)?,
         };
-        Ok(repository.snapshot(revision).await?)
+        Ok(repository.snapshot(revision).with_options(options).await?)
     }
 
     pub async fn list(&self, prefix: Option<&str>, rev: Option<&str>) -> Result<Vec<BrowserEntry>> {
@@ -302,7 +328,7 @@ impl BrowseSession {
                 }
             }
         } else {
-            let snapshot = self.snapshot(rev).await?;
+            let snapshot = self.snapshot(rev, Default::default()).await?;
             let mut pending = vec![GitPath::root()];
             while let Some(directory) = pending.pop() {
                 let mut cursor = None;
@@ -331,8 +357,18 @@ impl BrowseSession {
                                 pointer_hash: None,
                             });
                         } else {
-                            let blob = snapshot.read_blob(item.path).await?;
-                            entries.push(entry(name, blob.len() as u64, &blob));
+                            let metadata = snapshot.file_metadata(item.path.clone()).await?;
+                            if metadata.kind == ContentKind::Git {
+                                entries.push(BrowserEntry {
+                                    path: name.into(),
+                                    kind: EntryKind::File,
+                                    size: Some(metadata.size),
+                                    pointer_hash: None,
+                                });
+                            } else {
+                                let blob = snapshot.read_blob(item.path).await?;
+                                entries.push(entry(name, metadata.git_size, &blob));
+                            }
                         }
                     }
                     cursor = page.next;
@@ -347,6 +383,10 @@ impl BrowseSession {
 
     pub async fn stat(&self, path: &str, rev: Option<&str>) -> Result<FileMetadata> {
         GitPath::new(path.as_bytes().to_vec())?;
+        if self.remote.is_some() {
+            let snapshot = self.snapshot(rev, Default::default()).await?;
+            return remote_metadata(&snapshot, path, rev).await;
+        }
         let entry = self
             .list(Some(path), rev)
             .await?
@@ -371,85 +411,28 @@ impl BrowseSession {
             },
         })
     }
+}
 
-    pub async fn read(&self, path: &str, rev: Option<&str>) -> Result<Bytes> {
-        GitPath::new(path.as_bytes().to_vec())?;
-        if let Some(root) = &self.work_dir {
-            let stat = self.stat(path, rev).await?;
-            if rev.is_none() {
-                let bytes = tokio::fs::read(root.join(path)).await?;
-                if matches!(
-                    crab_git::classify(&bytes),
-                    crab_git::PointerKind::NotAPointer
-                ) {
-                    return Ok(bytes.into());
-                }
-            }
-            let object = format!("{}:{path}", rev.unwrap_or(""));
-            if stat.kind == ContentKind::Git {
-                return Ok(git(root, &["show", &object]).await?.into());
-            }
-            // Override both drivers so a previously installed v1 filter cannot service v2 reads.
-            let binary = shellout::resolve_crab_bin();
-            let quoted = format!(
-                "'{}' filter-process",
-                binary.to_string_lossy().replace('\'', "'\\''")
-            );
-            let crab = format!("filter.crab.process={quoted}");
-            let lfs = format!("filter.lfs.process={quoted}");
-            let bytes = git(
-                root,
-                &[
-                    "-c",
-                    &crab,
-                    "-c",
-                    &lfs,
-                    "cat-file",
-                    "--filters",
-                    &format!("--path={path}"),
-                    &object,
-                ],
-            )
-            .await?;
-            if !matches!(
-                crab_git::classify(&bytes),
-                crab_git::PointerKind::NotAPointer
-            ) {
-                return Err(AgentError::Other("Git returned an unresolved content pointer; configure Crab tracking before reading".into()));
-            }
-            return Ok(bytes.into());
-        }
-        let snapshot = self.snapshot(rev).await?;
-        let mut stream = snapshot
-            .open_file(GitPath::new(path.as_bytes().to_vec())?)
-            .await?;
-        let mut bytes = Vec::new();
-        loop {
-            match stream.next().await {
-                Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = stream.close().await;
-                    return Err(error.into());
-                }
-            }
-        }
-        stream.close().await?;
-        Ok(bytes.into())
-    }
-
-    pub async fn read_text(&self, path: &str, rev: Option<&str>) -> Result<String> {
-        Ok(String::from_utf8(self.read(path, rev).await?.to_vec())?)
-    }
-
-    pub async fn pointer_info(&self, path: &str, rev: Option<&str>) -> Result<Value> {
-        let metadata = self.stat(path, rev).await?;
-        Ok(
-            json!({ "size": metadata.size, "pointer_hash": metadata.pointer_hash,
-            "kind": format!("{:?}", metadata.kind).to_lowercase(),
-            "chunk_count": null, "xorb_count": null, "dedup_ratio": null }),
-        )
-    }
+async fn remote_metadata(
+    snapshot: &Snapshot,
+    path: &str,
+    rev: Option<&str>,
+) -> Result<FileMetadata> {
+    let path = GitPath::new(path.as_bytes().to_vec())?;
+    let metadata = snapshot.file_metadata(path.clone()).await?;
+    let pointer_hash = if metadata.kind == ContentKind::Git {
+        None
+    } else {
+        let pointer = snapshot.read_blob(path).await?;
+        entry(String::new(), metadata.git_size, &pointer).pointer_hash
+    };
+    Ok(FileMetadata {
+        size: metadata.size,
+        pointer_hash,
+        mtime: None,
+        rev: rev.map(str::to_owned),
+        kind: metadata.kind,
+    })
 }
 
 fn revision(value: &str) -> Result<Revision> {
@@ -487,7 +470,7 @@ fn entry(path: String, size: u64, blob: &[u8]) -> BrowserEntry {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = crate::shellout::git_command()
+    let output = crate::shellout::git_command()?
         .arg("--literal-pathspecs")
         .args(args)
         .current_dir(root)
@@ -505,7 +488,7 @@ async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
     use std::process::Stdio;
-    let mut child = crate::shellout::git_command()
+    let mut child = crate::shellout::git_command()?
         .args(["cat-file", mode])
         .current_dir(root)
         .stdin(Stdio::piped())
@@ -538,6 +521,15 @@ async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn text(session: &BrowseSession, path: &str, rev: Option<&str>) -> Result<String> {
+        let source = FileSource::capture(session, path, rev, session.read_scope()).await?;
+        let bytes = source.read_complete(1024).await;
+        let closed = source.close().await;
+        let bytes = bytes?;
+        closed?;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
 
     #[tokio::test]
     #[ignore = "requires an isolated CRAB_SDK_TEST_S3_BUCKET fixture"]
@@ -583,12 +575,14 @@ mod tests {
             let session = BrowseSession {
                 url: "test".into(),
                 work_dir: None,
+                readers: native::NativeReads::default(),
+                files: files::Files::default(),
                 remote: Some(Arc::new(RemoteSession {
                     client: client.clone(),
                     repository,
                 })),
             };
-            session.read_text("file.txt", None).await
+            text(&session, "file.txt", None).await
         }
         .await;
         client.close().await.unwrap();
@@ -619,14 +613,13 @@ mod tests {
         tokio::fs::write(root.join("file.txt"), b"edited\n")
             .await
             .unwrap();
-        let session = BrowseSession::open_local(root).await.unwrap();
+        let session = BrowseSession::open_local(root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         let result = async {
+            assert_eq!(text(&session, "file.txt", None).await.unwrap(), "edited\n");
             assert_eq!(
-                session.read_text("file.txt", None).await.unwrap(),
-                "edited\n"
-            );
-            assert_eq!(
-                session.read_text("file.txt", Some("HEAD")).await.unwrap(),
+                text(&session, "file.txt", Some("HEAD")).await.unwrap(),
                 "committed\n"
             );
             assert!(matches!(

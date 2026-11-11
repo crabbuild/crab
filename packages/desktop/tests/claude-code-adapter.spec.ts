@@ -5,6 +5,7 @@ import { AgentSubmissionUncertainError, type AgentEvent } from "../electron/orch
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn(), execFile: vi.fn(), execFileSync: vi.fn(() => "/usr/bin") }));
 import { spawn } from "node:child_process";
+import type { AgentProcessFactory } from "../electron/agent-process";
 import { ClaudeCodeAdapter } from "../electron/claude-code-adapter";
 
 interface Frame { type: string; request_id?: string; request?: Record<string, unknown>; message?: unknown; response?: unknown }
@@ -27,7 +28,11 @@ describe("Claude Code bidirectional transport", () => {
     vi.clearAllMocks();
     child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
-    adapter = new ClaudeCodeAdapter();
+    const factory: AgentProcessFactory = (binary, args, options) => {
+      const process = spawn(binary, args, { ...options, stdio: "pipe" });
+      return { process, closed: new Promise<void>(resolve => process.once("close", () => resolve())) };
+    };
+    adapter = new ClaudeCodeAdapter([], "claude", factory);
     events = [];
     adapter.onEvent(event => events.push(event));
   });

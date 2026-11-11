@@ -34,7 +34,11 @@ pub(in crate::native_process) async fn run(
     request.push(b'\n');
     // The worker must survive the RPC parent's death long enough to stop Git.
     // Isolate it from the SSH command group and leave its lifetime to the pipe.
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    // The private worker is a new process: its Git filters and hooks must use
+    // the selected store rather than inheriting the sidecar's ambient identity.
+    crate::storage_auth::configure_command(&mut command)?;
+    let mut child = command
         .arg(ARG)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -16,7 +16,6 @@ function createMockCapabilities(supported: boolean) {
   return {
     isSupported: vi.fn((_profileId: string, _feature: string) => supported),
     negotiate: vi.fn(),
-    getMinVersion: vi.fn(() => "1.3.0"),
     getCached: vi.fn(),
     clearCache: vi.fn(),
   };
@@ -56,7 +55,7 @@ describe("CompressedTransferHandler", () => {
 
       const handler = new CompressedTransferHandler(compressor, capabilities as any, router as any);
       expect(handler.isCompressionAvailable("profile-1")).toBe(true);
-      expect(capabilities.isSupported).toHaveBeenCalledWith("profile-1", "compression");
+      expect(capabilities.isSupported).toHaveBeenCalledWith("profile-1", "compress_file", "decompress_write");
     });
 
     it("returns false when agent does not support compression", () => {

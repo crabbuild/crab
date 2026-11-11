@@ -1,7 +1,7 @@
 //! Format-specific previewers.
 //!
-//! Each previewer takes a local file path (the working tree copy of a
-//! hydrated file) and returns a small JSON payload the renderer can
+//! Each previewer reads a captured, bounded file source and returns a
+//! small JSON payload the renderer can
 //! display directly. Parsing happens here rather than in the renderer
 //! because:
 //!
@@ -25,13 +25,30 @@ use serde_json::{Value, json};
 
 use crate::{AgentError, Result};
 
+fn parse_error(
+    context: impl Into<String>,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> AgentError {
+    AgentError::Preview {
+        context: context.into(),
+        source: Box::new(source),
+    }
+}
+
+pub(crate) mod query;
+mod reader;
+pub(crate) use reader::PreviewReader;
+
 /// Default row cap for a Parquet preview when the caller doesn't
 /// specify one. 200 rows is a balanced default: one row-group read,
 /// under 1 MB of JSON for most schemas.
 pub const DEFAULT_PARQUET_PREVIEW_ROWS: usize = 200;
 
 /// Parquet schema + row-group metadata + first `max_rows` rows as JSON.
-pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
+pub fn parquet(
+    file: impl parquet::file::reader::ChunkReader + 'static,
+    max_rows: usize,
+) -> Result<Value> {
     use arrow::json::{WriterBuilder, writer::JsonArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -39,9 +56,8 @@ pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
     // request can't blow the agent's heap.
     let max_rows = max_rows.clamp(1, 5000);
 
-    let file = File::open(path).map_err(AgentError::Io)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| AgentError::Other(format!("parquet: {e}")))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| parse_error("parquet", e))?;
 
     // Capture metadata into owned values up front. The builder is
     // consumed by `.build()` below, but we want schema info and
@@ -93,7 +109,7 @@ pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
         .with_batch_size(max_rows)
         .with_limit(max_rows)
         .build()
-        .map_err(|e| AgentError::Other(format!("parquet reader: {e}")))?;
+        .map_err(|e| parse_error("parquet reader", e))?;
 
     let mut rows_json: Vec<u8> = Vec::new();
     {
@@ -101,16 +117,14 @@ pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
             .with_explicit_nulls(true)
             .build::<_, JsonArray>(&mut rows_json);
         for batch in reader {
-            let batch = batch.map_err(|e| AgentError::Other(format!("parquet batch: {e}")))?;
+            let batch = batch.map_err(|e| parse_error("parquet batch", e))?;
             writer
                 .write(&batch)
-                .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+                .map_err(|e| parse_error("arrow→json", e))?;
         }
-        writer
-            .finish()
-            .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+        writer.finish().map_err(|e| parse_error("arrow→json", e))?;
     }
-    let rows: Value = serde_json::from_slice(&rows_json).unwrap_or(json!([]));
+    let rows: Value = serde_json::from_slice(&rows_json)?;
 
     Ok(json!({
         "kind": "parquet",
@@ -127,113 +141,84 @@ pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
 
 /// Safetensors header: the file starts with an 8-byte little-endian
 /// `u64` giving the JSON header byte length, followed by the header
-/// JSON, followed by raw tensor bytes. We read header-only; tensor
-/// data stays untouched.
-pub fn safetensors(path: &Path) -> Result<Value> {
-    let mut file = File::open(path).map_err(AgentError::Io)?;
+/// JSON, followed by raw tensor bytes. Parse the header without
+/// materializing tensors; the range reader may prefetch nearby bytes.
+pub fn safetensors(mut file: impl Read + Seek) -> Result<Value> {
+    let file_size = file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(0))?;
     let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf).map_err(AgentError::Io)?;
-    let header_len = u64::from_le_bytes(len_buf) as usize;
-
-    if header_len > 100 * 1024 * 1024 {
-        return Err(AgentError::Other(format!(
-            "safetensors header reports {header_len} bytes, refusing (sanity cap 100 MiB)"
-        )));
+    file.read_exact(&mut len_buf)?;
+    let header_len = usize::try_from(u64::from_le_bytes(len_buf)).map_err(std::io::Error::other)?;
+    if header_len > 100_000_000 || header_len as u64 > file_size.saturating_sub(8) {
+        return Err(AgentError::Other(
+            "safetensors header exceeds file size or 100 MB limit".into(),
+        ));
     }
-
-    let mut header_bytes = vec![0u8; header_len];
-    file.read_exact(&mut header_bytes).map_err(AgentError::Io)?;
-
-    let header: Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| AgentError::Other(format!("safetensors header JSON: {e}")))?;
-
-    // Derive a summary: tensor count, total param count, total bytes,
-    // dtype histogram. Handles the common HF weights layout where the
-    // header is an object of `{name: {dtype, shape, data_offsets}}`
-    // plus an optional `__metadata__` sibling.
-    let mut tensor_count = 0u64;
-    let mut total_params: u128 = 0;
-    let mut total_bytes: u128 = 0;
-    let mut dtype_hist: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    let mut tensors: Vec<Value> = Vec::new();
-
-    if let Some(obj) = header.as_object() {
-        for (name, tensor) in obj {
-            if name == "__metadata__" {
-                continue;
-            }
-            let Some(tobj) = tensor.as_object() else {
-                continue;
-            };
-            let dtype = tobj.get("dtype").and_then(Value::as_str).unwrap_or("");
-            let shape: Vec<i64> = tobj
-                .get("shape")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_i64).collect())
-                .unwrap_or_default();
-            let offsets: Option<(u64, u64)> = tobj
-                .get("data_offsets")
-                .and_then(Value::as_array)
-                .and_then(|a| {
-                    let s = a.first()?.as_u64()?;
-                    let e = a.get(1)?.as_u64()?;
-                    Some((s, e))
-                });
-            let nbytes = offsets.map(|(s, e)| e.saturating_sub(s)).unwrap_or(0);
-            let numel: i64 = if shape.is_empty() {
-                1
-            } else {
-                shape.iter().product()
-            };
-
-            tensor_count += 1;
-            total_params += u128::from(numel.max(0) as u64);
-            total_bytes += u128::from(nbytes);
-            *dtype_hist.entry(dtype.to_owned()).or_insert(0) += 1;
-
-            tensors.push(json!({
-                "name": name,
-                "dtype": dtype,
-                "shape": shape,
-                "nbytes": nbytes,
-            }));
+    let mut bytes = vec![0; header_len];
+    file.read_exact(&mut bytes)?;
+    let header: safetensors::tensor::Metadata = serde_json::from_slice(&bytes)?;
+    let mut entries: Vec<_> = header.tensors().into_iter().collect();
+    entries.sort_by_key(|(_, info)| info.data_offsets);
+    let mut end = 0usize;
+    let mut total_params = 0u128;
+    let mut dtype_hist = std::collections::BTreeMap::<String, u64>::new();
+    let mut tensors = Vec::with_capacity(entries.len());
+    for (name, tensor) in entries {
+        let (start, next) = tensor.data_offsets;
+        let count = tensor
+            .shape
+            .iter()
+            .copied()
+            .try_fold(1usize, usize::checked_mul)
+            .ok_or_else(|| AgentError::Other("safetensors tensor shape overflows".into()))?;
+        let size = count
+            .checked_mul(tensor.dtype.size())
+            .ok_or_else(|| AgentError::Other("safetensors tensor size overflows".into()))?;
+        // Metadata::deserialize does not call the dependency's private validate.
+        // Apply its contiguous-offset/shape contract without reading tensor bodies.
+        if start != end || next.checked_sub(start) != Some(size) {
+            return Err(AgentError::Other(
+                "safetensors tensor offsets disagree with its shape or dtype".into(),
+            ));
         }
+        end = next;
+        total_params += count as u128;
+        let dtype = format!("{:?}", tensor.dtype);
+        *dtype_hist.entry(dtype.clone()).or_default() += 1;
+        tensors.push(json!({"name": name, "dtype": dtype, "shape": tensor.shape, "nbytes": size}));
     }
-
-    tensors.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["name"].as_str().unwrap_or(""))
-    });
-
-    let metadata = header
-        .as_object()
-        .and_then(|o| o.get("__metadata__"))
-        .cloned()
-        .unwrap_or(Value::Null);
-
+    let data_size = file_size - 8 - header_len as u64;
+    if end as u64 != data_size {
+        return Err(AgentError::Other(
+            "safetensors tensor offsets do not cover the file payload".into(),
+        ));
+    }
+    tensors.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!({
         "kind": "safetensors",
         "header_bytes": header_len,
-        "tensor_count": tensor_count,
+        "tensor_count": tensors.len(),
         "total_params": total_params.to_string(),
-        "total_bytes": total_bytes.to_string(),
+        "total_bytes": data_size.to_string(),
         "dtype_histogram": dtype_hist,
-        "metadata": metadata,
+        "metadata": header.metadata(),
         "tensors": tensors,
     }))
 }
 
 /// NumPy `.npy` header parse.
-pub fn numpy_npy(path: &Path) -> Result<Value> {
-    let file = File::open(path).map_err(AgentError::Io)?;
-    let npy = npyz::NpyFile::new(file).map_err(|e| AgentError::Other(format!("npy: {e}")))?;
+pub fn numpy_npy(file: impl Read) -> Result<Value> {
+    let npy = npyz::NpyFile::new(file).map_err(|e| parse_error("npy", e))?;
     let header = npy.header();
     let shape: Vec<u64> = header.shape().to_vec();
     let dtype = format!("{:?}", header.dtype());
     let order = format!("{:?}", header.order());
-    let total_len: u128 = shape.iter().map(|&d| u128::from(d)).product();
+    let total_len = shape
+        .iter()
+        .try_fold(1u128, |total, &dimension| {
+            total.checked_mul(u128::from(dimension))
+        })
+        .ok_or_else(|| AgentError::Other("NumPy shape overflows its element count".into()))?;
 
     Ok(json!({
         "kind": "npy",
@@ -247,24 +232,20 @@ pub fn numpy_npy(path: &Path) -> Result<Value> {
 /// NumPy `.npz` archive: list the contained `.npy` members with
 /// shapes/dtypes. Implemented by treating the `.npz` as a zip archive
 /// and parsing each member's npy header.
-pub fn numpy_npz(path: &Path) -> Result<Value> {
-    let file = File::open(path).map_err(AgentError::Io)?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("npz zip: {e}")))?;
+pub fn numpy_npz(file: impl Read + Seek) -> Result<Value> {
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| parse_error("npz zip", e))?;
     let mut members: Vec<Value> = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| AgentError::Other(format!("npz member {i}: {e}")))?;
+            .map_err(|e| parse_error(format!("npz member {i}"), e))?;
         let name = entry.name().to_owned();
         if !name.ends_with(".npy") {
             continue;
         }
         let size = entry.size();
-        // Slurp the (typically small) member to parse its npy header.
-        let mut buf = Vec::with_capacity(size as usize);
-        entry.read_to_end(&mut buf).map_err(AgentError::Io)?;
-        match npyz::NpyFile::new(std::io::Cursor::new(buf)) {
+        // Array payloads can be multi-GiB; only the member header is needed.
+        match npyz::NpyFile::new(&mut entry) {
             Ok(npy) => {
                 let header = npy.header();
                 members.push(json!({
@@ -289,17 +270,15 @@ pub fn numpy_npz(path: &Path) -> Result<Value> {
 }
 
 /// Zip archive member listing.
-pub fn zip_archive(path: &Path) -> Result<Value> {
-    let file = File::open(path).map_err(AgentError::Io)?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("zip: {e}")))?;
+pub fn zip_archive(file: impl Read + Seek) -> Result<Value> {
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| parse_error("zip", e))?;
     let mut members: Vec<Value> = Vec::with_capacity(archive.len());
     let mut total_compressed: u128 = 0;
     let mut total_uncompressed: u128 = 0;
     for i in 0..archive.len() {
         let entry = archive
             .by_index(i)
-            .map_err(|e| AgentError::Other(format!("zip member {i}: {e}")))?;
+            .map_err(|e| parse_error(format!("zip member {i}"), e))?;
         total_compressed += u128::from(entry.compressed_size());
         total_uncompressed += u128::from(entry.size());
         members.push(json!({
@@ -324,13 +303,12 @@ pub fn zip_archive(path: &Path) -> Result<Value> {
 /// Notebooks are JSON files with a well-known schema (nbformat 4+).
 /// We parse the top-level structure and extract summary metadata
 /// without loading cell contents into memory beyond what serde needs.
-pub fn notebook_meta(path: &Path) -> Result<Value> {
-    let mut file = File::open(path).map_err(AgentError::Io)?;
+pub fn notebook_meta(mut file: impl Read) -> Result<Value> {
     let mut contents = String::new();
     file.read_to_string(&mut contents).map_err(AgentError::Io)?;
 
-    let nb: Value = serde_json::from_str(&contents)
-        .map_err(|e| AgentError::Other(format!("notebook JSON parse: {e}")))?;
+    let nb: Value =
+        serde_json::from_str(&contents).map_err(|e| parse_error("notebook JSON parse", e))?;
 
     let obj = nb
         .as_object()
@@ -415,15 +393,15 @@ pub fn notebook_meta(path: &Path) -> Result<Value> {
 ///
 /// For older pickle-only `.pt` files that aren't valid ZIPs, we fall
 /// back to reporting basic file info.
-pub fn torch_checkpoint(path: &Path) -> Result<Value> {
-    let file_size = std::fs::metadata(path).map_err(AgentError::Io)?.len();
-
-    let file = File::open(path).map_err(AgentError::Io)?;
+pub fn torch_checkpoint(mut file: impl Read + Seek) -> Result<Value> {
+    let file_size = file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(0))?;
 
     // Try to open as a ZIP archive. PyTorch's `torch.save` uses
     // zipfile by default since PyTorch 1.6+.
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
+        Err(zip::result::ZipError::Io(error)) => return Err(error.into()),
         Err(_) => {
             // Not a valid ZIP — likely an older pickle-only format.
             return Ok(json!({
@@ -492,3 +470,6 @@ pub fn peek(path: &Path, n: usize) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(0)).ok();
     Ok(buf)
 }
+
+#[cfg(test)]
+mod tests;

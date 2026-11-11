@@ -52,6 +52,114 @@ async fn segmented() -> (tempfile::TempDir, Vec<u8>, MerkleHash) {
 }
 
 #[tokio::test]
+async fn metadata_pages_preserve_repeated_occurrences_across_recipe_boundaries() {
+    let (root, content, hash) = segmented().await;
+    let reader = StagedFileReader::open(root.path().to_owned(), hash, content.len() as u64)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = content
+        .chunks_exact(52)
+        .enumerate()
+        .map(|(index, bytes)| {
+            (
+                index as u64 * 52,
+                52,
+                crab_xet::hash::compute_data_hash(bytes),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reader.chunk_count(), expected.len() as u64);
+    for (start, limit) in [
+        (0, 512),
+        (17, 512),
+        (510, 8),
+        (511, 1),
+        (512, 512),
+        (599, 3),
+        (600, 1),
+    ] {
+        let chunks = reader.chunk_page(start, limit).unwrap();
+        let actual = chunks
+            .iter()
+            .map(|chunk| (chunk.offset, chunk.len, chunk.chunk_hash))
+            .collect::<Vec<_>>();
+        let end = (start as usize + limit as usize).min(expected.len());
+        assert_eq!(
+            actual,
+            expected[start as usize..end],
+            "cursor {start}, limit {limit}"
+        );
+    }
+    for (start, limit) in [(601, 1), (0, 0), (0, 513)] {
+        assert!(reader.chunk_page(start, limit).is_err());
+    }
+}
+
+#[tokio::test]
+async fn writer_admission_cancels_without_blocking_the_runtime() {
+    let (root, content, hash) = segmented().await;
+    let writer = StagingArea::open(root.path().to_owned()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let read = StagedFileReader::open_with_cancel(
+        root.path().to_owned(),
+        hash,
+        content.len() as u64,
+        &cancel,
+    );
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        result = &mut read => panic!("reader bypassed exclusive writer: {}", result.is_ok()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+    }
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(StagingError::Cancelled)));
+    writer.close().await.unwrap();
+    StagingArea::open(root.path().to_owned())
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn writer_release_admits_the_complete_retained_recipe() {
+    let (root, content, hash) = segmented().await;
+    let writer = StagingArea::open(root.path().to_owned()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let read = StagedFileReader::open_with_cancel(
+        root.path().to_owned(),
+        hash,
+        content.len() as u64,
+        &cancel,
+    );
+    tokio::pin!(read);
+    tokio::select! {
+        biased;
+        result = &mut read => panic!("reader bypassed exclusive writer: {}", result.is_ok()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+    }
+    writer.close().await.unwrap();
+    let reader = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reader
+            .read_range(0..content.len() as u64, &cancel)
+            .await
+            .unwrap(),
+        content
+    );
+}
+
+#[tokio::test]
 async fn lifetime_pin_preserves_reads_through_retirement_and_exclusive_maintenance() {
     for prepared_source in [false, true] {
         let (root, content, hash) = if prepared_source {

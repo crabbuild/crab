@@ -43,13 +43,14 @@ pub async fn detect_provider(work_dir: &Path) -> DetectedProvider {
     }
 
     // 2. Read the remote origin URL.
-    let remote_url = match read_remote_origin_url(work_dir).await {
-        Some(url) => url,
-        None => {
-            debug!("no remote.origin.url found; forge features disabled");
-            return None;
-        }
-    };
+    let remote_url =
+        match read_remote_origin_url(work_dir, &crate::repository::ReadScope::default()).await {
+            Some(url) => url,
+            None => {
+                debug!("no remote.origin.url found; forge features disabled");
+                return None;
+            }
+        };
 
     // 3. Detect from URL patterns.
     detect_from_url(&remote_url).await
@@ -61,8 +62,11 @@ pub async fn detect_provider(work_dir: &Path) -> DetectedProvider {
 /// remote URL. Returns `None` when the provider cannot be determined.
 /// Persists the result to `.crab/desktop/settings.json` so that
 /// subsequent RPC calls (e.g. `forge_list_prs`) can read it back.
-pub async fn detect_and_persist(work_dir: &Path) -> Option<DetectedForge> {
-    let remote_url = read_remote_origin_url(work_dir).await?;
+pub async fn detect_and_persist(
+    work_dir: &Path,
+    scope: &crate::repository::ReadScope,
+) -> Option<DetectedForge> {
+    let remote_url = read_remote_origin_url(work_dir, scope).await?;
 
     // Check manual override first.
     let provider = if let Some(p) = read_manual_override(work_dir) {
@@ -81,6 +85,7 @@ pub async fn detect_and_persist(work_dir: &Path) -> Option<DetectedForge> {
     };
 
     // Persist to settings so forge RPCs can read it back.
+    scope.check().ok()?;
     persist_forge_settings(work_dir, &result);
 
     Some(result)
@@ -358,13 +363,14 @@ fn read_manual_override(work_dir: &Path) -> Option<Provider> {
 }
 
 /// Read `remote.origin.url` from the git config of the repository.
-async fn read_remote_origin_url(work_dir: &Path) -> Option<String> {
-    let output = crate::shellout::git_command()
-        .args(["config", "--get", "remote.origin.url"])
-        .current_dir(work_dir)
-        .output()
-        .await
-        .ok()?;
+async fn read_remote_origin_url(
+    work_dir: &Path,
+    scope: &crate::repository::ReadScope,
+) -> Option<String> {
+    let output =
+        crate::repository::git_output(work_dir, &["config", "--get", "remote.origin.url"], scope)
+            .await
+            .ok()?;
 
     if !output.status.success() {
         return None;

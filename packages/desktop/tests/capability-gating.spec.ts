@@ -10,8 +10,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { RemoteProvider } from "../electron/remote-provider";
-import { fullCapabilities, noCapabilities, type CapabilitySet } from "../electron/repo-provider";
+import { fullCapabilities, noCapabilities, type CapabilitySet } from "../electron/repo-capabilities";
 
 // ── Mock factories (same patterns as remote-provider-polling.spec.ts) ──
 
@@ -53,20 +54,22 @@ function makeMockCapabilityNegotiator(options?: {
 
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return opts.fileWatching;
-      if (feature === "search") return opts.search;
-      if (feature === "buildRun") return opts.buildRun;
+      if (feature === "watch_start") return opts.fileWatching;
+      if (feature === "git_grep") return opts.search;
+      if (feature === "exec_command") return opts.buildRun;
       return false;
     }),
     getCached: vi.fn().mockReturnValue(
       opts.hasCached
         ? {
-            version: "1.2.0",
-            features: {
-              fileWatching: opts.fileWatching,
-              search: opts.search,
-              buildRun: opts.buildRun,
-            },
+            protocol: 1,
+            version: "2.0.0-alpha.1",
+            methods: [
+              "capabilities",
+              ...(opts.fileWatching ? ["watch_start", "watch_stop"] : []),
+              ...(opts.search ? ["git_grep"] : []),
+              ...(opts.buildRun ? ["exec_command"] : []),
+            ],
           }
         : null,
     ),
@@ -75,10 +78,11 @@ function makeMockCapabilityNegotiator(options?: {
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
-  });
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
+  }));
 }
 
 // ── LocalProvider capabilities tests ─────────────────────────────
@@ -210,18 +214,60 @@ describe("RemoteProvider capabilities", () => {
     expect(caps.canTrash).toBe(false);
   });
 
-  it("returns conservative defaults when capabilities not yet negotiated", async () => {
+  it("returns no capabilities without a negotiated native agent", async () => {
     mockCapNegotiator.getCached.mockReturnValue(null);
+    mockSessionManager.agentSession.mockReturnValue(null);
 
     const caps = await provider.capabilities(REPO_ID);
 
     expect(caps).toEqual(noCapabilities());
   });
 
+  it("revokes watched repository capabilities when the native agent exits", async () => {
+    await provider.watchStart(REPO_ID);
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockCapNegotiator.getCached.mockReturnValue(null);
+    mockSessionManager.agentSession.mockReturnValue(null);
+    mockSessionManager.emit("ssh:agent-unavailable", { profileId: "profile-1" });
+    await Promise.resolve();
+    expect(changes).toEqual([{ type: "capabilities-changed", repoId: REPO_ID, capabilities: noCapabilities(), nativeSessionId: null, error: "Desktop services are unavailable." }]);
+  });
+
   it("returns noCapabilities for non-remote repo_id", async () => {
     const caps = await provider.capabilities("/local/path/to/repo");
 
     expect(caps).toEqual(noCapabilities());
+  });
+
+  it("a failed repository remains unavailable while its sibling uses the live agent", async () => {
+    const sibling = "ssh://profile-1/home/user/healthy";
+    mockSessionManager.repositoryRuntime.mockImplementation((_profileId, repoId) => ({ repoId, sessionId: repoId === REPO_ID ? null : "ssh:2", error: repoId === REPO_ID ? "Repository directory was removed" : undefined }));
+    expect(await provider.capabilities(REPO_ID)).toEqual(noCapabilities());
+    expect((await provider.capabilities(sibling)).canEdit).toBe(true);
+    await expect(provider.request("list", { repo_id: REPO_ID })).rejects.toThrow("Repository directory was removed");
+    expect(mockRouter.route).not.toHaveBeenCalled();
+    await provider.request("list", { repo_id: sibling });
+    expect(mockRouter.route).toHaveBeenCalledWith(sibling, "list", { repo_id: sibling });
+  });
+
+  it("publishes repository retry outcomes even when the view is not watching", async () => {
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockSessionManager.repositoryRuntime.mockReturnValue({ repoId: REPO_ID, sessionId: null, error: "Repository directory was removed" });
+    mockSessionManager.emit("ssh:repository-runtime", { profileId: "profile-1", repoId: REPO_ID, sessionId: null });
+    await Promise.resolve();
+    expect(changes).toEqual([expect.objectContaining({ repoId: REPO_ID, nativeSessionId: null, capabilities: noCapabilities(), error: "Repository directory was removed" })]);
+  });
+
+  it("revokes capabilities for an opened repository without a mounted watcher", async () => {
+    await provider.capabilities(REPO_ID);
+    const changes: unknown[] = [];
+    provider.on("capabilities-changed", event => changes.push(event));
+    mockSessionManager.getStatus.mockReturnValue("disconnected");
+    mockSessionManager.emit("ssh:status-changed", { profileId: "profile-1", status: "disconnected" });
+    await Promise.resolve();
+    expect(changes).toEqual([expect.objectContaining({ repoId: REPO_ID, nativeSessionId: null, capabilities: noCapabilities() })]);
   });
 });
 

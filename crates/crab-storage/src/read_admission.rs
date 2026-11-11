@@ -185,7 +185,7 @@ impl ObjectStore for AdmittedStore {
             biased;
             () = cancellation.cancelled() => return Err(cancelled()),
             result = crate::transport_read_admission::scope(
-                context,
+                context.clone(),
                 self.inner.get_opts(path, options),
             ) => result.map_err(terminal_read_error)?,
         };
@@ -215,19 +215,22 @@ impl ObjectStore for AdmittedStore {
         let extensions = result.extensions.clone();
         let path = path.clone();
         let stream = futures_util::stream::try_unfold(
-            (result.into_stream(), expected, path, cancellation),
-            |(mut stream, remaining, path, cancellation)| async move {
+            (result.into_stream(), expected, path, cancellation, context),
+            |(mut stream, remaining, path, cancellation, context)| async move {
                 let entry = tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return Err(cancelled()),
-                    entry = stream.next() => entry,
+                    // Providers may resume a failed body with another HTTP GET.
+                    // Keep its original policies active during payload polling;
+                    // otherwise that retry escapes admission after headers return.
+                    entry = crate::transport_read_admission::scope(context.clone(), stream.next()) => entry,
                 };
                 match entry {
                     Some(Ok(bytes)) => {
                         let left = remaining
                             .checked_sub(bytes.len() as u64)
                             .ok_or_else(|| corrupt(&path))?;
-                        Ok(Some((bytes, (stream, left, path, cancellation))))
+                        Ok(Some((bytes, (stream, left, path, cancellation, context))))
                     }
                     Some(Err(error)) => Err(terminal_read_error(error)),
                     None if remaining == 0 => Ok(None),

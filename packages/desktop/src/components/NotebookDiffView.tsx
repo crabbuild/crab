@@ -1,428 +1,155 @@
-import { useEffect, useState, useCallback, createContext, useContext } from "react";
-import {
-  BookOpen,
-  ChevronDown,
-  ChevronRight,
-  Code2,
-  Eye,
-  EyeOff,
-  FileText,
-  Loader2,
-  Minus,
-  Plus,
-  RefreshCw,
-} from "lucide-react";
-import { OpenRepo } from "../state";
-import { rpc } from "../ipc";
-import { diffNotebooks, type CellDiff, type NotebookDiff } from "../lib/nbdiff";
+import { useEffect, useRef, useState } from "react";
+import { BookOpen, ChevronDown, ChevronRight, Eye, EyeOff, Loader2 } from "lucide-react";
+import type { NotebookComparison } from "../ipc";
+import NotebookWorker from "../lib/notebook-diff.worker?worker";
+import type { NotebookDiffReply, RenderNotebookDiff } from "../lib/notebook-diff.worker";
 
-interface Props {
-  repo: OpenRepo;
-  path: string;
-  base?: string | null;
-  head?: string | null;
-}
-
-/** Context for global output visibility override. */
-const OutputVisibilityContext = createContext<{
-  globalOverride: boolean | null;
-  setGlobalOverride: (v: boolean | null) => void;
-}>({ globalOverride: null, setGlobalOverride: () => {} });
-
-/**
- * Notebook-aware diff view that renders cell-level changes for
- * `.ipynb` files. Fetches both sides via `readText` at the given
- * revisions and runs `diffNotebooks` to produce a structured patch.
- */
-export function NotebookDiffView({ repo, path, base, head }: Props) {
-  const [diff, setDiff] = useState<NotebookDiff | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [globalOverride, setGlobalOverride] = useState<boolean | null>(null);
-
+/** Render a captured comparison, never separate live reads of the two sides. */
+export function NotebookDiffView({ data, onRefresh }: { data: NotebookComparison; onRefresh?: () => void }) {
+  const [result, setResult] = useState<NotebookDiffReply | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const cancel = useRef<(() => void) | null>(null);
   useEffect(() => {
-    let cancelled = false;
-    setDiff(null);
-    setErr(null);
-    setLoading(true);
-
-    const fetchAndDiff = async () => {
-      try {
-        // Fetch old side (base revision, defaults to HEAD)
-        const oldRev = base ?? "HEAD";
-        let oldJson = "";
-        try {
-          const oldRes = await rpc.readText(repo.repo_id, path, { rev: oldRev });
-          oldJson = oldRes.text ?? "";
-        } catch {
-          // File might not exist in the base revision (new file)
-          oldJson = "";
-        }
-
-        // Fetch new side (head revision, or working tree if null)
-        let newJson = "";
-        try {
-          const newRes = await rpc.readText(repo.repo_id, path, {
-            rev: head ?? undefined,
-          });
-          newJson = newRes.text ?? "";
-        } catch {
-          // File might have been deleted
-          newJson = "";
-        }
-
-        if (!cancelled) {
-          const result = diffNotebooks(oldJson, newJson);
-          setDiff(result);
-          setLoading(false);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setErr(e instanceof Error ? e.message : String(e));
-          setLoading(false);
-        }
-      }
-    };
-
-    void fetchAndDiff();
+    setResult(null);
+    let worker: Worker | null = null;
+    let active = true;
+    const stop = () => { active = false; worker?.terminate(); };
+    cancel.current = stop;
+    try {
+      worker = new NotebookWorker();
+      worker.onmessage = (event: MessageEvent<NotebookDiffReply>) => {
+        if (!active) return;
+        stop();
+        setResult(event.data);
+      };
+      worker.onerror = worker.onmessageerror = () => {
+        if (!active) return;
+        stop();
+        setResult({ error: "The notebook comparison worker failed." });
+      };
+      worker.postMessage({ before: data.before, after: data.after });
+    } catch (error) {
+      stop();
+      setResult({ error: error instanceof Error ? error.message : String(error) });
+    }
     return () => {
-      cancelled = true;
+      stop();
+      cancel.current = null;
     };
-  }, [repo.repo_id, path, base, head]);
+  }, [data, attempt]);
 
-  if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Diffing notebook cells…
+  if (!result) return <div className="flex items-center justify-center gap-2 p-6 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Comparing notebook cells…
+    <button className="btn" onClick={() => { cancel.current?.(); setResult({ error: "Notebook comparison cancelled." }); }}>Cancel notebook comparison</button>
+  </div>;
+  if ("error" in result) return <div role="alert" className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{result.error}
+    <button className="btn ml-2" onClick={onRefresh ?? (() => setAttempt(attempt + 1))}>Retry notebook comparison</button>
+  </div>;
+  const status = data.before === null ? data.after === null ? "File absent in both versions" : "File added" : data.after === null ? "File deleted" : null;
+  return <NotebookCells key={data.path} diff={result.diff} status={status} />;
+}
+
+const CELL_PAGE_SIZE = 25;
+
+function NotebookCells({ diff, status }: { diff: RenderNotebookDiff; status: string | null }) {
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const [showOutputs, setShowOutputs] = useState(false);
+  const [page, setPage] = useState(0);
+  const changed = diff.cells.filter((cell) => cell.op !== "unchanged");
+  const unchanged = diff.cells.length - changed.length;
+  const visible = showUnchanged ? diff.cells : changed;
+  const hasOutputs = diff.cells.some((entry) => entry.cell.outputs !== null || (entry.oldCell !== undefined && entry.oldCell.outputs !== null));
+  const pages = Math.max(1, Math.ceil(visible.length / CELL_PAGE_SIZE));
+  const pageIndex = Math.min(page, pages - 1);
+  return (
+    <section aria-label="Notebook comparison" className="flex flex-col gap-3 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-gx-muted">
+        <BookOpen size={13} />
+        {status && <span className="chip text-gx-text">{status}</span>}
+        <span>{changed.length} changed cell{changed.length === 1 ? "" : "s"}</span>
+        <span>• {unchanged} unchanged</span>
+        {unchanged > 0 && <button className="btn" aria-pressed={showUnchanged} onClick={() => { setShowUnchanged(!showUnchanged); setPage(0); }}>
+          {showUnchanged ? "Hide unchanged cells" : "Show unchanged cells"}
+        </button>}
+        {hasOutputs && <button className="btn ml-auto" onClick={() => setShowOutputs(!showOutputs)}>
+          {showOutputs ? <EyeOff size={12} /> : <Eye size={12} />}{showOutputs ? "Hide all outputs" : "Show all outputs"}
+        </button>}
       </div>
-    );
-  }
-
-  if (err) {
-    return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
-        {err}
-      </div>
-    );
-  }
-
-  if (!diff) return null;
-
-  const changedCells = diff.cells.filter((c) => c.op !== "unchanged");
-  const unchangedCount = diff.cells.length - changedCells.length;
-  const outputChangedCount = diff.cells.filter((c) => c.outputsChanged).length;
-
-  return (
-    <OutputVisibilityContext.Provider value={{ globalOverride, setGlobalOverride }}>
-      <div className="flex flex-col gap-2 p-3">
-        {/* Summary bar */}
-        <div className="flex items-center gap-2 text-xs text-gx-muted">
-          <BookOpen size={12} />
-          <span>
-            {diff.cells.length} cell{diff.cells.length !== 1 ? "s" : ""} total
-          </span>
-          {changedCells.length > 0 && (
-            <span className="text-gx-warning">
-              • {changedCells.length} changed
-            </span>
-          )}
-          {diff.metadataChanged && (
-            <span className="text-gx-accent">• metadata changed</span>
-          )}
-          {outputChangedCount > 0 && (
-            <GlobalOutputToggle outputChangedCount={outputChangedCount} />
-          )}
-        </div>
-
-        {/* Cell diffs */}
-        <CellDiffList cells={diff.cells} unchangedCount={unchangedCount} />
-      </div>
-    </OutputVisibilityContext.Provider>
+      {diff.metadataChanged && <details className="rounded border border-gx-border p-2">
+        <summary className="cursor-pointer text-gx-accent">Notebook metadata or format changed</summary>
+        <TextPair label="Notebook details" before={diff.beforeDetails} after={diff.afterDetails} />
+      </details>}
+      {visible.length === 0 && <p className="py-4 text-gx-muted">No cell changes.{unchanged > 0 ? " Unchanged cells are available above." : ""}</p>}
+      <Pager label="Notebook cells" page={pageIndex} pages={pages} setPage={setPage} />
+      {visible.slice(pageIndex * CELL_PAGE_SIZE, (pageIndex + 1) * CELL_PAGE_SIZE).map((entry, index) => (
+        <CellCard key={`${pageIndex}-${showUnchanged}-${index}`} entry={entry} showOutputs={showOutputs} />
+      ))}
+    </section>
   );
 }
 
-// --- Sub-components ---
-
-function GlobalOutputToggle({ outputChangedCount }: { outputChangedCount: number }) {
-  const { globalOverride, setGlobalOverride } = useContext(OutputVisibilityContext);
-
-  const handleClick = useCallback(() => {
-    if (globalOverride === true) {
-      // Currently showing all → hide all
-      setGlobalOverride(false);
-    } else {
-      // Currently hidden or mixed → show all
-      setGlobalOverride(true);
-    }
-  }, [globalOverride, setGlobalOverride]);
-
-  const isShowing = globalOverride === true;
-
-  return (
-    <button
-      type="button"
-      className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-gx-muted hover:bg-gx-surface hover:text-gx-text"
-      onClick={handleClick}
-      aria-label={isShowing ? "Hide all outputs" : "Show all outputs"}
-    >
-      {isShowing ? <EyeOff size={10} /> : <Eye size={10} />}
-      {isShowing ? "Hide all outputs" : `Show all outputs (${outputChangedCount})`}
-    </button>
-  );
-}
-
-function CellDiffList({
-  cells,
-  unchangedCount: _unchangedCount,
-}: {
-  cells: CellDiff[];
-  unchangedCount: number;
-}) {
-  // Group consecutive unchanged cells into collapsed sections
-  const groups: Array<CellDiff | { kind: "collapsed"; count: number }> = [];
-  let consecutiveUnchanged = 0;
-
-  for (const cell of cells) {
-    if (cell.op === "unchanged") {
-      consecutiveUnchanged++;
-    } else {
-      if (consecutiveUnchanged > 0) {
-        groups.push({ kind: "collapsed", count: consecutiveUnchanged });
-        consecutiveUnchanged = 0;
-      }
-      groups.push(cell);
-    }
-  }
-  if (consecutiveUnchanged > 0) {
-    groups.push({ kind: "collapsed", count: consecutiveUnchanged });
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      {groups.map((item, i) => {
-        if ("kind" in item && item.kind === "collapsed") {
-          return <CollapsedCells key={`collapsed-${i}`} count={item.count} />;
-        }
-        const cell = item as CellDiff;
-        return <CellDiffCard key={`${cell.op}-${cell.index}-${i}`} entry={cell} />;
-      })}
-    </div>
-  );
-}
-
-function CollapsedCells({ count }: { count: number }) {
-  return (
-    <div className="flex items-center justify-center gap-1.5 rounded border border-gx-border/50 bg-gx-surface/50 px-3 py-1.5 text-[11px] text-gx-muted">
-      <RefreshCw size={10} />
-      {count} unchanged cell{count !== 1 ? "s" : ""}
-    </div>
-  );
-}
-
-function CellDiffCard({ entry }: { entry: CellDiff }) {
+function CellCard({ entry, showOutputs }: { entry: RenderNotebookDiff["cells"][number]; showOutputs: boolean }) {
   const [expanded, setExpanded] = useState(true);
-
-  const borderColor = {
-    added: "border-gx-success/50",
-    removed: "border-gx-error/50",
-    modified: "border-gx-warn/50",
-    unchanged: "border-gx-border",
-  }[entry.op];
-
-  const bgColor = {
-    added: "bg-gx-success/5",
-    removed: "bg-gx-error/5",
-    modified: "bg-gx-warn/5",
-    unchanged: "bg-gx-surface",
-  }[entry.op];
-
-  const opIcon = {
-    added: <Plus size={11} className="text-gx-success" />,
-    removed: <Minus size={11} className="text-gx-error" />,
-    modified: <RefreshCw size={11} className="text-gx-warn" />,
-    unchanged: null,
-  }[entry.op];
-
-  const cellTypeIcon =
-    entry.cell.cell_type === "code" ? (
-      <Code2 size={11} />
-    ) : (
-      <FileText size={11} />
-    );
-
-  return (
-    <div className={`rounded border ${borderColor} ${bgColor} overflow-hidden`}>
-      {/* Header */}
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] hover:bg-gx-surface/50"
-        onClick={() => setExpanded(!expanded)}
-      >
-        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        {opIcon}
-        <span className="inline-flex items-center gap-1 rounded bg-gx-surface px-1.5 py-0.5 text-[10px] font-medium text-gx-muted">
-          {cellTypeIcon}
-          {entry.cell.cell_type}
-        </span>
-        <span className="text-gx-muted">
-          Cell {entry.index}
-        </span>
-        <span className="ml-auto text-[10px] font-medium uppercase text-gx-muted">
-          {entry.op}
-        </span>
-      </button>
-
-      {/* Body */}
-      {expanded && (
-        <div className="border-t border-gx-border/30 px-2.5 py-2">
-          {entry.op === "modified" && entry.sourceChanged && entry.oldCell ? (
-            <ModifiedCellSource oldCell={entry.oldCell} newCell={entry.cell} />
-          ) : (
-            <CellSource cell={entry.cell} />
-          )}
-
-          {/* Output diff toggle */}
-          {entry.outputsChanged && (
-            <OutputDiffSection entry={entry} />
-          )}
-        </div>
-      )}
-    </div>
-  );
+  return <article aria-label={`${entry.op} cell ${entry.index + 1}`} className="overflow-hidden rounded border border-gx-border bg-gx-surface">
+    <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-gx-bg-sub" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+      {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      <span className="chip">{entry.cell.cell_type}</span><span>Cell {entry.index + 1}</span><span className="ml-auto text-gx-muted">{entry.op}</span>
+    </button>
+    {expanded && <div className="flex flex-col gap-3 border-t border-gx-border p-3">
+      {entry.sourceChanged && entry.oldCell ? <TextPair label="Source" before={entry.oldCell.source} after={entry.cell.source} /> : <TextPage label="Source" text={entry.cell.source} />}
+      {entry.detailsChanged && <details>
+        <summary className="cursor-pointer text-gx-accent">Cell details changed</summary>
+        <TextPair label="Cell details" before={entry.oldCell?.details ?? (entry.op === "removed" ? entry.cell.details : null)} after={entry.op === "removed" ? null : entry.cell.details} />
+      </details>}
+      {(entry.outputsChanged || entry.cell.outputs !== null) && <Outputs key={String(showOutputs)} entry={entry} initiallyExpanded={showOutputs} />}
+    </div>}
+  </article>;
 }
 
-/** Maximum characters to show before truncating output content. */
-const OUTPUT_TRUNCATE_LIMIT = 500;
-
-function OutputDiffSection({ entry }: { entry: CellDiff }) {
-  const { globalOverride } = useContext(OutputVisibilityContext);
-  const [localExpanded, setLocalExpanded] = useState(false);
-
-  // Global override takes precedence over local state
-  const isExpanded = globalOverride !== null ? globalOverride : localExpanded;
-
-  return (
-    <div className="mt-2 border-t border-gx-border/20 pt-2">
-      <button
-        type="button"
-        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-gx-muted hover:bg-gx-surface/50 hover:text-gx-text"
-        onClick={() => setLocalExpanded(!isExpanded)}
-        aria-label={isExpanded ? "Hide output diff" : "Show output diff"}
-      >
-        {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <Eye size={10} className="text-gx-warn" />
-        <span className="font-medium">Outputs changed</span>
-      </button>
-
-      {isExpanded && (
-        <div className="mt-1.5 flex flex-col gap-1.5 pl-4">
-          {/* Old outputs (removed) */}
-          {entry.oldCell && entry.oldCell.outputs.length > 0 && (
-            <OutputBlock
-              label="removed"
-              outputs={entry.oldCell.outputs}
-              variant="removed"
-            />
-          )}
-          {/* New outputs (added) */}
-          {entry.cell.outputs.length > 0 && (
-            <OutputBlock
-              label="added"
-              outputs={entry.cell.outputs}
-              variant="added"
-            />
-          )}
-          {/* Handle case where outputs were cleared */}
-          {entry.cell.outputs.length === 0 && (!entry.oldCell || entry.oldCell.outputs.length === 0) && (
-            <span className="text-[11px] italic text-gx-muted">outputs cleared</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
+function Outputs({ entry, initiallyExpanded }: { entry: RenderNotebookDiff["cells"][number]; initiallyExpanded: boolean }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
+  return <div className="border-t border-gx-border pt-2">
+    <button className="inline-flex items-center gap-2 text-gx-accent" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+      {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {expanded ? "Hide output diff" : "Show output diff"}
+    </button>
+    {expanded && <TextPair label="Outputs" before={entry.oldCell?.outputs ?? (entry.op === "removed" ? entry.cell.outputs : null)} after={entry.op === "removed" ? null : entry.cell.outputs} />}
+  </div>;
 }
 
-function OutputBlock({
-  label,
-  outputs,
-  variant,
-}: {
-  label: string;
-  outputs: unknown[];
-  variant: "added" | "removed";
-}) {
-  const [showFull, setShowFull] = useState(false);
-
-  const borderColor = variant === "removed" ? "border-gx-error/20" : "border-gx-success/20";
-  const bgColor = variant === "removed" ? "bg-gx-error/5" : "bg-gx-success/5";
-  const labelColor = variant === "removed" ? "text-gx-error" : "text-gx-success";
-
-  const text = JSON.stringify(outputs, null, 2);
-  const isTruncated = text.length > OUTPUT_TRUNCATE_LIMIT && !showFull;
-  const displayText = isTruncated ? text.slice(0, OUTPUT_TRUNCATE_LIMIT) : text;
-
-  return (
-    <div className={`rounded border ${borderColor} ${bgColor} p-2`}>
-      <div className={`mb-1 text-[10px] font-medium uppercase ${labelColor}`}>
-        {label}
-      </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-gx-text">
-        {displayText}
-        {isTruncated && "…"}
-      </pre>
-      {isTruncated && (
-        <button
-          type="button"
-          className="mt-1 text-[10px] font-medium text-gx-accent hover:underline"
-          onClick={() => setShowFull(true)}
-        >
-          show more
-        </button>
-      )}
-    </div>
-  );
+function TextPair({ label, before, after }: { label: string; before: string | null; after: string | null }) {
+  return <div className="mt-2 grid min-w-0 gap-2 md:grid-cols-2">
+    <TextPage label={`Before ${label}`} text={before} />
+    <TextPage label={`After ${label}`} text={after} />
+  </div>;
 }
 
-function CellSource({ cell }: { cell: { source: string[] } }) {
-  const text = cell.source.join("");
-  if (!text.trim()) {
-    return <span className="text-[11px] italic text-gx-muted">empty cell</span>;
-  }
-  return (
-    <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-gx-bg-sub p-2 font-mono text-[11px] leading-relaxed text-gx-text">
-      {text}
-    </pre>
-  );
+const TEXT_PAGE_SIZE = 4096;
+
+function TextPage({ label, text }: { label: string; text: string | null }) {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil((text?.length ?? 0) / TEXT_PAGE_SIZE));
+  const pageIndex = Math.min(page, pages - 1);
+  // Keep a surrogate pair together when it straddles a page boundary.
+  const offset = (value: number) => {
+    const index = value * TEXT_PAGE_SIZE;
+    return text && index > 0 && index < text.length && /[\uDC00-\uDFFF]/.test(text[index]) && /[\uD800-\uDBFF]/.test(text[index - 1]) ? index - 1 : index;
+  };
+  return <section aria-label={label} className="min-w-0 rounded border border-gx-border bg-gx-bg-sub p-2">
+    <div className="mb-1 text-[10px] font-medium text-gx-muted">{label}</div>
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-gx-text">{text === null ? "Absent" : text.length ? text.slice(offset(pageIndex), offset(pageIndex + 1)) : "Empty"}</pre>
+    <Pager label={label} page={pageIndex} pages={pages} setPage={setPage} />
+  </section>;
 }
 
-function ModifiedCellSource({
-  oldCell,
-  newCell,
-}: {
-  oldCell: { source: string[] };
-  newCell: { source: string[] };
-}) {
-  const oldText = oldCell.source.join("");
-  const newText = newCell.source.join("");
-
-  return (
-    <div className="flex flex-col gap-1.5">
-        <div className="rounded border border-gx-error/20 bg-gx-error/5 p-2">
-        <div className="mb-1 text-[10px] font-medium uppercase text-gx-error">
-          removed
-        </div>
-        <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-gx-text">
-          {oldText || <span className="italic text-gx-muted">empty</span>}
-        </pre>
-      </div>
-      <div className="rounded border border-gx-success/20 bg-gx-success/5 p-2">
-        <div className="mb-1 text-[10px] font-medium uppercase text-gx-success">
-          added
-        </div>
-        <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-gx-text">
-          {newText || <span className="italic text-gx-muted">empty</span>}
-        </pre>
-      </div>
-    </div>
-  );
+function Pager({ label, page, pages, setPage }: { label: string; page: number; pages: number; setPage: (page: number) => void }) {
+  if (pages <= 1) return null;
+  return <nav aria-label={`${label} pages`} className="flex items-center justify-end gap-2 py-1 text-[11px] text-gx-muted">
+    <button className="btn" disabled={page === 0} aria-label={`Previous ${label.toLowerCase()} page`} onClick={() => setPage(page - 1)}>Previous</button>
+    <label className="flex items-center gap-1">Page
+      <input type="number" aria-label={`${label} page`} min={1} max={pages} value={page + 1}
+        className="w-16 rounded border border-gx-border bg-gx-bg-sub px-1 py-0.5 text-gx-text"
+        onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (Number.isInteger(value) && value >= 1 && value <= pages) setPage(value - 1); }} />
+      of {pages}
+    </label>
+    <button className="btn" disabled={page + 1 === pages} aria-label={`Next ${label.toLowerCase()} page`} onClick={() => setPage(page + 1)}>Next</button>
+  </nav>;
 }

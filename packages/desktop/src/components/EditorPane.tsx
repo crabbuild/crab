@@ -1,16 +1,19 @@
-import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import clsx from "clsx";
-import { Binary, Code2, Download, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
-import { DirEntry, mainProcess, PointerInfo, rpc } from "../ipc";
-import { OpenRepo } from "../state";
-import { base64ToBytes, bytesToUtf8, hexDump, isProbablyBinary } from "../lib/binary";
+import { Binary, Code2, Eye, GitCompareArrows, Loader2, Pin, X } from "lucide-react";
+import { DirEntry, mainProcess, rpc } from "../ipc";
+import { OpenRepo, repositoryKey } from "../state";
+import { fileBufferKey, useFileBuffer } from "../hooks/useFileBuffer";
+import { fileBuffers } from "../lib/file-buffer-store";
+import { Streamdown } from "streamdown";
+import { base64ToBytes, decodeText, hexDump } from "../lib/binary";
 import { previewKindFor, PreviewKind } from "../lib/preview-kind";
 import { useSetting } from "../settings";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
-import { useRemoteAutoSave } from "../hooks/useRemoteAutoSave";
 import { useExternalFileChange } from "../hooks/useExternalFileChange";
 import { ExternalChangePrompt } from "./ExternalChangePrompt";
+import { FileInspector } from "./FileInspector";
 import { FileIcon } from "./FileIcon";
 import { CodeEditor } from "./CodeEditor";
 import { formatBytes } from "../lib/format";
@@ -24,8 +27,7 @@ import { NumpyView } from "./previews/NumpyView";
 import { ZipView } from "./previews/ZipView";
 import { NotebookView } from "./previews/NotebookView";
 import { PdfView } from "./previews/PdfView";
-import { VideoView } from "./previews/VideoView";
-import { AudioView } from "./previews/AudioView";
+import { MediaView } from "./previews/MediaView";
 import { GeoJsonView } from "./previews/GeoJsonView";
 import { SqliteView } from "./previews/SqliteView";
 import { OnnxView } from "./previews/OnnxView";
@@ -99,16 +101,8 @@ export function EditorPane({
   const activeEditor = tabs.find((t) => t.key === activeKey) ?? null;
   const activeDiff = diffTabs.find((t) => t.key === activeKey) ?? null;
 
-  // Track which tabs have unsaved changes (dirty state).
-  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
-  const markDirty = useCallback((key: string, dirty: boolean) => {
-    setDirtyKeys((prev) => {
-      const next = new Set(prev);
-      if (dirty) next.add(key);
-      else next.delete(key);
-      return next;
-    });
-  }, []);
+  useSyncExternalStore(fileBuffers.subscribeAll, fileBuffers.version, fileBuffers.version);
+  const dirtyKeys = new Set(tabs.filter(tab => tab.rev === null && fileBuffers.snapshot(fileBufferKey(repo, tab.path)).dirty).map(tab => tab.key));
 
   // Combine all tab keys for context menu index calculations.
   const allKeys = [...tabs.map((t) => t.key), ...diffTabs.map((t) => t.key)];
@@ -171,7 +165,7 @@ export function EditorPane({
         {activeEditor && (
           <div className="h-full w-full" key={activeEditor.key}>
             <EditorErrorBoundary path={activeEditor.path}>
-              <Router repo={repo} tab={activeEditor} onDirtyChange={markDirty} />
+              <Router repo={repo} tab={activeEditor} />
             </EditorErrorBoundary>
           </div>
         )}
@@ -497,7 +491,23 @@ function ContextMenuItemPane({
   );
 }
 
-function Router({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
+function Router(props: { repo: OpenRepo; tab: EditorTab }) {
+  const [details, setDetails] = useState(false);
+  const { repo, tab } = props;
+  const pointer = tab.entry.kind === "pointer" || tab.entry.kind === "lfs";
+  if (!pointer || previewKindFor(tab.path, tab.entry.kind) === "pointer") return <PreviewBody {...props} />;
+  return <div className="flex h-full min-h-0 flex-col">
+    <div className="flex shrink-0 justify-end border-b border-gx-border px-3 py-1">
+      <button type="button" className="btn text-xs" aria-pressed={details} onClick={() => setDetails(!details)}>
+        {details ? "Back to preview" : "File details"}
+      </button>
+    </div>
+    <div className={clsx("min-h-0 flex-1", details && "hidden")}><PreviewBody {...props} /></div>
+    {details && <div className="min-h-0 flex-1"><FileInspector repo={repo} path={tab.path} rev={tab.rev} /></div>}
+  </div>;
+}
+
+function PreviewBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
   const kind: PreviewKind = previewKindFor(tab.path, tab.entry.kind);
   const common = { repoId: repo.repo_id, path: tab.path, rev: tab.rev } as const;
   const capabilities = useRepoCapabilities();
@@ -506,40 +516,57 @@ function Router({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; 
   // edit capabilities, open markdown in the code editor so the user can edit it.
   const canEdit = capabilities.canEdit && tab.rev === null;
 
-  if (kind === "pointer") return <PointerBody repo={repo} tab={tab} />;
+  if (kind === "pointer") return <FileInspector repo={repo} path={tab.path} rev={tab.rev} />;
   if (kind === "card-editor") return <CardEditorView repo={repo} path={tab.path} />;
-  if (kind === "image") return <ImageView {...common} entryKind={tab.entry.kind} />;
-  if (kind === "video") return <VideoView {...common} />;
-  if (kind === "audio") return <AudioView {...common} />;
-  if (kind === "markdown") {
-    if (canEdit) {
-      return <MarkdownEditorBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
-    }
-    return <MarkdownView {...common} />;
-  }
+  if (kind === "text" || kind === "binary" || kind === "html") return <TextBody repo={repo} tab={tab} />;
+  if (kind === "video" || kind === "audio") return <MediaView {...common} kind={kind} />;
+  if (kind === "notebook") return <NotebookView {...common} nativeSessionId={repo.native_session_id} />;
+  if (kind === "markdown" && (canEdit || (tab.rev === null && fileBuffers.snapshot(fileBufferKey(repo, tab.path)).content !== null))) return <TextBody repo={repo} tab={tab} markdown />;
+  // Read-only previews must recapture after native replacement. Editors,
+  // notebook kernels and media retain their existing lifecycle owners.
+  if (!repo.native_session_id) return <div role="status" className="p-4 text-xs text-gx-muted">Waiting for repository services…</div>;
+  return <NativePreview key={repo.native_session_id} {...common} nativeSessionId={repo.native_session_id} kind={kind} entryKind={tab.entry.kind} />;
+}
+
+type NativePreviewKind = Exclude<PreviewKind, "pointer" | "card-editor" | "text" | "binary" | "html" | "video" | "audio" | "notebook">;
+
+function NativePreview({ kind, entryKind, nativeSessionId, ...common }: { nativeSessionId: string; kind: NativePreviewKind; entryKind: DirEntry["kind"]; repoId: string; path: string; rev: string | null }) {
+  if (kind === "image") return <ImageView {...common} entryKind={entryKind} />;
+  if (kind === "markdown") return <MarkdownView {...common} />;
   if (kind === "json") return <JsonView {...common} />;
   if (kind === "jsonl") return <JsonView {...common} jsonl />;
   if (kind === "csv") return <CsvView {...common} sep="," />;
   if (kind === "tsv") return <CsvView {...common} sep={"\t"} />;
-  if (kind === "parquet") return <ParquetView {...common} />;
-  if (kind === "arrow") return <ParquetView {...common} />;
+  if (kind === "parquet") return <ParquetView {...common} nativeSessionId={nativeSessionId} />;
+  if (kind === "arrow") return <ParquetView {...common} nativeSessionId={nativeSessionId} />;
   if (kind === "safetensors") return <SafetensorsView {...common} />;
   if (kind === "npy") return <NumpyView kind="npy" {...common} />;
   if (kind === "npz") return <NumpyView kind="npz" {...common} />;
   if (kind === "zip") return <ZipView {...common} />;
-  if (kind === "notebook") return <NotebookView {...common} />;
   if (kind === "pdf") return <PdfView {...common} />;
   if (kind === "geojson") return <GeoJsonView {...common} />;
-  if (kind === "sqlite") return <SqliteView {...common} />;
+  if (kind === "sqlite") return <SqliteView {...common} nativeSessionId={nativeSessionId} />;
   if (kind === "onnx") return <OnnxView {...common} />;
   if (kind === "hdf5") return <Hdf5View {...common} />;
   if (kind === "protobuf") return <ProtobufView {...common} />;
   if (kind === "model3d") return <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-gx-muted">Loading 3D viewer…</div>}><Model3dView {...common} /></Suspense>;
   if (kind === "torch-checkpoint") return <TorchCheckpointView {...common} />;
-  return <TextBody repo={repo} tab={tab} onDirtyChange={onDirtyChange} />;
+  const remaining: never = kind;
+  return remaining;
 }
 
-function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
+function SaveErrorNotice({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return <div role="alert" className="border-b border-gx-error/40 p-2 text-xs text-gx-error">
+    Could not save this file. Your edits are retained until they are saved.
+    <button type="button" className="btn ml-2" onClick={onRetry}>Retry saving</button>
+    <details className="mt-1 text-gx-muted">
+      <summary className="cursor-pointer">Error details</summary>
+      <p className="mt-1 break-words">{error}</p>
+    </details>
+  </div>;
+}
+
+function TextBody({ repo, tab, markdown = false }: { repo: OpenRepo; tab: EditorTab; markdown?: boolean }) {
   type LoadState =
     | { state: "loading" }
     | { state: "error"; message: string }
@@ -548,624 +575,84 @@ function TextBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab
     | { state: "truncated"; reason: string; size: number };
 
   const [load, setLoad] = useState<LoadState>({ state: "loading" });
-  const maxKib = useSetting("maxPreviewKib");
-  const capabilities = useRepoCapabilities();
-
-  // Editing is allowed when the repo supports editing and viewing the working tree (rev === null).
-  const canEdit = capabilities.canEdit && tab.rev === null;
-
-  // Transport routing: local files save via fs, remote files save via RPC.
-  const isLocal = !!repo.path && !repo.is_remote;
-
-  // Remote auto-save hook — handles debounced writes, failure persistence,
-  // and reconnection retry for remote files.
-  const remoteAutoSave = useRemoteAutoSave(
-    repo.repo_id,
-    tab.path,
-    tab.key,
-    onDirtyChange,
-  );
-
-  // Local auto-save: debounced write to disk on every content change.
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isSavingRef = useRef(false);
-  const pendingContentRef = useRef<string | null>(null);
-
-  // Track dirty state for external change detection.
-  const [isDirty, setIsDirty] = useState(false);
-
-  // External file change detection: when a file change event arrives,
-  // re-read the file and either silently reload or prompt the user.
-  const handleExternalReload = useCallback((newContent: string) => {
-    setLoad({ state: "text", text: newContent });
-    setIsDirty(false);
-    onDirtyChange(tab.key, false);
-    // Clear any pending local save since we're reloading.
-    pendingContentRef.current = null;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-  }, [onDirtyChange, tab.key]);
-
-  const { showPrompt: showExternalChangePrompt, acceptReload, keepMine } = useExternalFileChange({
-    repo,
-    filePath: tab.path,
-    isDirty,
-    currentContent: load.state === "text" ? load.text : null,
-    enabled: canEdit && load.state === "text",
-    onReload: handleExternalReload,
-  });
-
-  const writeToDisk = useCallback(
-    async (content: string) => {
-      isSavingRef.current = true;
-      try {
-        if (isLocal) {
-          const fullPath = `${repo.path}/${tab.path}`;
-          await mainProcess.fsWriteFile(fullPath, content);
-        } else {
-          await rpc.writeText(repo.repo_id, tab.path, content);
-        }
-        pendingContentRef.current = null;
-        setIsDirty(false);
-        onDirtyChange(tab.key, false);
-      } catch (e) {
-        console.error("Failed to save file:", e);
-      } finally {
-        isSavingRef.current = false;
-      }
-    },
-    [isLocal, repo.path, repo.repo_id, tab.path, onDirtyChange, tab.key],
-  );
-
-  // Called on every keystroke — debounces the actual write.
-  const handleChange = useCallback(
-    (content: string) => {
-      if (!isLocal) {
-        // Remote file: delegate to the remote auto-save hook.
-        remoteAutoSave.handleChange(content);
-        setIsDirty(true);
-        return;
-      }
-      pendingContentRef.current = content;
-      setIsDirty(true);
-      onDirtyChange(tab.key, true);
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-      }
-      saveTimerRef.current = setTimeout(() => {
-        saveTimerRef.current = null;
-        void writeToDisk(content);
-      }, 300);
-    },
-    [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
-  );
-
-  // Immediate save on Cmd+S.
-  const handleSave = useCallback(
-    (content: string) => {
-      if (!isLocal) {
-        remoteAutoSave.handleSave(content);
-        setIsDirty(false);
-        return;
-      }
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      pendingContentRef.current = null;
-      setIsDirty(false);
-      void writeToDisk(content);
-    },
-    [isLocal, remoteAutoSave, writeToDisk],
-  );
-
-  // Flush any pending save when the component unmounts (tab closed).
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      // Flush unsaved content synchronously on unmount (local only).
-      const pending = pendingContentRef.current;
-      if (pending !== null && repo.path && isLocal) {
-        const fullPath = `${repo.path}/${tab.path}`;
-        // Fire-and-forget — component is unmounting so we can't await.
-        void mainProcess.fsWriteFile(fullPath, pending);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.path, tab.path, isLocal]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoad({ state: "loading" });
-
-    // When editing the working tree of a local repo, read directly from
-    // disk so we always see the latest on-disk content. For remote repos,
-    // use rpc.readText which routes through the provider.
-    if (canEdit && isLocal && repo.path) {
-      const fullPath = `${repo.path}/${tab.path}`;
-      mainProcess.fsReadFile(fullPath)
-        .then((res) => {
-          if (cancelled) return;
-          if (!res.exists || res.content === null) {
-            setLoad({ state: "error", message: "File not found on disk" });
-            return;
-          }
-          setLoad({ state: "text", text: res.content });
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    } else if (canEdit && !isLocal) {
-      // Remote editable file: load via rpc.readText for working tree content.
-      rpc.readText(repo.repo_id, tab.path, { max_bytes: Math.max(maxKib * 1024, 64 * 1024) })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setLoad({ state: "truncated", reason: res.reason ?? "file too large to edit", size: res.size });
-            return;
-          }
-          setLoad({ state: "text", text: res.text ?? "" });
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    } else {
-      rpc
-        .readBytes(repo.repo_id, tab.path, {
-          rev: tab.rev ?? undefined,
-          max_bytes: Math.max(maxKib * 1024, 64 * 1024),
-        })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setLoad({
-              state: "truncated",
-              reason: res.reason ?? "file too large to preview",
-              size: res.size,
-            });
-            return;
-          }
-          const bytes = res.bytes_b64 ? base64ToBytes(res.bytes_b64) : new Uint8Array();
-          if (isProbablyBinary(bytes)) {
-            setLoad({ state: "binary", bytes, size: res.size });
-          } else {
-            setLoad({ state: "text", text: bytesToUtf8(bytes) });
-          }
-        })
-        .catch((err) =>
-          !cancelled &&
-          setLoad({ state: "error", message: err instanceof Error ? err.message : String(err) }),
-        );
-    }
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.key, maxKib]);
-
-  if (load.state === "loading") {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Loading {tab.path}…
-      </div>
-    );
-  }
-  if (load.state === "error") {
-    return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
-        Failed to read <code className="font-mono">{tab.path}</code>: {load.message}
-      </div>
-    );
-  }
-  if (load.state === "truncated") {
-    return (
-      <div className="m-4 space-y-2 rounded border border-gx-border bg-gx-surface p-4 text-sm">
-        <div className="flex items-center gap-2 font-semibold">
-          <Binary size={14} /> File too large to preview
-        </div>
-        <div className="text-xs text-gx-muted">
-          {tab.path} is {formatBytes(load.size)}. {load.reason}
-        </div>
-      </div>
-    );
-  }
-  if (load.state === "binary") {
-    return (
-      <div className="flex h-full flex-col">
-        <div className="flex items-center justify-between border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
-          <span>Binary · {formatBytes(load.size)} · showing first 4 KiB as hex</span>
-        </div>
-        <pre className="h-full overflow-auto bg-gx-bg-sub p-4 font-mono text-[11.5px] leading-5 text-gx-text">
-          {hexDump(load.bytes, 4096)}
-        </pre>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* Save pending indicator for remote files */}
-      {!isLocal && remoteAutoSave.savePending && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">
-          <Loader2 size={12} className="animate-spin" />
-          Save pending — reconnecting
-        </div>
-      )}
-      {/* External file change prompt */}
-      {showExternalChangePrompt && (
-        <ExternalChangePrompt onReload={acceptReload} onKeepMine={keepMine} />
-      )}
-      <div className="min-h-0 flex-1">
-        <CodeEditor
-          path={tab.path}
-          cacheKey={`${repo.path ?? repo.repo_id}::${tab.path}`}
-          value={load.text}
-          line={tab.line}
-          readOnly={!canEdit}
-          onChange={canEdit ? handleChange : undefined}
-          onSave={canEdit ? handleSave : undefined}
-          onBlur={canEdit ? handleSave : undefined}
-          repoRoot={repo.path ?? undefined}
-        />
-      </div>
-    </div>
-  );
-}
-
-/**
- * Markdown editor with a toggle between source editing and rendered preview.
- * Defaults to the source editor so the user can immediately type.
- */
-function MarkdownEditorBody({ repo, tab, onDirtyChange }: { repo: OpenRepo; tab: EditorTab; onDirtyChange: (key: string, dirty: boolean) => void }) {
   const [mode, setMode] = useState<"edit" | "preview">("edit");
-  const [content, setContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingContentRef = useRef<string | null>(null);
-
-  // Transport routing: local files save via fs, remote files save via RPC.
-  const isLocal = !!repo.path && !repo.is_remote;
-
-  // Track dirty state for external change detection.
-  const [isDirty, setIsDirty] = useState(false);
-
-  // Remote auto-save hook for remote files.
-  const remoteAutoSave = useRemoteAutoSave(
-    repo.repo_id,
-    tab.path,
-    tab.key,
-    onDirtyChange,
-  );
-
-  // External file change detection.
-  const handleExternalReload = useCallback((newContent: string) => {
-    setContent(newContent);
-    setIsDirty(false);
-    onDirtyChange(tab.key, false);
-    pendingContentRef.current = null;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-  }, [onDirtyChange, tab.key]);
-
-  const { showPrompt: showExternalChangePrompt, acceptReload, keepMine } = useExternalFileChange({
-    repo,
-    filePath: tab.path,
-    isDirty,
-    currentContent: content,
-    enabled: !loading && !error,
+  const maxKib = useSetting("maxPreviewKib");
+  const maxBytes = Math.max(maxKib * 1024, 64 * 1024);
+  const capabilities = useRepoCapabilities();
+  const buffer = useFileBuffer(repo, tab.path, tab.rev === null, capabilities.canEdit);
+  const canEdit = capabilities.canEdit && tab.rev === null && !buffer.restoring;
+  const { beginRead, finishRead, reload } = buffer;
+  const content = buffer.content ?? (load.state === "text" ? load.text : null);
+  const handleExternalReload = useCallback((text: string) => {
+    reload(text);
+    setLoad({ state: "text", text });
+  }, [reload]);
+  const { showPrompt, reloadError, acceptReload, keepMine } = useExternalFileChange({
+    repo, filePath: tab.path, isDirty: buffer.dirty, currentContent: content,
+    maxBytes, enabled: canEdit && content !== null && !buffer.saving,
     onReload: handleExternalReload,
   });
 
-  const writeToDisk = useCallback(
-    async (text: string) => {
-      try {
-        if (isLocal) {
-          const fullPath = `${repo.path}/${tab.path}`;
-          await mainProcess.fsWriteFile(fullPath, text);
-        } else {
-          await rpc.writeText(repo.repo_id, tab.path, text);
-        }
-        pendingContentRef.current = null;
-        setIsDirty(false);
-        onDirtyChange(tab.key, false);
-      } catch (e) {
-        console.error("Failed to save markdown:", e);
-      }
-    },
-    [isLocal, repo.path, repo.repo_id, tab.path, onDirtyChange, tab.key],
-  );
-
-  const handleChange = useCallback(
-    (text: string) => {
-      setContent(text);
-      if (!isLocal) {
-        remoteAutoSave.handleChange(text);
-        setIsDirty(true);
+  useEffect(() => {
+    if (!repo.native_session_id) return;
+    const ticket = beginRead();
+    if (ticket === null) return;
+    const controller = new AbortController();
+    setLoad({ state: "loading" });
+    rpc.readBytes(repo.repo_id, tab.path, {
+      native_session_id: repo.native_session_id, rev: tab.rev ?? undefined, max_bytes: maxBytes, signal: controller.signal,
+    }).then(res => {
+      if (controller.signal.aborted) return;
+      if (res.truncated) {
+        if (finishRead(ticket, null)) setLoad({ state: "truncated", reason: res.reason ?? "File exceeds the preview limit", size: res.size });
         return;
       }
-      pendingContentRef.current = text;
-      setIsDirty(true);
-      onDirtyChange(tab.key, true);
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(() => {
-        saveTimerRef.current = null;
-        void writeToDisk(text);
-      }, 300);
-    },
-    [isLocal, remoteAutoSave, writeToDisk, onDirtyChange, tab.key],
-  );
+      const bytes = res.bytes_b64 ? base64ToBytes(res.bytes_b64) : new Uint8Array();
+      const text = decodeText(bytes);
+      if (!finishRead(ticket, text)) return;
+      setLoad(text === null ? { state: "binary", bytes, size: res.size } : { state: "text", text });
+    }).catch(error => {
+      if (!controller.signal.aborted && finishRead(ticket)) setLoad({ state: "error", message: error instanceof Error ? error.message : String(error) });
+    });
+    return () => controller.abort();
+  }, [repo.repo_id, repo.native_session_id, tab.path, tab.rev, maxBytes, beginRead, finishRead, buffer.restoring]);
 
-  const handleSave = useCallback(
-    (text: string) => {
-      if (!isLocal) {
-        remoteAutoSave.handleSave(text);
-        setIsDirty(false);
-        return;
-      }
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      pendingContentRef.current = null;
-      setIsDirty(false);
-      void writeToDisk(text);
-    },
-    [isLocal, remoteAutoSave, writeToDisk],
-  );
+  // Pending content belongs to the repository buffer, so remounting must not
+  // replace it with a disk read or wait for services before displaying it.
+  const display = content !== null && (buffer.dirty || load.state === "loading" || load.state === "text")
+    ? { state: "text" as const, text: content } : load;
+  if (display.state === "loading") return <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+    <Loader2 size={14} className="animate-spin" /> {repo.native_session_id ? `Loading ${tab.path}…` : "Waiting for repository services…"}
+  </div>;
+  if (display.state === "error") return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+    Failed to read <code className="font-mono">{tab.path}</code>: {display.message}
+  </div>;
+  if (display.state === "truncated") return <div className="m-4 space-y-2 rounded border border-gx-border bg-gx-surface p-4 text-sm">
+    <div className="flex items-center gap-2 font-semibold"><Binary size={14} /> File too large to preview</div>
+    <div className="text-xs text-gx-muted">{tab.path} is {formatBytes(display.size)}. {display.reason}</div>
+  </div>;
+  if (display.state === "binary") return <div className="flex h-full flex-col">
+    <div className="border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">Binary · {formatBytes(display.size)} · showing first 4 KiB as hex</div>
+    <pre className="h-full overflow-auto bg-gx-bg-sub p-4 font-mono text-[11.5px] leading-5 text-gx-text">{hexDump(display.bytes, 4096)}</pre>
+  </div>;
 
-  // Flush pending save on unmount (local only).
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      const pending = pendingContentRef.current;
-      if (pending !== null && repo.path && isLocal) {
-        void mainProcess.fsWriteFile(`${repo.path}/${tab.path}`, pending);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo.path, tab.path, isLocal]);
-
-  // Load file content.
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    if (isLocal && repo.path) {
-      // Local: read from disk.
-      mainProcess.fsReadFile(`${repo.path}/${tab.path}`)
-        .then((res) => {
-          if (cancelled) return;
-          if (!res.exists || res.content === null) {
-            setError("File not found on disk");
-          } else {
-            setContent(res.content);
-          }
-        })
-        .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => !cancelled && setLoading(false));
-    } else {
-      // Remote: read via rpc.readText.
-      rpc.readText(repo.repo_id, tab.path, { max_bytes: 512 * 1024 })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.truncated) {
-            setError("File too large to edit");
-          } else {
-            setContent(res.text ?? "");
-          }
-        })
-        .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => !cancelled && setLoading(false));
-    }
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.key]);
-
-  if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Loading {tab.path}…
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
-        Failed to read <code className="font-mono">{tab.path}</code>: {error}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* Save pending indicator for remote files */}
-      {!isLocal && remoteAutoSave.savePending && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">
-          <Loader2 size={12} className="animate-spin" />
-          Save pending — reconnecting
-        </div>
-      )}
-      {/* External file change prompt */}
-      {showExternalChangePrompt && (
-        <ExternalChangePrompt onReload={acceptReload} onKeepMine={keepMine} />
-      )}
-      {/* Mode toggle toolbar */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-gx-border bg-gx-surface px-3 py-1">
-        <button
-          type="button"
-          onClick={() => setMode("edit")}
-          className={clsx(
-            "flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition",
-            mode === "edit" ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:text-gx-text",
-          )}
-        >
-          <Code2 size={12} /> Edit
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode("preview")}
-          className={clsx(
-            "flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition",
-            mode === "preview" ? "bg-gx-accent/20 text-gx-accent" : "text-gx-muted hover:text-gx-text",
-          )}
-        >
-          <Eye size={12} /> Preview
-        </button>
-      </div>
-      {/* Content area */}
-      <div className="min-h-0 flex-1">
-        {mode === "edit" ? (
-          <CodeEditor
-            path={tab.path}
-            cacheKey={`${repo.path ?? repo.repo_id}::${tab.path}`}
-            value={content ?? ""}
-            line={tab.line}
-            readOnly={false}
-            onChange={handleChange}
-            onSave={handleSave}
-            onBlur={handleSave}
-            repoRoot={repo.path ?? undefined}
-          />
-        ) : (
-          <MarkdownView repoId={repo.repo_id} path={tab.path} rev={tab.rev} />
-        )}
-      </div>
+  return <div className="flex h-full flex-col">
+    {buffer.restoring && <div role="status" className="border-b border-gx-border px-3 py-1 text-[11px] text-gx-muted">Restoring index version…</div>}
+    {buffer.error && <SaveErrorNotice error={buffer.error} onRetry={buffer.save} />}
+    {buffer.dirty && !buffer.available && <div role="status" className="border-b border-gx-warning/30 bg-gx-warning/10 px-3 py-1 text-[11px] text-gx-warning">Save pending — waiting for connection</div>}
+    {showPrompt && <ExternalChangePrompt reloadError={reloadError} onReload={acceptReload} onKeepMine={keepMine} />}
+    {markdown && <div className="flex shrink-0 items-center gap-1 border-b border-gx-border bg-gx-surface px-3 py-1">
+      <button type="button" className="btn text-xs" aria-pressed={mode === "edit"} onClick={() => setMode("edit")}><Code2 size={12} /> Edit</button>
+      <button type="button" className="btn text-xs" aria-pressed={mode === "preview"} onClick={() => setMode("preview")}><Eye size={12} /> Preview</button>
+    </div>}
+    <div className="min-h-0 flex-1">
+      {markdown && mode === "preview" ? <div className="h-full overflow-auto p-6"><Streamdown shikiTheme={["github-light", "github-dark"]}>{display.text}</Streamdown></div> :
+        <CodeEditor path={tab.path} cacheKey={JSON.stringify([repositoryKey(repo), tab.rev, tab.path])}
+          value={display.text} line={tab.line} readOnly={!canEdit}
+          onChange={canEdit ? buffer.edit : undefined} onSave={canEdit ? buffer.save : undefined} onBlur={canEdit ? buffer.save : undefined}
+          repoRoot={tab.rev === null && !repo.is_remote ? repo.path ?? undefined : undefined} />}
     </div>
-  );
-}
-
-function PointerBody({ repo, tab }: { repo: OpenRepo; tab: EditorTab }) {
-  const [info, setInfo] = useState<PointerInfo | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setInfo(null);
-    setErr(null);
-    setLoading(true);
-    rpc
-      .pointerInfo(repo.repo_id, tab.path, tab.rev ?? undefined)
-      .then((p) => {
-        if (!cancelled) setInfo(p);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setErr(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [repo.repo_id, tab.path, tab.rev]);
-
-  // Use entry-level data as fallback when the full pointerInfo RPC
-  // hasn't resolved or failed (e.g. no remote configured).
-  const entrySize = tab.entry.size;
-  const entryHash = tab.entry.pointer_hash;
-
-  const displaySize = info
-    ? formatBytes(info.size)
-    : entrySize != null
-      ? formatBytes(entrySize)
-      : loading ? "…" : "–";
-
-  const displayKind = info?.kind ?? tab.entry.kind ?? "–";
-
-  const displayHash = info?.pointer_hash ?? entryHash ?? null;
-
-  const displayChunks = info
-    ? info.chunk_count?.toLocaleString() ?? "–"
-    : loading ? "…" : "–";
-
-  const displayXorbs = info
-    ? info.xorb_count?.toLocaleString() ?? "–"
-    : loading ? "…" : "–";
-
-  const displayDedup = info
-    ? info.dedup_ratio?.toFixed(3) ?? "–"
-    : loading ? "…" : "–";
-
-  return (
-    <div className="h-full overflow-auto bg-gx-bg-sub p-6 text-sm">
-      <div className="mx-auto max-w-3xl rounded border border-gx-border bg-gx-surface p-5">
-        <div className="mb-4 flex items-center gap-2 text-base font-semibold">
-          <Binary size={16} className="text-gx-accent" />
-          {tab.entry.kind === "lfs" ? "Git LFS pointer" : "Crab pointer"}
-        </div>
-
-        {err && (
-          <div className="mb-3 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
-            {err}
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 gap-3">
-          <KV label="Path" value={tab.path} mono wide />
-          <KV label="Logical size" value={displaySize} />
-          <KV label="Pointer kind" value={displayKind} />
-          <KV label="Chunks" value={displayChunks} />
-          <KV label="Xorbs" value={displayXorbs} />
-          <KV label="Dedup ratio" value={displayDedup} />
-        </div>
-
-        {displayHash && (
-          <div className="mt-4">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-gx-muted">Content hash</div>
-            <div className="break-all rounded border border-gx-border bg-gx-bg-sub p-2 font-mono text-[11px]">
-              {displayHash}
-            </div>
-          </div>
-        )}
-
-        {repo.path && (
-          <div className="mt-5 flex gap-2">
-            <button
-              type="button"
-              className="btn btn-primary text-xs"
-              onClick={() => void rpc.hydrate(repo.path!, [tab.path])}
-              title="Materialize this file via `crab hydrate`"
-            >
-              <Download size={12} /> Hydrate to preview
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function KV({
-  label,
-  value,
-  mono,
-  wide,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  wide?: boolean;
-}) {
-  return (
-    <div className={wide ? "col-span-2" : undefined}>
-      <div className="mb-0.5 text-[10px] uppercase tracking-wider text-gx-muted">{label}</div>
-      <div className={clsx("text-sm", mono && "break-all font-mono")}>{value}</div>
-    </div>
-  );
+  </div>;
 }
 
 // ── Error boundary for the editor/preview area ──────────────────────

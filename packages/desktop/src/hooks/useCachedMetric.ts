@@ -9,6 +9,8 @@ import { useEffect, useRef, useState } from "react";
  * 3. When fresh data arrives, update state and persist to localStorage.
  *
  * Cache key format: `crab.dashboard.cache.${repoId}.${metric}`
+ * Re-enabling revalidates the same logical cache. Disabled metrics cannot
+ * publish or persist a late response from an earlier source.
  */
 export function useCachedMetric<T>(
   repoId: string,
@@ -33,9 +35,13 @@ export function useCachedMetric<T>(
   fetcherRef.current = fetcher;
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setData(null); setLoading(false); setStale(false);
+      return;
+    }
 
     // Reset data to cached value for the new key (or null if no cache).
+    setStale(false);
     try {
       const raw = localStorage.getItem(cacheKey);
       if (raw) {

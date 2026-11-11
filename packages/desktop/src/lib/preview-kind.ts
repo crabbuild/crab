@@ -140,17 +140,8 @@ const BASENAME_KIND: Record<string, PreviewKind> = {
 };
 
 export function previewKindFor(path: string, entryKind: EntryKind): PreviewKind {
-  // Determine preview kind by extension regardless of whether the
-  // file is a pointer. Hydrated pointers have full content on disk
-  // and should preview normally (Parquet grid, safetensors viewer,
-  // image, etc.). If the file ISN'T hydrated, the agent-side
-  // handler will return an error ("file not on disk") which the UI
-  // surfaces as a banner with a "Hydrate" button — that's handled
-  // in each preview component's error state.
-  //
-  // We only fall back to the pointer metadata card when the
-  // extension doesn't map to any known previewer AND the entry is
-  // a pointer/lfs kind.
+  // Format routing is independent of storage. Captured-range previewers can
+  // inspect pointers without hydrating; unknown formats open file metadata.
 
   const slash = path.lastIndexOf("/");
   const name = slash === -1 ? path : path.slice(slash + 1);

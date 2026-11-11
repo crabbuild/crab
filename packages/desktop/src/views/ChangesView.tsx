@@ -36,10 +36,11 @@ import { ViewToolbar, ToolbarAction } from "../components/ViewToolbar";
 import { ContextMenu, MenuItemDef } from "../components/ContextMenu";
 import { executeCommand, CommandContext } from "../lib/command-registry";
 import { CommitComposer } from "./CommitComposer";
-import { hunkToAnchor, lineToDiscardAnchor, ParsedHunk, parsePatch } from "../lib/parse-patch";
+import { hunkToAnchor, lineToDiscardAnchor } from "../lib/parse-patch";
 import { deriveFileStatesFromPatches } from "../lib/file-state";
 import { countDiscardedLines, shouldConfirmDiscard } from "../lib/discard-threshold";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 import { useSettings } from "../settings";
 import { BatchActionBar } from "../components/BatchActionBar";
 import { StagingZones } from "../components/StagingZones";
@@ -176,11 +177,12 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   const [openFilePath, setOpenFilePath] = useState<string | null>(null);
   const [openFileContent, setOpenFileContent] = useState<string | null>(null);
   const [openFileLoading, setOpenFileLoading] = useState(false);
+  const [openFileError, setOpenFileError] = useState<string | null>(null);
 
   // Whole-repo patches used to derive the per-file tri-state
   // checkbox. One round-trip per side keeps the cost O(1) regardless
   // of how many files are in the change set (the per-file
-  // `fetchPatch` above still powers the right-pane view). Pending
+  // selected-file effect still powers the right pane). Pending
   // toggles live in `togglingPaths` so we can disable the checkbox
   // while the op is in flight.
   const [workTreePatch, setWorkTreePatch] = useState<string>("");
@@ -213,21 +215,28 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   // Track whether we've completed the initial load. Subsequent
   // refreshes update entries in-place without flashing a spinner.
   const hasLoadedRef = useRef(false);
+  const statusRequest = useRef(0);
+  const patchRequest = useRef(0);
 
   const refreshStatus = useCallback(() => {
+    const request = ++statusRequest.current;
     if (!hasLoadedRef.current) setLoading(true);
     setError(null);
     rpc
       .gitStatus(repo.repo_id)
       .then((r) => {
+        if (request !== statusRequest.current) return;
         setEntries(r.entries);
         hasLoadedRef.current = true;
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [repo.repo_id]);
+      .catch((e: Error) => { if (request === statusRequest.current) setError(e.message); })
+      .finally(() => { if (request === statusRequest.current) setLoading(false); });
+  }, [repo.repo_id, repo.native_session_id]);
 
-  useEffect(refreshStatus, [refreshStatus]);
+  useEffect(() => {
+    refreshStatus();
+    return () => { statusRequest.current++; };
+  }, [refreshStatus]);
 
   // File watcher: auto-refresh status when files change on disk.
   // The watcher lifecycle is managed by RepoDetail via
@@ -238,14 +247,17 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   // index-vs-HEAD) in parallel. Used for tri-state derivation —
   // pathless calls so one round-trip pair covers every file.
   const refreshPatchPair = useCallback(async () => {
+    const request = ++patchRequest.current;
     try {
       const [wt, cached] = await Promise.all([
         rpc.gitDiffIndexPatch(repo.repo_id, {}),
         rpc.gitDiffCachedPatch(repo.repo_id, {}),
       ]);
+      if (request !== patchRequest.current) return;
       setWorkTreePatch(wt.patch ?? "");
       setCachedPatch(cached.patch ?? "");
     } catch {
+      if (request !== patchRequest.current) return;
       // Partial failure means the checkboxes render `empty` for
       // everything — not great, but the rest of the view stays
       // usable. A follow-up toast on the specific action that
@@ -253,7 +265,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       setWorkTreePatch("");
       setCachedPatch("");
     }
-  }, [repo.repo_id]);
+  }, [repo.repo_id, repo.native_session_id]);
+
+  // Invalidate owner changes and unmount separately from entries: a status
+  // update can belong to an explicit staging refresh of this patch pair.
+  useEffect(() => () => { patchRequest.current++; }, [refreshPatchPair]);
 
   // Re-derive the patch pair whenever the status list changes.
   // Skip if a staging operation already refreshed the pair explicitly
@@ -262,9 +278,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   useEffect(() => {
     if (skipPatchPairEffectRef.current) {
       skipPatchPairEffectRef.current = false;
-      return;
-    }
-    void refreshPatchPair();
+    } else void refreshPatchPair();
   }, [refreshPatchPair, entries]);
 
   const statusByPath = useMemo(() => {
@@ -316,9 +330,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
 
   // Build a CommandContext from the view's available state.
   const dirtyCount = entries?.length ?? 0;
+  const fileTransfers = useFileTransfers(repo);
   const commandContext = useMemo<CommandContext>(
     () => ({
       repoId: repo.repo_id,
+      fileTransfers,
       currentBranch: "",
       upstream: null,
       ahead: 0,
@@ -328,7 +344,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       activeOperation: null,
       forgeProvider: repo.forge_provider ?? null,
     }),
-    [repo.repo_id, repo.forge_provider, dirtyCount, hasStaged],
+    [repo.repo_id, repo.forge_provider, dirtyCount, hasStaged, fileTransfers],
   );
 
   // Toolbar actions with dynamic disabled states.
@@ -336,12 +352,12 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     () => [
       { id: "git.stage.all", icon: Plus, label: "Stage All", disabled: dirtyCount === 0 },
       { id: "git.unstage.all", icon: Minus, label: "Unstage All", disabled: !hasStaged },
-      { id: "git.discard.all", icon: Undo2, label: "Discard All", disabled: dirtyCount === 0 },
+      { id: "git.discard.all", icon: Undo2, label: "Discard All", disabled: dirtyCount === 0 || !fileTransfers.restore },
       { id: "git.push", icon: ArrowUp, label: "Push" },
       { id: "git.pull", icon: ArrowDown, label: "Pull" },
       { id: "git.fetch", icon: RefreshCw, label: "Fetch" },
     ],
-    [dirtyCount, hasStaged],
+    [dirtyCount, hasStaged, fileTransfers.restore],
   );
 
   // Handle toolbar action clicks — route through CommandRegistry.
@@ -364,11 +380,11 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     () => [
       { id: "git.stage.file", label: "Stage", icon: Plus },
       { id: "git.unstage.file", label: "Unstage", icon: Minus },
-      { id: "git.discard.file", label: "Discard Changes", icon: Undo2, danger: true },
+      { id: "git.discard.file", label: "Discard Changes", icon: Undo2, danger: true, disabled: !fileTransfers.restore },
       { id: "open.diff", label: "Open Diff", icon: FileDiff, separator: true },
       { id: "open.file", label: "Open File", icon: FileText },
     ],
-    [],
+    [fileTransfers.restore],
   );
 
   const handleFileContextMenu = useCallback(
@@ -380,7 +396,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
   );
 
   // Per-file discard handler for the inline action buttons.
-  // Routes through the command registry so undo/toast/history all work.
+  // The registry reports only the confirmed operation and its real outcome.
   const handleDiscardFileByPath = useCallback(
     async (path: string) => {
       const result = await executeCommand("git.discard.file", commandContext, path);
@@ -393,71 +409,43 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     [commandContext, refreshStatus, refreshPatchPair],
   );
 
-  // Open File handler: reads the full file content and shows it in
-  // the right pane, replacing the diff view. Uses rpc.readText for
-  // both local and remote repos (routes through RpcRouter).
-  const handleOpenFile = useCallback(
-    async (path: string) => {
-      setOpenFilePath(path);
-      setOpenFileLoading(true);
-      setOpenFileContent(null);
-      try {
-        const result = await rpc.readText(repo.repo_id, path);
-        setOpenFileContent(result.text);
-      } catch {
-        setOpenFileContent(null);
-      } finally {
-        setOpenFileLoading(false);
-      }
-    },
-    [repo.repo_id],
-  );
+  const handleOpenFile = useCallback((path: string) => { setOpenFilePath(path); }, []);
 
-  // Fetch the appropriate patch for the currently selected file.
-  // For fully-staged files (state === "full"), use `git diff --cached`
-  // (index vs HEAD) so the user sees what will be committed. For
-  // working/partial files, use worktree-vs-index.
-  const fetchPatch = useCallback(
-    async (path: string) => {
-      setPatchLoading(true);
-      setPatchError(null);
-      try {
-        const code = statusByPath.get(path) ?? "";
-        const state = fileStates[path] ?? "empty";
-
-        let r: { patch: string };
-        if (state === "full") {
-          // Staged file — show index vs HEAD (git diff --cached)
-          r = await rpc.gitDiffCachedPatch(repo.repo_id, { path });
-        } else {
-          // Working/partial — show worktree vs index
-          // When the file is untracked, `git diff` ignores it —
-          // include the worktree-side extras so the user still sees
-          // the new content. The agent honours `include_untracked`.
-          r = await rpc.gitDiffIndexPatch(repo.repo_id, {
-            path,
-            include_untracked: code === "??",
-          });
-        }
-        setPatch(r.patch);
-      } catch (e) {
-        setPatchError(e instanceof Error ? e.message : String(e));
-        setPatch(null);
-      } finally {
-        setPatchLoading(false);
-      }
-    },
-    [repo.repo_id, statusByPath, fileStates],
-  );
+  // Full-file and patch selections survive native replacement; only their
+  // reads are revoked. An old reply must never publish into a new selection.
+  useEffect(() => {
+    const controller = new AbortController();
+    setOpenFileContent(null);
+    setOpenFileError(null);
+    setOpenFileLoading(false);
+    if (!openFilePath || !repo.native_session_id) return;
+    setOpenFileLoading(true);
+    void rpc.readText(repo.repo_id, openFilePath, { native_session_id: repo.native_session_id, signal: controller.signal }).then(result => {
+      if (controller.signal.aborted) return;
+      if (result.truncated || result.text === null) setOpenFileError(result.reason ?? "File content is unavailable.");
+      else setOpenFileContent(result.text);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setOpenFileError(error instanceof Error ? error.message : String(error));
+    }).finally(() => { if (!controller.signal.aborted) setOpenFileLoading(false); });
+    return () => controller.abort();
+  }, [repo.repo_id, repo.native_session_id, openFilePath, entries]);
 
   useEffect(() => {
-    if (!selectedPath) {
-      setPatch(null);
-      setPatchError(null);
-      return;
-    }
-    void fetchPatch(selectedPath);
-  }, [selectedPath, fetchPatch]);
+    const controller = new AbortController();
+    setPatch(null);
+    setPatchError(null);
+    setPatchLoading(false);
+    if (!selectedPath || !repo.native_session_id) return;
+    setPatchLoading(true);
+    const options = { path: selectedPath, native_session_id: repo.native_session_id, signal: controller.signal };
+    const request = fileStates[selectedPath] === "full"
+      ? rpc.gitDiffCachedPatch(repo.repo_id, options)
+      : rpc.gitDiffIndexPatch(repo.repo_id, { ...options, include_untracked: statusByPath.get(selectedPath) === "??" });
+    void request.then(result => { if (!controller.signal.aborted) setPatch(result.patch); })
+      .catch((error: unknown) => { if (!controller.signal.aborted) setPatchError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!controller.signal.aborted) setPatchLoading(false); });
+    return () => controller.abort();
+  }, [repo.repo_id, repo.native_session_id, selectedPath, statusByPath, fileStates]);
 
   // Reset selection + patch when the repo changes so we don't show
   // stale content.
@@ -477,20 +465,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       // For new untracked files, automatically show full file content
       // since there's no meaningful diff to display.
       const code = statusByPath.get(path) ?? "";
-      if (code === "??") {
-        void (async () => {
-          setOpenFilePath(path);
-          setOpenFileLoading(true);
-          try {
-            const result = await rpc.readText(repo.repo_id, path);
-            setOpenFileContent(result.text);
-          } catch {
-            // Fall through — will show empty state
-          } finally {
-            setOpenFileLoading(false);
-          }
-        })();
-      }
+      if (code === "??") setOpenFilePath(path);
     },
     [statusByPath, repo.repo_id],
   );
@@ -544,7 +519,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
       try {
         await op();
         if (successToast) setToast({ kind: "info", text: successToast });
-        if (selectedPath) await fetchPatch(selectedPath);
         // Suppress the entries-triggered refreshPatchPair since we
         // call it explicitly here — avoids a redundant RPC round-trip.
         skipPatchPairEffectRef.current = true;
@@ -556,7 +530,6 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
             kind: "info",
             text: "File changed on disk — refreshing diff.",
           });
-          if (selectedPath) await fetchPatch(selectedPath);
           skipPatchPairEffectRef.current = true;
           refreshStatus();
           await refreshPatchPair();
@@ -568,7 +541,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         });
       }
     },
-    [selectedPath, fetchPatch, refreshStatus, refreshPatchPair],
+    [refreshStatus, refreshPatchPair],
   );
 
   // Toast auto-dismiss (4 s) — simple enough that dragging in a
@@ -684,77 +657,13 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     [requestDiscard],
   );
 
-  /**
-   * Whole-file staging for pointer blobs. `<InlinePatchDiff />`
-   * swaps its per-hunk toolbar for a `<PointerFileCard />` when it
-   * detects a Crab / LFS pointer signature in the patch; the
-   * card calls these callbacks once with every hunk for that file
-   * so we can batch into a single `git_stage_hunks` /
-   * `git_unstage_hunks` / `git_discard_hunks` RPC.
-   *
-   * For the stage direction: when the source patch has no hunks
-   * (untracked pointer file), fall back to `rpc.add` which shells
-   * `crab add` to stage the file whole-file. The unstage and
-   * discard directions don't need that fallback — you can't
-   * unstage something that isn't staged, and you can't discard a
-   * file that only exists in the working tree (it's already in
-   * the state the user wants).
-   */
-  const onStageFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) {
-        // Untracked pointer file — fall back to whole-file add via
-        // gitAddPaths which routes through the RPC router for both
-        // local and remote repos.
-        const path = hunks[0]?.path;
-        if (path) {
-          void runStagingOp(
-            () => rpc.gitAddPaths(repo.repo_id, [path]),
-            "Staged pointer",
-          );
-        }
-        return;
-      }
-      void runStagingOp(
-        () => rpc.gitStageHunks(repo.repo_id, anchors),
-        "Staged pointer",
-      );
-    },
-    [repo.repo_id, runStagingOp],
-  );
-
-  const onUnstageFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) return;
-      void runStagingOp(
-        () => rpc.gitUnstageHunks(repo.repo_id, anchors),
-        "Unstaged pointer",
-      );
-    },
-    [repo.repo_id, runStagingOp],
-  );
-
   const onDiscardFile = useCallback(
-    ({ hunks }: { path: string; hunks: ParsedHunk[] }) => {
-      const anchors: HunkAnchor[] = hunks.map(hunkToAnchor);
-      if (anchors.length === 0) return;
-      requestDiscard(anchors, "Discarded pointer");
-    },
-    [requestDiscard],
+    ({ path }: { path: string }) => { void handleDiscardFileByPath(path); },
+    [handleDiscardFileByPath],
   );
 
-  /**
-   * Toggle every hunk for one file from its current tri-state.
-   *
-   *   - `empty` / `partial` (intent `stage`): parse the worktree-
-   *     vs-index patch, slice to this file, stage every hunk.
-   *     For untracked files there's no patch — fall back to
-   *     `rpc.add` which stages the file whole-file.
-   *   - `full` (intent `unstage`): parse the cached patch, slice
-   *     to this file, unstage every hunk.
-   */
+  // Whole-file actions use Git paths; pointer/binary contents are not text
+  // hunks. Inline text selections keep their separate anchor validation.
   const onToggleFile = useCallback(
     async (path: string, intent: "stage" | "unstage") => {
       if (togglingPaths.has(path)) return;
@@ -764,31 +673,10 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         return next;
       });
       try {
-        const source = intent === "stage" ? workTreePatch : cachedPatch;
-        const parsed = parsePatch(source);
-        const hunks: HunkAnchor[] = parsed.hunks
-          .filter((h) => h.path === path)
-          .map(hunkToAnchor);
-
-        if (hunks.length === 0) {
-          // Untracked file or no-op: fall back to whole-file staging
-          // via `git add` which handles untracked paths correctly.
-          // Only makes sense for the stage direction; unstage with no
-          // hunks is a no-op.
-          if (intent === "stage") {
-            await runStagingOp(
-              () => rpc.gitAddPaths(repo.repo_id, [path]),
-              "Staged file",
-            );
-          }
-          return;
-        }
-
         await runStagingOp(
-          () =>
-            intent === "stage"
-              ? rpc.gitStageHunks(repo.repo_id, hunks)
-              : rpc.gitUnstageHunks(repo.repo_id, hunks),
+          () => intent === "stage"
+            ? rpc.gitAddPaths(repo.repo_id, [path])
+            : rpc.gitResetPaths(repo.repo_id, [path]),
           intent === "stage" ? "Staged file" : "Unstaged file",
         );
       } finally {
@@ -799,7 +687,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
         });
       }
     },
-    [togglingPaths, workTreePatch, cachedPatch, runStagingOp, repo.repo_id],
+    [togglingPaths, runStagingOp, repo.repo_id],
   );
 
   // --- Multi-select + Batch operations ---
@@ -894,11 +782,10 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
 
   /** Batch discard all multi-selected files. */
   const batchDiscard = useCallback(async () => {
-    if (multiSelected.size === 0) return;
+    if (multiSelected.size === 0 || !fileTransfers.restore) return;
     setBatchBusy(true);
     try {
-      // Use git checkout -- for tracked files, clean for untracked
-      await rpc.gitCheckout(repo.repo_id, ".", { pathspec: true });
+      if (await fileTransfers.restore([...multiSelected]) === null) return;
       skipPatchPairEffectRef.current = true;
       refreshStatus();
       await refreshPatchPair();
@@ -908,7 +795,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
     } finally {
       setBatchBusy(false);
     }
-  }, [multiSelected, repo.repo_id, refreshStatus, refreshPatchPair]);
+  }, [multiSelected, fileTransfers, refreshStatus, refreshPatchPair]);
 
   // Keyboard shortcuts for batch operations
   useEffect(() => {
@@ -1093,7 +980,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
               count={multiSelected.size}
               onStage={batchStage}
               onUnstage={batchUnstage}
-              onDiscard={batchDiscard}
+              onDiscard={fileTransfers.restore ? batchDiscard : undefined}
               onClear={clearMultiSelect}
               busy={batchBusy}
             />
@@ -1123,7 +1010,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                   onSelect={handleFileSelect}
                   onDoubleClick={openFileDiff}
                   onToggleFile={onToggleFile}
-                  onDiscardFile={handleDiscardFileByPath}
+                  onDiscardFile={fileTransfers.restore ? handleDiscardFileByPath : undefined}
                   onOpenFile={handleOpenFile}
                   onContextMenu={handleFileContextMenu}
                 />
@@ -1138,7 +1025,7 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                   onSelect={selectFile}
                   onDoubleClick={openFileDiff}
                   onToggleFile={onToggleFile}
-                  onDiscardFileByPath={handleDiscardFileByPath}
+                  onDiscardFileByPath={fileTransfers.restore ? handleDiscardFileByPath : undefined}
                   onOpenFile={handleOpenFile}
                   onContextMenu={handleFileContextMenu}
                   scrollRef={fileListScrollRef}
@@ -1175,6 +1062,8 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                 path={openFilePath}
                 content={openFileContent}
                 loading={openFileLoading}
+                error={openFileError}
+                waiting={!repo.native_session_id}
                 onClose={() => { setOpenFilePath(null); setOpenFileContent(null); }}
               />
             ) : (
@@ -1184,13 +1073,14 @@ export function ChangesView({ repo, onOpenDiff, activeDiffPath, onCommit }: Prop
                 loading={patchLoading}
                 error={patchError}
                 canUnstage={canUnstage}
+                stagedOnly={!!selectedPath && fileStates[selectedPath] === "full"}
                 onStageHunk={onStageHunk}
                 onUnstageHunk={onUnstageHunk}
                 onDiscardHunk={onDiscardHunk}
                 onDiscardLine={onDiscardLine}
-                onStageFile={onStageFile}
-                onUnstageFile={onUnstageFile}
-                onDiscardFile={onDiscardFile}
+                onStageFile={({ path }) => onToggleFile(path, "stage")}
+                onUnstageFile={({ path }) => onToggleFile(path, "unstage")}
+                onDiscardFile={fileTransfers.restore && selectedPath && fileStates[selectedPath] !== "full" ? onDiscardFile : undefined}
                 toast={toast}
                 onDismissToast={() => setToast(null)}
               />
@@ -1274,7 +1164,7 @@ function FlatList({
   onSelect: (path: string) => void;
   onDoubleClick: (path: string) => void;
   onToggleFile: (path: string, intent: "stage" | "unstage") => void;
-  onDiscardFileByPath: (path: string) => void;
+  onDiscardFileByPath?: (path: string) => void;
   onOpenFile?: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -1389,8 +1279,8 @@ function FlatList({
                   type="button"
                   title={`Discard changes in ${e.path}`}
                   aria-label={`Discard changes in ${e.path}`}
-                  disabled={toggling}
-                  onClick={(ev) => { ev.stopPropagation(); onDiscardFileByPath(e.path); }}
+                  disabled={toggling || !onDiscardFileByPath}
+                  onClick={(ev) => { ev.stopPropagation(); onDiscardFileByPath?.(e.path); }}
                   className="flex h-5 w-5 items-center justify-center rounded text-gx-muted hover:bg-gx-error/20 hover:text-gx-error disabled:opacity-50 disabled:cursor-not-allowed transition"
                 >
                   <Undo2 size={13} />
@@ -1554,6 +1444,7 @@ interface PatchPaneProps {
   loading: boolean;
   error: string | null;
   canUnstage: boolean;
+  stagedOnly: boolean;
   onStageHunk: Parameters<typeof InlinePatchDiff>[0]["onStageHunk"];
   onUnstageHunk: Parameters<typeof InlinePatchDiff>[0]["onUnstageHunk"];
   onDiscardHunk: Parameters<typeof InlinePatchDiff>[0]["onDiscardHunk"];
@@ -1573,11 +1464,15 @@ function FileContentPane({
   path,
   content,
   loading,
+  error,
+  waiting,
   onClose,
 }: {
   path: string;
   content: string | null;
   loading: boolean;
+  error: string | null;
+  waiting: boolean;
   onClose: () => void;
 }) {
   const lines = useMemo(() => content?.split("\n") ?? [], [content]);
@@ -1600,17 +1495,19 @@ function FileContentPane({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {loading && (
+        {waiting && <p role="status" className="p-4 text-xs text-gx-muted">Waiting for repository recovery…</p>}
+        {!waiting && loading && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
             <Loader2 size={14} className="animate-spin" /> Loading file…
           </div>
         )}
-        {!loading && content == null && (
+        {!waiting && !loading && error && <p role="alert" className="m-4 text-xs text-gx-error">{error}</p>}
+        {!waiting && !loading && !error && content == null && (
           <div className="flex h-full items-center justify-center text-sm text-gx-muted">
             Unable to read file content (binary or missing).
           </div>
         )}
-        {!loading && content != null && (
+        {!waiting && !loading && !error && content != null && (
           <pre className="p-0 m-0 text-[12px] leading-[1.6] font-mono">
             <table className="w-full border-collapse">
               <tbody>
@@ -1639,6 +1536,7 @@ function PatchPane({
   loading,
   error,
   canUnstage,
+  stagedOnly,
   onStageHunk,
   onUnstageHunk,
   onDiscardHunk,
@@ -1655,7 +1553,7 @@ function PatchPane({
         <span className="font-mono text-gx-text">
           {selectedPath ?? "No file selected"}
         </span>
-        <span className="ml-auto">Working tree vs Index</span>
+        <span className="ml-auto">{stagedOnly ? "Index vs HEAD" : "Working tree vs Index"}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {!selectedPath && (

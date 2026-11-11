@@ -138,6 +138,76 @@ impl Fixture {
 pub(super) async fn verify(snapshot: &Snapshot, original: &[u8]) {
     let path = GitPath::new(b"z-crab".to_vec()).unwrap();
     let size = original.len() as u64;
+    for name in ["z-crab", "z-crab-no-hint", "z-crab-stale-hint"] {
+        let page = snapshot
+            .file_chunks(GitPath::new(name).unwrap(), 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            (page.chunk_count, page.xorb_count, page.next),
+            (1, Some(1), None)
+        );
+        let chunk = &page.chunks[0];
+        assert_eq!(
+            (chunk.offset, chunk.length, chunk.hash.as_str()),
+            (
+                0,
+                size,
+                crab_xet::hash::compute_data_hash(original).hex().as_str()
+            )
+        );
+        assert!(chunk.xorb_hash.is_some());
+    }
+    for (start, limit) in [(2, 1), (0, 0), (0, 513)] {
+        assert_eq!(
+            snapshot
+                .file_chunks(path.clone(), start, limit)
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            crab_sdk::ErrorKind::InvalidInput
+        );
+    }
+    for name in ["second.txt", "z-lfs"] {
+        assert_eq!(
+            snapshot
+                .file_chunks(GitPath::new(name).unwrap(), 0, 1)
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            crab_sdk::ErrorKind::UnsupportedCapability
+        );
+    }
+    let pointer = snapshot.read_blob(path.clone()).await.unwrap();
+    let limits = crab_sdk::operation::ReadLimits {
+        max_response_bytes: pointer.len() as u64 + 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        snapshot
+            .file_chunks(path.clone(), 0, 1)
+            .with_options(ReadOptions::default().with_limits(limits).unwrap())
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        crab_sdk::ErrorKind::LimitExceeded
+    );
+    let cancellation = crab_sdk::operation::Cancellation::default();
+    cancellation.cancel();
+    let operation = crab_sdk::operation::Options::default().with_cancellation(cancellation);
+    assert_eq!(
+        snapshot
+            .file_chunks(path.clone(), 0, 1)
+            .with_options(ReadOptions::default().with_operation(operation))
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        crab_sdk::ErrorKind::Cancelled
+    );
     for range in [0..size, 0..0, size..size, 1..size - 1, 65530..65547] {
         let mut stream = snapshot
             .open_file(path.clone())
@@ -252,6 +322,11 @@ pub(super) async fn verify_pinned_lookup(snapshot: &Snapshot, original: &[u8]) {
         b"z-crab-no-hint".as_slice(),
         b"z-crab-stale-hint".as_slice(),
     ] {
+        let page = snapshot
+            .file_chunks(GitPath::new(name.to_vec()).unwrap(), 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.chunks[0].length, original.len() as u64);
         for range in [0..original.len() as u64, 1..original.len() as u64 - 1] {
             let mut stream = snapshot
                 .open_file(GitPath::new(name.to_vec()).unwrap())
@@ -273,6 +348,15 @@ pub(super) async fn verify_lookup_missing(snapshot: &Snapshot) {
         b"z-crab-no-hint".as_slice(),
         b"z-crab-stale-hint".as_slice(),
     ] {
+        assert_eq!(
+            snapshot
+                .file_chunks(GitPath::new(name.to_vec()).unwrap(), 0, 1)
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            crab_sdk::ErrorKind::NotFound
+        );
         let mut stream = snapshot
             .open_file(GitPath::new(name.to_vec()).unwrap())
             .await

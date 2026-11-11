@@ -203,10 +203,10 @@ export class CompressedTransferHandler {
 
   /**
    * Check whether compression is available for a given profile.
-   * Requires the agent to support the "compression" capability.
+   * Requires both compressed transfer RPC handlers.
    */
   isCompressionAvailable(profileId: string): boolean {
-    return this.capabilities.isSupported(profileId, "compression");
+    return this.capabilities.isSupported(profileId, "compress_file", "decompress_write");
   }
 
   // ── Private helpers ────────────────────────────────────────────

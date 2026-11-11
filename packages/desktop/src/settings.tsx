@@ -1,5 +1,10 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { mainProcess } from "./ipc";
+import { repositoryKey, useActiveRepo } from "./state";
+import { parseRepoId } from "../electron/ssh-types";
+import { repositoryWorktree } from "./lib/repository-worktree";
+import { workspaceDocuments, workspaceOverrides, type WorkspaceDocumentState } from "./lib/workspace-settings-store";
+import { getWatchPath, useFileWatcher } from "./hooks/useFileWatcher";
 
 // ---- Schema -----------------------------------------------------------
 
@@ -262,8 +267,9 @@ function load(): Settings {
  * Read the current settings snapshot from localStorage.
  * Safe to call outside React (e.g. from toast publishers).
  */
+let effectiveSnapshot: Settings | undefined;
 export function getSettings(): Settings {
-  return load();
+  return effectiveSnapshot ?? load();
 }
 
 function save(s: Settings) {
@@ -279,20 +285,52 @@ function save(s: Settings) {
 
 interface Ctx {
   settings: Settings;
+  userSettings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   reset: () => void;
 }
 
 const SettingsContext = createContext<Ctx | null>(null);
+interface WorkspaceDocument extends WorkspaceDocumentState {
+  key: string;
+  canEdit: boolean;
+  reload: () => void;
+  change: (update: (document: Record<string, unknown>) => void) => Promise<boolean>;
+}
+const WorkspaceContext = createContext<WorkspaceDocument | null>(null);
+export function useWorkspaceDocument(): WorkspaceDocument {
+  const document = useContext(WorkspaceContext);
+  if (!document) throw new Error("useWorkspaceDocument used outside SettingsProvider");
+  return document;
+}
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
-  const [settings, setSettings] = useState<Settings>(() => load());
+  const [userSettings, setSettings] = useState<Settings>(() => load());
+  const repo = useActiveRepo();
+  const root = repo ? repositoryWorktree(repo) : undefined;
+  const key = repo && root ? repositoryKey(repo) : "";
+  const canEdit = !!root && !!repo?.capabilities?.canEdit;
+  const owner = repo && parseRepoId(repo.repo_id) ? repo.native_session_id : null;
+  const subscribe = useCallback((listener: () => void) => key ? workspaceDocuments.subscribe(key, listener) : () => {}, [key]);
+  const snapshot = useCallback(() => workspaceDocuments.snapshot(key), [key]);
+  const workspaceState = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const reload = useCallback(() => { if (key) void workspaceDocuments.load(key); }, [key]);
+  useEffect(() => {
+    if (!key || !root || !repo) return;
+    workspaceDocuments.bind(key, { repoId: repo.repo_id, fullPath: `${root.replace(/[\\/]$/, "")}/.crab/desktop/settings.json`, canEdit, owner });
+    reload();
+  }, [key, root, repo?.repo_id, repo?.native_session_id, canEdit, owner, reload]);
+  useFileWatcher(repo ? getWatchPath(repo) : undefined, reload);
+  const change = useCallback((update: (document: Record<string, unknown>) => void) => workspaceDocuments.update(key, update), [key]);
+  const workspace = useMemo(() => ({ ...workspaceState, key, canEdit, reload, change }), [workspaceState, key, canEdit, reload, change]);
+  const settings = useMemo(() => ({ ...userSettings, ...workspaceOverrides(workspaceState.document) }), [userSettings, workspaceState.document]);
+  useEffect(() => { effectiveSnapshot = settings; }, [settings]);
 
   // Persist on every change. Saving is cheap (a stringify + a
   // localStorage write) so we don't bother debouncing.
   useEffect(() => {
-    save(settings);
-  }, [settings]);
+    save(userSettings);
+  }, [userSettings]);
 
   // Apply the theme class on <html> reactively. The initial class
   // is set by the inline script in index.html to avoid a flash; this
@@ -346,8 +384,8 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
 
   const reset = useCallback(() => setSettings(DEFAULT_SETTINGS), []);
 
-  const value = useMemo<Ctx>(() => ({ settings, update, reset }), [settings, update, reset]);
-  return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
+  const value = useMemo<Ctx>(() => ({ settings, userSettings, update, reset }), [settings, userSettings, update, reset]);
+  return <WorkspaceContext.Provider value={workspace}><SettingsContext.Provider value={value}>{children}</SettingsContext.Provider></WorkspaceContext.Provider>;
 }
 
 export function useSettings(): Ctx {
@@ -358,4 +396,9 @@ export function useSettings(): Ctx {
 
 export function useSetting<K extends keyof Settings>(key: K): Settings[K] {
   return useSettings().settings[key];
+}
+
+export function useUserSettings(): Ctx {
+  const context = useSettings();
+  return { ...context, settings: context.userSettings };
 }

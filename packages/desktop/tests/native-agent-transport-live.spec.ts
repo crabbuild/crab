@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -8,7 +9,8 @@ import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
 import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
-import { getExpandedEnv, type AgentEvent } from "../electron/orchestrator-adapters";
+import type { AgentEvent } from "../electron/orchestrator-adapters";
+import { getExpandedEnv } from "../electron/env/userShellEnv";
 import { CodexAppServerAdapter } from "../electron/codex-app-server-adapter";
 import { ClaudeCodeAdapter } from "../electron/claude-code-adapter";
 import { terminalSshServer } from "./fixtures/ssh-terminal-server";
@@ -22,7 +24,7 @@ describe.skipIf(!liveRoot || process.platform === "win32")("native protocols thr
     const runtime = path.resolve(`resources/native/${platform}-${process.arch}`);
     // This server is the current account's existing CLI login. The client
     // transport never receives this environment or copies credential files.
-    const server = await terminalSshServer(root, getExpandedEnv().PATH);
+    const server = await terminalSshServer(root, (await getExpandedEnv()).PATH);
     Object.assign(server.env, { HOME: homedir(), CRAB_BIN: path.join(runtime, "crab"), TMPDIR: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
     const client = await server.connect();
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -33,8 +35,8 @@ describe.skipIf(!liveRoot || process.platform === "win32")("native protocols thr
     let exit: number | null = null;
     channel.on("exit", code => { exit = code; });
     const closed = new Promise<number | null>((resolve, reject) => { channel.once("close", () => resolve(exit)); channel.once("error", reject); });
-    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {} }) } as unknown as SshSessionManager;
-    const router = new RpcRouter(manager, { request: async () => { throw new Error("Native transport cannot fall through to local RPC"); } });
+    const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, channels: { agent: channel } }) } as unknown as SshSessionManager;
+    const router = new RpcRouter(manager, { request: async () => { throw new Error("Native transport cannot fall through to local RPC"); } }, mockStorageConnections);
     router.attachChannel("owned-server", channel as unknown as ClientChannel);
     const factory = remoteAgentProcessFactory(router, "owned-server");
     const createAdapter = () => provider === "codex" ? new CodexAppServerAdapter(undefined, undefined, "codex", factory) : new ClaudeCodeAdapter([], "claude", factory);

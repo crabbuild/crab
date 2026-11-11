@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import * as fs from "node:fs";
@@ -15,6 +16,10 @@ import { AgentDeployer } from "../electron/ssh-deployer";
 import { KnownHostsManager, createHostKeyVerifier, type HostKeyVerifier } from "../electron/ssh-known-hosts";
 import { RemoteRuntimeStore } from "../electron/ssh-runtime";
 import { RemoteFileBrowser } from "../electron/ssh-file-browser";
+import { ProviderRegistry } from "../electron/provider-registry";
+import { RemoteProvider } from "../electron/remote-provider";
+import { RemoteFileEditor } from "../electron/ssh-file-editor";
+import { RemoteGitManager } from "../electron/ssh-remote-git";
 import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
@@ -30,7 +35,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
   let verifier: HostKeyVerifier;
   let uname: string; let abortOnWrite: boolean; let stalledOperation: "OPEN" | "WRITE" | "CLOSE" | undefined; let written: (() => void) | undefined; let native: boolean; let exits: Array<number | null>; let diagnostics: string[];
   beforeEach(async () => {
-    directory = await mkdtemp(path.join(tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
+    directory = await mkdtemp(path.join(process.env.CRAB_AGENT_LIVE_ROOT ?? tmpdir(), "crab-runtime-sftp-")); remote = path.join(directory, "remote ' 雪");
     vi.stubEnv("CRAB_DESKTOP_SETTINGS_PATH", path.join(directory, "settings.json"));
     local = path.join(directory, "app", "resources", "native", "mac-arm64"); await mkdir(remote); await mkdir(local, { recursive: true });
     const cli = Buffer.from("#!/bin/sh\nprintf 'owned-cli\\n'\n");
@@ -56,7 +61,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
           const channel = acceptCommand(); channel.on("error", () => {}); commands.push(info.command);
           if (info.command === "uname -s && uname -m") { channel.write(uname); channel.exit(0); channel.end(); return; }
           if (info.command.includes("shasum") && acknowledged !== uploads) throw new Error("Hash attempted before SFTP CLOSE acknowledgement");
-          const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8" } });
+          const child = spawn("/bin/sh", ["-c", info.command], { cwd: remote, detached: true, env: { HOME: remote, PATH: process.env.PATH, TMPDIR: directory, LANG: "en_US.UTF-8", ...(native ? { AWS_SESSION_TOKEN: "fixture-ambient-token" } : {}) } });
           children.add(child); child.stderr.on("data", (chunk: Buffer) => { if (native) diagnostics.push(chunk.toString()); }); channel.pipe(child.stdin); child.stdout.pipe(channel, { end: false }); child.stderr.pipe(channel.stderr, { end: false });
           channel.once("close", () => {
             if (!children.has(child)) return;
@@ -214,7 +219,7 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
     const hosts = new KnownHostsManager(path.join(directory, "manager-pins"), path.join(directory, "manager-user"), path.join(directory, "manager-global"));
     hosts.accept("127.0.0.1", address.port, hostKey);
     const manager = new SshSessionManager(createHostKeyVerifier(hosts, async () => false));
-    const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
+    const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } }, mockStorageConnections);
     const negotiator = new CapabilityNegotiator(router);
     manager.setAgentDependencies({ createDeployer: () => new AgentDeployer(store.resolve.bind(store)), rpcRouter: router, capabilityNegotiator: negotiator });
     // Persist before waits so a runner deadline still leaves the last phase
@@ -233,7 +238,8 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
       await run("git", ["init", "--template=", "--initial-branch=main"], { cwd: repo, env }); await writeFile(path.join(repo, "tracked.txt"), "before\n");
       await run("git", ["add", "tracked.txt"], { cwd: repo, env });
       await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "-m", "baseline"], { cwd: repo, env });
-      const browser = new RemoteFileBrowser(router, manager);
+      const provider = new RemoteProvider({ router, sessionManager: manager, capabilityNegotiator: negotiator, fileEditor: new RemoteFileEditor(router, manager), gitManager: new RemoteGitManager(router, manager) });
+      const browser = new RemoteFileBrowser(manager, new ProviderRegistry(), provider);
       progress("open-repository");
       const opened = await browser.openAsRepo("runtime", repo) as { repo_id: string; is_remote: boolean };
       const repoId = `ssh://runtime${repo}`;
@@ -341,8 +347,20 @@ describe.skipIf(process.platform === "win32")("real SFTP runtime installation", 
         await run("git", ["config", "user.name", "Fixture"], { cwd: repo, env });
         await run("git", ["config", "user.email", "fixture@example.invalid"], { cwd: repo, env });
         await run("git", ["worktree", "lock", "--reason", "owned cleanup rejection", apply.path], { cwd: repo, env });
-        const applied = await router.route(repoId, "task_apply", { repo_id: repoId, task_id: applyId, branch: apply.branch, base_ref: apply.base_ref, base_branch: "main", worktree_path: apply.path }) as { applied: boolean; worktree_removed: boolean; cleanup_error: string };
+        const hookReceipt = path.join(repo, "selected-store-hook.txt");
+        const hooks = path.join(repo, ".git", "hooks"); await mkdir(hooks, { recursive: true });
+        const hook = `#!/bin/sh
+[ "$AWS_ACCESS_KEY_ID" = fixture-selected-access ] || exit 87
+[ "$AWS_SECRET_ACCESS_KEY" = fixture-selected-secret ] || exit 88
+[ -z "$AWS_SESSION_TOKEN" ] || exit 89
+printf verified > '${hookReceipt.replaceAll("'", "'\\''")}'
+`;
+        await writeFile(path.join(hooks, "pre-merge-commit"), hook, { mode: 0o755 });
+        const selectedStore = { bucket: "fixture-bucket", region: "us-east-1", endpoint: "http://127.0.0.1:9", credentials: { provider: "s3", access_key_id: "fixture-selected-access", secret_access_key: "fixture-selected-secret", session_token: null } };
+        const applied = await router.route(repoId, "task_apply", { repo_id: repoId, task_id: applyId, branch: apply.branch, base_ref: apply.base_ref, base_branch: "main", worktree_path: apply.path, __storage_auth: selectedStore }) as { applied: boolean; worktree_removed: boolean; cleanup_error: string };
         expect({ applied: applied.applied, removed: applied.worktree_removed, error: applied.cleanup_error, bytes: await readFile(path.join(repo, "applied.txt"), "utf8"), retained: fs.existsSync(apply.path) }).toEqual({ applied: true, removed: false, error: expect.stringContaining("locked"), bytes: "confirmed merge\n", retained: true });
+        expect(await readFile(hookReceipt, "utf8")).toBe("verified");
+        await fs.promises.unlink(path.join(hooks, "pre-merge-commit"));
         await run("git", ["worktree", "unlock", apply.path], { cwd: repo, env });
         await router.route(repoId, "task_discard", { repo_id: repoId, task_id: applyId, branch: apply.branch, worktree_path: apply.path });
         const destroyed = await router.route(repoId, "worktree_destroy", { repo_id: repoId, path: taskWorktrees[1].path, branch: taskWorktrees[1].branch, force: true });

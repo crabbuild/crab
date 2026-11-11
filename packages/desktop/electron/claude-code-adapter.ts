@@ -234,6 +234,7 @@ export class ClaudeCodeAdapter extends AgentAdapter {
     const child = this.proc;
     if (!child) return Promise.resolve();
     this.cancellation = this.processClosed;
+    if (!this.initialized) child.kill("SIGTERM");
     for (const requestId of this.approvals.keys()) this.respond(requestId, { behavior: "deny", message: "Conversation stopped", interrupt: true });
     for (const [requestId, pending] of this.inputs) this.respond(requestId, "request" in pending ? { action: "cancel" } : { behavior: "deny", message: "Conversation stopped", interrupt: true });
     this.clearRequests();

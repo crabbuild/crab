@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PushFlowSummary, PushProgressEvent, PushStepInfo, PushUploadProgress, onAgentEvent, rpc } from "../ipc";
+import { PushFlowSummary, PushProgressEvent, PushStepInfo, PushUploadProgress, onAgentEvent, rpc, call } from "../ipc";
 
 export type PushPhaseGroup = "finalize";
 export const PUSH_STEPS = [{ index: 1, name: "push", label: "Publish repository", group: "finalize" as const }];
@@ -49,7 +49,7 @@ export function useCrabPushFlow() {
   const cancel = useCallback(() => {
     const id = jobId.current;
     jobId.current = null;
-    if (id) void window.crab.rpc("rpc/cancel", { op_id: id }).catch(() => undefined);
+    if (id) void call("rpc/cancel", { op_id: id }).catch(() => undefined);
     setState({ phase: "error", message: "Cancelled by user", steps: steps("error") });
   }, []);
   const reset = useCallback(() => { jobId.current = null; setState({ phase: "idle" }); }, []);

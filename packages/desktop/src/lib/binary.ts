@@ -1,28 +1,27 @@
-// Heuristic: decide whether a blob is text or binary.
-//
-// VS Code uses a similar approach — sample the first ~8 KB and look
-// for NUL bytes or a high ratio of non-printable characters. The
-// heuristic is intentionally conservative: false-positives ("binary
-// when it's actually text") just fall back to hex view, while
-// false-negatives would let Monaco choke on invalid UTF-8 and crash.
+// Control-byte detection selects hex view. Strict decoding below protects
+// editable files from replacement characters that would corrupt a later save.
 
 const SAMPLE_BYTES = 8 * 1024;
 const NONPRINTABLE_THRESHOLD = 0.3;
 
-export function isProbablyBinary(bytes: Uint8Array): boolean {
+export function decodeText(bytes: Uint8Array): string | null {
   const n = Math.min(bytes.length, SAMPLE_BYTES);
-  if (n === 0) return false;
   let nonPrintable = 0;
   for (let i = 0; i < n; i++) {
     const b = bytes[i];
     // NUL byte → almost certainly binary.
-    if (b === 0) return true;
+    if (b === 0) return null;
     // Printable ASCII range + common whitespace (\t, \n, \r, \f).
     const printable =
       (b >= 0x20 && b < 0x7f) || b === 0x09 || b === 0x0a || b === 0x0d || b === 0x0c || b >= 0x80;
     if (!printable) nonPrintable++;
   }
-  return nonPrintable / n > NONPRINTABLE_THRESHOLD;
+  if (n > 0 && nonPrintable / n > NONPRINTABLE_THRESHOLD) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 // Decode base64 to Uint8Array in a browser-safe way. atob + manual
@@ -33,14 +32,6 @@ export function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
-}
-
-// Decode bytes as UTF-8; if the bytes are invalid UTF-8 (non-BMP
-// garbage inside a claimed text file), TextDecoder with fatal:false
-// still produces a lossy string — the caller should have ruled that
-// out with `isProbablyBinary` first.
-export function bytesToUtf8(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8").decode(bytes);
 }
 
 // Render first N bytes as a classic hex dump.

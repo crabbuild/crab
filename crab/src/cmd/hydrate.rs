@@ -537,14 +537,7 @@ impl Hydrator for SmudgeSessionHydrator {
                     Err(remote_error) => match try_hydrate_from_staging(path, ptr, cancel).await {
                         Ok(Some(bytes)) => Ok(bytes),
                         Ok(None) => Err(remote_error),
-                        Err(staging_error) => {
-                            warn!(
-                                path = %path.display(),
-                                error = %staging_error,
-                                "local staging hydrate fallback failed"
-                            );
-                            Err(remote_error)
-                        }
+                        Err(staging_error) => Err(staging_error),
                     },
                 };
                 match result {
@@ -1103,14 +1096,7 @@ impl HydrationRuntime {
                     Ok(write)
                 }
                 Ok(None) => Err(remote_error),
-                Err(staging_error) => {
-                    warn!(
-                        path = %path.display(),
-                        error = %staging_error,
-                        "local staging hydrate fallback failed"
-                    );
-                    Err(remote_error)
-                }
+                Err(staging_error) => Err(staging_error),
             },
         };
 
@@ -1451,81 +1437,42 @@ fn preserve_destination_permissions(dest: &Path, temporary: &std::fs::File) -> R
     }
 }
 
-const STAGING_HYDRATE_BATCH_CHUNKS: usize = 512;
-
-/// Restore an unpushed pointer from its exact published staging recipe.
-///
-/// Failed pushes intentionally preserve staging. This fallback keeps that
-/// content recoverable after a pull turns the worktree back into pointers,
-/// while the tempfile and whole-file hash gate prevent partial or stale data
-/// from replacing the destination.
+// Git clean delegates a verified recipe before Git accepts its index update.
+// The canonical reader pins those retained bytes without granting push authority.
 async fn try_hydrate_from_staging(
     dest: &Path,
     ptr: &Pointer,
     cancel: &CancellationToken,
 ) -> Result<Option<VerifiedWrite>> {
-    let Some(start) = dest.parent() else {
+    let Some(parent) = dest.parent() else {
         return Ok(None);
     };
-    let Ok(context) = WorktreeContext::resolve_from_path(start) else {
+    // Export destinations outside a worktree have no staging candidate. Keep
+    // the original remote failure there; discovery/setup failures still fail.
+    let context = match crab_git::worktree::WorktreeContext::resolve_from_path(parent) {
+        Ok(context) => WorktreeContext::from(context),
+        Err(crab_git::worktree::WorktreeError::Discover {
+            source:
+                gix_discover::upwards::Error::NoGitRepository { .. }
+                | gix_discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+                | gix_discover::upwards::Error::NoGitRepositoryWithinFs { .. },
+            ..
+        }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(reader) = crab_staging::StagedFileReader::open_with_cancel(
+        context.shared_staging_dir(),
+        MerkleHash::from(ptr.file_hash),
+        ptr.size,
+        cancel,
+    )
+    .await?
+    else {
         return Ok(None);
     };
-    let staging_root = context.shared_staging_dir();
-    let staging = match crab_staging::StagingAreaReadOnly::open_blocking_default(staging_root).await
-    {
-        Ok(staging) => staging,
-        Err(error) => {
-            debug!(error = %error, "local staging unavailable for hydrate fallback");
-            return Ok(None);
-        }
-    };
-    let file_hash = MerkleHash::from(ptr.file_hash);
-    let Some(recipe) = staging.published_recipe_for_file(&file_hash)? else {
-        return Ok(None);
-    };
-    if recipe.file_hash() != file_hash || recipe.file_size() != ptr.size {
-        return Err(error::CrabError::StagingCorrupt(format!(
-            "published recipe for {} does not match pointer size {}",
-            file_hash.hex(),
-            ptr.size
-        )));
-    }
-
-    let parent = dest.parent().unwrap_or(Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut written = 0u64;
-    let mut next_occurrence = 0u64;
-    while next_occurrence < recipe.chunk_count() {
-        error::check_cancelled(cancel)?;
-        let page = staging.recipe_page(&recipe, next_occurrence)?;
-        for spans in page.chunks.chunks(STAGING_HYDRATE_BATCH_CHUNKS) {
-            let hashes = spans.iter().map(|span| span.chunk_hash).collect::<Vec<_>>();
-            let chunks = staging.get_chunks_batch(&hashes).await?;
-            for (span, (chunk_hash, data)) in spans.iter().zip(chunks) {
-                if chunk_hash != span.chunk_hash || data.len() as u64 != span.len {
-                    return Err(error::CrabError::StagingCorrupt(format!(
-                        "staged chunk {} does not match the published recipe",
-                        span.chunk_hash.hex()
-                    )));
-                }
-                tmp.write_all(&data)?;
-                hasher.update(&data);
-                written = written.checked_add(data.len() as u64).ok_or_else(|| {
-                    error::CrabError::StagingCorrupt(
-                        "staging hydrate byte count overflow".to_owned(),
-                    )
-                })?;
-            }
-        }
-        next_occurrence = page.next_occurrence();
-    }
-    if written != ptr.size || hasher.finalize().as_bytes() != &ptr.file_hash {
-        return Err(error::CrabError::StagingCorrupt(format!(
-            "staged content for {} does not reconstruct the requested pointer",
-            file_hash.hex()
-        )));
-    }
+    let tmp = tempfile::NamedTempFile::new_in(parent)?;
+    let written = reader.reconstruct_to_path(tmp.path(), cancel).await?;
+    error::check_cancelled(cancel)?;
     let verified = persist_verified_temp(tmp, dest, written)?;
     debug!(path = %dest.display(), bytes = written, "hydrated unpushed pointer from local staging");
     Ok(Some(verified))

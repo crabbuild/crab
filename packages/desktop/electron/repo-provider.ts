@@ -12,34 +12,7 @@
 
 import { EventEmitter } from "node:events";
 
-// ── Capability Set ───────────────────────────────────────────────
-
-/**
- * Feature flags describing what a given repository supports at this
- * moment. Determined at open time and updated on connection state
- * changes. The renderer uses these to enable/disable UI controls
- * instead of checking `is_remote`.
- */
-export interface CapabilitySet {
-  /** File writing (create, rename, delete, write). */
-  canEdit: boolean;
-  /** Real-time file change notifications. */
-  canWatch: boolean;
-  /** Hunk-level git staging. */
-  canStageHunks: boolean;
-  /** Git worktree management. */
-  canWorktree: boolean;
-  /** PR/forge operations (depends on forge_provider). */
-  canForge: boolean;
-  /** Crab hydrate/dehydrate. */
-  canHydrate: boolean;
-  /** Full-text search. */
-  canSearch: boolean;
-  /** Command execution (terminals, build/run). */
-  canExec: boolean;
-  /** Move to trash (local only — remote has no trash). */
-  canTrash: boolean;
-}
+import type { CapabilitySet } from "./repo-capabilities";
 
 // ── Provider Events ──────────────────────────────────────────────
 
@@ -61,6 +34,8 @@ export interface CapabilitiesChangedEvent {
   type: "capabilities-changed";
   repoId: string;
   capabilities: CapabilitySet;
+  nativeSessionId: string | null;
+  error?: string;
 }
 
 export type ProviderEvent = FsChangedEvent | CapabilitiesChangedEvent;
@@ -103,6 +78,7 @@ export interface FsReadResult {
  * (file watching, fs mutations, capabilities).
  */
 export interface RepoProvider {
+  nativeSession(repoId: string): string | null;
   /**
    * Core dispatch — handles any RPC method. This is the primary
    * entry point for all git and agent operations.
@@ -128,11 +104,11 @@ export interface RepoProvider {
   /** Delete a file or directory. Optionally move to trash (local only). */
   fsDelete(repoId: string, path: string, useTrash?: boolean): Promise<FsDeleteResult>;
 
-  /** Write text content to a file. */
-  fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
+  /** Write text content; SSH retains the caller's native session through admission. */
+  fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult>;
 
   /** Read text content from a file. */
-  fsRead(repoId: string, path: string): Promise<FsReadResult>;
+  fsRead(repoId: string, path: string, maxBytes: number | undefined, nativeSessionId: string | null): Promise<FsReadResult>;
 
   // ── Capabilities ─────────────────────────────────────────────
 
@@ -166,52 +142,15 @@ export interface ProviderEventEmitter {
  * RepoProvider interface contract with typed event emission.
  */
 export abstract class BaseProvider extends EventEmitter implements ProviderEventEmitter {
+  abstract nativeSession(repoId: string): string | null;
   abstract request(method: string, params: Record<string, unknown>): Promise<unknown>;
   abstract watchStart(repoId: string): Promise<void>;
   abstract watchStop(repoId: string): Promise<void>;
   abstract fsCreate(repoId: string, path: string, kind: "file" | "directory"): Promise<FsCreateResult>;
   abstract fsRename(repoId: string, oldPath: string, newPath: string): Promise<FsRenameResult>;
   abstract fsDelete(repoId: string, path: string, useTrash?: boolean): Promise<FsDeleteResult>;
-  abstract fsWrite(repoId: string, path: string, content: string): Promise<FsWriteResult>;
-  abstract fsRead(repoId: string, path: string): Promise<FsReadResult>;
+  abstract fsWrite(repoId: string, path: string, content: string, nativeSessionId: string | null): Promise<FsWriteResult>;
+  abstract fsRead(repoId: string, path: string, maxBytes: number | undefined, nativeSessionId: string | null): Promise<FsReadResult>;
   abstract capabilities(repoId: string): Promise<CapabilitySet>;
   abstract dispose(): void;
-}
-
-// ── Utility: Full capability set (local default) ─────────────────
-
-/**
- * Returns a CapabilitySet with all flags set to true. Used as the
- * default for local repos which have full access.
- */
-export function fullCapabilities(): CapabilitySet {
-  return {
-    canEdit: true,
-    canWatch: true,
-    canStageHunks: true,
-    canWorktree: true,
-    canForge: true,
-    canHydrate: true,
-    canSearch: true,
-    canExec: true,
-    canTrash: true,
-  };
-}
-
-/**
- * Returns a CapabilitySet with all flags set to false. Used when a
- * remote connection is lost and no operations are available.
- */
-export function noCapabilities(): CapabilitySet {
-  return {
-    canEdit: false,
-    canWatch: false,
-    canStageHunks: false,
-    canWorktree: false,
-    canForge: false,
-    canHydrate: false,
-    canSearch: false,
-    canExec: false,
-    canTrash: false,
-  };
 }

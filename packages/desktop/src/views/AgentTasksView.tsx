@@ -35,7 +35,7 @@ import { ResizeHandle } from "../components/orchestrator/ResizeHandle";
 import { ContextPinPanel } from "../components/orchestrator/ContextPinPanel";
 import { MultiAgentView } from "../components/orchestrator/MultiAgentView";
 import { useAgentSessions } from "../lib/use-agent-sessions";
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 import { ChatTranscript } from "../components/orchestrator/ChatTranscript";
 import type { ChatAttachment } from "../components/orchestrator/ChatInput";
 import { rpc, type AgentWorkflowDefinition, type AgentWorkflowRun, type RefEntry } from "../ipc";
@@ -171,7 +171,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
 
 function AgentTasksWorkspace({ repo, onOpenAgentManager, active }: Props & { active: boolean }) {
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
 
   // ── Session-persisted orchestrator state ──────────────────────────
   // Read saved orchestrator view state from the session so switching

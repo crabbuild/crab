@@ -390,14 +390,14 @@ const stageCommands: Command[] = [
   },
   {
     id: "git.discard.all",
-    label: "Git: Discard All Changes",
+    label: "Git: Discard All Unstaged Changes",
     category: "Stage",
     destructive: true,
-    isEnabled: (ctx: CommandContext) => ctx.dirtyCount > 0,
+    isEnabled: (ctx: CommandContext) => ctx.dirtyCount > 0 && !!ctx.fileTransfers?.restore,
     execute: async (ctx: CommandContext): Promise<CommandResult> => {
-      // Reset working tree to HEAD
-      await rpc.gitCheckout(ctx.repoId, ".", { pathspec: true });
-      return { success: true, message: "All changes discarded" };
+      const count = await ctx.fileTransfers!.restore!();
+      return count === null ? { success: false, cancelled: true, message: "Restoration cancelled" }
+        : { success: true, message: `Restored ${count} ${count === 1 ? "file" : "files"} from the index` };
     },
   },
 ];

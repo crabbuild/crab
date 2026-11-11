@@ -24,7 +24,7 @@ Renderer                    Main                    Agent
    │ ◄───────────────────────│                       │
 ```
 
-**Used by**: stat, list_refs, git_status_porcelain, pointer_info,
+**Used by**: stat, list_refs, git_status_porcelain, file_open, file_chunks, file_close,
 read_text, preview_*, git_log, auth_status
 
 **Characteristics**:

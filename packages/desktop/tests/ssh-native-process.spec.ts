@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { ClientChannel } from "ssh2";
@@ -8,6 +9,7 @@ import { remoteAgentProcessFactory } from "../electron/ssh-native-process";
 interface Request { id: number; method: string; params: Record<string, unknown> }
 
 class Channel extends EventEmitter {
+  end(): this { return this; }
   requests: Request[] = [];
   bytes: Buffer[] = [];
   holdStop = false;
@@ -36,9 +38,9 @@ class Channel extends EventEmitter {
 }
 
 function fixture() {
-  const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {} }) } as unknown as SshSessionManager;
-  const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local RPC"); } });
   const channel = new Channel();
+  const manager = { getStatus: () => "connected", getConnection: () => ({ profile: {}, channels: { agent: channel as unknown as ClientChannel } }) } as unknown as SshSessionManager;
+  const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local RPC"); } }, mockStorageConnections);
   router.attachChannel("server", channel as unknown as ClientChannel);
   const factory = remoteAgentProcessFactory(router, "server");
   const owner = factory("native-cli", ["--stdio"], { cwd: "/owned/workspace", env: { LOCAL_ONLY_CREDENTIAL: "fixture-secret" } });

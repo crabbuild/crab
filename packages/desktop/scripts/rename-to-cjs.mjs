@@ -80,6 +80,7 @@ async function renameJsToCjs() {
 }
 
 await renameJsToCjs();
+await copyFile(new URL("../electron/jupyter-runtime.py", import.meta.url), join(OUT_DIR, "jupyter-runtime.py"));
 await copyManifests();
 await verifyDaemonArtifact();
 

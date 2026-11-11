@@ -2,7 +2,8 @@ import type { IpcMain } from "electron";
 import type { AgentProcessFactory, OwnedAgentProcess } from "./agent-process";
 import { runAgentCommand } from "./agent-process";
 import { detectAgents, getCachedAgents, prewarmAgents, type DetectedAgent } from "./orchestrator-adapters";
-import { parseRepoId, type RpcRouter } from "./ssh-router";
+import type { RpcRouter } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
 import { remoteAgentProcessFactory } from "./ssh-native-process";
 
 /** Probes the same server environment used by native conversations. */

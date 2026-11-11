@@ -3,7 +3,7 @@
  * local and remote directories with conflict detection.
  *
  * Monitors both local (via Node fs.watch) and remote (via agent RPC
- * "watch_start") directories for file system events. Propagates local
+ * "watch_start", "watch_stop") directories for file system events. Propagates local
  * changes within 3 seconds and remote changes within 5 seconds.
  *
  * Conflict detection: if the same file is modified on both sides
@@ -180,7 +180,7 @@ export class WorkspaceSyncEngine extends EventEmitter {
     // Decide remote watching mode based on agent capabilities
     const hasFileWatching = this.capabilityNegotiator?.isSupported(
       state.pair.profileId,
-      "fileWatching",
+      "watch_start", "watch_stop",
     ) ?? false;
 
     if (hasFileWatching) {

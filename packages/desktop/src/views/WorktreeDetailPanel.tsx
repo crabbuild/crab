@@ -10,19 +10,22 @@ import {
   X,
 } from "lucide-react";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { OpenRepo } from "../state";
+import { OpenRepo, useStore } from "../state";
 import {
   rpc,
+  mainProcess,
   DirEntry,
   HydratedWorktreeEntry,
   WorktreeStatus,
   MergeStrategy,
   OpResult,
-  RepoHandle,
+  onAgentEvent,
 } from "../ipc";
 import { DiffView } from "./DiffView";
 import { EditorPane, EditorTab } from "../components/EditorPane";
 import { FileTree } from "../components/FileTree";
+import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 
 interface Props {
   repo: OpenRepo;
@@ -51,6 +54,7 @@ interface MergeTarget {
  * - Merge-back actions to integrate changes into other branches
  */
 export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) {
+  const { closeTransferRepo } = useStore();
   const [changedFiles, setChangedFiles] = useState<ChangedFile[] | null>(null);
   const [allEntries, setAllEntries] = useState<DirEntry[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,7 +67,13 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
 
   // Worktree repo handle (opened lazily for file listing/editing)
-  const [wtRepo, setWtRepo] = useState<(RepoHandle & { label: string; path: string; openedAt: number }) | null>(null);
+  const [wtRepo, setWtRepo] = useState<OpenRepo | null>(null);
+  const transfers = useFileTransfers(wtRepo);
+  const hydration = useHydrationStatus(wtRepo?.repo_id ?? "", !!wtRepo);
+  const fileTransfers = useMemo(() => ({
+    hydrate: transfers.hydrate ? (paths: string[]) => transfers.hydrate!({ kind: "custom", paths }) : undefined,
+    dehydrate: transfers.dehydrate ? (paths: string[]) => transfers.dehydrate!({ kind: "custom", paths }) : undefined,
+  }), [transfers]);
 
   const branch = shortBranch(worktree.branch);
   const changedPathSet = useMemo(
@@ -79,9 +89,16 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
   // Open the worktree as a repo context for file operations
   useEffect(() => {
     let cancelled = false;
-    rpc
-      .openLocal(worktree.path)
+    let ownedRepoId: string | undefined;
+    setWtRepo(null);
+    if (repo.is_remote) return;
+    // An auxiliary worktree needs its own handle with the parent's selected
+    // storage identity. Falling back to the parent could mutate another tree.
+    rpc.storageConnections(repo.repo_id)
+      .then(binding => cancelled ? null : rpc.openLocal(worktree.path, binding.selected_id))
       .then((handle) => {
+        if (!handle) return;
+        ownedRepoId = handle.repo_id;
         if (!cancelled) {
           setWtRepo({
             ...handle,
@@ -89,23 +106,49 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
             path: worktree.path,
             openedAt: Date.now(),
           });
-        }
+        } else void closeTransferRepo(handle.repo_id).catch(error => console.error("Worktree close failed", error));
       })
-      .catch(() => {
-        // If we can't open the worktree, fall back to using the parent repo
-        if (!cancelled) setWtRepo(null);
+      .catch((error: unknown) => {
+        if (!cancelled) setError(error instanceof Error ? error.message : String(error));
       });
-    return () => { cancelled = true; };
-  }, [worktree.path, worktree.meta?.display_name]);
+    return () => {
+      cancelled = true;
+      if (ownedRepoId) void closeTransferRepo(ownedRepoId).catch(error => console.error("Worktree close failed", error));
+    };
+  }, [repo.repo_id, repo.is_remote, repo.native_session_id, worktree.path, worktree.meta?.display_name, closeTransferRepo]);
 
-  // Fetch the full file listing for the worktree.
-  // Falls back to the parent repo if the worktree can't be opened
-  // independently (e.g. the main worktree is already the active repo).
+  // This auxiliary handle is owned by the panel rather than the app's open
+  // repository list. Keep its reader identity current after native replay.
+  useEffect(() => onAgentEvent(event => {
+    if (event.method !== "repo:capabilities-changed") return;
+    const update = event.params as Pick<OpenRepo, "repo_id" | "native_session_id" | "capabilities"> & { error?: string };
+    setWtRepo(current => current?.repo_id === update.repo_id ? {
+      ...current, native_session_id: update.native_session_id, capabilities: update.capabilities, native_error: update.error,
+    } : current);
+  }), []);
+
   useEffect(() => {
-    const repoId = wtRepo?.repo_id ?? repo.repo_id;
+    const id = wtRepo?.repo_id;
+    const session = wtRepo?.native_session_id;
+    if (!id || !session || wtRepo.capabilities) return;
+    let cancelled = false;
+    // Opening can emit readiness before this panel retains its handle. Query
+    // that captured session; a late reply cannot enable a replacement owner.
+    mainProcess.getCapabilities(id).then(capabilities => {
+      if (!cancelled) setWtRepo(current => current?.repo_id === id && current.native_session_id === session ? { ...current, capabilities } : current);
+    }).catch((error: unknown) => {
+      if (!cancelled) setError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { cancelled = true; };
+  }, [wtRepo?.repo_id, wtRepo?.native_session_id, wtRepo?.capabilities]);
+
+  // Only the worktree's own handle can authorize its file list and editing.
+  useEffect(() => {
+    setAllEntries(null);
+    if (!wtRepo) return;
     let cancelled = false;
     rpc
-      .list(repoId)
+      .list(wtRepo.repo_id)
       .then((r) => {
         if (!cancelled) setAllEntries(r.entries);
       })
@@ -113,7 +156,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
         if (!cancelled) setAllEntries([]);
       });
     return () => { cancelled = true; };
-  }, [wtRepo, repo.repo_id]);
+  }, [wtRepo]);
 
   // Fetch changed files using git_branch_info
   const fetchChanges = useCallback(() => {
@@ -190,11 +233,9 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
     }));
   }, [filterChanged, changedFiles, allEntries]);
 
-  // The repo context to use for editor operations
-  const editorRepo = useMemo<OpenRepo>(() => {
-    if (wtRepo) return wtRepo;
-    return repo;
-  }, [wtRepo, repo]);
+  const worktreeError = repo.is_remote
+    ? "To browse and transfer this SSH worktree, use Open worktree as full workspace in its card."
+    : error || wtRepo?.native_error || hydration.error;
 
   // Open a file in the multi-tab editor
   function openFile(path: string, entry: DirEntry) {
@@ -341,9 +382,9 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                     <Loader2 size={12} className="animate-spin" /> Loading…
                   </div>
                 )}
-                {error && (
-                  <div className="m-2 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-[11px] text-gx-error">
-                    {error}
+                {worktreeError && (
+                  <div role="alert" className="m-2 rounded border border-gx-error/40 bg-gx-error/10 p-2 text-[11px] text-gx-error">
+                    {worktreeError}
                   </div>
                 )}
                 {!loading && filterChanged && changedFiles && changedFiles.length === 0 && (
@@ -351,12 +392,16 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                     No changes detected.
                   </div>
                 )}
-                {displayEntries.length > 0 && (
+                {wtRepo && displayEntries.length > 0 && (
                   <FileTree
                     entries={displayEntries}
                     gitStatus={gitStatusRecord}
                     onOpenFile={(path, entry) => handleFileSelect(path, entry)}
                     workspacePath={worktree.path}
+                    repoId={wtRepo?.repo_id}
+                    hydrationByPath={hydration.byPath}
+                    fileTransfers={fileTransfers}
+                    canEdit={!!wtRepo?.capabilities?.canEdit}
                     initialExpansion="closed"
                     onRefresh={fetchChanges}
                   />
@@ -370,9 +415,9 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
           {/* Right: Multi-tab editor / diff view */}
           <Panel minSize={40}>
             <div className="flex h-full flex-col">
-              {editorTabs.length > 0 ? (
+              {wtRepo && editorTabs.length > 0 ? (
                 <EditorPane
-                  repo={editorRepo}
+                  repo={wtRepo}
                   tabs={editorTabs.filter((t) => !t.key.startsWith("diff::"))}
                   diffTabs={editorTabs
                     .filter((t) => t.key.startsWith("diff::"))
@@ -384,7 +429,7 @@ export function WorktreeDetailPanel({ repo, worktree, status, onClose }: Props) 
                   pinnedKeys={new Set()}
                   renderDiff={
                     isActiveDiff && activeDiffPath ? (
-                      <DiffView repo={editorRepo} path={activeDiffPath} />
+                      <DiffView repo={wtRepo} path={activeDiffPath} />
                     ) : null
                   }
                 />

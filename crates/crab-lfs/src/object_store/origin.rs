@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn origin_rehashes_even_a_matching_receipt_without_mutation() {
         let storage = Arc::new(InMemory::new());
-        let store = Store::new(storage.clone());
+        let store = Store::new(storage.clone()).with_target_identity([1; 32]);
         let lfs = LfsObjectStore::new(store.clone(), "origin");
         let oid: [u8; 32] = Sha256::digest(b"hello").into();
         let path = lfs.object_path(&oid);

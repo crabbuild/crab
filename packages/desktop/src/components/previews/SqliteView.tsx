@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo, useSyncExternalStore } from "react";
 import clsx from "clsx";
-import { Database, Key, Loader2, Table2, Terminal } from "lucide-react";
+import { Database, Key, Table2 } from "lucide-react";
 import { rpc } from "../../ipc";
 import { formatBytes } from "../../lib/format";
-import { DuckDbQueryPanel } from "./DuckDbQueryPanel";
+import { FileBrowseState, FileQueryMode, FileQueryPanel } from "./FileQueryPanel";
+import { fileQuery } from "../../lib/file-query";
 
-interface Props { repoId: string; path: string; rev: string | null; }
+interface Props { repoId: string; path: string; rev: string | null; nativeSessionId: string; }
 
 interface SqliteTable {
   name: string;
@@ -21,85 +22,50 @@ interface SqliteData {
   tables: SqliteTable[];
 }
 
-type ViewMode = "browse" | "sql";
 
-/**
- * SQLite database previewer with DuckDB SQL query support.
- *
- * Two modes:
- *   - Browse: table list with row counts + column schemas + data grid
- *   - SQL: full DuckDB SQL editor for analytics queries
- */
-export function SqliteView({ repoId, path, rev }: Props) {
+export function SqliteView({ repoId, path, rev, nativeSessionId }: Props) {
   const [data, setData] = useState<SqliteData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
-  const [mode, setMode] = useState<ViewMode>("browse");
+  const query = useMemo(() => fileQuery(repoId, path, rev), [repoId, path, rev]);
+  const { mode } = useSyncExternalStore(query.subscribe, query.snapshot, query.snapshot);
 
   useEffect(() => {
-    let cancelled = false;
+    if (mode === "sql") return;
+    const controller = new AbortController();
     setData(null);
     setErr(null);
     rpc
-      .previewSqlite(repoId, path, { rev: rev ?? undefined })
+      .previewSqlite(repoId, path, { rev: rev ?? undefined, native_session_id: nativeSessionId, signal: controller.signal })
       .then((d) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setData(d);
         if (d.tables.length > 0) setActiveTable(d.tables[0].name);
       })
-      .catch((e: Error) => { if (!cancelled) setErr(e.message); });
-    return () => { cancelled = true; };
-  }, [repoId, path, rev]);
+      .catch((e: Error) => { if (!controller.signal.aborted) setErr(e.message); });
+    return () => controller.abort();
+  }, [repoId, path, rev, nativeSessionId, mode]);
 
-  if (err) return <div className="m-4 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{err}</div>;
-  if (!data) return <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted"><Loader2 size={14} className="animate-spin" /> Reading SQLite database…</div>;
-
-  const table = data.tables.find(t => t.name === activeTable);
+  const table = data?.tables.find(t => t.name === activeTable);
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header with mode toggle */}
       <div className="flex shrink-0 items-center gap-4 border-b border-gx-border bg-gx-surface px-3 py-1.5 text-[11px] text-gx-muted">
         <Database size={13} className="text-gx-accent" />
-        <span><strong className="text-gx-text">{data.table_count}</strong> tables</span>
-        <span>{formatBytes(data.file_size)}</span>
-
-        {/* Mode toggle */}
-        <div className="ml-4 flex items-center rounded border border-gx-border bg-gx-bg-sub">
-          <button
-            type="button"
-            onClick={() => setMode("browse")}
-            className={clsx(
-              "flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition rounded-l",
-              mode === "browse"
-                ? "bg-gx-accent/15 text-gx-accent"
-                : "text-gx-muted hover:text-gx-text",
-            )}
-          >
-            <Table2 size={10} />
-            Browse
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("sql")}
-            className={clsx(
-              "flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium transition rounded-r",
-              mode === "sql"
-                ? "bg-gx-accent/15 text-gx-accent"
-                : "text-gx-muted hover:text-gx-text",
-            )}
-          >
-            <Terminal size={10} />
-            SQL
-          </button>
-        </div>
+        <FileQueryMode query={query} mode={mode} />
+        {data && (
+          <>
+            <span><strong className="text-gx-text">{data.table_count}</strong> tables</span>
+            <span>{formatBytes(data.file_size)}</span>
+          </>
+        )}
 
         <span className="ml-auto font-mono">{path.split("/").pop()}</span>
       </div>
 
       {/* Content */}
       {mode === "browse" ? (
-        <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr]">
+        data ? <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr]">
           {/* Table list */}
           <aside className="min-h-0 overflow-auto border-r border-gx-border bg-gx-surface p-2">
             <div className="mb-2 text-[10px] uppercase tracking-wider text-gx-muted">Tables</div>
@@ -128,17 +94,13 @@ export function SqliteView({ repoId, path, rev }: Props) {
               <div className="flex h-full items-center justify-center text-sm text-gx-muted">Select a table</div>
             )}
           </div>
-        </div>
+        </div> : <FileBrowseState error={err} loading="Reading SQLite database…" />
       ) : (
         <div className="min-h-0 flex-1">
-          <DuckDbQueryPanel
-            repoId={repoId}
-            filePath={path}
-            tables={data.tables.map((t) => ({
-              name: t.name,
-              columns: t.columns,
-              row_count: t.row_count,
-            }))}
+          <FileQueryPanel
+            query={query}
+            nativeSessionId={nativeSessionId}
+            tables={data?.tables}
           />
         </div>
       )}

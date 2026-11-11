@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Terminal } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Cloud, FolderGit2, FolderTree, PanelLeftOpen, Terminal } from "lucide-react";
 import clsx from "clsx";
-import { OpenRepo, WorkspaceRepoEntry } from "../state";
+import { OpenRepo, WorkspaceRepoEntry, useStore } from "../state";
 import { createPresetManager, type StartupCommand } from "../lib/terminal-presets";
 import { AgentIcon, agentAccentColor } from "./orchestrator/AgentIcon";
 
@@ -22,6 +22,8 @@ interface Props {
   terminalActive: boolean;
   onOpenTerminal: () => void;
   onShowOverview: () => void;
+  activityDrawerOpen: boolean;
+  onToggleActivityDrawer: () => void;
   /** Called when user selects an agent preset from the dropdown. */
   onSpawnAgentTerminal?: (cmd: StartupCommand) => void;
   /** Workspace name (when a workspace is active). */
@@ -63,12 +65,16 @@ export function TopBar({
   terminalActive,
   onOpenTerminal,
   onShowOverview,
+  activityDrawerOpen,
+  onToggleActivityDrawer,
   onSpawnAgentTerminal,
   workspaceName,
   workspaceRepos,
   activeWorkspaceRelativePath,
   onWorkspaceRepoSelect,
 }: Props) {
+  const { state } = useStore();
+  const running = Object.values(state.jobs).filter(job => job.status === "running").length;
   // Derive worktree display info from the active repo label.
   const isWorktree = activeRepo?.label.startsWith("↳") ?? false;
   const worktreeName = isWorktree
@@ -284,6 +290,23 @@ export function TopBar({
         className="flex shrink-0 items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
+        <button
+          type="button"
+          onClick={onToggleActivityDrawer}
+          className={clsx(
+            "flex h-7 items-center gap-1.5 rounded px-2 text-[11px] text-gx-muted transition hover:bg-gx-surface-hover hover:text-gx-text",
+            activityDrawerOpen && "bg-gx-accent/15 text-gx-accent",
+            running > 0 && !activityDrawerOpen && "text-gx-warn",
+          )}
+          title="Toggle Activity (background jobs)"
+          aria-label="Activity"
+          aria-expanded={activityDrawerOpen}
+          aria-controls="activity-drawer"
+        >
+          <Activity size={14} />
+          Activity
+          {running > 0 && <span className="rounded bg-gx-warn/20 px-1 tabular-nums text-gx-warn">{running}</span>}
+        </button>
         <TerminalSplitButton
           terminalActive={terminalActive}
           onOpenTerminal={onOpenTerminal}

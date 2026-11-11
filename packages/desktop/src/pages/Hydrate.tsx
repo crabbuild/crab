@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Download, Upload } from "lucide-react";
 import { OpenRepo, useStore } from "../state";
-import { nextJobId, rpc } from "../ipc";
+import { nextJobId } from "../ipc";
 import { useJobLines } from "../lib/useJobLines";
 import { useHydrationStatus } from "../hooks/useHydrationStatus";
 import { useTrackedPatterns } from "../hooks/useTrackedPatterns";
@@ -9,23 +9,28 @@ import { ConfirmHydrateDialog } from "../components/ConfirmHydrateDialog";
 import { HydrateScopePicker } from "../components/hydrate/HydrateScopePicker";
 import { HydrateScopePreview } from "../components/hydrate/HydrateScopePreview";
 import { formatBytes } from "../lib/format";
-import { HydrateVerb, Scope, resolveScope } from "../lib/hydrateScope";
+import { HydrateVerb, Scope, requiresTransferConfirmation, resolveScope } from "../lib/hydrateScope";
 
-/** Auto-confirm threshold for hydrate (above this we always show the dialog). */
-const CONFIRM_BYTES_THRESHOLD = 1 * 1024 * 1024 * 1024;
-const CONFIRM_FILES_THRESHOLD = 100;
+interface Selection {
+  verb: HydrateVerb;
+  paths: string[];
+  bytes: number;
+  nativeSessionId: string;
+}
 
 export function HydratePage({ repo }: { repo: OpenRepo }) {
   const [scope, setScope] = useState<Scope>({ kind: "all" });
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmVerb, setConfirmVerb] = useState<HydrateVerb | null>(null);
-  const { startJob } = useStore();
+  const [confirmation, setConfirmation] = useState<Selection | null>(null);
+  const { runFileTransfer } = useStore();
   const lines = useJobLines(jobId);
 
-  const enabled = !!repo.path;
-  const { byPath, refresh, summary } = useHydrationStatus(repo.repo_id, enabled);
+  const enabled = !!repo.path || repo.is_remote;
+  const canHydrate = !!repo.native_session_id && !!repo.capabilities?.canHydrateSelection;
+  const canDehydrate = !!repo.native_session_id && !!repo.capabilities?.canDehydrateSelection;
+  const { byPath, summary, loading: loadingStatus, error: statusError } = useHydrationStatus(repo.repo_id, enabled);
   const tracked = useTrackedPatterns(repo, enabled);
 
   const entries = useMemo(() => Array.from(byPath.values()), [byPath]);
@@ -41,29 +46,18 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
     [scope, entries],
   );
 
-  const activePreview = confirmVerb === "dehydrate" ? resolvedDehydrate : resolvedHydrate;
-
-  async function runNow(verb: HydrateVerb) {
-    if (!repo.path) return;
-    const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
-    if (resolved.matched.length === 0) {
-      setConfirmVerb(null);
-      return;
-    }
+  async function runNow({ verb, paths, nativeSessionId }: Selection) {
     const id = nextJobId(verb);
-    startJob(id, verb);
     setJobId(id);
     setBusy(true);
     setError(null);
     try {
-      if (verb === "hydrate") await rpc.hydrate(repo.path, resolved.patterns, id);
-      else await rpc.dehydrate(repo.path, resolved.patterns, id);
+      await runFileTransfer(repo.repo_id, { paths, verb }, nativeSessionId, id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      setConfirmVerb(null);
-      refresh();
+      setConfirmation(null);
     }
   }
 
@@ -74,23 +68,23 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
    * always confirms — destructive in spirit, even if reversible.
    */
   function requestRun(verb: HydrateVerb) {
+    const nativeSessionId = repo.native_session_id;
+    if (!nativeSessionId || (verb === "hydrate" ? !canHydrate : !canDehydrate)) return;
     const resolved = verb === "hydrate" ? resolvedHydrate : resolvedDehydrate;
     if (resolved.matched.length === 0) return;
-    const heavy =
-      verb === "dehydrate" ||
-      resolved.bytes >= CONFIRM_BYTES_THRESHOLD ||
-      resolved.matched.length >= CONFIRM_FILES_THRESHOLD;
+    const selection = { verb, paths: resolved.matched.map(entry => entry.path), bytes: resolved.bytes, nativeSessionId };
+    const heavy = requiresTransferConfirmation(verb, resolved.matched.length, resolved.bytes);
     if (heavy) {
-      setConfirmVerb(verb);
+      setConfirmation(selection);
     } else {
-      void runNow(verb);
+      void runNow(selection);
     }
   }
 
-  if (!repo.path) {
+  if (!enabled) {
     return (
       <div className="p-4 text-sm text-gx-muted">
-        Hydrate / dehydrate are only available for local repositories.
+        Hydration requires a repository with a working tree.
       </div>
     );
   }
@@ -99,7 +93,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
   // crab. Without this the user sees a useless picker with all-zero
   // counts and disabled buttons.
   const noTrackedFilesYet =
-    entries.length === 0 && tracked.patterns.length === 0 && !tracked.loading;
+    entries.length === 0 && tracked.patterns.length === 0 && !tracked.loading && !loadingStatus && !statusError;
 
   return (
     <div className="flex h-full flex-col">
@@ -115,7 +109,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
 
         {noTrackedFilesYet ? (
           <div className="rounded border border-gx-border bg-gx-bg-sub p-4 text-xs text-gx-muted">
-            <p className="mb-1 text-gx-text">No crab-tracked files in this repo yet.</p>
+            <p className="mb-1 text-gx-text">No Crab or Git LFS files in this repository yet.</p>
             <p>
               Track large files via the <strong className="text-gx-text">Track &amp; Stage</strong>{" "}
               tab or by running <code className="kbd">crab track '*.bin'</code>. They'll show up
@@ -141,7 +135,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               <button
                 type="button"
                 className="btn btn-primary text-xs"
-                disabled={busy || resolvedHydrate.matched.length === 0}
+                disabled={busy || !canHydrate || resolvedHydrate.matched.length === 0}
                 onClick={() => requestRun("hydrate")}
                 title={
                   resolvedHydrate.matched.length === 0
@@ -155,7 +149,7 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
               <button
                 type="button"
                 className="btn text-xs"
-                disabled={busy || resolvedDehydrate.matched.length === 0}
+                disabled={busy || !canDehydrate || resolvedDehydrate.matched.length === 0}
                 onClick={() => requestRun("dehydrate")}
                 title={
                   resolvedDehydrate.matched.length === 0
@@ -170,9 +164,9 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
           </>
         )}
 
-        {error && (
-          <div className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
-            {error}
+        {(error || statusError) && (
+          <div role="alert" className="rounded border border-gx-error/40 bg-gx-error/10 p-2 text-xs text-gx-error">
+            {error || statusError}
           </div>
         )}
       </div>
@@ -190,17 +184,17 @@ export function HydratePage({ repo }: { repo: OpenRepo }) {
       </div>
 
       <ConfirmHydrateDialog
-        open={confirmVerb !== null}
-        verb={confirmVerb ?? "hydrate"}
-        fileCount={activePreview.matched.length}
-        totalBytes={activePreview.bytes}
+        open={confirmation !== null}
+        verb={confirmation?.verb ?? "hydrate"}
+        fileCount={confirmation?.paths.length ?? 0}
+        totalBytes={confirmation?.bytes ?? 0}
         busy={busy}
         error={error}
         onCancel={() => {
-          if (!busy) setConfirmVerb(null);
+          if (!busy) setConfirmation(null);
         }}
         onConfirm={() => {
-          if (confirmVerb) void runNow(confirmVerb);
+          if (confirmation) void runNow(confirmation);
         }}
       />
     </div>

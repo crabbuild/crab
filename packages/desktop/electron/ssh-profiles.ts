@@ -31,9 +31,8 @@ export class SshProfileManager {
   private profilesPath: string;
   private profiles: SshProfile[] = [];
 
-  constructor(profilesPath?: string) {
-    this.profilesPath =
-      profilesPath ?? path.join(os.homedir(), ".crab", "desktop", "ssh-profiles.json");
+  constructor(profilesPath: string) {
+    this.profilesPath = profilesPath;
     this.load();
   }
 

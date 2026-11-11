@@ -1,6 +1,7 @@
 import type { DeployProgress } from "./ssh-deployer";
 import type { KnownHost } from "./ssh-known-hosts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { RpcReply } from "./rpc-transport";
 
 // Whitelist of RPC method names the renderer is allowed to invoke.
 // Any new agent verb must be added here; unknown calls are rejected
@@ -20,7 +21,17 @@ const ALLOWED_METHODS = new Set([
   "list",
   "list_refs",
   "stat",
-  "pointer_info",
+  "media_open",
+  "media_close",
+  "file_open",
+  "file_chunks",
+  "file_close",
+  "file_materialize",
+  "files_materialize",
+  "files_dehydrate",
+  "files_restore",
+  "activity_file_transfers",
+  "activity_file_transfers_recover",
   "read_text",
   "read_bytes",
   "read_range",
@@ -31,10 +42,9 @@ const ALLOWED_METHODS = new Set([
   "preview_zip",
   "repo_summary",
   "git_status_porcelain",
-  "git_diff_file",
+  "file_diff",
   "git_grep",
   "search_replace",
-  "crab_diff_file",
   "hydration_status",
   "git_log",
   "git_stash_list",
@@ -49,7 +59,8 @@ const ALLOWED_METHODS = new Set([
   "resolve_ref",
   "about",
   "agent_health",
-  "cache_clear",
+  "cache_stats",
+  "cache_clean",
   "clone",
   "status",
   "hydrate",
@@ -67,6 +78,7 @@ const ALLOWED_METHODS = new Set([
   "git_reset_paths",
   // Commit
   "git_commit",
+  "git_commit_paths",
   "git_config_get",
   // Branches
   "git_checkout",
@@ -113,7 +125,7 @@ const ALLOWED_METHODS = new Set([
   "repo_size_history",
   "dedup_savings",
   "preview_sqlite",
-  "duckdb_query",
+  "file_query",
   "preview_onnx",
   "preview_hdf5",
   "preview_protobuf",
@@ -129,7 +141,6 @@ const ALLOWED_METHODS = new Set([
   "preview_notebook_meta",
   "notebook_strip_outputs",
   // Large-file pre-commit
-  "crab_add_auto",
   "crab_track_and_add",
   // Additional previews
   "preview_torch_checkpoint",
@@ -252,7 +263,11 @@ contextBridge.exposeInMainWorld("crab", {
     if (!ALLOWED_METHODS.has(method)) {
       throw new Error(`method not allowed: ${method}`);
     }
-    return ipcRenderer.invoke("crab:rpc", method, params);
+    const reply: RpcReply<unknown> = await ipcRenderer.invoke("crab:rpc", method, params);
+    // Promise rejection with a plain value preserves code/data through the
+    // context bridge; throwing an Error here would discard custom properties.
+    if (!reply.ok) return Promise.reject(reply.error);
+    return reply.value;
   },
   pickRepoDirectory: () => ipcRenderer.invoke("crab:dialog-open-repo"),
   pickCloneDestination: () => ipcRenderer.invoke("crab:dialog-select-destination"),
@@ -296,24 +311,10 @@ contextBridge.exposeInMainWorld("crab", {
   },
   fsOpenExternal: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-open-external", fullPath),
-  // Overloaded: fsWriteFile(fullPath, content) or fsWriteFile(repoId, fullPath, content)
-  fsWriteFile: (...args: [string, string] | [string, string, string]) => {
-    if (args.length === 3) {
-      // New overload: (repoId, fullPath, content)
-      return ipcRenderer.invoke("crab:fs-write-file", args[0], args[1], args[2]);
-    }
-    // Legacy: (fullPath, content)
-    return ipcRenderer.invoke("crab:fs-write-file", args[0], args[1]);
-  },
-  // Overloaded: fsReadFile(fullPath) or fsReadFile(repoId, fullPath)
-  fsReadFile: (...args: [string] | [string, string]) => {
-    if (args.length === 2) {
-      // New overload: (repoId, fullPath)
-      return ipcRenderer.invoke("crab:fs-read-file", args[0], args[1]) as Promise<{ exists: boolean; content: string | null }>;
-    }
-    // Legacy: (fullPath)
-    return ipcRenderer.invoke("crab:fs-read-file", args[0]) as Promise<{ exists: boolean; content: string | null }>;
-  },
+  fsWriteFile: (repoId: string, fullPath: string, content: string, nativeSessionId: string | null) =>
+    ipcRenderer.invoke("crab:fs-write-file", repoId, fullPath, content, nativeSessionId),
+  fsReadFile: (...args: [string] | [string, string, number | undefined, string | null]) =>
+    ipcRenderer.invoke("crab:fs-read-file", ...args) as Promise<{ exists: boolean; content: string | null }>,
   fsReadImage: (fullPath: string) =>
     ipcRenderer.invoke("crab:fs-read-image", fullPath) as Promise<{
       exists: boolean;
@@ -336,6 +337,9 @@ contextBridge.exposeInMainWorld("crab", {
       canWorktree: boolean;
       canForge: boolean;
       canHydrate: boolean;
+      canHydrateSelection?: boolean;
+      canDehydrateSelection?: boolean;
+      canRestoreSelection?: boolean;
       canSearch: boolean;
       canExec: boolean;
       canTrash: boolean;
@@ -548,21 +552,21 @@ contextBridge.exposeInMainWorld("crab", {
   // Open a URL in the system browser
   openUrl: (url: string) => ipcRenderer.invoke("crab:open-url", url),
   // Jupyter kernel
-  jupyterListKernels: () => ipcRenderer.invoke("crab:jupyter-list-kernels"),
-  jupyterCheck: () => ipcRenderer.invoke("crab:jupyter-check"),
-  jupyterInstall: () => ipcRenderer.invoke("crab:jupyter-install"),
-  jupyterStart: (kernelName: string, cwd: string, jupyterPath?: string) => ipcRenderer.invoke("crab:jupyter-start", kernelName, cwd, jupyterPath),
-  jupyterExecute: (id: string, code: string) => ipcRenderer.invoke("crab:jupyter-execute", id, code),
+  jupyterListKernels: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-list-kernels", pythonPath),
+  jupyterCheck: (pythonPath?: string) => ipcRenderer.invoke("crab:jupyter-check", pythonPath),
+  jupyterInstall: (pythonPath: string) => ipcRenderer.invoke("crab:jupyter-install", pythonPath),
+  jupyterStart: (id: string, repoId: string, pythonPath: string, target: import("./jupyter-types").KernelTarget) => ipcRenderer.invoke("crab:jupyter-start", id, repoId, pythonPath, target),
+  jupyterExecute: (id: string, code: string, requestId: string, cell: number) => ipcRenderer.invoke("crab:jupyter-execute", id, code, requestId, cell),
   jupyterInterrupt: (id: string) => ipcRenderer.invoke("crab:jupyter-interrupt", id),
   jupyterRestart: (id: string) => ipcRenderer.invoke("crab:jupyter-restart", id),
   jupyterShutdown: (id: string) => ipcRenderer.invoke("crab:jupyter-shutdown", id),
-  onJupyterOutput: (listener: (evt: { id: string; msgType: string; content: Record<string, unknown>; parentMsgId: string }) => void) => {
+  onJupyterOutput: (listener: (evt: import("./jupyter-types").KernelOutput & { id: string }) => void) => {
     const handler = (_e: unknown, payload: any) => listener(payload);
     ipcRenderer.on("crab:jupyter-output", handler);
     return () => { ipcRenderer.removeListener("crab:jupyter-output", handler); };
   },
-  onJupyterStatus: (listener: (evt: { id: string; status: string }) => void) => {
-    const handler = (_e: unknown, payload: any) => listener(payload);
+  onJupyterStatus: (listener: (evt: import("./jupyter-types").KernelStatus) => void) => {
+    const handler = (_e: unknown, payload: import("./jupyter-types").KernelStatus) => listener(payload);
     ipcRenderer.on("crab:jupyter-status", handler);
     return () => { ipcRenderer.removeListener("crab:jupyter-status", handler); };
   },
@@ -816,8 +820,8 @@ contextBridge.exposeInMainWorld("crab", {
     },
 
     // Agent capabilities events (on/off pairs)
-    onAgentCapabilities: (listener: (payload: { profileId: string; capabilities: Record<string, boolean> }) => void) => {
-      const handler = (_e: unknown, payload: { profileId: string; capabilities: Record<string, boolean> }) => listener(payload);
+    onAgentCapabilities: (listener: (payload: { profileId: string; capabilities: import("./ssh-types").AgentCapabilities }) => void) => {
+      const handler = (_e: unknown, payload: { profileId: string; capabilities: import("./ssh-types").AgentCapabilities }) => listener(payload);
       ipcRenderer.on("ssh:agent-capabilities", handler);
       return () => { ipcRenderer.removeListener("ssh:agent-capabilities", handler); };
     },

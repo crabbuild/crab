@@ -189,30 +189,38 @@ async fn full_and_range_streams_never_write_receipts() {
 }
 
 #[tokio::test]
-async fn streamed_upload_receipt_avoids_full_reverification_for_ranges() {
-    let oid = Sha256::digest(b"verified").into();
-    let store = Arc::new(DeliveryStore {
-        inner: InMemory::new(),
-        object_path: LfsObjectStore::object_path_for_prefix("stream", &oid),
-        fault: Fault::None,
-        bodies: AtomicUsize::new(0),
-        delivery_read: AtomicUsize::new(1),
-        reads: AtomicUsize::new(0),
-        writes: AtomicUsize::new(0),
-    });
-    let lfs = LfsObjectStore::new(Store::new(store.clone()), "stream");
-    let file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(file.path(), b"verified").unwrap();
+async fn streamed_upload_receipt_reuse_requires_a_bound_transport() {
+    for bound in [false, true] {
+        let oid = Sha256::digest(b"verified").into();
+        let store = Arc::new(DeliveryStore {
+            inner: InMemory::new(),
+            object_path: LfsObjectStore::object_path_for_prefix("stream", &oid),
+            fault: Fault::None,
+            bodies: AtomicUsize::new(0),
+            delivery_read: AtomicUsize::new(1),
+            reads: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
+        });
+        let transport = Store::new(store.clone());
+        let transport = if bound {
+            transport.with_target_identity([1; 32])
+        } else {
+            transport
+        };
+        let lfs = LfsObjectStore::new(transport, "stream");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"verified").unwrap();
 
-    lfs.put_stream_with_size(&oid, Some(8), file.path())
-        .await
-        .unwrap();
-    let result = collect(&lfs, &oid, Some(1..4)).await.unwrap();
+        lfs.put_stream_with_size(&oid, Some(8), file.path())
+            .await
+            .unwrap();
+        let result = collect(&lfs, &oid, Some(1..4)).await.unwrap();
 
-    assert_eq!(
-        (result, store.bodies.load(Ordering::Relaxed)),
-        (b"eri".to_vec(), 1)
-    );
+        assert_eq!(
+            (result, store.bodies.load(Ordering::Relaxed)),
+            (b"eri".to_vec(), if bound { 1 } else { 2 })
+        );
+    }
 }
 
 #[tokio::test]
@@ -341,4 +349,244 @@ async fn read_session_tracks_delivery_and_range_preverification_jobs() {
     assert!(
         matches!(partial, Err(LfsError::Io { source }) if source.kind() == std::io::ErrorKind::BrokenPipe)
     );
+}
+
+#[tokio::test]
+async fn retained_remote_proofs_skip_only_unchanged_bound_object_bodies() {
+    let (lfs, raw, oid) = fixture(Fault::None).await;
+    let lfs = LfsObjectStore::new(lfs.store.with_target_identity([1; 32]), "stream");
+    let cache = crate::LfsReadCache::default();
+    for (range, expected_bodies) in [(1..4, 2), (3..5, 3)] {
+        let session = LfsReadSession::new(cache.clone());
+        let (_, _, stream) = lfs
+            .get_stream_with_session(&oid, 8, Some(range.clone()), &session)
+            .await
+            .unwrap();
+        let bytes = stream
+            .try_fold(Vec::new(), |mut all, bytes| async move {
+                all.extend_from_slice(&bytes);
+                Ok(all)
+            })
+            .await
+            .unwrap();
+        session.close().await;
+        assert_eq!(
+            (
+                bytes,
+                raw.bodies.load(Ordering::Relaxed),
+                raw.writes.load(Ordering::Relaxed)
+            ),
+            (
+                b"verified"[range.start as usize..range.end as usize].to_vec(),
+                expected_bodies,
+                0
+            )
+        );
+    }
+    raw.inner
+        .put(&raw.object_path, Bytes::from_static(b"corrupt!").into())
+        .await
+        .unwrap();
+    let session = LfsReadSession::new(cache.clone());
+    let corrupt = lfs
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await;
+    session.close().await;
+    assert!(matches!(corrupt, Err(LfsError::ObjectCorrupt { .. })));
+    raw.inner
+        .put(&raw.object_path, Bytes::from_static(b"verified").into())
+        .await
+        .unwrap();
+    let session = LfsReadSession::new(cache);
+    let (_, _, stream) = lfs
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await
+        .unwrap();
+    let bytes = stream.try_collect::<Vec<_>>().await.unwrap();
+    session.close().await;
+    assert_eq!(bytes.concat(), b"v");
+}
+
+#[tokio::test]
+async fn whole_delivery_retains_only_its_verified_response_for_later_ranges() {
+    let (lfs, raw, oid) = fixture(Fault::None).await;
+    let lfs = LfsObjectStore::new(lfs.store.with_target_identity([1; 32]), "stream");
+    let cache = crate::LfsReadCache::default();
+    for range in [None, Some(2..4)] {
+        let session = LfsReadSession::new(cache.clone());
+        let (_, _, stream) = lfs
+            .get_stream_with_session(&oid, 8, range, &session)
+            .await
+            .unwrap();
+        let _ = stream.try_collect::<Vec<_>>().await.unwrap();
+        session.close().await;
+    }
+    assert_eq!(
+        (
+            raw.bodies.load(Ordering::Relaxed),
+            raw.writes.load(Ordering::Relaxed)
+        ),
+        (2, 0)
+    );
+}
+
+#[tokio::test]
+async fn coincident_validators_cannot_reuse_proof_across_store_incarnations() {
+    let (first, _, oid) = fixture(Fault::None).await;
+    let first = LfsObjectStore::new(first.store.with_target_identity([1; 32]), "stream");
+    let cache = crate::LfsReadCache::default();
+    let session = LfsReadSession::new(cache.clone());
+    let (_, _, stream) = first
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await
+        .unwrap();
+    let _ = stream.try_collect::<Vec<_>>().await.unwrap();
+    session.close().await;
+    let raw = Arc::new(InMemory::new());
+    raw.put(
+        &first.object_path(&oid),
+        Bytes::from_static(b"corrupt!").into(),
+    )
+    .await
+    .unwrap();
+    let other = LfsObjectStore::new(Store::new(raw).with_target_identity([1; 32]), "stream");
+    assert_eq!(
+        first
+            .store
+            .head(&first.object_path(&oid))
+            .await
+            .unwrap()
+            .e_tag,
+        other
+            .store
+            .head(&other.object_path(&oid))
+            .await
+            .unwrap()
+            .e_tag
+    );
+    let session = LfsReadSession::new(cache);
+    let result = other
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await;
+    session.close().await;
+    assert!(matches!(result, Err(LfsError::ObjectCorrupt { .. })));
+}
+
+#[tokio::test]
+async fn scoped_read_routes_cannot_reuse_the_canonical_transport_proof() {
+    let (first, _, oid) = fixture(Fault::None).await;
+    let first = LfsObjectStore::new(first.store.with_target_identity([1; 32]), "stream");
+    let cache = crate::LfsReadCache::default();
+    let session = LfsReadSession::new(cache.clone());
+    let (_, _, stream) = first
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await
+        .unwrap();
+    let _ = stream.try_collect::<Vec<_>>().await.unwrap();
+    session.close().await;
+    let raw = Arc::new(InMemory::new());
+    raw.put(
+        &first.object_path(&oid),
+        Bytes::from_static(b"corrupt!").into(),
+    )
+    .await
+    .unwrap();
+    let store = first
+        .store
+        .clone()
+        .with_read_routes(vec![("stream/lfs".to_owned(), raw)]);
+    assert_eq!(
+        first
+            .store
+            .head(&first.object_path(&oid))
+            .await
+            .unwrap()
+            .e_tag,
+        store.head(&first.object_path(&oid)).await.unwrap().e_tag
+    );
+    let routed = LfsObjectStore::new(store, "stream");
+    let session = LfsReadSession::new(cache);
+    let result = routed
+        .get_stream_with_session(&oid, 8, Some(0..1), &session)
+        .await;
+    session.close().await;
+    assert!(matches!(result, Err(LfsError::ObjectCorrupt { .. })));
+}
+
+#[tokio::test]
+async fn canonical_receipts_cannot_certify_bytes_from_a_different_read_route() {
+    let (canonical, _, oid) = fixture(Fault::None).await;
+    let canonical = LfsObjectStore::new(canonical.store.with_target_identity([1; 32]), "stream");
+    canonical.verify_size(&oid, 8).await.unwrap();
+    let raw = Arc::new(InMemory::new());
+    raw.put(
+        &canonical.object_path(&oid),
+        Bytes::from_static(b"corrupt!").into(),
+    )
+    .await
+    .unwrap();
+    let routed_store = canonical
+        .store
+        .clone()
+        .with_read_routes(vec![("stream/lfs/objects".to_owned(), raw)]);
+    assert_eq!(
+        canonical
+            .store
+            .head(&canonical.object_path(&oid))
+            .await
+            .unwrap()
+            .e_tag,
+        routed_store
+            .head(&canonical.object_path(&oid))
+            .await
+            .unwrap()
+            .e_tag
+    );
+    let routed = LfsObjectStore::new(routed_store, "stream");
+    let result = collect(&routed, &oid, Some(0..1)).await;
+    assert!(
+        matches!(&result, Err(LfsError::ObjectCorrupt { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn receipts_cannot_cross_canonical_transport_identities() {
+    let (first, _, oid) = fixture(Fault::None).await;
+    let first = LfsObjectStore::new(first.store.with_target_identity([1; 32]), "stream");
+    first.verify_size(&oid, 8).await.unwrap();
+    let receipt_path = receipt_path_at("stream", &oid);
+    let (receipt, _) = first
+        .store
+        .get_with_etag_bounded(&receipt_path, MAX_RECEIPT_SIZE)
+        .await
+        .unwrap();
+    let raw = Arc::new(InMemory::new());
+    raw.put(
+        &first.object_path(&oid),
+        Bytes::from_static(b"corrupt!").into(),
+    )
+    .await
+    .unwrap();
+    raw.put(&receipt_path, receipt.into()).await.unwrap();
+    let store = Store::new(raw).with_target_identity([2; 32]);
+    let expected = first.store.head(&first.object_path(&oid)).await.unwrap();
+    let other = store.head(&first.object_path(&oid)).await.unwrap();
+    assert_eq!(
+        (expected.size, expected.e_tag, expected.version),
+        (other.size, other.e_tag, other.version)
+    );
+    let other = LfsObjectStore::new(store, "stream");
+    assert!(matches!(
+        collect(&other, &oid, Some(0..1)).await,
+        Err(LfsError::ObjectCorrupt { .. })
+    ));
+}
+
+#[tokio::test]
+async fn declared_size_mismatch_rejects_ranges_before_opening_the_payload() {
+    let (lfs, raw, oid) = fixture(Fault::None).await;
+    let result = lfs.get_stream(&oid, 4, Some(0..1)).await;
+    assert!(matches!(result, Err(LfsError::ObjectCorrupt { .. })));
+    assert_eq!(raw.bodies.load(Ordering::Relaxed), 0);
 }

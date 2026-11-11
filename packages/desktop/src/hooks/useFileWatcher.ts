@@ -17,6 +17,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import { mainProcess, onAgentEvent } from "../ipc";
 import type { OpenRepo } from "../state";
+import { parseRepoId } from "../../electron/ssh-types";
+import { repositoryWorktree } from "../lib/repository-worktree";
 
 /**
  * Compute the watch path for a repo. Remote repos use `repo_id`
@@ -25,9 +27,8 @@ import type { OpenRepo } from "../state";
  * repos with no usable path.
  */
 export function getWatchPath(repo: OpenRepo): string | undefined {
-  if (repo.deferred) return undefined;
-  if (repo.is_remote) return repo.repo_id;
-  return repo.path;
+  const root = repositoryWorktree(repo);
+  return root ? (parseRepoId(repo.repo_id) ? repo.repo_id : root) : undefined;
 }
 
 /**

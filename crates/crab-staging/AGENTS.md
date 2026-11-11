@@ -31,6 +31,10 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
 
 - Keep process admission and in-process locks separate; synchronous index guards must end before await points.
   Source: `crates/crab-staging/src/lib.rs`.
+- File-reader admission queues behind clean writers with the existing staging
+  budget. Use `StagedFileReader::open_with_cancel` for owned operations; cancellation
+  releases queued locks and joins started metadata work before return. It must
+  not block a Tokio worker or treat contention as missing local content.
 - File-version reads must include all ordered chunk occurrences, even when chunk bytes deduplicate; inspect recipe consumers before changing index membership.
   Source: `crates/crab-staging/src/index.rs`.
   Prepared-only versions remain enumerable through open/delegated leases and

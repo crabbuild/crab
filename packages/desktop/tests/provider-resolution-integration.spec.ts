@@ -6,7 +6,7 @@
  * - Local repo_ids resolve to LocalProvider
  * - Remote repo_ids (ssh://) with explicit registration resolve to RemoteProvider
  * - Unregistered local repo_ids fall back to LocalProvider singleton
- * - Unregistered remote repo_ids return null (caller uses RpcRouter directly)
+ * - Unregistered remote repo_ids are rejected before local dispatch
  * - Provider registration happens before the RepoHandle is returned (no race)
  *
  * Validates: Requirements 4.4, 4.5, 14.1, 14.2, 14.3
@@ -18,7 +18,7 @@ import {
   _resetProviderRegistry,
   getProviderRegistry,
 } from "../electron/provider-registry";
-import { parseRepoId } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
 import type { RepoProvider } from "../electron/repo-provider";
 
 // ── Mock Providers ───────────────────────────────────────────────
@@ -289,17 +289,6 @@ describe("Provider Resolution Integration — remote repos", () => {
     });
   });
 
-  it("returns null for unregistered ssh:// repo_id (caller uses RpcRouter)", () => {
-    const repoId = "ssh://unknown-server/some/repo";
-
-    // No explicit registration for this remote repo.
-    const resolved = ctx.registry.resolve(repoId);
-
-    // Per Requirement 14.2: unregistered remote repos return null so
-    // the caller can attempt RpcRouter-based routing directly.
-    expect(resolved).toBeNull();
-  });
-
   it("prefers explicit registration over automatic ssh:// resolution", () => {
     const repoId = "ssh://gpu-server/data/ml-project";
     ctx.registry.register(repoId, remoteProvider);
@@ -315,7 +304,7 @@ describe("Provider Resolution Integration — remote repos", () => {
     const methods = [
       "git_status_porcelain",
       "git_log",
-      "git_diff_file",
+      "file_diff",
       "git_stage",
       "git_commit",
       "list_refs",
@@ -485,7 +474,7 @@ describe("Provider Resolution Integration — close lifecycle", () => {
     expect(resolved).toBe(ctx.localProvider);
   });
 
-  it("unregisters remote provider on close, subsequent resolve returns null", async () => {
+  it("closing a remote repository prevents subsequent dispatch", async () => {
     const repoId = "ssh://gpu-server/data/ml-project";
     const remoteProvider = createMockRemoteProvider("gpu-server");
 
@@ -495,9 +484,7 @@ describe("Provider Resolution Integration — close lifecycle", () => {
     await simulateIpcHandler(ctx, "close", { repo_id: repoId });
     expect(ctx.registry.has(repoId)).toBe(false);
 
-    // After close, unregistered ssh:// repo_id returns null
-    const resolved = ctx.registry.resolve(repoId);
-    expect(resolved).toBeNull();
+    await expect(simulateIpcHandler(ctx, "write_file", { repo_id: repoId, path: "weights.bin", content: "wrong machine" })).rejects.toMatchObject({ code: "SSH_REPOSITORY_NOT_OPEN" });
   });
 });
 

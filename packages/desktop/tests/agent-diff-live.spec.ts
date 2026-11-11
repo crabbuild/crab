@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { describe, expect, it, vi } from "vitest";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
@@ -67,7 +68,7 @@ async function sidecarChannel(startChild: () => ChildProcess, autoReconnect: boo
   }
   const hosts = new KnownHostsManager(path.join(keyDirectory, "pins.json"), path.join(keyDirectory, "user_hosts"), path.join(keyDirectory, "global_hosts"));
   const manager = new SshSessionManager(createHostKeyVerifier(hosts, async () => true));
-  const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } });
+  const router = new RpcRouter(manager, { request: async () => { throw new Error("Local fallback must not run"); } }, mockStorageConnections);
   const negotiator = new CapabilityNegotiator(router);
   manager.setAgentDependencies({ createDeployer: () => new FixtureDeployer(async () => { throw new Error("Fixture uses its already-built sidecar"); }), capabilityNegotiator: negotiator, rpcRouter: router });
   const close = async () => {

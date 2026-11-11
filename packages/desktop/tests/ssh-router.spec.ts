@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Unit tests for the RPC Router module.
  *
@@ -8,7 +9,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, routeRpcCall } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, routeRpcCall } from "../electron/ssh-router";
 import type { RpcRouterOptions } from "../electron/ssh-router";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -29,6 +31,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel } }>();
 
@@ -72,7 +75,7 @@ function createRouter(
 ) {
   const sm = sessionManager ?? new MockSessionManager();
   const la = localAgent ?? new MockLocalAgent();
-  const router = new RpcRouter(sm as any, la, options);
+  const router = new RpcRouter(sm as any, la, mockStorageConnections, options);
   return { router, sessionManager: sm, localAgent: la };
 }
 
@@ -117,14 +120,35 @@ describe("parseRepoId", () => {
 });
 
 describe("RpcRouter — routing logic", () => {
+  it("metadata joins its repository's replay while control bypasses admission", async () => {
+    const sm = new MockSessionManager();
+    const channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    sm.repositoryWork = () => opening;
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const repo_id = "ssh://server/data/repo";
+    const metadata = router.route(repo_id, "git_status_porcelain", { repo_id });
+    const cancelled = router.route(repo_id, "rpc/cancel", { repo_id, op_id: "opening" });
+    expect(channel.written.map(line => JSON.parse(line).method)).toEqual(["rpc/cancel"]);
+    simulateResponse(channel, 1, { ok: true });
+    await cancelled;
+    release();
+    await vi.waitFor(() => expect(channel.written).toHaveLength(2));
+    simulateResponse(channel, 2, { entries: [] });
+    await expect(metadata).resolves.toEqual({ entries: [] });
+  });
+
   it("routes local repo IDs to the local agent", async () => {
     const { router, localAgent } = createRouter();
     localAgent.nextResult = { status: "clean" };
 
-    const result = await router.route("/home/user/repo", "git_status", {});
+    const result = await router.route("/home/user/repo", "git_status_porcelain", {});
     expect(result).toEqual({ status: "clean" });
     expect(localAgent.calls).toHaveLength(1);
-    expect(localAgent.calls[0].method).toBe("git_status");
+    expect(localAgent.calls[0].method).toBe("git_status_porcelain");
   });
 
   it("routes ssh:// repo IDs to the remote agent", async () => {
@@ -136,7 +160,7 @@ describe("RpcRouter — routing logic", () => {
     const { router } = createRouter(sm);
     router.attachChannel("gpu-server", channel.asChannel());
 
-    const promise = router.route("ssh://gpu-server/data/repo", "git_status", { repo_id: "ssh://gpu-server/data/repo" });
+    const promise = router.route("ssh://gpu-server/data/repo", "git_status_porcelain", { repo_id: "ssh://gpu-server/data/repo" });
 
     // Simulate response from remote agent
     simulateResponse(channel, 1, { status: "dirty" });
@@ -169,7 +193,7 @@ describe("RpcRouter — routing logic", () => {
     const { router } = createRouter(sm);
 
     await expect(
-      router.route("ssh://offline-server/repo", "git_status", {}),
+      router.route("ssh://offline-server/repo", "git_status_porcelain", {}),
     ).rejects.toThrow("SSH connection not available");
   });
 });
@@ -301,7 +325,7 @@ describe("RpcRouter — timeout handling", () => {
 });
 
 describe("RpcRouter — call queuing during reconnection", () => {
-  it("queues read-only calls during reconnection", async () => {
+  it.each(["git_status_porcelain", "git_worktree_list"])("queues %s during reconnection", async method => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();
     sm.setStatus("server", "reconnecting");
@@ -309,7 +333,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const { router } = createRouter(sm);
 
     // This should be queued, not rejected
-    const promise = router.route("ssh://server/repo", "git_status_porcelain", {});
+    const promise = router.route("ssh://server/repo", method, {});
 
     // Simulate reconnection success
     sm.setStatus("server", "connected");
@@ -320,6 +344,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
     const replayPromise = router.replayQueue("server");
 
     // Respond to the replayed call
+    await vi.waitFor(() => expect(channel.written).toHaveLength(1));
     simulateResponse(channel, 1, { status: "clean" });
     await replayPromise;
 
@@ -327,33 +352,17 @@ describe("RpcRouter — call queuing during reconnection", () => {
     expect(result).toEqual({ status: "clean" });
   });
 
-  it.each(["git_worktree_list", "staging_stats", "pointer_info", "pointer_top", "forge_list_prs"].flatMap(method => ["repo", "profile", "batch"].map(entry => ({ method, entry }))))("replays supported $method reads through $entry admission", async ({ method, entry }) => {
-    const sm = new MockSessionManager(); const channel = new MockChannel();
-    const { router } = createRouter(sm); sm.setStatus("server", "reconnecting");
-    const repo = "ssh://server/repo"; const params = { repo_id: repo }; const response = { observed: method };
-    const pending = entry === "profile" ? router.sendToRemoteAgent("server", method, params)
-      : entry === "batch" ? router.batchRpc(repo, [{ method, params }]) : router.route(repo, method, params);
-    // Consume rejection immediately so a broken admission rule is a test failure,
-    // not an unhandled promise left behind while replay is inspected.
-    const result = pending.then(value => ({ value }), error => ({ error }));
-    const before = channel.written.length;
-    sm.setStatus("server", "connected"); sm.setConnection("server", channel); router.attachChannel("server", channel.asChannel());
-    const replay = router.replayQueue("server");
-    const request = channel.written[0] ? JSON.parse(channel.written[0]) as { id: number; method: string; params: unknown } : undefined;
-    if (request) simulateResponse(channel, request.id, response);
-    await replay;
-    expect({ before, request: request && { method: request.method, params: request.params }, result: await result }).toEqual({ before: 0, request: { method, params }, result: { value: entry === "batch" ? [{ result: response }] : response } });
-  });
-
-  it("rejects write operations immediately during reconnection", async () => {
+  it("rejects live operations immediately during reconnection", async () => {
     const sm = new MockSessionManager();
     sm.setStatus("server", "reconnecting");
 
     const { router } = createRouter(sm);
 
-    await expect(
-      router.route("ssh://server/repo", "git_commit", { message: "test" }),
-    ).rejects.toThrow("Connection lost: mutating or unclassified operations are unavailable during reconnection");
+    for (const method of ["git_commit", "cache_clean", "file_diff", "file_open", "file_chunks", "file_close", "file_materialize", "read_range", "read_bytes", "read_text", "preview_parquet", "rpc/cancel", "forge_list_prs", "staging_stats", "git_stash_list", "unknown_operation"]) {
+      await expect(
+        router.route("ssh://server/repo", method, { repo_id: "ssh://server/repo" }),
+      ).rejects.toThrow("Connection lost: live operations are unavailable during reconnection");
+    }
   });
 
   it("drops oldest calls when queue overflows", async () => {
@@ -367,7 +376,7 @@ describe("RpcRouter — call queuing during reconnection", () => {
 
     // Queue 4 calls (max is 3, so first should be dropped)
     for (let i = 0; i < 4; i++) {
-      const p = router.route("ssh://server/repo", "git_log", { i });
+      const p = router.route("ssh://server/repo", "git_log", { index: i });
       p.catch((err) => rejections.push(err));
       promises.push(p);
     }
@@ -398,48 +407,43 @@ describe("RpcRouter — call queuing during reconnection", () => {
   });
 });
 
-describe("RpcRouter — repository ownership across channels", () => {
-  it("reopens acknowledged repos but excludes failed and closed opens", async () => {
-    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
-    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
-    async function request(method: string, params: Record<string, string>, error = false) {
-      const pending = router.sendToRemoteAgent("server", method, params).catch((failure: unknown) => failure);
-      const frame = JSON.parse(first.written.at(-1)!) as { id: number };
-      if (error) simulateErrorResponse(first, frame.id, -32000, "Open failed"); else simulateResponse(first, frame.id, { repo_id: params.repo_id });
-      await pending;
-    }
-    await request("open_local", { repo_id: "kept", path: "/repo" });
-    await request("open_local", { repo_id: "another", path: "/another" });
-    await request("open_local", { repo_id: "failed", path: "/missing" }, true);
-    await request("open_local", { repo_id: "closed", path: "/closed" }); await request("close", { repo_id: "closed" });
-    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
-    const restored = router.restoreRepositories("server");
-    for (let i = 0; i < 2; i++) {
-      await vi.waitFor(() => expect(second.written.length).toBe(i + 1));
-      const frame = JSON.parse(second.written[i]) as { id: number }; simulateResponse(second, frame.id, {});
-    }
-    await restored;
-    expect(second.written.map(frame => { const { method, params } = JSON.parse(frame) as { method: string; params: unknown }; return { method, params }; })).toEqual([
-      { method: "open_local", params: { repo_id: "kept", path: "/repo" } }, { method: "open_local", params: { repo_id: "another", path: "/another" } },
-    ]);
-  });
-
-  it("rejects a retired restore and never writes its next open into the newer channel", async () => {
-    const sm = new MockSessionManager(); sm.setStatus("server", "connected");
-    const { router } = createRouter(sm); const first = new MockChannel(); router.attachChannel("server", first.asChannel());
-    for (const id of ["first", "second"]) {
-      const opening = router.sendToRemoteAgent("server", "open_local", { repo_id: id, path: `/${id}` });
-      const request = JSON.parse(first.written.at(-1)!) as { id: number }; simulateResponse(first, request.id, {}); await opening;
-    }
-    const second = new MockChannel(); router.attachChannel("server", second.asChannel());
-    const restoring = router.restoreRepositories("server").catch((error: unknown) => error);
-    const third = new MockChannel(); router.attachChannel("server", third.asChannel());
-    expect({ result: await restoring, writes: third.written }).toEqual({ result: expect.objectContaining({ message: expect.stringContaining("replaced") }), writes: [] });
-    router.forgetRepositories("server"); await router.restoreRepositories("server"); expect(third.written).toEqual([]);
-  });
-});
-
 describe("RpcRouter — notification forwarding", () => {
+  it.each([
+    { method: "list", params: { op_id: "owned" }, event: "progress/partial", data: { op_id: "owned", kind: "list_entry", chunk: { path: "data.bin" } } },
+    { method: "crab_push_structured", params: { job_id: "owned" }, event: "crab/push_progress", data: { job_id: "owned", event: "upload_progress", data: { bytes_uploaded: 1024 } } },
+  ])("preserves $event notifications under their native operation identity", async ({ method, params, event, data }) => {
+    const sm = new MockSessionManager(), channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const progress: unknown[] = [];
+    router.on("progress", event => progress.push(event));
+    const repo_id = "ssh://server/repo";
+    const pending = router.route(repo_id, method, { ...params, repo_id });
+    simulateNotification(channel, event, data);
+    simulateResponse(channel, 1, {});
+    await pending;
+    expect(progress).toEqual([{ method: event, params: { ...data, repo_id } }]);
+  });
+
+  it("scopes UI progress to the pending request and drops unrelated or late jobs", async () => {
+    const sm = new MockSessionManager(), channel = new MockChannel();
+    sm.setStatus("server", "connected"); sm.setConnection("server", channel);
+    const { router } = createRouter(sm);
+    router.attachChannel("server", channel.asChannel());
+    const progress: unknown[] = [];
+    router.on("progress", event => progress.push(event));
+    const repo_id = "ssh://server/repo";
+    const pending = router.route(repo_id, "file_materialize", { repo_id, file_id: "captured", op_id: "owned-job" });
+    simulateNotification(channel, "progress/complete", { job_id: "another-job", status: 0 });
+    simulateNotification(channel, "progress/transfer", { job_id: "owned-job", repo_id: "ssh://other/repo", written_bytes: 4 });
+    simulateNotification(channel, "progress/complete", { job_id: "owned-job", status: 0 });
+    simulateResponse(channel, 1, { written_bytes: 4 });
+    await pending;
+    simulateNotification(channel, "progress/complete", { job_id: "owned-job", status: 1 });
+    expect(progress).toEqual([{ method: "progress/complete", params: { job_id: "owned-job", repo_id, status: 0 } }]);
+  });
+
   it("forwards notifications with profileId tag", async () => {
     const sm = new MockSessionManager();
     const channel = new MockChannel();
@@ -506,8 +510,8 @@ describe("RpcRouter — batch RPC", () => {
 
     const promise = router.batchRpc("ssh://server/repo", calls);
 
-    // Each NDJSON line must be accepted by the sidecar request dispatcher.
-    expect(channel.written.map(frame => JSON.parse(frame).method)).toEqual(calls.map(call => call.method));
+    // The native agent accepts one request per line, not JSON-RPC arrays.
+    expect(channel.written.map(line => JSON.parse(line).method)).toEqual(calls.map(call => call.method));
 
     // Simulate individual responses (may arrive out of order)
     simulateResponse(channel, 2, { branches: ["main"] });
@@ -542,10 +546,10 @@ describe("RpcRouter — batch RPC", () => {
 
     const results = await promise;
     expect(results[0]).toEqual({ result: { name: "repo" } });
-    expect(results[1]).toEqual({ error: { code: -32601, message: "Method not found" } });
+    expect(results[1]).toEqual({ error: { code: -32601, message: "Method not found", data: undefined } });
   });
 
-  it("routes local calls through the local agent", async () => {
+  it("falls back to sequential calls for local repos", async () => {
     const la = new MockLocalAgent();
     la.nextResult = "local-result";
     const { router } = createRouter(undefined, la);
@@ -585,9 +589,9 @@ describe("routeRpcCall — integration helper", () => {
     const la = new MockLocalAgent();
     la.nextResult = "local";
     const sm = new MockSessionManager();
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
 
-    const result = await routeRpcCall(router, la, "git_status", { repo_id: "/local/path" });
+    const result = await routeRpcCall(router, la, "git_status_porcelain", { repo_id: "/local/path" });
     expect(result).toBe("local");
   });
 
@@ -598,10 +602,10 @@ describe("routeRpcCall — integration helper", () => {
     sm.setStatus("remote-1", "connected");
     sm.setConnection("remote-1", channel);
 
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
     router.attachChannel("remote-1", channel.asChannel());
 
-    const promise = routeRpcCall(router, la, "git_status", { repo_id: "ssh://remote-1/repo" });
+    const promise = routeRpcCall(router, la, "git_status_porcelain", { repo_id: "ssh://remote-1/repo" });
     simulateResponse(channel, 1, "remote-status");
 
     const result = await promise;
@@ -613,7 +617,7 @@ describe("routeRpcCall — integration helper", () => {
     const la = new MockLocalAgent();
     la.nextResult = "pong";
     const sm = new MockSessionManager();
-    const router = new RpcRouter(sm as any, la);
+    const router = new RpcRouter(sm as any, la, mockStorageConnections);
 
     const result = await routeRpcCall(router, la, "ping", {});
     expect(result).toBe("pong");

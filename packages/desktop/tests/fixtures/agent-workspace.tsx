@@ -132,7 +132,7 @@ function WorkspaceFixture() {
   const [repoId, setRepoId] = useState(availabilityMode ? "ssh://first/repo" : "fixture-repo");
   return <>
     {availabilityMode && <button type="button" onClick={() => setRepoId("ssh://second/repo")}>Select second server</button>}
-    <AgentTasksView repo={{ repo_id: repoId, url: repoId, is_remote: availabilityMode, cache_dir: "", label: "Fixture", openedAt: 1, deferred: true }} />
+    <AgentTasksView repo={{ repo_id: repoId, url: repoId, is_remote: availabilityMode, cache_dir: "", label: "Fixture", openedAt: 1, deferred: true, native_session_id: null }} />
   </>;
 }
 createRoot(document.getElementById("root")!).render(<StoreProvider><SettingsProvider><SessionProvider>

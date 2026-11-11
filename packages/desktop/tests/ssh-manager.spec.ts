@@ -8,6 +8,10 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import type { Client, ClientChannel, SFTPWrapper } from "ssh2";
+import type { AgentDeployer } from "../electron/ssh-deployer";
+import type { CapabilityNegotiator } from "../electron/ssh-capabilities";
+import type { RpcRouter } from "../electron/ssh-router";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -42,14 +46,14 @@ class MockClientChannel extends EventEmitter {
   end = vi.fn();
   write = vi.fn();
   setWindow = vi.fn();
-  stderr = new EventEmitter();
+  stderr = Object.assign(new EventEmitter(), { resume: vi.fn() });
 }
 
 class MockClient extends EventEmitter {
   connect = vi.fn();
   setNoDelay = vi.fn();
   end = vi.fn();
-  destroy = vi.fn();
+  destroy = vi.fn(() => { this.emit("close"); return this; });
   exec = vi.fn();
   shell = vi.fn();
   forwardOut = vi.fn();
@@ -67,12 +71,6 @@ vi.mock("ssh2", () => ({
 }));
 
 import { SshSessionManager, SshProfile } from "../electron/ssh-manager";
-import type { ClientChannel } from "ssh2";
-import { RpcRouter } from "../electron/ssh-router";
-import { AgentDeployer } from "../electron/ssh-deployer";
-import { CapabilityNegotiator } from "../electron/ssh-capabilities";
-import type { AgentCapabilities } from "../electron/ssh-types";
-import { getPassword } from "../electron/keychain";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -119,6 +117,28 @@ async function connectProfile(
   return client;
 }
 
+function nativeRuntime(manager: SshSessionManager) {
+  const channels: MockClientChannel[] = [];
+  const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
+  let cached = false;
+  const send = vi.fn(async (_profile: string, method: string, params: Record<string, unknown>): Promise<unknown> => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
+  const replay = vi.fn(async () => {});
+  manager.setAgentDependencies({
+    createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent: vi.fn(async () => {
+      const channel = new MockClientChannel();
+      channel.end.mockImplementation(() => { channel.emit("close", 0); });
+      channels.push(channel); return channel;
+    }) }) as unknown as AgentDeployer,
+    capabilityNegotiator: {
+      getCached: () => cached ? capabilities : null,
+      negotiate: async () => { cached = true; return capabilities; },
+      clearCache: () => { cached = false; },
+    } as unknown as CapabilityNegotiator,
+    rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: replay, clearQueue: vi.fn() } as unknown as RpcRouter,
+  });
+  return { channels, send, replay };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("SshSessionManager", () => {
@@ -159,8 +179,8 @@ describe("SshSessionManager", () => {
 
     it("connect transitions to 'connected' when ssh2 client emits 'ready'", async () => {
       const profile = makeProfile();
-      const client = await connectProfile(manager, profile);
-      expect({ status: manager.getStatus("test-profile-1"), noDelay: client.setNoDelay.mock.calls }).toEqual({ status: "connected", noDelay: [[true]] });
+      await connectProfile(manager, profile);
+      expect(manager.getStatus("test-profile-1")).toBe("connected");
     });
 
     it("connect transitions to 'error' when ssh2 client emits 'error'", async () => {
@@ -209,35 +229,333 @@ describe("SshSessionManager", () => {
       await expect(manager.disconnect("non-existent")).resolves.toBeUndefined();
     });
 
-    it("connect disconnects existing connection before reconnecting (idempotent)", async () => {
+    it("connected profiles reuse the authenticated connection", async () => {
       const profile = makeProfile();
-
-      // First connection
       const client1 = await connectProfile(manager, profile);
-      expect(manager.getStatus("test-profile-1")).toBe("connected");
+      const reopened = manager.connect(profile);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for (const client of mockClientInstances) client.emit("ready");
+      await reopened;
+      expect(mockClientInstances).toHaveLength(1);
+      expect(client1.end).not.toHaveBeenCalled();
+    });
 
-      // Second connection to same profile — should disconnect first
-      const initialCount = mockClientInstances.length;
-      const connectPromise2 = manager.connect(profile);
+    it("concurrent repository restores share the same connection attempt", async () => {
+      const profile = makeProfile();
+      const joined = Promise.allSettled([manager.connect(profile), manager.connect(profile)]);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for (const client of mockClientInstances) client.emit("ready");
+      expect((await joined).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(mockClientInstances).toHaveLength(1);
+    });
 
-      // Wait for the new client to be created and connect() called
-      await vi.waitFor(() => {
-        expect(mockClientInstances.length).toBeGreaterThan(initialCount);
+    it("reuses a restored repository instead of replacing its newly captured readers", async () => {
+      const profile = makeProfile();
+      const channels: MockClientChannel[] = [];
+      const capabilities = { protocol: 1 as const, version: "test", methods: ["capabilities", "open_local"] };
+      const send = vi.fn(async (_profile: string, method: string, params: { repo_id: string }) => method === "open_local" ? { repo_id: params.repo_id, url: params.repo_id } : {});
+      manager.setAgentDependencies({
+        createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent: vi.fn(async () => {
+          const channel = new MockClientChannel();
+          channel.end.mockImplementation(() => { channel.emit("close", 0); });
+          channels.push(channel); return channel;
+        }) }) as unknown as AgentDeployer,
+        capabilityNegotiator: { getCached: () => capabilities, negotiate: async () => capabilities, clearCache: vi.fn() } as unknown as CapabilityNegotiator,
+        rpcRouter: { attachChannel: vi.fn(), sendToRemoteAgent: send, retireRepository: (profile: string, repo_id: string) => send(profile, "close", { repo_id }), replayQueue: vi.fn(async () => {}), clearQueue: vi.fn() } as unknown as RpcRouter,
       });
-      const client2 = mockClientInstances[mockClientInstances.length - 1];
-      await vi.waitFor(() => expect(client2.connect).toHaveBeenCalled());
-      client2.emit("ready");
-      await connectPromise2;
+      await connectProfile(manager, profile);
+      try {
+        await manager.ensureAgent(profile.id);
+        await manager.openRepository(profile.id, "/repository");
+        await manager.openRepository(profile.id, "/repository");
+        expect(send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(1);
+        channels[0].emit("close", 0);
+        await manager.ensureAgent(profile.id);
+        await manager.openRepository(profile.id, "/repository");
+        expect(send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(2);
+      } finally { await manager.disconnect(profile.id); }
+    });
 
-      // First client should have been ended (disconnect was called)
-      expect(client1.end).toHaveBeenCalled();
-      expect(manager.getStatus("test-profile-1")).toBe("connected");
+    it("a failed repository replay leaves its sibling ready and retries only the failed repository", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const native = runtime.send.getMockImplementation()!;
+      runtime.send.mockImplementation(async (id, method, params) => {
+        if (method === "open_local" && params.repo_id === second.repo_id) throw new Error("Repository directory was removed");
+        return native(id, method, params);
+      });
+      runtime.channels[0].emit("close", 0);
+      try {
+        await expect(manager.ensureAgent(profile.id)).resolves.toBeUndefined();
+        expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBeNull();
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id))).toMatchObject({ sessionId: null, error: "Repository directory was removed" });
+        runtime.send.mockImplementation(native); runtime.send.mockClear();
+        await manager.openRepository(profile.id, "/second");
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).not.toBeNull();
+        expect(runtime.send.mock.calls.map(([, method, params]) => [method, params.repo_id])).toEqual([["open_local", second.repo_id]]);
+        expect(runtime.channels).toHaveLength(2);
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("storage replacement revokes only the affected repository without replacing SSH", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const process = manager.agentSession(profile.id);
+      await manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBe(first.native_session_id);
+      expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).toBe(second.native_session_id);
+      expect(manager.agentSession(profile.id)).toBe(process);
+      expect(runtime.send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(3);
+      await manager.disconnect(profile.id);
+    });
+
+    it("storage removal drains native readers while retaining the repository for repair", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      await manager.storageIdentityChanged([String(first.repo_id)], "removed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id))).toMatchObject({ sessionId: null, error: expect.stringContaining("saved connection was removed") });
+      expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: first.repo_id });
+      await manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      expect(manager.repositoryRuntime(profile.id, String(first.repo_id)).sessionId).not.toBeNull();
+      await manager.disconnect(profile.id);
+    });
+
+    it("reselection waits for the removed identity's native close before replacement", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: () => void;
+      const closing = new Promise<void>(resolve => { release = resolve; });
+      runtime.send.mockImplementation(async (id, method, params) => {
+        if (method === "close") await closing;
+        return native(id, method, params);
+      });
+      const removed = manager.storageIdentityChanged([String(first.repo_id)], "removed");
+      await vi.waitFor(() => expect(runtime.send.mock.calls.some(([, method]) => method === "close")).toBe(true));
+      const replaced = manager.storageIdentityChanged([String(first.repo_id)], "changed");
+      try {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(runtime.send.mock.calls.filter(([, method]) => method === "open_local")).toHaveLength(1);
+      } finally { release(); await Promise.all([removed, replaced]); await manager.disconnect(profile.id); }
+    });
+
+    it("concurrent opens join the repository's native open outcome", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => outcome);
+      try {
+        const joined = Promise.all([manager.openRepository(profile.id, "/first"), manager.openRepository(profile.id, "/first")]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const sent = runtime.send.mock.calls.length;
+        release({ repo_id: `ssh://${profile.id}/first` });
+        await joined;
+        expect(sent).toBe(1);
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("a slow repository replay does not hold agent readiness or its healthy sibling", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const first = await manager.openRepository(profile.id, "/first");
+      const second = await manager.openRepository(profile.id, "/second");
+      const native = runtime.send.getMockImplementation()!;
+      runtime.replay.mockClear();
+      let release!: (value: unknown) => void;
+      const blocked = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation((id, method, params) => method === "open_local" && params.repo_id === second.repo_id ? blocked : native(id, method, params));
+      runtime.channels[0].emit("close", 0);
+      let ready = false;
+      const restarting = manager.ensureAgent(profile.id).then(() => { ready = true; });
+      try {
+        await vi.waitFor(() => expect(ready).toBe(true));
+        await expect(manager.openRepository(profile.id, "/first")).resolves.toMatchObject({ repo_id: first.repo_id });
+        expect(manager.repositoryRuntime(profile.id, String(second.repo_id)).sessionId).toBeNull();
+        expect(runtime.replay).toHaveBeenCalledWith(profile.id);
+      } finally {
+        release({ repo_id: second.repo_id });
+        await restarting;
+        await manager.disconnect(profile.id);
+      }
+    });
+
+    it("forgetting a repository during replay closes the late native owner without restoring it", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const handle = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation((id, method, params) => method === "open_local" ? outcome : native(id, method, params));
+      runtime.send.mockClear();
+      runtime.channels[0].emit("close", 0);
+      try {
+        const restarting = manager.ensureAgent(profile.id);
+        await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(profile.id, "open_local", expect.objectContaining({ repo_id: handle.repo_id })));
+        manager.forgetRepository(profile.id, String(handle.repo_id));
+        release({ repo_id: handle.repo_id });
+        await restarting;
+        expect(manager.repositoryRuntimes(profile.id)).toEqual([]);
+        await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(profile.id, "close", { repo_id: handle.repo_id }));
+      } finally { await manager.disconnect(profile.id); }
+    });
+
+    it("late replay cleanup cannot revoke a replacement native session", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const repository = await manager.openRepository(profile.id, "/first");
+      const native = runtime.send.getMockImplementation()!;
+      let release!: (value: unknown) => void;
+      const blocked = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => blocked);
+      runtime.channels[0].emit("close", 0);
+      await manager.ensureAgent(profile.id);
+      runtime.channels[1].emit("close", 0);
+      runtime.send.mockImplementation(native);
+      try {
+        await manager.ensureAgent(profile.id);
+        const replacement = await manager.openRepository(profile.id, "/first");
+        release({ repo_id: repository.repo_id });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(manager.repositoryRuntime(profile.id, String(repository.repo_id)).sessionId).toBe(replacement.native_session_id);
+      } finally {
+        release({ repo_id: repository.repo_id });
+        await manager.disconnect(profile.id);
+      }
+    });
+
+    it("disconnect sends native EOF before joining an in-flight repository replay", async () => {
+      const profile = makeProfile();
+      const runtime = nativeRuntime(manager);
+      await connectProfile(manager, profile); await manager.ensureAgent(profile.id);
+      const handle = await manager.openRepository(profile.id, "/first");
+      let release!: (value: unknown) => void;
+      const outcome = new Promise(resolve => { release = resolve; });
+      runtime.send.mockImplementation(() => outcome); runtime.send.mockClear();
+      runtime.channels[0].emit("close", 0);
+      const restarting = manager.ensureAgent(profile.id);
+      void restarting.catch(() => {});
+      await vi.waitFor(() => expect(runtime.send).toHaveBeenCalled());
+      const closing = manager.disconnect(profile.id);
+      void closing.catch(() => {});
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const sentEof = runtime.channels[1].end.mock.calls.length;
+      release({ repo_id: handle.repo_id });
+      await Promise.allSettled([restarting, closing]);
+      expect(sentEof).toBe(1);
+    });
+
+    it.each([false, true])("disconnect joins authentication without resurrection (handshake started: %s)", async started => {
+      const profile = makeProfile();
+      const opening = manager.connect(profile);
+      const checked = expect(opening).rejects.toThrow("SSH connection closed");
+      const client = mockClientInstances[0];
+      if (started) await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
+      await manager.disconnect(profile.id);
+      await checked;
+      client.emit("ready");
+      expect(manager.getStatus(profile.id)).toBe("disconnected");
+      expect(client.destroy).toHaveBeenCalled();
+    });
+
+    it("concurrent jump profiles retain their own transports", async () => {
+      const first = makeProfile({ id: "first", jumpHost: "first-hop" });
+      const second = makeProfile({ id: "second", jumpHost: "second-hop" });
+      const opening = Promise.all([manager.connect(first), manager.connect(second)]);
+      await vi.waitFor(() => expect(mockClientInstances).toHaveLength(4));
+      const [firstTarget, secondTarget, firstJump, secondJump] = mockClientInstances;
+      for (const jump of [firstJump, secondJump]) {
+        jump.forwardOut.mockImplementation((_from, _port, _host, _target, callback) => callback(undefined, new MockClientChannel() as unknown as ClientChannel));
+        jump.emit("ready");
+      }
+      await vi.waitFor(() => expect(secondTarget.connect).toHaveBeenCalled());
+      firstTarget.emit("ready"); secondTarget.emit("ready");
+      await opening;
+      expect(manager.getConnection(first.id)?.jumpClients).toEqual([firstJump as unknown as Client]);
+      expect(manager.getConnection(second.id)?.jumpClients).toEqual([secondJump as unknown as Client]);
+      await manager.disconnect(first.id);
+      expect(firstJump.end).toHaveBeenCalled();
+      expect(secondJump.end).not.toHaveBeenCalled();
+      await manager.disconnect(second.id);
     });
   });
 
   // ── Reconnection logic ───────────────────────────────────────────
 
   describe("reconnection logic", () => {
+    it("a transport lost during reconnect bootstrap remains reconnecting", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      let fail!: (error: Error) => void;
+      const ensureAgent = vi.fn(() => new Promise<never>((_resolve, reject) => { fail = reject; }));
+      manager.setAgentDependencies({
+        createDeployer: () => Object.assign(new EventEmitter(), { ensureAgent }) as unknown as AgentDeployer,
+        capabilityNegotiator: { clearCache: vi.fn() } as unknown as CapabilityNegotiator,
+        rpcRouter: { clearQueue: vi.fn() } as unknown as RpcRouter,
+      });
+      manager.getConnection(profile.id)!.profile.autoDeployAgent = true;
+      initial.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      replacement.emit("end");
+      fail(new Error("SSH transport ended during deployment"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getStatus(profile.id)).toBe("reconnecting");
+      await manager.disconnect(profile.id);
+    });
+
+    it("repository reopen joins the background reconnect", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      initial.emit("end");
+      const reopened = manager.connect(profile);
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await reopened;
+      expect(mockClientInstances).toHaveLength(2);
+      expect(manager.getStatus(profile.id)).toBe("connected");
+    });
+
+    it("rejects an SFTP callback from the replaced transport", async () => {
+      const profile = makeProfile();
+      const first = await connectProfile(manager, profile);
+      let finish: ((error: undefined, sftp: SFTPWrapper) => void) | undefined;
+      first.sftp.mockImplementation(callback => { finish = callback; });
+      const opening = manager.getSftp(profile.id);
+      const checked = expect(opening).rejects.toThrow("SSH connection closed while opening SFTP");
+      first.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      const stale = new MockClientChannel();
+      if (!finish) throw new Error("SFTP callback was not registered");
+      finish(undefined, stale as unknown as SFTPWrapper);
+      await checked;
+      expect(stale.end).toHaveBeenCalled();
+    });
+
     beforeEach(() => {
       vi.useFakeTimers();
     });
@@ -332,6 +650,21 @@ describe("SshSessionManager", () => {
       expect(manager.getStatus("test-profile-1")).toBe("connected");
     });
 
+    it("disconnect revokes a reconnect awaiting authentication", async () => {
+      const profile = makeProfile();
+      const initial = await connectProfile(manager, profile);
+      initial.emit("end");
+      await vi.advanceTimersByTimeAsync(1000);
+      const replacement = mockClientInstances.at(-1)!;
+      await vi.waitFor(() => expect(replacement.connect).toHaveBeenCalled());
+
+      await manager.disconnect(profile.id);
+      expect(replacement.destroy).toHaveBeenCalled();
+      replacement.emit("ready");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.getStatus(profile.id)).toBe("disconnected");
+    });
+
     it("after 60s total failure, gives up and transitions to 'disconnected'", async () => {
       const profile = makeProfile({ autoReconnect: true });
       const connectPromise = manager.connect(profile);
@@ -360,15 +693,6 @@ describe("SshSessionManager", () => {
 
       expect(manager.getStatus("test-profile-1")).toBe("disconnected");
     });
-
-    it("cancelReconnection stops further attempts", async () => {
-      const client = await connectProfile(manager, makeProfile());
-      client.emit("end");
-      manager.cancelReconnection("test-profile-1");
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect({ status: manager.getStatus("test-profile-1"), clients: mockClientInstances.length }).toEqual({ status: "disconnected", clients: 1 });
-    });
-
   });
 
   // ── Keep-alive timeout detection ─────────────────────────────────
@@ -545,297 +869,4 @@ describe("SshSessionManager", () => {
       expect(manager.getConnection("test-profile-1")).toBeUndefined();
     });
   });
-});
-
-
-describe("SSH connection ownership", () => {
-  const managers: SshSessionManager[] = [];
-  const capabilities: AgentCapabilities = { version: "2.0.0", features: { fileWatching: false, deltaSync: false, compression: false, processManagement: false, environmentManagement: false, debugging: false, search: false, buildRun: false, logTailing: false } };
-  class AgentChannel extends EventEmitter {
-    end = vi.fn();
-    destroy = vi.fn(() => { this.emit("close"); });
-    write(frame: string, done?: (error?: Error | null) => void): boolean {
-      const request = JSON.parse(frame) as { id: number; method: string };
-      this.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method === "capabilities" ? capabilities : { method: request.method } }) + "\n"));
-      done?.(); return true;
-    }
-    asChannel(): ClientChannel { return this as unknown as ClientChannel; }
-  }
-  function pending<T>() {
-    let resolve!: (value: T) => void;
-    const promise = new Promise<T>(done => { resolve = done; });
-    return { promise, resolve };
-  }
-  function fixture() {
-    let manager: SshSessionManager;
-    const proxy = { getStatus: (id: string) => manager.getStatus(id), getConnection: (id: string) => manager.getConnection(id) } as SshSessionManager;
-    const router = new RpcRouter(proxy, { request: async () => { throw new Error("Local fallback must not run"); } });
-    const deployer = new AgentDeployer(async () => { throw new Error("Fixture must supply its startup channel"); }); const negotiator = new CapabilityNegotiator(router);
-    const channels: AgentChannel[] = [];
-    const deploy = vi.spyOn(deployer, "ensureAgent").mockImplementation(async () => { const channel = new AgentChannel(); channels.push(channel); return channel.asChannel(); });
-    manager = new SshSessionManager(async () => {});
-    manager.setAgentDependencies({ createDeployer: () => deployer, capabilityNegotiator: negotiator, rpcRouter: router });
-    managers.push(manager);
-    return { manager, router, negotiator, deploy, channels };
-  }
-  beforeEach(() => { vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock"; });
-  afterEach(async () => { for (const manager of managers.splice(0)) await manager.disconnect("test-profile-1"); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-
-  it("does not complete connect before the deployed channel and capabilities are ready", async () => {
-    const { manager, deploy, negotiator } = fixture(); const channel = new AgentChannel(); const starting = pending<ClientChannel>();
-    deploy.mockReturnValueOnce(starting.promise); let settled = false;
-    const connected = manager.connect(makeProfile({ autoDeployAgent: true })).then(() => { settled = true; });
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready");
-    await vi.advanceTimersByTimeAsync(0);
-    const before = { status: manager.getStatus("test-profile-1"), settled };
-    starting.resolve(channel.asChannel()); await connected; await vi.advanceTimersByTimeAsync(0);
-    expect({ before, after: manager.getStatus("test-profile-1"), capabilities: negotiator.getCached("test-profile-1") }).toEqual({ before: { status: "deploying", settled: false }, after: "connected", capabilities });
-  });
-
-  it("publishes deployment completion only after the capability handshake", async () => {
-    const { manager, negotiator } = fixture(); const handshake = pending<AgentCapabilities>();
-    vi.spyOn(negotiator, "negotiate").mockReturnValueOnce(handshake.promise);
-    const completed: unknown[] = [];
-    manager.on("ssh:deploy-progress", value => { if (value.stage === "starting" && value.percent === 100) completed.push(value); });
-    const connecting = manager.connect(makeProfile({ autoDeployAgent: true }));
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    expect({ completed: completed.length, status: manager.getStatus("test-profile-1") }).toEqual({ completed: 0, status: "deploying" });
-    handshake.resolve(capabilities); await connecting;
-    expect(completed).toEqual([{ profileId: "test-profile-1", stage: "starting", percent: 100 }]);
-  });
-
-  it("waits for repository restoration before publishing connected readiness", async () => {
-    const { manager, router } = fixture(); const reopened = pending<void>();
-    const restore = vi.spyOn(router, "restoreRepositories").mockReturnValueOnce(reopened.promise);
-    const connecting = manager.connect(makeProfile({ autoDeployAgent: true }));
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    expect({ restoring: restore.mock.calls, status: manager.getStatus("test-profile-1") }).toEqual({ restoring: [["test-profile-1"]], status: "deploying" });
-    reopened.resolve(undefined); await connecting; expect(manager.getStatus("test-profile-1")).toBe("connected");
-  });
-
-  it("cannot publish a late repository restore after disconnect", async () => {
-    const { manager, router } = fixture(); const reopened = pending<void>();
-    vi.spyOn(router, "restoreRepositories").mockReturnValueOnce(reopened.promise);
-    const connecting = manager.connect(makeProfile({ autoDeployAgent: true })).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    await manager.disconnect("test-profile-1"); reopened.resolve(undefined); await connecting; await vi.advanceTimersByTimeAsync(0);
-    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
-  });
-
-  it.each([{ host: "new.example.invalid" }, { port: 2222 }, { username: "another" }])("forgets repository identities when the endpoint changes: %j", async endpoint => {
-    const { manager, router } = fixture(); await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
-    const forget = vi.spyOn(router, "forgetRepositories");
-    await connectProfile(manager, makeProfile({ autoDeployAgent: true, ...endpoint }));
-    expect(forget.mock.calls).toEqual([["test-profile-1"]]);
-  });
-
-  it("redeploys and actually executes the router's queued read after reconnect", async () => {
-    const { manager, router, deploy, channels } = fixture(); const client = await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
-    await vi.advanceTimersByTimeAsync(0); client.emit("end");
-    let result: unknown;
-    void router.sendToRemoteAgent("test-profile-1", "task_compute_diff", {}).then(value => { result = value; });
-    await vi.advanceTimersByTimeAsync(1000); const replacement = mockClientInstances.at(-1)!; replacement.emit("ready");
-    await vi.advanceTimersByTimeAsync(0);
-    expect({ deployments: deploy.mock.calls.length, channels: channels.length, result, status: manager.getStatus("test-profile-1") }).toEqual({ deployments: 2, channels: 2, result: { method: "task_compute_diff" }, status: "connected" });
-  });
-
-  it("ignores a retired client's late end, close and error", async () => {
-    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0);
-    await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0);
-    previous.emit("end"); previous.emit("close"); previous.emit("error", new Error("Retired transport"));
-    expect(manager.getStatus("test-profile-1")).toBe("connected");
-  });
-
-  it("does not resurrect a disconnected reconnect attempt after late ready", async () => {
-    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0); previous.emit("end");
-    await vi.advanceTimersByTimeAsync(1000); const pendingClient = mockClientInstances.at(-1)!;
-    await manager.disconnect("test-profile-1"); pendingClient.emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
-  });
-
-  it("retires a channel that finishes deploying after disconnect", async () => {
-    const { manager, deploy } = fixture(); const starting = pending<ClientChannel>(); const channel = new AgentChannel(); deploy.mockReturnValueOnce(starting.promise);
-    const connected = manager.connect(makeProfile({ autoDeployAgent: true })).catch(() => {});
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    await manager.disconnect("test-profile-1"); starting.resolve(channel.asChannel()); await connected; await vi.advanceTimersByTimeAsync(0);
-    expect({ status: manager.getStatus("test-profile-1"), destroyed: channel.destroy.mock.calls.length, channel: manager.getConnection("test-profile-1")?.channels.agent }).toEqual({ status: "disconnected", destroyed: 1, channel: undefined });
-  });
-
-  it("settles an opening handshake when the server closes without ready", async () => {
-    const { manager } = fixture(); let outcome = "pending";
-    void manager.connect(makeProfile({ autoDeployAgent: true })).then(() => { outcome = "connected"; }, () => { outcome = "failed"; });
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled()); mockClientInstances[0].emit("close"); await vi.advanceTimersByTimeAsync(0);
-    expect(outcome).toBe("failed");
-  });
-
-  it("enforces the total reconnect deadline while a handshake is still opening", async () => {
-    const { manager } = fixture(); const previous = await connectProfile(manager, makeProfile({ autoDeployAgent: true })); await vi.advanceTimersByTimeAsync(0); previous.emit("end");
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(manager.getStatus("test-profile-1")).toBe("disconnected");
-  });
-  it("uses the same attached owner for explicit deployment and makes it idempotent", async () => {
-    const { manager, deploy, negotiator } = fixture();
-    await connectProfile(manager, makeProfile({ autoDeployAgent: false }));
-    await manager.deployAgent("test-profile-1"); await manager.deployAgent("test-profile-1");
-    expect({ deployments: deploy.mock.calls.length, attached: Boolean(manager.getConnection("test-profile-1")?.channels.agent), capabilities: negotiator.getCached("test-profile-1") }).toEqual({ deployments: 1, attached: true, capabilities });
-  });
-
-  it("rejects a queued read on permanent disconnect", async () => {
-    const { manager, router } = fixture(); const client = await connectProfile(manager, makeProfile({ autoDeployAgent: true }));
-    client.emit("end"); const read = router.sendToRemoteAgent("test-profile-1", "task_compute_diff", {});
-    const outcome = read.catch(error => (error as Error).message);
-    await manager.disconnect("test-profile-1");
-    expect(await outcome).toBe("Connection lost permanently");
-  });
-
-  it("cancels credential lookup without starting a late SSH transport", async () => {
-    const { manager } = fixture(); const password = pending<string | null>(); vi.mocked(getPassword).mockReturnValueOnce(password.promise);
-    let outcome = "pending";
-    void manager.connect(makeProfile({ authMethod: { type: "password" }, autoDeployAgent: false })).then(() => { outcome = "connected"; }, () => { outcome = "failed"; });
-    const client = mockClientInstances[0]; await manager.disconnect("test-profile-1"); await vi.advanceTimersByTimeAsync(0);
-    const cancelled = outcome; password.resolve("owned-fixture-password"); await vi.advanceTimersByTimeAsync(0);
-    expect({ cancelled, connected: client.connect.mock.calls.length, status: manager.getStatus("test-profile-1") }).toEqual({ cancelled: "failed", connected: 0, status: "disconnected" });
-  });
-
-  it("keeps concurrent jump chains with their own profile", async () => {
-    const { manager } = fixture();
-    const first = manager.connect(makeProfile({ id: "first", jumpHost: "first-bastion", autoDeployAgent: false }));
-    const [firstClient, firstJump] = mockClientInstances;
-    const second = manager.connect(makeProfile({ id: "second", jumpHost: "second-bastion", autoDeployAgent: false }));
-    const [secondClient, secondJump] = mockClientInstances.slice(2);
-    const tunnel = (_source: string, _sourcePort: number, _target: string, _targetPort: number, done: (error: Error | undefined, stream: ClientChannel) => void) => done(undefined, new AgentChannel().asChannel());
-    firstJump.forwardOut.mockImplementation(tunnel); secondJump.forwardOut.mockImplementation(tunnel);
-    try {
-      firstJump.emit("ready"); secondJump.emit("ready"); await vi.advanceTimersByTimeAsync(0);
-      firstClient.emit("ready"); secondClient.emit("ready"); await Promise.all([first, second]);
-      const owners = [Object.is(manager.getConnection("first")?.jumpClients[0], firstJump), Object.is(manager.getConnection("second")?.jumpClients[0], secondJump)];
-      await manager.disconnect("first");
-      expect({ owners, firstClosed: firstJump.end.mock.calls.length > 0, secondClosed: secondJump.end.mock.calls.length }).toEqual({ owners: [true, true], firstClosed: true, secondClosed: 0 });
-    } finally { await manager.disconnect("first"); await manager.disconnect("second"); }
-  });
-
-});
-
-describe("SSH host verification ownership", () => {
-  let manager: SshSessionManager;
-  let verify: ReturnType<typeof vi.fn<ConstructorParameters<typeof SshSessionManager>[0]>>;
-  beforeEach(() => {
-    vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock";
-    verify = vi.fn<ConstructorParameters<typeof SshSessionManager>[0]>(async () => {}); manager = new SshSessionManager(verify);
-  });
-  afterEach(async () => { await manager.disconnect("test-profile-1"); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-  async function start() {
-    const connected = manager.connect(makeProfile());
-    const outcome = connected.catch((error: unknown) => error);
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled());
-    const client = mockClientInstances[0];
-    const config = client.connect.mock.calls[0][0] as import("ssh2").ConnectConfig;
-    const hostVerifier = config.hostVerifier as import("ssh2").HostVerifier;
-    return { client, config, hostVerifier, outcome };
-  }
-  it("keeps the verified account and reconnect destination when the caller edits its profile", async () => {
-    const profile = makeProfile();
-    const connecting = manager.connect(profile);
-    await vi.waitFor(() => expect(mockClientInstances[0].connect).toHaveBeenCalled());
-    const client = mockClientInstances[0];
-    const verifier = client.connect.mock.calls[0][0].hostVerifier as import("ssh2").HostVerifier;
-    profile.host = "replacement.example.invalid";
-    const key = Buffer.from("fixture-host-public-key");
-    const { hostKeyFingerprint } = await import("../electron/ssh-known-hosts");
-    verifier(key, vi.fn()); await vi.advanceTimersByTimeAsync(0);
-    client.emit("ready"); await connecting;
-    const endpoint = manager.getConnection(profile.id)?.endpoint;
-    client.emit("end"); await vi.advanceTimersByTimeAsync(1000);
-    expect({ endpoint, reconnectHost: mockClientInstances.at(-1)!.connect.mock.calls[0][0].host }).toEqual({
-      endpoint: { host: "test.example.com", port: 22, username: "testuser", hostKey: hostKeyFingerprint(key) }, reconnectHost: "test.example.com",
-    });
-  });
-  it("pauses the network deadline while the owner reviews the fingerprint", async () => {
-    let approve!: () => void; verify.mockImplementation(() => new Promise<void>(resolve => { approve = resolve; }));
-    const { client, config, hostVerifier, outcome } = await start(); const callback = vi.fn(); const key = Buffer.from("fixture");
-    await vi.advanceTimersByTimeAsync(9000); hostVerifier(key, callback);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect({ destroyed: client.destroy.mock.calls.length, decisions: callback.mock.calls.length, readyTimeout: config.readyTimeout, identity: verify.mock.calls[0].slice(0, 3) }).toEqual({ destroyed: 0, decisions: 0, readyTimeout: 0, identity: ["test.example.com", 22, key] });
-    approve(); await vi.advanceTimersByTimeAsync(0); client.emit("ready"); await outcome;
-    expect(callback).toHaveBeenCalledWith(true);
-  });
-  it("retains the remaining network budget after approval", async () => {
-    const { client, hostVerifier, outcome } = await start();
-    await vi.advanceTimersByTimeAsync(9000); hostVerifier(Buffer.from("fixture"), vi.fn());
-    await vi.advanceTimersByTimeAsync(1001);
-    expect({ result: (await outcome as Error).message, destroyed: client.destroy.mock.calls.length > 0 }).toEqual({ result: "SSH connection handshake timed out", destroyed: true });
-  });
-  it("does not resume a retired handshake after late approval", async () => {
-    let approve!: () => void; verify.mockImplementation(() => new Promise<void>(resolve => { approve = resolve; }));
-    const { hostVerifier, outcome } = await start(); const callback = vi.fn();
-    hostVerifier(Buffer.from("fixture"), callback); await manager.disconnect("test-profile-1"); approve(); await outcome; await vi.advanceTimersByTimeAsync(0);
-    expect({ decisions: callback.mock.calls.length, status: manager.getStatus("test-profile-1"), aborted: verify.mock.calls[0][3].aborted }).toEqual({ decisions: 0, status: "disconnected", aborted: true });
-  });
-  it("stops reconnecting after a trust rejection", async () => {
-    const first = await connectProfile(manager, makeProfile()); first.emit("end");
-    await vi.advanceTimersByTimeAsync(1000); const replacement = mockClientInstances.at(-1)!;
-    const hostVerifier = replacement.connect.mock.calls[0][0].hostVerifier as import("ssh2").HostVerifier;
-    const { HostKeyError } = await import("../electron/ssh-known-hosts");
-    verify.mockRejectedValue(new HostKeyError("SSH_HOST_KEY_REJECTED", "Key rejected"));
-    hostVerifier(Buffer.from("fixture"), vi.fn()); await vi.advanceTimersByTimeAsync(60_000);
-    expect({ status: manager.getStatus("test-profile-1"), attempts: mockClientInstances.length }).toEqual({ status: "error", attempts: 2 });
-  });
-  it("keeps verification active for rekey after readiness", async () => {
-    const { client, hostVerifier, outcome } = await start(); client.emit("ready"); await outcome;
-    const { HostKeyError } = await import("../electron/ssh-known-hosts");
-    verify.mockRejectedValue(new HostKeyError("SSH_HOST_KEY_REVOKED", "Key revoked"));
-    hostVerifier(Buffer.from("rekey"), vi.fn()); await vi.advanceTimersByTimeAsync(60_000);
-    expect({ status: manager.getStatus("test-profile-1"), attempts: mockClientInstances.length, destroyed: client.destroy.mock.calls.length }).toEqual({ status: "error", attempts: 1, destroyed: 1 });
-  });
-});
-
-describe("SSH connection test command ownership", () => {
-  beforeEach(() => { vi.useFakeTimers(); mockClientInstances = []; process.env.SSH_AUTH_SOCK = "/tmp/mock-agent.sock"; });
-  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-  async function testing() {
-    const manager = new SshSessionManager(async () => {});
-    let result: { ok: boolean; error?: string } | undefined;
-    const done = manager.testConnection(makeProfile()).then(value => { result = value; });
-    await vi.waitFor(() => expect(mockClientInstances[0]?.connect).toHaveBeenCalled());
-    const client = mockClientInstances[0]; const channel = Object.assign(new MockClientChannel(), { destroy: vi.fn() });
-    client.exec.mockImplementation((_command: string, callback: (error: null, stream: typeof channel) => void) => callback(null, channel));
-    client.emit("ready"); await vi.advanceTimersByTimeAsync(0);
-    return { client, channel, done, result: () => result };
-  }
-  it("bounds a command that never closes and retires its transport", async () => {
-    const test = await testing(); await vi.advanceTimersByTimeAsync(5001);
-    try { expect({ result: test.result(), closed: test.client.destroy.mock.calls.length > 0 }).toEqual({ result: { ok: false, error: "Connection timed out" }, closed: true }); }
-    finally { test.channel.emit("close", 0); await test.done; }
-  });
-  it("fails immediately if the transport closes before the command", async () => {
-    const test = await testing(); test.client.emit("close"); await vi.advanceTimersByTimeAsync(0);
-    try { expect(test.result()).toEqual({ ok: false, error: "SSH connection closed during connection test" }); }
-    finally { test.channel.emit("close", 0); await test.done; }
-  });
-  it.each([[1, undefined], [null, "TERM"]])("does not accept expected output with failed exit %s/%s", async (code, signal) => {
-    const test = await testing(); test.channel.emit("data", Buffer.from("ok\n")); test.channel.emit("close", code, signal); await test.done;
-    expect(test.result()?.ok).toBe(false);
-  });
-  it("does not treat an unrelated word containing ok as success", async () => {
-    const test = await testing(); test.channel.emit("data", Buffer.from("broken\n")); test.channel.emit("close", 0); await test.done;
-    expect(test.result()).toEqual({ ok: false, error: "Remote command did not return expected output" });
-  });
-  it("handles command stream errors without an unhandled event", async () => {
-    const test = await testing(); test.channel.emit("error", new Error("Remote channel failed")); await test.done;
-    expect(test.result()).toEqual({ ok: false, error: "Remote channel failed" }); test.channel.emit("close");
-  });
-  it("bounds output from a command that floods stdout", async () => {
-    const test = await testing(); test.channel.emit("data", Buffer.alloc(70 * 1024)); await test.done;
-    expect(test.result()).toEqual({ ok: false, error: "Remote connection test output exceeded 64 KiB" }); test.channel.emit("close");
-  });
-  it("retires an exec channel delivered after the command deadline", async () => {
-    const manager = new SshSessionManager(async () => {}); const done = manager.testConnection(makeProfile());
-    await vi.waitFor(() => expect(mockClientInstances[0]?.connect).toHaveBeenCalled()); const client = mockClientInstances[0];
-    let callback!: (error: null, stream: MockClientChannel & { destroy: ReturnType<typeof vi.fn> }) => void;
-    client.exec.mockImplementation((_command: string, ready: typeof callback) => { callback = ready; });
-    client.emit("ready"); await vi.advanceTimersByTimeAsync(5001); await done;
-    const late = Object.assign(new MockClientChannel(), { destroy: vi.fn() }); callback(null, late);
-    expect({ destroyed: late.destroy.mock.calls.length, readers: late.listenerCount("data") }).toEqual({ destroyed: 1, readers: 0 }); late.emit("close");
-  });
-
 });

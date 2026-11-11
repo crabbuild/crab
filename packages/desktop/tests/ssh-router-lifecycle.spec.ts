@@ -1,25 +1,29 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
 import type { SshSessionManager } from "../electron/ssh-manager";
 import { RpcRouter } from "../electron/ssh-router";
 import type { RemoteEndpoint } from "../electron/ssh-types";
+import type { RequestAdmission } from "../electron/rpc-transport";
 
 class Channel extends EventEmitter {
+  end(): this { return this; }
   writes: string[] = [];
   write(frame: string, done?: (error?: Error | null) => void): boolean { this.writes.push(frame); done?.(); return true; }
   asChannel(): ClientChannel { return this as unknown as ClientChannel; }
   reply(id: number, result: unknown): void { this.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n")); }
 }
 
-function fixture(timeoutMs = 30_000, status = "connected") {
+function fixture(timeoutMs = 30_000, status = "connected", admit?: RequestAdmission) {
   const channels = new Map<string, Channel>();
   const endpoints = new Map<string, RemoteEndpoint>();
   const manager = {
     getStatus: () => status,
+    repositoryWork: () => undefined,
     getConnection: (profile: string) => ({ endpoint: endpoints.get(profile), channels: { agent: channels.get(profile)?.asChannel() }, profile: { operationTimeoutMs: timeoutMs } }),
   } as unknown as SshSessionManager;
-  const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local request"); } });
+  const router = new RpcRouter(manager, { request: async () => { throw new Error("Unexpected local request"); } }, mockStorageConnections, {}, admit);
   const attach = (profile: string) => {
     const channel = new Channel(); channels.set(profile, channel); router.attachChannel(profile, channel.asChannel()); return channel;
   };
@@ -29,6 +33,14 @@ function fixture(timeoutMs = 30_000, status = "connected") {
 describe("RPC channel lifecycle", () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it("checks transfer admission before writing a remote native frame", async () => {
+    const admit = vi.fn(() => { throw new Error("Preparation was cancelled"); });
+    const { router, attach } = fixture(30_000, "connected", admit); const channel = attach("profile");
+    await expect(router.sendToRemoteAgent("profile", "files_materialize", { repo_id: "ssh://profile/work", op_id: "cancelled", paths: ["file.bin"] })).rejects.toThrow("Preparation was cancelled");
+    expect(channel.writes).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it.each([
     { field: "host", value: "other.example.invalid" }, { field: "port", value: 2222 },
@@ -141,7 +153,7 @@ describe("RPC channel lifecycle", () => {
 
   it("applies reconnect write admission to batched calls", async () => {
     const manager = { getStatus: () => "reconnecting" } as unknown as SshSessionManager;
-    const router = new RpcRouter(manager, { request: vi.fn() }); const channel = new Channel();
+    const router = new RpcRouter(manager, { request: vi.fn() }, mockStorageConnections); const channel = new Channel();
     router.attachChannel("profile", channel.asChannel());
     const results = await router.batchRpc("ssh://profile/repo", [{ method: "git_commit", params: {} }]);
     expect({ results, writes: channel.writes, timers: vi.getTimerCount() }).toEqual({ results: [{ error: { code: -32000, message: expect.stringContaining("unavailable during reconnection") } }], writes: [], timers: 0 });

@@ -36,6 +36,7 @@ import { OpenRepo } from "../state";
 import { DirEntry, HydrationEntry, rpc, StagingStats } from "../ipc";
 import { formatBytes } from "../lib/format";
 import { useHydrationStatus } from "../hooks/useHydrationStatus";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 import { useStagingStats } from "../hooks/useStagingStats";
 import { useCrabStatus } from "../hooks/useCrabStatus";
 import { PushFlowPanel } from "./PushFlowPanel";
@@ -47,6 +48,7 @@ import { executeCommand, CommandContext } from "../lib/command-registry";
 import { HydratePage } from "../pages/Hydrate";
 import { DatasetsView } from "./DatasetsView";
 import { LargeFileWizard } from "../components/LargeFileWizard";
+import { isEligible, type HydrateVerb } from "../lib/hydrateScope";
 
 interface Props {
   repo: OpenRepo;
@@ -94,6 +96,7 @@ function getFileIcon(path: string) {
 
 export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   const crabStatus = useCrabStatus(repo.repo_id);
+  const fileTransfers = useFileTransfers(repo);
 
   const [tab, setTab] = useState<Tab>("files");
   const [phase, setPhase] = useState<FlowPhase>("browse");
@@ -126,6 +129,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   const commandContext = useMemo<CommandContext>(() => ({
     repoId: repo.repo_id,
     repoPath: repo.path,
+    fileTransfers,
     currentBranch: "main",
     upstream: null,
     ahead: 0,
@@ -134,18 +138,18 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     hasStagedChanges: false,
     activeOperation: null,
     forgeProvider: null,
-  }), [repo.repo_id, repo.path]);
+  }), [repo.repo_id, repo.path, fileTransfers]);
 
   // Toolbar actions for the Large Files view.
   const toolbarActions = useMemo<ToolbarAction[]>(() => [
     { id: "crab.track", icon: Plus, label: "Add/Track" },
-    { id: "crab.hydrate", icon: Download, label: "Hydrate" },
-    { id: "crab.dehydrate", icon: Upload, label: "Dehydrate" },
     { id: "crab.push", icon: ArrowUp, label: "Push" },
   ], []);
 
   const handleToolbarAction = useCallback(async (actionId: string) => {
-    if (actionId === "crab.track") {
+    if (actionId === "crab.push") {
+      setShowPush(true);
+    } else if (actionId === "crab.track") {
       const pattern = window.prompt("Enter file pattern to track (e.g. *.bin, models/):");
       if (!pattern) return;
       await executeCommand("crab.track", commandContext, pattern);
@@ -155,17 +159,22 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
   }, [commandContext]);
 
   // Context menu items for right-clicking files.
-  const contextMenuItems = useMemo<MenuItemDef[]>(() => [
-    { id: "crab.hydrate.file", label: "Hydrate", icon: Download },
-    { id: "crab.dehydrate.file", label: "Dehydrate", icon: Upload },
-    { id: "crab.track.file", label: "Track", icon: Plus, separator: true },
-    { id: "crab.untrack.file", label: "Untrack", icon: Minus },
-  ], []);
+  const contextMenuItems = useMemo<MenuItemDef[]>(() => {
+    const item = contextMenu && hydration.byPath.get(contextMenu.filePath);
+    const actions: MenuItemDef[] = [];
+    if (item && repo.native_session_id) {
+      if (repo.capabilities?.canHydrateSelection && isEligible(item, "hydrate")) actions.push({ id: "crab.hydrate.file", label: "Hydrate", icon: Download });
+      if (repo.capabilities?.canDehydrateSelection && isEligible(item, "dehydrate")) actions.push({ id: "crab.dehydrate.file", label: "Dehydrate", icon: Upload });
+    }
+    actions.push({ id: "crab.track.file", label: "Track", icon: Plus, separator: actions.length > 0 }, { id: "crab.untrack.file", label: "Untrack", icon: Minus });
+    return actions;
+  }, [contextMenu, hydration.byPath, repo.native_session_id, repo.capabilities]);
 
   const handleContextMenuSelect = useCallback(async (itemId: string) => {
     if (!contextMenu) return;
-    await executeCommand(itemId, commandContext, contextMenu.filePath);
+    const path = contextMenu.filePath;
     setContextMenu(null);
+    await executeCommand(itemId, commandContext, path);
   }, [contextMenu, commandContext]);
 
   const handleFileContextMenu = useCallback((e: React.MouseEvent, filePath: string) => {
@@ -283,29 +292,8 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
     setShowWizard(false); setWizardFiles([]);
   };
 
-  // Show loading spinner while checking crab status.
-  if (crabStatus.status === "loading") {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
-        <Loader2 size={14} className="animate-spin" /> Checking repository status…
-      </div>
-    );
-  }
-
-  // Show the setup wizard when the repo is not initialized with crab.
-  if (crabStatus.status === "uninitialized" || crabStatus.status === "no-storage") {
-    return (
-      <div className="flex h-full flex-col">
-        <ViewToolbar
-          title="Large Files"
-          icon={Package}
-          actions={[]}
-          onAction={() => {}}
-        />
-        <CrabSetupWizard repoId={repo.repo_id} onComplete={crabStatus.refresh} />
-      </div>
-    );
-  }
+  const needsSetup = crabStatus.status === "uninitialized" || crabStatus.status === "no-storage";
+  const actions = needsSetup || crabStatus.status === "loading" ? [] : toolbarActions;
 
   if (showWizard) {
     return (
@@ -348,7 +336,7 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
       <ViewToolbar
         title="Large Files"
         icon={Package}
-        actions={toolbarActions}
+        actions={actions}
         onAction={handleToolbarAction}
       />
 
@@ -404,16 +392,23 @@ export function CrabFlowView({ repo, onSelectCommit, onOpenFile }: Props) {
         </button>
       </div>
 
-      {tab === "storage-map" ? (
-        <PointerMapPanel repo={repo} onSelectCommit={onSelectCommit} />
+      {/* Dataset inspection uses captured reads and does not require Crab storage. */}
+      {tab === "datasets" ? (
+        <DatasetsView repo={repo} onOpenFile={onOpenFile ?? (() => {})} />
       ) : tab === "hydrate" ? (
         <HydratePage repo={repo} />
-      ) : tab === "datasets" ? (
-        <DatasetsView repo={repo} onOpenFile={onOpenFile ?? (() => {})} />
+      ) : crabStatus.status === "loading" ? (
+        <div className="flex h-full items-center justify-center gap-2 text-sm text-gx-muted">
+          <Loader2 size={14} className="animate-spin" /> Checking repository status…
+        </div>
+      ) : needsSetup ? (
+        <CrabSetupWizard repoId={repo.repo_id} onComplete={crabStatus.refresh} />
+      ) : tab === "storage-map" ? (
+        <PointerMapPanel repo={repo} onSelectCommit={onSelectCommit} />
       ) : (
         <FilesPanel
           loading={loading}
-          error={error}
+          error={error ?? stagingStatsHook.error}
           phase={phase}
           untrackedFiles={untrackedFiles}
           stagingStats={stagingStats}
@@ -536,6 +531,7 @@ function buildPointerTree(entries: PointerEntry[]): PointerTreeNode[] {
 }
 
 function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCommit?: (sha: string) => void }) {
+  const fileTransfers = useFileTransfers(repo);
   const [data, setData] = useState<PointerEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [limit, setLimit] = useState<50 | 100 | 250 | 500>(50);
@@ -566,23 +562,20 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
 
   const tree = useMemo(() => (data ? buildPointerTree(data) : []), [data]);
 
-  const handleHydrate = async (path: string) => {
+  const transfer = async (path: string, verb: HydrateVerb) => {
+    if (!fileTransfers[verb] || actionInProgress) return;
     setActionInProgress(path);
+    setErr(null);
     try {
-      await rpc.hydrate(repo.path!, [path]);
-      hydration.refresh();
-    } catch { /* ignore */ }
-    setActionInProgress(null);
+      await fileTransfers[verb]?.({ kind: "custom", paths: [path] });
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActionInProgress(null);
+    }
   };
-
-  const handleDehydrate = async (path: string) => {
-    setActionInProgress(path);
-    try {
-      await rpc.dehydrate(repo.path!, [path]);
-      hydration.refresh();
-    } catch { /* ignore */ }
-    setActionInProgress(null);
-  };
+  const handleHydrate = repo.native_session_id && repo.capabilities?.canHydrateSelection ? (path: string) => transfer(path, "hydrate") : undefined;
+  const handleDehydrate = repo.native_session_id && repo.capabilities?.canDehydrateSelection ? (path: string) => transfer(path, "dehydrate") : undefined;
 
   return (
     <div className="relative flex min-h-0 flex-1">
@@ -657,8 +650,8 @@ function PointerMapPanel({ repo, onSelectCommit }: { repo: OpenRepo; onSelectCom
                   onShowHistory={() => setHistoryFile(e)}
                   isActive={historyFile?.path === e.path}
                   hydrationState={hydration.byPath.get(e.path)?.state ?? null}
-                  onHydrate={() => handleHydrate(e.path)}
-                  onDehydrate={() => handleDehydrate(e.path)}
+                  onHydrate={handleHydrate && (() => handleHydrate(e.path))}
+                  onDehydrate={handleDehydrate && (() => handleDehydrate(e.path))}
                   actionInProgress={actionInProgress === e.path}
                 />
               ))}
@@ -704,15 +697,15 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
   entry: PointerEntry; index: number; totalBytes: number;
   onShowHistory: () => void; isActive: boolean;
   hydrationState: string | null;
-  onHydrate: () => void;
-  onDehydrate: () => void;
+  onHydrate?: () => void;
+  onDehydrate?: () => void;
   actionInProgress: boolean;
 }) {
   const share = totalBytes ? (entry.size / totalBytes) * 100 : 0;
   const fileName = entry.path.split("/").pop() ?? entry.path;
   const dirPath = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/") + 1) : "";
   const isHydrated = hydrationState === "hydrated";
-  const isPointer = hydrationState === "pointer" || hydrationState === null;
+  const isPointer = hydrationState === "pointer" || hydrationState === "missing";
   const { Icon: FileIcon, color: iconColor } = getFileIcon(entry.path);
 
   return (
@@ -728,7 +721,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
         "shrink-0 w-16 text-center rounded px-1.5 py-0.5 text-[10px] font-medium",
         isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
       )}>
-        {hydrationState ?? "pointer"}
+        {hydrationState ?? "Unknown"}
       </span>
       <span className="shrink-0 w-16 text-right tabular-nums text-gx-muted">{formatBytes(entry.size)}</span>
       <div className="flex shrink-0 items-center gap-1.5 w-24 justify-end">
@@ -741,7 +734,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
       <div className="flex shrink-0 w-14 items-center justify-center gap-1">
         {actionInProgress ? (
           <Loader2 size={12} className="animate-spin text-gx-muted" />
-        ) : isHydrated ? (
+        ) : isHydrated && onDehydrate ? (
           <button
             type="button"
             className="rounded p-1 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
@@ -751,7 +744,7 @@ function PointerListRow({ entry, index, totalBytes, onShowHistory, isActive, hyd
           >
             <CloudOff size={12} />
           </button>
-        ) : isPointer ? (
+        ) : isPointer && onHydrate ? (
           <button
             type="button"
             className="rounded p-1 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"
@@ -785,8 +778,8 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
   node: PointerTreeNode; depth: number; totalBytes: number;
   onShowHistory: (entry: PointerEntry) => void; activeHistoryPath: string | null;
   hydrationByPath: Map<string, HydrationEntry>;
-  onHydrate: (path: string) => void;
-  onDehydrate: (path: string) => void;
+  onHydrate?: (path: string) => void;
+  onDehydrate?: (path: string) => void;
   actionInProgress: string | null;
 }) {
   const [dirExpanded, setDirExpanded] = useState(depth < 2);
@@ -834,7 +827,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
   const isActive = activeHistoryPath === entry.path;
   const hydrationState = hydrationByPath.get(entry.path)?.state ?? null;
   const isHydrated = hydrationState === "hydrated";
-  const isPointer = hydrationState === "pointer" || hydrationState === null;
+  const isPointer = hydrationState === "pointer" || hydrationState === "missing";
   const isActionInProgress = actionInProgress === entry.path;
   const { Icon: FileIcon, color: iconColor } = getFileIcon(entry.path);
 
@@ -850,7 +843,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
         "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
         isHydrated ? "bg-gx-success/10 text-gx-success" : "bg-gx-accent/10 text-gx-accent",
       )}>
-        {hydrationState ?? "pointer"}
+        {hydrationState ?? "Unknown"}
       </span>
       <span className="ml-2 flex items-center gap-1.5 text-[10px] text-gx-muted">
         <span className="tabular-nums">{formatBytes(entry.size)}</span>
@@ -863,7 +856,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
       <div className="flex shrink-0 items-center gap-0.5">
         {isActionInProgress ? (
           <Loader2 size={11} className="animate-spin text-gx-muted" />
-        ) : isHydrated ? (
+        ) : isHydrated && onDehydrate ? (
           <button
             type="button"
             className="rounded p-0.5 text-gx-muted transition hover:bg-gx-accent/10 hover:text-gx-accent"
@@ -873,7 +866,7 @@ function PointerTreeRow({ node, depth, totalBytes, onShowHistory, activeHistoryP
           >
             <CloudOff size={11} />
           </button>
-        ) : isPointer ? (
+        ) : isPointer && onHydrate ? (
           <button
             type="button"
             className="rounded p-0.5 text-gx-muted transition hover:bg-gx-success/10 hover:text-gx-success"
@@ -1105,20 +1098,9 @@ function FilesPanel({
 
   const handleCommit = useCallback(
     async (message: string) => {
-      // Two-step: stage everything in the working tree that crab
-      // touched (`.gitattributes` + the tracked files), then commit.
-      // We can't always rely on `crab add` having staged the file
-      // already (older crab versions, or the user ran `git restore
-      // --staged` between add and commit).
-      const paths = new Set<string>();
-      for (const f of stagingStats?.files ?? []) {
-        if (f.file_path) paths.add(f.file_path);
-      }
-      if (gitStatusByPath.has(".gitattributes")) paths.add(".gitattributes");
-      if (paths.size > 0) {
-        await rpc.gitAddPaths(repo.repo_id, Array.from(paths));
-      }
-      await rpc.gitCommit(repo.repo_id, { message });
+      const paths = (stagingStats?.files ?? []).map(file => file.file_path).filter((path): path is string => !!path);
+      if (gitStatusByPath.has(".gitattributes")) paths.push(".gitattributes");
+      await rpc.gitCommit(repo.repo_id, { message, paths });
       onRefresh();
       onRefreshStaging();
     },
@@ -1157,84 +1139,83 @@ function FilesPanel({
       {loading && <div className="flex items-center gap-2 p-4 text-xs text-gx-muted"><Loader2 size={12} className="animate-spin" /> Scanning...</div>}
       {error && phase !== "tracking" && <div className="mx-4 mt-3 rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">{error}</div>}
 
-      {!loading && (
-        <div className="min-h-0 flex-1 overflow-auto">
-          {/* ── Staged in Crab section (with commit + push CTAs) ── */}
-          <StagedSection
-            stats={stagingStats}
-            loading={stagingStatsLoading}
-            gitStatusByPath={gitStatusByPath}
-            needsCommit={needsCommit}
-            hasUnpushedCommits={hasUnpushedCommits}
-            removingFiles={removingFiles}
-            onRemoveFile={handleRemoveFile}
-            onShowPush={onShowPush}
-            onCommit={handleCommit}
-          />
+      {/* Keep the commit draft mounted while scans refresh the file list. */}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {/* ── Staged in Crab section (with commit + push CTAs) ── */}
+        <StagedSection
+          stats={stagingStats}
+          loading={stagingStatsLoading}
+          gitStatusByPath={gitStatusByPath}
+          needsCommit={needsCommit}
+          hasUnpushedCommits={hasUnpushedCommits}
+          removingFiles={removingFiles}
+          onRemoveFile={handleRemoveFile}
+          onShowPush={onShowPush}
+          onCommit={handleCommit}
+        />
 
-          {/* ── Untracked section ── */}
-          {untrackedFiles.length > 0 && (
-            <div>
-              <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover" onClick={() => onSetExpandUntracked(!expandUntracked)}>
-                {expandUntracked ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-                <FileWarning size={11} className="text-gx-warn" />
-                Not Tracked ({untrackedFiles.length})
-              </button>
-              {expandUntracked && (
-                <div className="ml-6 border-l border-gx-border/30">
-                  {phase === "browse" && untrackedFiles.length > 1 && (
-                    <div className="flex items-center gap-3 border-b border-gx-border/50 px-4 py-1.5 text-[10px] text-gx-muted">
-                      <button type="button" className="hover:text-gx-text" onClick={onSelectAll}>Select all</button>
-                      <button type="button" className="hover:text-gx-text" onClick={onSelectNone}>Clear</button>
-                      {selected.size > 0 && <span className="ml-auto text-gx-accent">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
-                    </div>
-                  )}
-                  {viewMode === "list"
-                    ? untrackedFiles.map((f) => <FileRow key={f.path} file={f} selected={selected.has(f.path)} onToggle={() => onToggleSelect(f.path)} progress={trackingProgress.get(f.path)} selectable={phase === "browse"} onContextMenu={(e) => onFileContextMenu(e, f.path)} />)
-                    : viewMode === "tree"
-                    ? <TreeView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} progress={trackingProgress} selectable={phase === "browse"} onFileContextMenu={onFileContextMenu} />
-                    : <CardView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} selectable={phase === "browse"} />
-                  }
-                  {phase === "browse" && selected.size > 0 && (
-                    <div className="border-t border-gx-border/50 px-4 py-3">
-                      <button type="button" className="btn btn-primary text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</button>
-                      <p className="mt-1.5 text-[10px] text-gx-muted">Files will be chunked, deduplicated, and staged for push.</p>
-                    </div>
-                  )}
-                  {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-gx-accent"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── Tracking result ── */}
-          {phase === "tracked" && trackResult && (
-            <div className="mx-4 my-3 rounded border border-gx-success/30 bg-gx-success/5 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-gx-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
-              {trackResult.errors > 0 && <div className="mt-2 text-xs text-gx-error">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
-              <div className="mt-3 flex gap-2">
-                <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}><Upload size={11} /> Push</button>
-                <button type="button" className="btn text-xs" onClick={onReset}>Done</button>
+        {/* ── Untracked section ── */}
+        {untrackedFiles.length > 0 && (
+          <div>
+            <button type="button" className="flex w-full items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gx-muted hover:bg-gx-surface-hover" onClick={() => onSetExpandUntracked(!expandUntracked)}>
+              {expandUntracked ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+              <FileWarning size={11} className="text-gx-warn" />
+              Not Tracked ({untrackedFiles.length})
+            </button>
+            {expandUntracked && (
+              <div className="ml-6 border-l border-gx-border/30">
+                {phase === "browse" && untrackedFiles.length > 1 && (
+                  <div className="flex items-center gap-3 border-b border-gx-border/50 px-4 py-1.5 text-[10px] text-gx-muted">
+                    <button type="button" className="hover:text-gx-text" onClick={onSelectAll}>Select all</button>
+                    <button type="button" className="hover:text-gx-text" onClick={onSelectNone}>Clear</button>
+                    {selected.size > 0 && <span className="ml-auto text-gx-accent">{selected.size} selected · {formatBytes(untrackedFiles.filter((f) => selected.has(f.path)).reduce((s, f) => s + f.size, 0))}</span>}
+                  </div>
+                )}
+                {viewMode === "list"
+                  ? untrackedFiles.map((f) => <FileRow key={f.path} file={f} selected={selected.has(f.path)} onToggle={() => onToggleSelect(f.path)} progress={trackingProgress.get(f.path)} selectable={phase === "browse"} onContextMenu={(e) => onFileContextMenu(e, f.path)} />)
+                  : viewMode === "tree"
+                  ? <TreeView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} progress={trackingProgress} selectable={phase === "browse"} onFileContextMenu={onFileContextMenu} />
+                  : <CardView files={untrackedFiles} selected={selected} onToggle={onToggleSelect} selectable={phase === "browse"} />
+                }
+                {phase === "browse" && selected.size > 0 && (
+                  <div className="border-t border-gx-border/50 px-4 py-3">
+                    <button type="button" className="btn btn-primary text-xs" onClick={onTrack}><Package size={11} /> Track {selected.size} file{selected.size > 1 ? "s" : ""}</button>
+                    <p className="mt-1.5 text-[10px] text-gx-muted">Files will be chunked, deduplicated, and staged for push.</p>
+                  </div>
+                )}
+                {phase === "tracking" && <div className="flex items-center gap-2 px-4 py-3 text-xs text-gx-accent"><Loader2 size={12} className="animate-spin" />Tracking...</div>}
               </div>
-            </div>
-          )}
-          {phase === "error" && (
-            <div className="mx-4 my-3 space-y-2">
-              <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error"><XCircle size={12} /> {error}</div>
-              <button type="button" className="btn text-xs" onClick={onReset}>Try Again</button>
-            </div>
-          )}
+            )}
+          </div>
+        )}
 
-          {/* Empty */}
-          {untrackedFiles.length === 0 && !loading && !(stagingStats && (stagingStats.chunk_count ?? 0) > 0) && (
-            <div className="flex flex-col items-center justify-center p-8 text-center">
-              <FolderOpen size={32} className="mb-3 text-gx-muted/40" />
-              <div className="text-sm text-gx-text">No large files to track</div>
-              <div className="mt-1 text-xs text-gx-muted">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
+        {/* ── Tracking result ── */}
+        {phase === "tracked" && trackResult && (
+          <div className="mx-4 my-3 rounded border border-gx-success/30 bg-gx-success/5 p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-gx-success"><CheckCircle2 size={12} />{trackResult.tracked} file{trackResult.tracked > 1 ? "s" : ""} tracked</div>
+            {trackResult.errors > 0 && <div className="mt-2 text-xs text-gx-error">{trackResult.errorDetails?.map((e) => <div key={e.path} className="mt-1 font-mono text-[10px]">{e.path}: {e.stderr}</div>)}</div>}
+            <div className="mt-3 flex gap-2">
+              <button type="button" className="btn btn-primary text-xs" onClick={onShowPush}><Upload size={11} /> Push</button>
+              <button type="button" className="btn text-xs" onClick={onReset}>Done</button>
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+        {phase === "error" && (
+          <div className="mx-4 my-3 space-y-2">
+            <div className="rounded border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error"><XCircle size={12} /> {error}</div>
+            <button type="button" className="btn text-xs" onClick={onReset}>Try Again</button>
+          </div>
+        )}
+
+        {/* Empty */}
+        {untrackedFiles.length === 0 && !loading && !error && !stagingStats?.files?.length && (
+          <div className="flex flex-col items-center justify-center p-8 text-center">
+            <FolderOpen size={32} className="mb-3 text-gx-muted/40" />
+            <div className="text-sm text-gx-text">No large files to track</div>
+            <div className="mt-1 text-xs text-gx-muted">Files ≥ {sizeThreshold} MB will appear here. Already-tracked files are in Storage Map.</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

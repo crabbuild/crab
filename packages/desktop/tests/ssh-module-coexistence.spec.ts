@@ -20,7 +20,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RemoteProvider, type RemoteProviderOptions } from "../electron/remote-provider";
-import { ProviderRegistry } from "../electron/provider-registry";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 
 // ── Mock Factories ───────────────────────────────────────────────
 
@@ -64,13 +64,15 @@ function createMockCapabilityNegotiator() {
 }
 
 function createMockSessionManager() {
-  return {
+  const manager = { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue("connected"),
     getConnection: vi.fn().mockReturnValue({ client: {} }),
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
     on: vi.fn(),
     off: vi.fn(),
     emit: vi.fn(),
   };
+  return withRepositoryRuntimes(manager);
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -161,21 +163,6 @@ describe("SSH module coexistence — RemoteProvider wraps without conflicts", ()
     } satisfies RemoteProviderOptions as any);
   });
 
-  it("RemoteProvider.fsRead delegates to RemoteFileEditor.readFile", async () => {
-    const result = await remoteProvider.fsRead("ssh://gpu-server/home/user/repo", "/home/user/repo/file.ts");
-
-    expect(mockFileEditor.readFile).toHaveBeenCalledWith("gpu-server", "/home/user/repo/file.ts");
-    expect(result.exists).toBe(true);
-    expect(result.content).toBe("file content");
-  });
-
-  it("RemoteProvider.fsWrite delegates to RemoteFileEditor.writeFile", async () => {
-    const result = await remoteProvider.fsWrite("ssh://gpu-server/home/user/repo", "/home/user/repo/file.ts", "new content");
-
-    expect(mockFileEditor.writeFile).toHaveBeenCalledWith("gpu-server", "/home/user/repo/file.ts", "new content");
-    expect(result.written).toBe(11); // "new content".length
-  });
-
   it("RemoteProvider.fsCreate delegates to RemoteFileEditor.createFile for files", async () => {
     await remoteProvider.fsCreate("ssh://gpu-server/home/user/repo", "/home/user/repo/new.ts", "file");
 
@@ -264,60 +251,4 @@ describe("SSH module coexistence — SSH-view features remain independent", () =
     }
   });
 
-  it("ProviderRegistry does not interfere with SSH-specific IPC handlers", () => {
-    const registry = new ProviderRegistry();
-
-    // Even with no providers registered, SSH-specific IPC handlers
-    // (which are on separate channels) continue to function.
-    // The registry only affects the crab:rpc channel routing.
-    expect(registry.resolve("ssh://server/repo")).toBeNull();
-
-    // This null result means the crab:rpc handler would fall through
-    // to RpcRouter-based routing — but SSH-specific IPC handlers
-    // (ssh:read-file, ssh:git-status, etc.) are completely unaffected
-    // because they're on different IPC channels.
-  });
-
-  it("RemoteFileEditor can be used by both RemoteProvider and ssh:* IPC handlers simultaneously", () => {
-    // The RemoteFileEditor is a stateless class that delegates to RpcRouter.
-    // Both the RemoteProvider (via crab:rpc path) and the ssh:read-file
-    // IPC handler (via ssh-ipc.ts) can call the same RemoteFileEditor
-    // instance without conflicts because:
-    // 1. RemoteFileEditor has no mutable state that could conflict
-    // 2. Each call is independent (no shared locks or queues)
-    // 3. The underlying RpcRouter handles multiplexing over SSH
-
-    const mockRouter = createMockRouter();
-    const mockSessionManager = createMockSessionManager();
-    const fileEditor = {
-      readFile: vi.fn().mockResolvedValue({ content: "data", path: "/f", mtime: 1, size: 4, language: "text" }),
-      writeFile: vi.fn().mockResolvedValue({ success: true, mtime: 2 }),
-      createFile: vi.fn().mockResolvedValue(undefined),
-      deleteFile: vi.fn().mockResolvedValue(undefined),
-      renameFile: vi.fn().mockResolvedValue(undefined),
-    };
-
-    // Simulate concurrent access from both paths
-    const remoteProvider = new RemoteProvider({
-      router: mockRouter as any,
-      fileEditor: fileEditor as any,
-      gitManager: createMockGitManager() as any,
-      capabilityNegotiator: createMockCapabilityNegotiator() as any,
-      sessionManager: mockSessionManager as any,
-    } satisfies RemoteProviderOptions as any);
-
-    // Path 1: crab:rpc → RemoteProvider → fileEditor
-    const p1 = remoteProvider.fsRead("ssh://server/repo", "/repo/a.ts");
-
-    // Path 2: ssh:read-file → fileEditor directly (simulating ssh-ipc.ts handler)
-    const p2 = fileEditor.readFile("server", "/repo/b.ts");
-
-    // Both should resolve without conflict
-    return Promise.all([p1, p2]).then(([result1, result2]) => {
-      expect(result1.exists).toBe(true);
-      expect(result2.content).toBe("data");
-      // Both calls went through — no interference
-      expect(fileEditor.readFile).toHaveBeenCalledTimes(2);
-    });
-  });
 });

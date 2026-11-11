@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace } from "./state";
+import { StoreProvider, useActiveRepo, useStore, WorkspaceRepoEntry, getActiveWorkspace, repositoryKey } from "./state";
 import { SettingsProvider, useSetting, useSettings } from "./settings";
 import { PtyModeProvider } from "./lib/pty-mode-context";
-import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoPath } from "./lib/session-context";
-import { rpc } from "./ipc";
+import { SessionProvider, useSession, useWorkspaceSession, useActiveRepoKey } from "./lib/session-context";
+import { rpc, type RepoHandle } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { RepoDetail } from "./components/RepoDetail";
 import { EmptyState } from "./components/EmptyState";
@@ -13,9 +13,10 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { TelemetryOptInModal } from "./components/TelemetryOptInModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { ToastManager } from "./components/ToastManager";
-import { WorkspaceThemeEffect } from "./components/WorkspaceThemeEffect";
 import { Welcome } from "./components/Welcome";
 import { WorkspaceDashboardView } from "./views/WorkspaceDashboardView";
+import { SshView } from "./views/SshView";
+import { SettingsView } from "./views/SettingsView";
 import { TerminalKeepAlive, TerminalKeepAliveHandle } from "./components/TerminalKeepAlive";
 import { useTabBarShortcuts } from "./components/workspace/TabBar";
 import { FuzzySwitcher } from "./components/workspace/FuzzySwitcher";
@@ -25,8 +26,10 @@ import { useFuzzySwitcherShortcut } from "./hooks/useFuzzySwitcherShortcut";
 import { useNavHistory, NavEntry } from "./hooks/useNavHistory";
 import { useHeapWatcherEffect } from "./hooks/useHeapWatcher";
 import { useCommandPaletteShortcuts } from "./hooks/useCommandPaletteShortcuts";
+import { useFileTransfers } from "./hooks/useFileTransfers";
 import { useSshHealthAlerts } from "./hooks/useSshHealthAlerts";
 import { setupAllToastPublishers } from "./lib/toast-publishers";
+import { dismissToast, publishToast } from "./lib/toasts";
 import { localPathName } from "./lib/local-path-name";
 import type { SshTerminalRequest, TerminalStartupRequest } from "./views/TerminalView";
 import type { StartupCommand } from "./lib/terminal-presets";
@@ -39,7 +42,8 @@ const LS_REPO_SIDEBAR = "crab.repoSidebarOpen";
 
 function Shell() {
   const active = useActiveRepo();
-  const { state, dispatch, addRepo, setActive, setMaxLogLines } = useStore();
+  const fileTransfers = useFileTransfers(active);
+  const { state, dispatch, addRepo, setMaxLogLines } = useStore();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const maxLogLines = useSetting("maxLogLines");
   const showActivityBar = useSetting("showActivityBar");
@@ -153,7 +157,7 @@ function Shell() {
   // ── Session persistence: deactivate/activate on repo switch ──────
   const sessionManager = useSession();
   const wsSessionManager = useWorkspaceSession();
-  const activeRepoPath = useActiveRepoPath();
+  const activeRepoPath = useActiveRepoKey();
   const prevRepoPathRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -358,6 +362,7 @@ function Shell() {
     context: {
       repoId: active?.repo_id ?? "",
       repoPath: active?.path,
+      fileTransfers,
       currentBranch: paletteBranch,
       upstream: null,
       ahead: 0,
@@ -383,7 +388,7 @@ function Shell() {
   // that clone/open repos outside of the normal React component flow.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { handle: { repo_id: string; url: string; is_remote: boolean; cache_dir: string }; path: string } | undefined;
+      const detail = (e as CustomEvent).detail as { handle: RepoHandle; path: string } | undefined;
       if (!detail?.handle) return;
       addRepo({
         ...detail.handle,
@@ -404,65 +409,37 @@ function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxLogLines]);
 
-  // Reopen persisted repositories on first render, once. We keep a
-  // ref guard so React Strict Mode's double-invoke doesn't open each
-  // repo twice during dev. Failures per-repo are non-fatal — a repo
-  // whose path no longer exists simply drops out of the list.
-  //
-  // Optimisation: only the last-active repo is opened immediately via
-  // `rpc.openLocal`. The remaining repos are added as deferred entries
-  // (no agent round-trip) and opened on-demand when the user selects
-  // them in the sidebar. This avoids scanning every repo at startup.
+  // The store loads saved entries as inert placeholders before persistence runs.
+  // Reopen only the selected path eagerly; the sidebar opens others on demand.
   const reopenedRef = useRef(false);
   useEffect(() => {
     if (reopenedRef.current) return;
     reopenedRef.current = true;
     if (!reopenReposOnStartup) return;
-    try {
-      const raw = localStorage.getItem("crab.recentRepos.v1");
-      const activePath = localStorage.getItem("crab.activeRepoPath.v1");
-      if (!raw) return;
-      const persisted = JSON.parse(raw) as Array<{ path: string; label: string; openedAt: number }>;
-      if (!Array.isArray(persisted)) return;
-
-      // Add non-active repos as deferred entries immediately (no RPC).
-      for (const p of persisted) {
-        if (p.path === activePath) continue; // handled below
-        addRepo({
-          repo_id: `deferred-${p.path}`,
-          url: "",
-          is_remote: false,
-          cache_dir: "",
-          label: p.label.replace(/^(↳\s*)wt:/, "$1worktree:"),
-          path: p.path,
-          openedAt: p.openedAt,
-          deferred: true,
-        });
+    const activePath = localStorage.getItem("crab.activeRepoPath.v1");
+    const entry = state.repos.find(repo => repo.deferred && repositoryKey(repo) === activePath);
+    if (!entry?.path) return;
+    const path = entry.path;
+    const { label, openedAt } = entry;
+    let failureToast: string | undefined;
+    let pending = false;
+    async function reopen() {
+      if (pending) return;
+      pending = true;
+      if (failureToast) dismissToast(failureToast);
+      try {
+        const handle = await rpc.reopen(path, entry);
+        // A delayed startup connection must not steal focus from a repository
+        // the user selected while authentication or deployment was pending.
+        dispatch({ type: "add-repo", activation: "if-empty", repo: { ...handle, path, label, openedAt } });
+      } catch (error) {
+        failureToast = publishToast({ kind: "error", title: "Could not reopen repository", body: `${label}: ${error instanceof Error ? error.message : String(error)}`, duration: 0, action: { label: "Retry", onClick: () => { void reopen(); } } });
+      } finally {
+        pending = false;
       }
-
-      // Open only the last-active repo eagerly.
-      if (activePath) {
-        const activeEntry = persisted.find((p) => p.path === activePath);
-        if (activeEntry) {
-          (async () => {
-            try {
-              const handle = await rpc.openLocal(activeEntry.path);
-              addRepo({
-                ...handle,
-                label: activeEntry.label.replace(/^(↳\s*)wt:/, "$1worktree:"),
-                path: activeEntry.path,
-                openedAt: activeEntry.openedAt,
-              });
-              setActive(handle.repo_id);
-            } catch {
-              // Agent down or path gone — skip.
-            }
-          })();
-        }
-      }
-    } catch {
-      // Corrupt localStorage blob — ignore.
     }
+    void reopen();
+    // Startup consumes one saved selection; later changes are user navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -531,8 +508,7 @@ function Shell() {
     prevRepoIdsRef.current = state.repos.map((r) => r.repo_id);
   }, [state.repos]);
 
-  // handleNavigate, handleBack, handleForward use the nav instance declared above.
-  const handleNavigate = useCallback((entry: NavEntry) => {
+  const handleViewChanged = useCallback((entry: NavEntry) => {
     setTerminalRepoId(entry.view === "terminal" ? active?.repo_id ?? null : null);
     if (entry.view === "terminal") setTerminalActivated(true);
     // Restored entries already own this position in history. Compare routes
@@ -541,6 +517,10 @@ function Shell() {
     // Attach the current workspace repo path to the entry for cross-repo nav.
     nav.push({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
   }, [nav, activeWorkspaceRelativePath, active?.repo_id]);
+
+  const handleNavigate = useCallback((entry: NavEntry) => {
+    nav.navigate({ ...entry, repoPath: entry.repoPath ?? activeWorkspaceRelativePath });
+  }, [nav, activeWorkspaceRelativePath]);
 
   const handleBack = useCallback(() => {
     nav.back();
@@ -556,11 +536,12 @@ function Shell() {
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
         if (e.key === "[") { e.preventDefault(); handleBack(); }
         else if (e.key === "]") { e.preventDefault(); handleForward(); }
+        else if (e.key === ",") { e.preventDefault(); handleNavigate({ view: "settings" }); }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleBack, handleForward]);
+  }, [handleBack, handleForward, handleNavigate]);
 
   const handleSpawnAgentTerminal = useCallback((command: StartupCommand) => {
     window.dispatchEvent(new CustomEvent("crab:spawn-agent-terminal", { detail: command }));
@@ -579,6 +560,8 @@ function Shell() {
         onShowOverview={() => window.dispatchEvent(new CustomEvent("crab:show-repository-overview"))}
         terminalActive={terminalActive}
         onOpenTerminal={openTerminal}
+        activityDrawerOpen={drawerOpen}
+        onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
         onSpawnAgentTerminal={handleSpawnAgentTerminal}
         workspaceName={workspaceActive ? (getActiveWorkspace(state)?.name ?? null) : null}
         workspaceRepos={workspaceActive ? activeWorkspaceRepos : undefined}
@@ -591,7 +574,7 @@ function Shell() {
           recently accessed repos for ⌘1–⌘9 shortcuts. */}
       <div className="flex min-h-0 flex-1">
         {repoSidebarOpen && (
-          <Sidebar onCollapse={() => setRepoSidebarOpen(false)} />
+          <Sidebar onCollapse={() => setRepoSidebarOpen(false)} onOpenSettings={() => handleNavigate({ view: "settings" })} />
         )}
         <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           {active ? (
@@ -599,14 +582,16 @@ function Shell() {
               key={active.repo_id}
               repo={active}
               restoreEntry={nav.restoreEntry}
-              onNavigate={handleNavigate}
-              activityDrawerOpen={drawerOpen}
-              onToggleActivityDrawer={() => setDrawerOpen((value) => !value)}
+              onNavigate={handleViewChanged}
             />
+          ) : nav.current?.view === "settings" ? (
+            <SettingsView />
+          ) : nav.current?.view === "ssh" ? (
+            <SshView />
           ) : state.workspaces.length > 0 ? (
             <WorkspaceDashboardView workspace={getActiveWorkspace(state)!} />
           ) : (
-            <EmptyState />
+            <EmptyState onConnectSsh={() => handleNavigate({ view: "ssh" })} />
           )}
           {/* Share the rail width with WorkspaceShell; keep one host mounted
               across page and repository changes so PTYs are never recreated. */}
@@ -628,7 +613,6 @@ function Shell() {
       </div>
       <ProgressDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <TelemetryOptInModal />
-      <WorkspaceThemeEffect />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -636,6 +620,7 @@ function Shell() {
         context={{
           repoId: active?.repo_id ?? "",
           repoPath: active?.path,
+          fileTransfers,
           currentBranch: paletteBranch,
           upstream: null,
           ahead: 0,

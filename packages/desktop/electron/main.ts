@@ -1,10 +1,19 @@
-import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage } from "electron";
+import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage,protocol,webContents } from "electron";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { JupyterKernel, checkJupyterRuntime, installJupyter, listKernelSpecs, stopJupyterRuntimeCommands } from "./jupyter-kernel";
+import type { KernelTarget } from "./jupyter-types";
+import type { WebContents } from "electron";
+import { nativeSessionLost, noCapabilities } from "./repo-capabilities";
+import type { CapabilitiesChangedEvent } from "./repo-provider";
+import { rpcReply } from "./rpc-transport";
+import type Database from "better-sqlite3";
+import { FileTransfers, isFileTransfer } from "./file-transfers";
+import { MediaResources } from "./media";
 import { registerAppShutdown } from "./app-shutdown";
 import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
@@ -26,18 +35,21 @@ import { initAutoUpdater,stopAutoUpdater } from "./updater";
 import { SshProfileManager } from "./ssh-profiles";
 import { SshSessionManager } from "./ssh-manager";
 import { RemoteRuntimeStore } from "./ssh-runtime";
-import { RemoteFileBrowser } from "./ssh-file-browser";
 import { KnownHostsManager, createHostKeyVerifier } from "./ssh-known-hosts";
 import { confirmSshHostKey } from "./ssh-host-key-dialog";
 import { registerSshIpcHandlers } from "./ssh-ipc";
 import { RemoteTerminalManager } from "./ssh-terminal";
 import { PortForwardManager } from "./ssh-port-forward";
 import { SshDatabase } from "./ssh-database";
-import { RpcRouter,parseRepoId } from "./ssh-router";
+import { parseRepoId } from "./ssh-types";
+import { RpcRouter } from "./ssh-router";
 import { getProviderRegistry } from "./provider-registry";
 import { LocalProvider } from "./local-provider";
+import { readTextFile } from "./file-read";
+import { stopFileWrites } from "./file-write";
 import { RemoteProvider } from "./remote-provider";
 import { AgentDeployer } from "./ssh-deployer";
+import { RemoteFileBrowser } from "./ssh-file-browser";
 import { CapabilityNegotiator } from "./ssh-capabilities";
 import { WorkspaceSyncEngine } from "./ssh-workspace-sync";
 import { FileTransferManager } from "./ssh-file-transfer";
@@ -73,24 +85,73 @@ import { StatusPoller,RepoStatus } from "./workspace-poller";
 
 const isDev = !app.isPackaged;
 
+// One main process owns each profile's transfer receipts. A second process
+// must not recover a live owner's jobs as interrupted before it opens SQLite.
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+});
+
 // Load credentials from ~/.config/crab/.env early so that the agent
 // subprocess (and any crab CLI invocations) inherit AWS/storage creds
 // even though macOS GUI apps don't get the user's shell environment.
 loadEnvGlobal();
 
+protocol.registerSchemesAsPrivileged([{ scheme: "crab-content", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
+let media: MediaResources | null = null;
+let fileTransfers: FileTransfers | null = null;
+let activityError: string | null = null;
+let desktopDatabase: SshDatabase | null = null;
+
 let mainWindow: BrowserWindow | null = null;
+
+function admitFileTransfer(method: string, params: unknown): void { fileTransfers?.fence(method, params); }
+
+function sendAgentEvent(method: string, params: unknown): void {
+  fileTransfers?.observe(method, params);
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send("crab:event", { method, params });
+}
+
+function sendRepositoryCapabilities(event: CapabilitiesChangedEvent): void {
+  if (event.nativeSessionId === null) fileTransfers?.forget(event.repoId);
+  if (event.nativeSessionId === null) void media?.invalidateRepo(event.repoId).catch(error => console.error("Media invalidation failed", error));
+  sendAgentEvent("repo:capabilities-changed", { repo_id: event.repoId, capabilities: event.capabilities, native_session_id: event.nativeSessionId, error: event.error });
+}
+
 let agent: Agent | null = null;
-let resolveAgentReady!: () => void;
-let rejectAgentReady!: (reason: unknown) => void;
-const agentReady = new Promise<void>((resolve, reject) => {
-  resolveAgentReady = resolve;
-  rejectAgentReady = reject;
-});
-// The window can issue RPC before shell/PTY startup has finished. Keep those
-// requests pending until the native ping succeeds, or surface its real failure.
-void agentReady.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
+let isShuttingDown = false;
+let quitRequested = false;
+const notebookKernels = new Map<string, { repoId: string; owner: WebContents; kernel: JupyterKernel; release: () => void }>();
+
+async function closeNotebookKernel(id: string): Promise<void> {
+  const entry = notebookKernels.get(id);
+  if (!entry) return;
+  try { await entry.kernel.shutdown(); }
+  finally {
+    if (notebookKernels.get(id) === entry) notebookKernels.delete(id);
+    entry.release();
+  }
+}
+
+async function stopNotebookKernels(repoId?: string): Promise<void> {
+  const results = await Promise.allSettled([...notebookKernels].filter(([, entry]) => !repoId || entry.repoId === repoId).map(([id]) => closeNotebookKernel(id)));
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Notebook shutdown failed");
+}
+// Resolve the renderer's unsaved-buffer decision before tearing down native,
+// terminal or SSH owners; cancelling Quit must leave the app fully usable.
+app.on("before-quit", event => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  event.preventDefault();
+  if (quitRequested) return;
+  quitRequested = true;
+  mainWindow.close();
+});
 let shutdownAgentServices: (() => Promise<void>) | undefined;
 
 // Workspace state (managed by IPC handlers)
@@ -228,6 +289,28 @@ async function createWindow() {
     },
   });
 
+  const window = mainWindow;
+  const owner = window.webContents;
+  window.on("close", () => { if (!owner.isDestroyed()) owner.send("crab:term-save-request"); });
+  owner.on("will-prevent-unload", event => {
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "warning", buttons: ["Keep editing", "Discard edits"], defaultId: 0, cancelId: 0,
+      message: "Some file edits have not been saved.",
+      detail: "Keep editing to retry saving. Discarding loses unsaved edits; Crab waits for saves already in progress.",
+    });
+    if (choice === 1) event.preventDefault();
+    else quitRequested = false;
+  });
+  window.once("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+    if (quitRequested) app.quit();
+  });
+  const ownerId = owner.id;
+  const closeMedia = () => { void media?.closeOwner(ownerId).catch(error => console.error("Media cleanup failed", error)); };
+  owner.on("did-start-navigation", (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) closeMedia(); });
+  owner.on("render-process-gone", closeMedia);
+  owner.on("destroyed", closeMedia);
+
   const devServer = process.env.VITE_DEV_SERVER_URL;
   if (isDev && devServer) {
     await mainWindow.loadURL(devServer);
@@ -295,7 +378,7 @@ function extractRepoIdFromParams(params: unknown): string | null {
   return null;
 }
 
-function registerIpc(skillManager: SkillManager) {
+function registerIpc(skillManager: SkillManager, storageConnections: StorageConnections, localAgent: () => Promise<Agent>, db: Database.Database) {
   // Keychain handlers for secure credential storage.
   registerKeychainHandlers(ipcMain);
 
@@ -321,25 +404,80 @@ function registerIpc(skillManager: SkillManager) {
   // ProviderRegistry based on the repo_id in params. For open_local
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
-  ipcMain.handle("crab:rpc", async (_evt, method: string, params: unknown) => {
-    await agentReady;
-    if (!agent) throw new Error("agent not running");
+  function initializeTransferActivity() {
+    try {
+      fileTransfers = new FileTransfers(db,
+        repoId => dispatchAgent("close", { repo_id: repoId }).finally(() => fileTransfers?.forget(repoId)),
+        (repoId, opId, session) => dispatchAgent("rpc/cancel", { repo_id: repoId, op_id: opId, native_session_id: session }),
+        change => sendAgentEvent("activity/file-transfer", change),
+        message => storageConnections.redactText(message));
+      activityError = null;
+    } catch (error) {
+      activityError = `File-transfer Activity is unavailable: ${storageConnections.redactText(error instanceof Error ? error.message : String(error))}`;
+      console.error(activityError);
+    }
+  }
+  initializeTransferActivity();
 
-    if (method.startsWith("storage_connections_")) return agent.request(method, params);
+  async function requestAgent(method: string, params: unknown): Promise<unknown> {
+    if (method === "activity_file_transfers") return fileTransfers?.snapshot() ?? { version: 0, jobs: [], error: activityError };
+    if (method === "activity_file_transfers_recover") {
+      if (!fileTransfers) initializeTransferActivity();
+      if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
+      return fileTransfers.recover();
+    }
+    const repoId = extractRepoIdFromParams(params);
+    const control = params as Record<string, unknown> | null;
+    if (method === "rpc/cancel" && typeof control?.op_id === "string" && fileTransfers?.owns(control.op_id)) {
+      return fileTransfers.requestCancel(String(repoId), control.op_id, String(control.native_session_id));
+    }
+    if (method === "close" && repoId && fileTransfers) return fileTransfers.close(repoId);
+    if (isFileTransfer(method)) {
+      if (!fileTransfers) throw new Error(activityError ?? "File-transfer Activity is unavailable");
+      const repository = repoId ? storageConnections.repositoryContext(repoId) : undefined;
+      if (!repository || !repoId) throw new Error("Reopen the repository before transferring files.");
+      const provider = getProviderRegistry().resolve(repoId);
+      const nativeSessionId = provider?.nativeSession(repoId) ?? null;
+      const payload = params as Record<string, unknown>;
+      const admitted = { ...payload, native_session_id: payload.native_session_id ?? nativeSessionId };
+      return fileTransfers.run(method, admitted, { ...repository, nativeSessionId }, () => dispatchAgent(method, admitted));
+    }
+    const session = repoId && method === "file_open" ? getProviderRegistry().resolve(repoId)?.nativeSession(repoId) : null;
+    const result = await dispatchAgent(method, params);
+    if (repoId && method === "file_open" && session && getProviderRegistry().resolve(repoId)?.nativeSession(repoId) === session) {
+      const payload = params as Record<string, unknown>;
+      if (typeof payload.path === "string") fileTransfers?.capture(repoId, session, payload.path, result);
+    }
+    if (repoId && method === "file_close") fileTransfers?.forget(repoId, String((params as Record<string, unknown>).file_id));
+    return result;
+  }
+
+  async function dispatchAgent(method: string, params: unknown): Promise<unknown> {
+    if (method.startsWith("storage_connections_")) {
+      if (method !== "storage_connections_test") {
+        // Device metadata owns no native readiness. Identity changes still join
+        // existing repository owners through the vault's shared callback.
+        return storageConnections.request(method, params, () => { throw new Error("Unknown storage connection operation"); });
+      }
+      const repoId = extractRepoIdFromParams(params);
+      const remote = repoId ? parseRepoId(repoId) : null;
+      if (method === "storage_connections_test" && remote) {
+        if (!_rpcRouter) throw new Error("SSH services are not initialized");
+        return _rpcRouter.sendToRemoteAgent(remote.profileId, method, params);
+      }
+      return (await localAgent()).request(method, params);
+    }
     const registry = getProviderRegistry();
 
     // Handle repo open methods: register provider before returning handle.
     if (method === "open_local" || method === "open_url") {
-      const handle = await agent.request(method, params);
+      const handle = await (await localAgent()).request(method, params);
       // Register the appropriate provider for this repo_id.
       const repoId = (handle as { repo_id?: string })?.repo_id;
       if (repoId) {
         const parsed = parseRepoId(repoId);
         if (parsed) {
-          // Remote repo — RemoteProvider is registered by the SSH
-          // subsystem when the connection is established. If one isn't
-          // registered yet, the registry's resolve() will return null
-          // and we fall through to the RpcRouter-based fallback.
+          // SSH repository handles are registered by the SSH open path.
         } else {
           // Local repo — register with the LocalProvider singleton.
           // The LocalProvider is already set as the fallback, but
@@ -356,6 +494,8 @@ function registerIpc(skillManager: SkillManager) {
     // Handle repo close: unregister the provider.
     if (method === "close") {
       const repoId = extractRepoIdFromParams(params);
+      if (repoId) await media?.closeRepo(repoId);
+      if (repoId) await stopNotebookKernels(repoId);
       // Route the close call through the appropriate provider.
       let result: unknown;
       if (repoId) {
@@ -365,11 +505,11 @@ function registerIpc(skillManager: SkillManager) {
           void provider.watchStop(repoId).catch(() => {});
           result = await provider.request(method, params as Record<string, unknown>);
         } else {
-          result = await agent.request(method, params);
+          result = await (await localAgent()).request(method, params);
         }
         registry.unregister(repoId);
       } else {
-        result = await agent.request(method, params);
+        result = await (await localAgent()).request(method, params);
       }
       return result;
     }
@@ -379,18 +519,45 @@ function registerIpc(skillManager: SkillManager) {
     if (repoId) {
       const provider = registry.resolve(repoId);
       if (provider) {
-        return provider.request(method, params as Record<string, unknown>);
+        const payload = params as Record<string, unknown>;
+        if (Object.hasOwn(payload, "native_session_id")) {
+          const expected = payload.native_session_id;
+          if (!expected || provider.nativeSession(repoId) !== expected) {
+            // A revoked session drains under its original owner. Cleanup must
+            // never send an old file identity into a replacement process.
+            if (method === "file_close") return { closed: payload.file_id };
+            throw nativeSessionLost();
+          }
+          // Keep the expected identity until the owner admits the wire request;
+          // a repository replacement may be queued after this initial check.
+          return provider.request(method, payload);
+        }
+        return provider.request(method, payload);
       }
-      // No provider found — for remote repos without explicit
-      // registration, this shouldn't happen after open. Fall through
-      // to the local agent as a safety net.
+      // Unregistered SSH identities throw in resolve; only local startup
+      // without an initialized provider reaches the agent below.
     }
 
-    // Fallback: no repo_id in params or no provider resolved — send
+    // No repo_id, or a local provider still starting — send
     // to the local agent directly (preserves existing behavior for
     // repo-less calls like `ping`, `version`, etc.).
-    return agent.request(method, params);
+    return (await localAgent()).request(method, params);
+  }
+  media = new MediaResources(requestAgent, (owner, id, error) => {
+    const contents = webContents.fromId(owner);
+    if (contents && !contents.isDestroyed()) contents.send("crab:event", { method: "media/error", params: { media_id: id, error } });
   });
+  protocol.handle("crab-content", request => media!.fetch(request));
+  ipcMain.handle("crab:rpc", (event, method: string, params: unknown) => rpcReply(async () => {
+    if (method === "media_open" || method === "media_close") {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id || !media) throw new Error("Media requests require the application window");
+      if (method === "media_open") return media.open(event.sender.id, params);
+      if (!params || typeof params !== "object" || !("media_id" in params) || typeof params.media_id !== "string") throw new Error("Media identity is required");
+      await media.close(event.sender.id, params.media_id);
+      return { closed: params.media_id };
+    }
+    return requestAgent(method, params);
+  }));
 
   ipcMain.handle("crab:dialog-open-repo", async () => {
     if (!mainWindow) return null;
@@ -593,9 +760,7 @@ function registerIpc(skillManager: SkillManager) {
     if (provider) {
       return provider.capabilities(repoId);
     }
-    // Fallback: local repos always have full capabilities.
-    const { fullCapabilities } = await import("./repo-provider.js");
-    return fullCapabilities();
+    return noCapabilities();
   });
 
   // ---- File operations ----
@@ -751,87 +916,20 @@ function registerIpc(skillManager: SkillManager) {
     await shell.openPath(fullPath);
   });
 
-  // Write text content to a file (creates parent directories as needed).
-  // Accepts an optional repoId first parameter for provider-based routing.
-  ipcMain.handle(
-    "crab:fs-write-file",
-    async (_evt, firstArg: string, secondArg: string, thirdArg?: string) => {
-      const registry = getProviderRegistry();
+  ipcMain.handle("crab:fs-write-file", async (_evt, repoId: string, fullPath: string, content: string, nativeSessionId: string | null) => {
+    const provider = getProviderRegistry().resolve(repoId);
+    if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
+    return provider.fsWrite(repoId, fullPath, content, nativeSessionId);
+  });
 
-      // Detect whether the caller passed repoId as the first argument.
-      // If thirdArg is present, the signature is (repoId, fullPath, content).
-      // Otherwise, the signature is (fullPath, content) for backward compat.
-      let repoId: string | null;
-      let fullPath: string;
-      let content: string;
-
-      if (thirdArg !== undefined) {
-        repoId = firstArg;
-        fullPath = secondArg;
-        content = thirdArg;
-      } else {
-        repoId = null;
-        fullPath = firstArg;
-        content = secondArg;
-      }
-
-      // If repoId is provided, resolve the provider and delegate.
-      if (repoId) {
-        const provider = registry.resolve(repoId);
-        if (provider) {
-          return provider.fsWrite(repoId, fullPath, content);
-        }
-      }
-
-      // Fallback: local filesystem operations (existing behavior).
-      const dir = path.dirname(fullPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(fullPath, content, "utf8");
-      return { path: fullPath, written: content.length };
-    },
-  );
-
-  // Read text content from a file on disk.
-  // Accepts an optional repoId first parameter for provider-based routing.
-  ipcMain.handle(
-    "crab:fs-read-file",
-    async (_evt, firstArg: string, secondArg?: string) => {
-      const registry = getProviderRegistry();
-
-      // Detect whether the caller passed repoId as the first argument.
-      // If secondArg is present, the signature is (repoId, fullPath).
-      // Otherwise, the signature is (fullPath) for backward compat.
-      let repoId: string | null;
-      let fullPath: string;
-
-      if (secondArg !== undefined) {
-        repoId = firstArg;
-        fullPath = secondArg;
-      } else {
-        repoId = null;
-        fullPath = firstArg;
-      }
-
-      // If repoId is provided, resolve the provider and delegate.
-      if (repoId) {
-        const provider = registry.resolve(repoId);
-        if (provider) {
-          return provider.fsRead(repoId, fullPath);
-        }
-      }
-
-      // Fallback: local filesystem operations (existing behavior).
-      if (!fs.existsSync(fullPath)) {
-        return { exists: false, content: null };
-      }
-      const stat = fs.statSync(fullPath);
-      if (stat.isDirectory()) {
-        return { exists: true, content: null };
-      }
-      const content = fs.readFileSync(fullPath, "utf8");
-      return { exists: true, content };
-    },
-  );
+  ipcMain.handle("crab:fs-read-file", async (_evt, ...args: [string] | [string, string, number | undefined, string | null]) => {
+    // The task file viewer still supplies a worktree path without a repo handle.
+    // Repository documents always resolve a provider and cannot fall through.
+    if (args.length === 1) return readTextFile(args[0]);
+    const provider = getProviderRegistry().resolve(args[0]);
+    if (!provider) throw new Error("Repository file services are unavailable. Reopen the repository.");
+    return provider.fsRead(args[0], args[1], args[2], args[3]);
+  });
 
   // Read binary content from a file on disk and return it as a
   // base64-encoded data URL plus the inferred MIME type. Used by the
@@ -1214,175 +1312,60 @@ function registerIpc(skillManager: SkillManager) {
     await shell.openExternal(url);
   });
 
-  // ---- Jupyter kernel management ----
-  // Lazy-loaded to avoid crashing the app if zeromq fails to load.
-  let JupyterKernelModule: typeof import("./jupyter-kernel.js") | null = null;
-  try {
-    JupyterKernelModule = require("./jupyter-kernel") as typeof import("./jupyter-kernel.js");
-  } catch (e) {
-    console.error("[crab-desktop] Failed to load jupyter-kernel module:", e);
-  }
+  ipcMain.handle("crab:jupyter-check", (_evt, pythonPath?: string) => checkJupyterRuntime(pythonPath));
+  ipcMain.handle("crab:jupyter-list-kernels", async (_evt, pythonPath: string) => listKernelSpecs(pythonPath));
+  ipcMain.handle("crab:jupyter-install", async (_evt, pythonPath: string) => installJupyter(pythonPath));
 
-  const kernels = new Map<string, any>();
-  let kernelCounter = 0;
-  let detectedJupyterPath: string | null = null;
-
-  ipcMain.handle("crab:jupyter-list-kernels", async () => {
-    if (!JupyterKernelModule) return [];
-    const path = detectedJupyterPath || undefined;
-    try {
-      return await JupyterKernelModule.listKernelSpecs(path);
-    } catch {
-      return [];
-    }
-  });
-
-  ipcMain.handle("crab:jupyter-check", async () => {
-    // Check if jupyter + ipykernel are available.
-    // Use `which` to get the FULL path — spawn() needs an absolute path
-    // in packaged Electron apps where PATH is limited.
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-
-    let jupyterPath: string | null = null;
-
-    // Best approach: use a login shell which sources .zshrc/.bashrc
-    // and picks up version managers (mise, pyenv, conda, etc.).
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const result = execSync(`${shell} -l -c "which jupyter"`, {
-        encoding: "utf8",
-        timeout: 10000,
-      }).trim();
-      if (result && result.startsWith("/")) jupyterPath = result;
-    } catch { /* login shell failed */ }
-
-    // Fallback: try with manually expanded PATH.
-    if (!jupyterPath) {
-      try {
-        const result = execSync("which jupyter", {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin:${process.env.HOME}/.local/bin:${process.env.HOME}/miniconda3/bin:${process.env.HOME}/anaconda3/bin`,
-          },
-          shell: "/bin/bash",
-          timeout: 5000,
-        }).trim();
-        if (result && result.startsWith("/")) jupyterPath = result;
-      } catch { /* not found */ }
-    }
-
-    // Fallback: probe known paths directly using fs.existsSync.
-    if (!jupyterPath) {
-      const { existsSync, readdirSync } = require("node:fs") as typeof import("node:fs");
-      const candidates = [
-        "/opt/homebrew/bin/jupyter",
-        "/usr/local/bin/jupyter",
-        `${process.env.HOME}/.local/bin/jupyter`,
-        `${process.env.HOME}/miniconda3/bin/jupyter`,
-        `${process.env.HOME}/anaconda3/bin/jupyter`,
-        `${process.env.HOME}/.pyenv/shims/jupyter`,
-      ];
-      // Also check mise installs (common on macOS).
-      try {
-        const miseDir = `${process.env.HOME}/.local/share/mise/installs/python`;
-        if (existsSync(miseDir)) {
-          const versions = readdirSync(miseDir);
-          for (const v of versions.sort().reverse()) {
-            candidates.push(`${miseDir}/${v}/bin/jupyter`);
-          }
-        }
-      } catch { /* ignore */ }
-      for (const p of candidates) {
-        if (existsSync(p)) { jupyterPath = p; break; }
-      }
-    }
-
-    // Cache the detected path for subsequent calls.
-    if (jupyterPath) detectedJupyterPath = jupyterPath;
-
-    let pythonPath: string | null = null;
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const result = execSync(`${shell} -l -c "which python3"`, {
-        encoding: "utf8",
-        timeout: 10000,
-      }).trim();
-      if (result && result.startsWith("/")) pythonPath = result;
-    } catch { /* not found */ }
-
-    return { jupyterPath, pythonPath, available: jupyterPath !== null };
-  });
-
-  ipcMain.handle("crab:jupyter-install", async () => {
-    // Auto-install ipykernel using pip.
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-    const pips = ["pip3", "pip", "/usr/local/bin/pip3", "/opt/homebrew/bin/pip3",
-      `${process.env.HOME}/.local/bin/pip3`];
-    for (const pip of pips) {
-      try {
-        const output = execSync(`${pip} install jupyter ipykernel`, {
-          encoding: "utf8", timeout: 120000,
-          env: { ...process.env, PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin` },
-        });
-        return { success: true, output };
-      } catch { /* try next */ }
-    }
-    return { success: false, output: "Could not find pip. Please install Python first." };
-  });
-
-  ipcMain.handle("crab:jupyter-start", async (_evt, kernelName: string, cwd: string, jupyterPath?: string) => {
-    if (!JupyterKernelModule) return { id: null, status: "error", message: "Jupyter support not available (zeromq failed to load)" };
-    const id = `kernel-${++kernelCounter}`;
-    const effectivePath = jupyterPath || detectedJupyterPath || undefined;
-    const kernel = new JupyterKernelModule.JupyterKernel(kernelName, cwd, effectivePath);
-    kernel.setOutputHandler((output: any) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("crab:jupyter-output", { id, ...output });
-      }
+  ipcMain.handle("crab:jupyter-start", async (evt, id: string, repoId: string, pythonPath: string, target: KernelTarget) => {
+    if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
+    if (target.kind === "local" && parseRepoId(repoId)) throw new Error("A local kernel requires a local working tree.");
+    if (!id || notebookKernels.has(id)) throw new Error("Duplicate kernel connection");
+    const owner = evt.sender;
+    const kernel = new JupyterKernel(target.name, pythonPath, async signal => {
+      const env = await getUserShellBaseEnv();
+      signal.throwIfAborted();
+      const local = target.kind === "local" ? await localAgent() : null;
+      return () => {
+        signal.throwIfAborted();
+        if (isShuttingDown || owner.isDestroyed()) throw new Error("Notebook closed during kernel startup");
+        if (target.kind === "remote") return { env, serverUrl: target.url };
+        if (!local || !target.nativeSessionId || local.repositorySession(repoId) !== target.nativeSessionId) throw nativeSessionLost();
+        const cwd = local.worktreePath(repoId);
+        if (!cwd) throw new Error("The repository has no local working tree for this kernel.");
+        return { cwd, env };
+      };
     });
-    kernel.setStatusHandler((status: any) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("crab:jupyter-status", { id, status });
+    const destroyed = () => { void closeNotebookKernel(id).catch(error => console.error("Notebook cleanup failed", error)); };
+    owner.once("destroyed", destroyed);
+    // The renderer preassigns the ID. The same owner can cancel environment
+    // preparation and readiness before the connection invoke has returned.
+    notebookKernels.set(id, { repoId, owner, kernel, release: () => owner.removeListener("destroyed", destroyed) });
+    kernel.setOutputHandler(output => { if (!owner.isDestroyed()) owner.send("crab:jupyter-output", { id, ...output }); });
+    kernel.setStatusHandler((status, error) => {
+      if (status === "dead" && notebookKernels.get(id)?.kernel === kernel) {
+        notebookKernels.delete(id);
+        owner.removeListener("destroyed", destroyed);
       }
+      if (!owner.isDestroyed()) owner.send("crab:jupyter-status", { id, status, error });
     });
     try {
       await kernel.start();
-      kernels.set(id, kernel);
-      return { id, status: "ok" };
-    } catch (e) {
-      return { id: null, status: "error", message: e instanceof Error ? e.message : String(e) };
+      if (isShuttingDown || owner.isDestroyed() || !notebookKernels.has(id)) throw new Error("Notebook closed during kernel startup");
+    } catch (error) {
+      await closeNotebookKernel(id);
+      throw error;
     }
   });
 
-  ipcMain.handle("crab:jupyter-execute", async (_evt, id: string, code: string) => {
-    const kernel = kernels.get(id);
-    if (!kernel) return { error: "kernel not found" };
-    try {
-      const msgId = await kernel.execute(code);
-      return { msgId };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
-  });
-
-  ipcMain.handle("crab:jupyter-interrupt", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) await kernel.interrupt();
-  });
-
-  ipcMain.handle("crab:jupyter-restart", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) await kernel.restart();
-  });
-
-  ipcMain.handle("crab:jupyter-shutdown", async (_evt, id: string) => {
-    const kernel = kernels.get(id);
-    if (kernel) {
-      await kernel.shutdown();
-      kernels.delete(id);
-    }
-  });
+  function ownedKernel(id: string, sender: WebContents): JupyterKernel {
+    const entry = notebookKernels.get(id);
+    if (!entry || entry.owner !== sender) throw new Error("Kernel not connected");
+    return entry.kernel;
+  }
+  ipcMain.handle("crab:jupyter-execute", (evt, id: string, code: string, requestId: string, cell: number) => ownedKernel(id, evt.sender).execute(code, requestId, cell));
+  ipcMain.handle("crab:jupyter-interrupt", (evt, id: string) => ownedKernel(id, evt.sender).interrupt());
+  ipcMain.handle("crab:jupyter-restart", (evt, id: string) => ownedKernel(id, evt.sender).restart());
+  ipcMain.handle("crab:jupyter-shutdown", async (evt, id: string) => { ownedKernel(id, evt.sender); await closeNotebookKernel(id); });
 
   // ---- Workspace IPC handlers ----
 
@@ -1807,46 +1790,94 @@ app.whenReady().then(async () => {
   await skillManager.initialize();
   registerSkillManagerIpc(ipcMain, skillManager, () => mainWindow);
 
-  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager);
-  registerSidecarIpc(sidecarManager);
-  registerLspIpc(lspManager, () => mainWindow);
-  registerFileWatcher(() => mainWindow);
-
   // SSH subsystem initialization
-  const sshProfileManager = new SshProfileManager();
-  const sshDatabase = new SshDatabase();
+  // v2.0.0-alpha.1 stores the default SSH data here. Custom app profiles must
+  // stay isolated; moving default data requires an explicit migration.
+  const sshDataDirectory = app.commandLine.hasSwitch("user-data-dir")
+    ? app.getPath("userData") : path.join(os.homedir(), ".crab", "desktop");
+  const sshProfileManager = new SshProfileManager(path.join(sshDataDirectory, "ssh-profiles.json"));
+  const sshDatabase = new SshDatabase(path.join(sshDataDirectory, "ssh-enhanced.db"));
   const db = sshDatabase.getDb();
+  desktopDatabase = sshDatabase;
 
   // Core SSH modules
-  const knownHosts = new KnownHostsManager();
+  const knownHosts = new KnownHostsManager(path.join(app.getPath("userData"), "ssh-known-hosts.json"));
   const verifyHostKey = createHostKeyVerifier(knownHosts, (request, signal) => {
     if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false);
     return confirmSshHostKey(mainWindow, request, signal);
   });
   const sshSessionManager = new SshSessionManager(verifyHostKey);
+
+  const storageConnections = new StorageConnections(
+    path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
+    async (keys, state) => {
+      // The vault persists identity before either native owner replaces readers.
+      // Join both outcomes so one transport's failure cannot skip the other.
+      const outcomes = await Promise.allSettled([
+        agent?.storageIdentityChanged(keys, state),
+        sshSessionManager.storageIdentityChanged(keys, state),
+      ]);
+      const failures = outcomes.flatMap(outcome => outcome.status === "rejected" ? [outcome.reason] : []);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "Storage identity changed but some repositories could not recover");
+    },
+    repoIds => sendAgentEvent("repo:storage-source-changed", { repo_ids: repoIds }),
+  );
+
+  // Share construction, not process readiness: Agent retains its own restart
+  // and repository owners. A failed prerequisite can be repaired and retried.
+  let construction: Promise<Agent> | undefined;
+  function localAgent(): Promise<Agent> {
+    if (isShuttingDown) return Promise.reject(new Error("Crab Desktop is shutting down"));
+    if (agent) return Promise.resolve(agent);
+    if (!construction) construction = constructLocalAgent().finally(() => { construction = undefined; });
+    return construction;
+  }
+
+  const { getDefaultShell, buildTerminalEnv, shellEnvPromise, writeSessionLog } = registerIpc(skillManager, storageConnections, localAgent, db);
+  registerSidecarIpc(sidecarManager);
+  registerLspIpc(lspManager, () => mainWindow);
+  registerFileWatcher(() => mainWindow);
+
   _sshSessionManager = sshSessionManager;
   const sshTerminalManager = new RemoteTerminalManager(sshSessionManager, id => sshProfileManager.get(id));
   const sshPortForwardManager = new PortForwardManager(sshSessionManager);
-  registerSshIpcHandlers(sshProfileManager, sshSessionManager, knownHosts, sshTerminalManager, sshPortForwardManager);
 
-  // Enhanced SSH modules — wired after basic handlers so the app starts
-  // even if any enhanced module fails to initialize.
+  const rpcRouter = new RpcRouter(sshSessionManager, {
+    request: async (method: string, params: unknown) => {
+      return (await localAgent()).request(method, params);
+    },
+  }, storageConnections, {}, admitFileTransfer);
+  _rpcRouter = rpcRouter;
+  orchestrator?.setRpcRouter(rpcRouter);
+  const runtimeOptions = { packaged: app.isPackaged, appPath: app.getAppPath(), version: app.getVersion(), cacheDirectory: path.join(app.getPath("userData"), "remote-runtimes") };
+  const remoteRuntimes = new RemoteRuntimeStore(runtimeOptions);
+  const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
+  sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(remoteRuntimes.resolve.bind(remoteRuntimes)), capabilityNegotiator, rpcRouter });
+  const fileEditor = new RemoteFileEditor(rpcRouter, sshSessionManager);
+  const gitManager = new RemoteGitManager(rpcRouter, sshSessionManager);
+  const remoteProvider = new RemoteProvider({
+    router: rpcRouter,
+    fileEditor,
+    gitManager,
+    capabilityNegotiator,
+    sessionManager: sshSessionManager,
+  });
+  const registry = getProviderRegistry();
+
+  const fileBrowser = new RemoteFileBrowser(sshSessionManager, registry, remoteProvider);
+  registerSshIpcHandlers(sshProfileManager, sshSessionManager, fileBrowser, knownHosts, sshTerminalManager, sshPortForwardManager);
+
+  bridgeAgentDeployToRenderer(sshSessionManager);
+  // Remote progress is scoped by the router's live request owner. Forward only
+  // that stream; remote OAuth or other unowned notifications stay remote.
+  rpcRouter.on("progress", ({ method, params }) => sendAgentEvent(method, params));
+  remoteProvider.on("fs/changed", event => sendAgentEvent("fs/changed", { repo_path: event.repoPath }));
+  remoteProvider.on("capabilities-changed", sendRepositoryCapabilities);
+
+
+  // Optional SSH IDE services cannot prevent native bootstrap or repository browsing.
   try {
-    const rpcRouter = new RpcRouter(sshSessionManager, {
-      request: async (method: string, params: unknown) => {
-        if (!agent) throw new Error("agent not running");
-        return agent.request(method, params);
-      },
-    });
-    _rpcRouter = rpcRouter;
-    orchestrator?.setRpcRouter(rpcRouter);
-    const capabilityNegotiator = new CapabilityNegotiator(rpcRouter);
-    const runtimeAppPath = app.getAppPath(); const runtimeVersion = app.getVersion();
-    const runtimeCache = path.join(app.getPath("userData"), "remote-runtimes");
-    const runtimeOptions = { packaged: app.isPackaged, appPath: runtimeAppPath, version: runtimeVersion, cacheDirectory: runtimeCache };
-    const remoteRuntimes = new RemoteRuntimeStore(runtimeOptions);
-    const resolveRemoteRuntime = remoteRuntimes.resolve.bind(remoteRuntimes);
-    sshSessionManager.setAgentDependencies({ createDeployer: () => new AgentDeployer(resolveRemoteRuntime), capabilityNegotiator, rpcRouter });
     const fileTransferManager = new FileTransferManager(sshSessionManager);
     const deltaSyncEngine = new DeltaSyncEngine(rpcRouter);
     const workspaceSyncEngine = new WorkspaceSyncEngine(
@@ -1867,52 +1898,8 @@ app.whenReady().then(async () => {
     const toolManager = new RemoteToolManager(rpcRouter, sshSessionManager);
     const connectionQualityMonitor = new ConnectionQualityMonitor(latencyMonitor, rpcRouter, sshSessionManager);
     const bookmarkManager = new BookmarkManager(db);
-    const fileEditor = new RemoteFileEditor(rpcRouter, sshSessionManager);
     const workspaceManager = new RemoteWorkspaceManager(rpcRouter, sshSessionManager, fileEditor);
-    const gitManager = new RemoteGitManager(rpcRouter, sshSessionManager);
     const debugManager = new RemoteDebugManager(rpcRouter, sshSessionManager);
-
-    // Create the RemoteProvider singleton and register it with the
-    // ProviderRegistry. All remote repos share a single RemoteProvider
-    // instance that routes through the RpcRouter.
-    const remoteProvider = new RemoteProvider({
-      router: rpcRouter,
-      fileEditor,
-      gitManager,
-      capabilityNegotiator,
-      sessionManager: sshSessionManager,
-    });
-    const registry = getProviderRegistry();
-
-    // Bridge RemoteProvider's fs/changed events to the renderer so the
-    // useFileWatcher hook picks them up. This mirrors how the local
-    // file-watcher.ts sends events via webContents.send("crab:event", ...).
-    remoteProvider.on("fs/changed", (evt) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-      mainWindow.webContents.send("crab:event", {
-        method: "fs/changed",
-        params: { repo_path: evt.repoPath },
-      });
-    });
-
-    // Bridge RemoteProvider's capabilities-changed events to the renderer
-    // so the UI can reactively enable/disable controls when the SSH
-    // connection state transitions (connected ↔ disconnected ↔ reconnecting).
-    remoteProvider.on("capabilities-changed", (evt) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-      mainWindow.webContents.send("crab:event", {
-        method: "repo:capabilities-changed",
-        params: { repo_id: evt.repoId, capabilities: evt.capabilities },
-      });
-    });
-
-    const remoteFileBrowser = new RemoteFileBrowser(rpcRouter, sshSessionManager, undefined, registry, remoteProvider);
-    ipcMain.handle("ssh:open-as-repo", async (_event: unknown, profileId: string, remotePath: string) => {
-      const handle = await remoteFileBrowser.openAsRepo(profileId, remotePath);
-      const repoId = `ssh://${profileId}${remotePath}`;
-      void remoteProvider.watchStart(repoId);
-      return handle;
-    });
 
     wireEnhancedIpcHandlers({
       fileTransferManager,
@@ -1926,7 +1913,6 @@ app.whenReady().then(async () => {
       toolManager,
       connectionQualityMonitor,
       bookmarkManager,
-      capabilityNegotiator,
       workspaceManager,
       gitManager,
       debugManager,
@@ -1935,7 +1921,6 @@ app.whenReady().then(async () => {
 
     // Bridge sync and deploy events to the renderer
     bridgeSyncEventsToRenderer(workspaceSyncEngine, fileTransferManager);
-    bridgeAgentDeployToRenderer(sshSessionManager);
 
     // Remote workspace orchestrator — multi-repo discovery and polling
     // for remote workspace sources over SSH.
@@ -2168,15 +2153,12 @@ app.whenReady().then(async () => {
   }
 
   app.on("before-quit", () => {
+    if (mainWindow) return;
     termRouter.dispose();
     daemonSubsystem?.dispose();
   });
 
-  // Spin up the agent in the background. If it fails, surface the
-  // error via IPC so the renderer can render a banner; otherwise the
-  // renderer's first RPC call transparently waits for `start()` to
-  // finish.
-  try {
+  async function constructLocalAgent(): Promise<Agent> {
     try {
       const shellEnv = await shellEnvPromise;
       if (shellEnv) {
@@ -2186,6 +2168,8 @@ app.whenReady().then(async () => {
       console.warn("[crab-desktop] Failed to resolve shell environment before starting agent:", err);
     }
 
+    // A delayed shell lookup cannot create a process after application shutdown.
+    if (isShuttingDown) throw new Error("Crab Desktop is shutting down");
     const mainSettings = readMainSettings();
 
     // Persist only main-process-redacted logs; the native file sink would
@@ -2203,23 +2187,16 @@ app.whenReady().then(async () => {
     // Main-process worktrees, Git helpers and the sidecar must use the same release.
     process.env.CRAB_BIN = runtime.crab;
     process.env.PATH = `${path.dirname(runtime.crab)}${path.delimiter}${process.env.PATH ?? ""}`;
-    const storageConnections = new StorageConnections(
-      path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
-    );
-    agent = new Agent(runtime.agent, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections);
-    if (logsDir) agent.on("stderr", (line: string) => {
+    // The native process owns and retires its private metadata index.
+    const next = new Agent(runtime, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections, admitFileTransfer);
+    if (logsDir) next.on("stderr", (line: string) => {
       const day = new Date().toISOString().slice(0, 10);
       fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {
         if (error) console.warn("[crab-desktop] Could not append agent log.");
       });
     });
-    agent.on("notification", (method, params) => {
-      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
-        return;
-      }
-      mainWindow.webContents.send("crab:event", { method, params });
-    });
-    agent.on("exit", (code, signal) => {
+    next.on("notification", sendAgentEvent);
+    next.on("exit", (code, signal) => {
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
         return;
       }
@@ -2231,33 +2208,37 @@ app.whenReady().then(async () => {
 
     // Register the OAuth device flow handler so `auth/start`
     // notifications from the agent trigger browser-open + token polling.
-    registerForgeAuth(agent, () => mainWindow);
+    registerForgeAuth(next, () => mainWindow);
 
     // Initialize the ProviderRegistry with the LocalProvider singleton.
     // This must happen after the agent is created so the LocalProvider
     // can delegate RPC calls to it.
     const registry = getProviderRegistry();
-    const localProvider = new LocalProvider(agent);
+    const localProvider = new LocalProvider(next);
     registry.setLocalProvider(localProvider);
+    localProvider.on("capabilities-changed", sendRepositoryCapabilities);
+    agent = next;
 
     // Fire-and-forget; we don't want to block the window on the
     // agent's ping round-trip. Failures bubble into the catch below.
-    agent.start().then(resolveAgentReady).catch((err) => {
-      rejectAgentReady(err);
+    next.start().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       mainWindow?.webContents.send("crab:event", {
         method: "agent/failed",
         params: { message },
       });
     });
-  } catch (err) {
-    rejectAgentReady(err);
+    return next;
+  }
+
+  void localAgent().catch((err) => {
+    if (isShuttingDown) return;
     const message = err instanceof Error ? err.message : String(err);
     mainWindow?.webContents.send("crab:event", {
       method: "agent/failed",
       params: { message },
     });
-  }
+  });
 
 
 });
@@ -2270,19 +2251,17 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 });
 
-// Save terminal state before the app quits. The renderer sends its
-// layout via IPC when it receives the "before-quit" signal.
-app.on("before-quit", () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("crab:term-save-request");
-  }
-});
-
 registerAppShutdown(app, [
-  stopAllWatchers,
+  () => { isShuttingDown = true; },
   stopAutoUpdater,
+  stopFileWrites,
+  stopNotebookKernels,
+  stopJupyterRuntimeCommands,
+  stopAllWatchers,
   () => shutdownAgentServices?.(),
-  () => agent?.shutdown(),
+  () => fileTransfers?.stop(),
+  async () => { try { await media?.closeAll(); } finally { await agent?.shutdown(); } },
+  () => _sshSessionManager && Promise.all(_sshSessionManager.getAllConnections().map(connection => _sshSessionManager!.disconnect(connection.profile.id))),
   () => sidecarManager.stopAll(),
   () => lspManager.stopAll(),
-]);
+], () => desktopDatabase?.close());

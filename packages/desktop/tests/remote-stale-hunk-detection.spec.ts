@@ -18,6 +18,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
 import { RemoteProvider } from "../electron/remote-provider";
 import { getWatchPath } from "../src/hooks/useFileWatcher";
 import { isStaleHunkError, STALE_HUNK_RPC_CODE } from "../src/ipc";
@@ -49,22 +50,24 @@ function makeMockGitManager() {
 function makeMockCapabilityNegotiator(supportsFileWatching = true) {
   return {
     isSupported: vi.fn().mockImplementation((_profileId: string, feature: string) => {
-      if (feature === "fileWatching") return supportsFileWatching;
+      if (feature === "watch_start") return supportsFileWatching;
       return false;
     }),
     getCached: vi.fn().mockReturnValue({
-      version: "1.0.0",
-      features: { fileWatching: supportsFileWatching },
+      protocol: 1,
+      version: "2.0.0-alpha.1",
+      methods: supportsFileWatching ? ["capabilities", "watch_start", "watch_stop"] : ["capabilities"],
     }),
   };
 }
 
 function makeMockSessionManager(status = "connected") {
   const emitter = new EventEmitter();
-  return Object.assign(emitter, {
+  return withRepositoryRuntimes(Object.assign(emitter, { repositoryWork: () => undefined,
     getStatus: vi.fn().mockReturnValue(status),
     getConnection: vi.fn().mockReturnValue(null),
-  });
+    agentSession: vi.fn().mockReturnValue("ssh:1"),
+  }));
 }
 
 // ── Tests ────────────────────────────────────────────────────────

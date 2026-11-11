@@ -1,8 +1,7 @@
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -11,69 +10,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-const LOCAL_BLOCK_BYTES: usize = 1024 * 1024;
-const MAX_LOCAL_PROOF_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_LOCAL_FILES: usize = 128;
-
-type LocalEntry = Arc<Mutex<Option<VerifiedLocal>>>;
-
-#[derive(PartialEq, Eq)]
-struct LocalKey {
-    path: PathBuf,
-    size: u64,
-}
-
-impl LocalKey {
-    fn proof_bytes(&self) -> u64 {
-        self.size.div_ceil(LOCAL_BLOCK_BYTES as u64) * 32
-    }
-}
-
-#[derive(Default)]
-struct LocalCache {
-    entries: VecDeque<(LocalKey, LocalEntry)>,
-    proof_bytes: u64,
-}
-
-impl LocalCache {
-    fn claim(&mut self, key: LocalKey) -> Option<LocalEntry> {
-        if let Some(entry) = self
-            .entries
-            .iter()
-            .position(|(found, _)| *found == key)
-            .and_then(|index| self.entries.remove(index))
-        {
-            let claim = Arc::clone(&entry.1);
-            self.entries.push_back(entry);
-            return Some(claim);
-        }
-        let required = key.proof_bytes();
-        if required > MAX_LOCAL_PROOF_BYTES {
-            return None;
-        }
-        while self.entries.len() >= MAX_LOCAL_FILES
-            || self.proof_bytes + required > MAX_LOCAL_PROOF_BYTES
-        {
-            // A worker or waiter still owns this exact incarnation. Evicting
-            // its entry would admit a second verifier for the same source.
-            let index = self
-                .entries
-                .iter()
-                .position(|(_, entry)| Arc::strong_count(entry) == 1)?;
-            if let Some((retired, _)) = self.entries.remove(index) {
-                self.proof_bytes -= retired.proof_bytes();
-            }
-        }
-        let entry = Arc::new(Mutex::new(None));
-        self.proof_bytes += required;
-        self.entries.push_back((key, Arc::clone(&entry)));
-        Some(entry)
-    }
-}
+#[cfg(test)]
+use super::read_cache::MAX_LOCAL_FILES;
+use super::read_cache::{LOCAL_BLOCK_BYTES, LfsReadCache};
 
 // The full SHA-256 authenticates these block proofs. Subsequent reads verify
 // copied bytes against them, never file timestamps or a reusable pathname.
-struct VerifiedLocal {
+pub(super) struct VerifiedLocal {
     file: File,
     blocks: Vec<blake3::Hash>,
 }
@@ -82,32 +25,51 @@ struct VerifiedLocal {
 ///
 /// Drop read futures/streams before closing. Close rejects further hash work and
 /// waits for every admitted blocking verification job, including detached joins.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LfsReadSession(Arc<State>);
 
-#[derive(Default)]
 struct State {
-    state: Mutex<SessionState>,
+    cache: Mutex<Option<LfsReadCache>>,
     tasks: TaskTracker,
 }
 
-#[derive(Default)]
-struct SessionState {
-    closed: bool,
-    local: LocalCache,
+impl Default for LfsReadSession {
+    fn default() -> Self {
+        Self::new(LfsReadCache::default())
+    }
 }
 
 impl LfsReadSession {
+    /// Track one operation while retaining proofs in a caller-owned cache.
+    ///
+    /// Close each operation after dropping its read futures/streams. Drop the
+    /// shared cache after all operations close to release retained local sources.
+    #[must_use]
+    pub fn new(cache: LfsReadCache) -> Self {
+        Self(Arc::new(State {
+            cache: Mutex::new(Some(cache)),
+            tasks: TaskTracker::new(),
+        }))
+    }
+
+    pub(crate) fn cache(&self) -> std::io::Result<LfsReadCache> {
+        self.0
+            .cache
+            .lock()
+            .map_err(|_| std::io::Error::other("LFS verification admission is unavailable"))?
+            .clone()
+            .ok_or_else(closed)
+    }
+
     /// Stop verification admission and wait for already-started jobs.
     pub async fn close(&self) {
         {
-            let mut state = self
+            let mut cache = self
                 .0
-                .state
+                .cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.closed = true;
-            state.local = LocalCache::default();
+            drop(cache.take());
             self.0.tasks.close();
         }
         self.0.tasks.wait().await;
@@ -118,7 +80,8 @@ impl LfsReadSession {
     /// The first read verifies complete SHA-256 and size. Later ranges verify every
     /// covered block; source replacement/unlink cannot redirect the retained file.
     /// Only open-time absence returns None. Close drains admitted work and releases
-    /// retained sources; callers must stop/drop read futures before closing.
+    /// this session's cache claim; a caller-owned cache can retain checked sources
+    /// for later operations. Stop/drop read futures before closing.
     pub async fn read_local_range(
         &self,
         storage: &Path,
@@ -140,23 +103,7 @@ impl LfsReadSession {
             result = crate::object_store::origin::verification_permit() => result?,
         };
         let path = crate::local::object_path(storage, oid);
-        let entry = {
-            let mut state =
-                self.0.state.lock().map_err(|_| {
-                    std::io::Error::other("LFS verification admission is unavailable")
-                })?;
-            if state.closed {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "LFS read session is closed",
-                )
-                .into());
-            }
-            state.local.claim(LocalKey {
-                path: path.clone(),
-                size,
-            })
-        };
+        let entry = self.cache()?.local(path.clone(), size)?;
         let oid = *oid;
         let cancel = cancel.clone();
         self.spawn_blocking(move || {
@@ -215,14 +162,11 @@ impl LfsReadSession {
     {
         let state = self
             .0
-            .state
+            .cache
             .lock()
             .map_err(|_| std::io::Error::other("LFS verification admission is unavailable"))?;
-        if state.closed {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "LFS read session is closed",
-            ));
+        if state.is_none() {
+            return Err(closed());
         }
         Ok(self.0.tasks.spawn_blocking(job))
     }
@@ -336,6 +280,10 @@ fn corrupt(oid: &[u8; 32]) -> crate::LfsError {
     }
 }
 
+fn closed() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "LFS read session is closed")
+}
+
 fn cancelled() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Interrupted,
@@ -346,6 +294,36 @@ fn cancelled() -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_proofs_survive_operation_close_until_the_cache_owner_releases_them() {
+        let root = tempfile::tempdir().unwrap();
+        let body = b"retained payload";
+        let oid = Sha256::digest(body).into();
+        let path = crate::local::object_path(root.path(), &oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let cache = LfsReadCache::default();
+        let cancel = CancellationToken::new();
+        let first = LfsReadSession::new(cache.clone());
+        first
+            .read_local_range(root.path(), &oid, body.len() as u64, 0..3, &cancel)
+            .await
+            .unwrap();
+        first.close().await;
+        std::fs::remove_file(&path).unwrap();
+        let source = Arc::downgrade(&cache.local(path, body.len() as u64).unwrap().unwrap());
+        let second = LfsReadSession::new(cache.clone());
+        let bytes = second
+            .read_local_range(root.path(), &oid, body.len() as u64, 4..8, &cancel)
+            .await
+            .unwrap();
+        second.close().await;
+        assert_eq!(bytes, Some(Bytes::from_static(b"ined")));
+        assert!(source.upgrade().is_some());
+        drop(cache);
+        assert!(source.upgrade().is_none());
+    }
 
     #[tokio::test]
     async fn absent_local_objects_do_not_reserve_the_requested_payload() {
@@ -441,30 +419,6 @@ mod tests {
                         &(MAX_LOCAL_FILES as u64).to_le_bytes()
                     ))
                 && matches!(closed, Err(crate::LfsError::Io { source }) if source.kind() == std::io::ErrorKind::BrokenPipe)
-        );
-    }
-
-    #[test]
-    fn proof_budget_cannot_evict_live_source_claims() {
-        let mut cache = LocalCache::default();
-        let full_size = MAX_LOCAL_PROOF_BYTES / 32 * LOCAL_BLOCK_BYTES as u64;
-        let key = |name: &str| LocalKey {
-            path: name.into(),
-            size: full_size,
-        };
-        let first = cache.claim(key("first")).unwrap();
-        let same = cache.claim(key("first")).unwrap();
-        assert!(
-            Arc::ptr_eq(&first, &same)
-                && cache.claim(key("second")).is_none()
-                && cache.proof_bytes == MAX_LOCAL_PROOF_BYTES
-        );
-        drop(first);
-        drop(same);
-        assert!(
-            cache.claim(key("second")).is_some()
-                && cache.entries.len() == 1
-                && cache.proof_bytes == MAX_LOCAL_PROOF_BYTES
         );
     }
 

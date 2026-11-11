@@ -51,9 +51,19 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 
 ## Features and platform
 
-Only `facade` is declared; there is no declared default feature. It enables the optional high-level gix dependency. Git-spawning tests need Git on PATH; inspect locked gix source before altering its validation or discovery contract.
+`facade` enables the optional high-level gix dependency. `process` enables the shared `process::OwnedChild` group/job lifetime owner used by CLI and desktop. Neither is enabled by default. Git-spawning tests need Git on PATH; inspect locked dependency source before altering validation or process contracts.
+
+`index_stat` also uses `facade`. CLI and desktop publication share its locked
+stat-cache writer. Retain the stat captured during verification and fence native
+updates with the expected blob; never stamp a later external edit as clean.
 
 ## Verification
+
+`process::tests` covers Darwin exit/permission races. Process callers must stop
+before joining pipes on errors; Unix exit polling retains the leader until the
+group signal. CLI cancellation/grace policy stays in `crab/src/git/process.rs`;
+desktop owns its finite output/deadline policy in
+`packages/desktop/agent/src/repository/content/command.rs`.
 
 Read inline discovery/ref tests and `crates/crab-git/src/receive_plan/tests.rs`; pack quarantine regressions live in `crates/crab-git/src/incoming_pack/tests.rs`.
 

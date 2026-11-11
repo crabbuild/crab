@@ -5,7 +5,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 
 /**
  * Persists the active view name to the session whenever it changes.
@@ -15,7 +15,7 @@ import { useSession, useActiveRepoPath } from "../lib/session-context";
  */
 export function useSessionView(viewName: string): void {
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
   const prevViewRef = useRef<string | null>(null);
 
   useEffect(() => {

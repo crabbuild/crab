@@ -1,7 +1,7 @@
-import { Activity, Cloud, HardDrive, Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
+import { Cloud, HardDrive, Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { HydrationSummary, rpc } from "../ipc";
 import { formatBytes } from "../lib/format";
-import { useActiveRepo, useStore } from "../state";
+import { useActiveRepo } from "../state";
 import { SidecarChips } from "./SidecarChips";
 import { TaskListPopover } from "./TaskListPopover";
 import { RemoteManagerPopover } from "./RemoteManagerPopover";
@@ -12,6 +12,7 @@ import clsx from "clsx";
 interface Props {
   summary: HydrationSummary | null;
   loading: boolean;
+  error: string | null;
   onRefresh: () => void;
   /** Navigate to the storage config section in Settings. */
   onOpenStorageConfig?: () => void;
@@ -29,18 +30,13 @@ interface Props {
   } | null;
   /** Called after a toolbar command completes (push/pull/fetch). */
   onCommandExecuted?: (commandId: string) => void;
-  /** Whether the activity drawer is currently open. */
-  activityDrawerOpen?: boolean;
-  /** Toggle the activity drawer. */
-  onToggleActivityDrawer?: () => void;
 }
 
 /**
  * Thin strip along the bottom of the main pane — VS Code-style.
  * Shows at-a-glance hydration progress (how many pointer files are
  * materialised, how much disk they take, how much would be used if
- * everything were hydrated) and a live count of running background
- * jobs.
+ * everything were hydrated). App-wide jobs live in the header's Activity.
  *
  * Kept to a single row with icon-first info so non-technical users
  * can see the shape of their checkout without squinting. For very
@@ -48,10 +44,7 @@ interface Props {
  * wants a subset hydrated — that's addressed by the per-subtree
  * Hydrate action and the dataset preset we ship in Pass B.
  */
-export function StatusBar({ summary, loading, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted, activityDrawerOpen, onToggleActivityDrawer }: Props) {
-  const { state } = useStore();
-  const running = Object.values(state.jobs).filter((j) => j.status === "running").length;
-
+export function StatusBar({ summary, loading, error, onRefresh, onOpenStorageConfig, onNavigateFile, onNavigateCommit, syncToolbar, onCommandExecuted }: Props) {
   return (
     <div className="flex h-7 shrink-0 items-center justify-between border-t border-gx-border bg-gx-surface px-3 text-[11px] text-gx-muted">
       <div className="flex items-center gap-4">
@@ -70,7 +63,7 @@ export function StatusBar({ summary, loading, onRefresh, onOpenStorageConfig, on
             <Loader2 size={11} className="animate-spin" /> Checking hydration…
           </span>
         ) : (
-          <span>No hydration data</span>
+          <span title={error ?? undefined}>{error ? "File status unavailable" : "No hydration data"}</span>
         )}
       </div>
       <div className="flex items-center gap-3">
@@ -90,26 +83,6 @@ export function StatusBar({ summary, loading, onRefresh, onOpenStorageConfig, on
         />
         <RemoteStatusChip onClick={onOpenStorageConfig} />
         <SidecarChips />
-        {onToggleActivityDrawer && (
-          <button
-            type="button"
-            onClick={onToggleActivityDrawer}
-            className={clsx(
-              "flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-gx-surface-hover",
-              activityDrawerOpen && "bg-gx-accent/15 text-gx-accent",
-              running > 0 && !activityDrawerOpen && "text-gx-warn",
-            )}
-            title="Toggle Activity (background jobs)"
-          >
-            <Activity size={11} />
-            {running > 0 && (
-              <span className="ml-0.5 flex items-center gap-0.5 rounded bg-gx-warn/20 px-1 text-[9px] text-gx-warn">
-                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-gx-warn" />
-                {running}
-              </span>
-            )}
-          </button>
-        )}
         <button
           type="button"
           onClick={onRefresh}

@@ -73,8 +73,12 @@ const compiler = process.platform === "linux" && process.arch === "arm64"
 const environment = { ...process.env, ...compiler };
 if (testing) {
   const extension = process.platform === "win32" ? ".exe" : "";
-  const env = { ...environment, CRAB_BIN: path.join(target, "release", `crab${extension}`) };
+  const env = { ...environment, CRAB_BIN: path.join(desktop, "resources", "native", `${platform}-${process.arch}`, `crab${extension}`) };
   await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked"], env);
+  for (const filter of ["native_crab_and_lfs_pointer_previews_use_staging_without_hydrating", "native_crab_comparison_", "materialization_", "restoration_", "native_cleanup_reports_usage_and_preserves_busy_and_retained_state"]) {
+    await run("cargo", ["test", "--release", "-p", "crab-desktop-agent", "--locked", filter, "--", "--ignored", "--test-threads=1"], env);
+  }
+  await run("cargo", ["test", "--release", "-p", "crab-git", "--locked", "--features", "process", "--lib", "process::tests"], env);
   process.exit(0);
 }
 

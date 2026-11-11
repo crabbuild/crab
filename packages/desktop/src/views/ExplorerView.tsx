@@ -6,8 +6,9 @@ import { DirEntry, HydrationEntry, mainProcess, RefEntry, rpc } from "../ipc";
 import { FileTree } from "../components/FileTree";
 import { TransferDropZone } from "../components/ssh/TransferDropZone";
 import { useFileWatcher, getWatchPath } from "../hooks/useFileWatcher";
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 import { useRepoCapabilities } from "../hooks/useRepoCapabilities";
+import { useFileTransfers } from "../hooks/useFileTransfers";
 
 interface Props {
   repo: OpenRepo;
@@ -21,9 +22,6 @@ interface Props {
   onRefreshGitStatus?: () => void;
   /** Hydration state map keyed by path, for tree decorations. */
   hydrationByPath?: Map<string, HydrationEntry>;
-  /** Fired after hydrate/dehydrate finishes so hydration state can
-   *  be refreshed by the owning container. */
-  onHydrateComplete?: () => void;
 }
 
 /**
@@ -44,10 +42,9 @@ export const ExplorerView = memo(function ExplorerView({
   gitStatus,
   onRefreshGitStatus,
   hydrationByPath,
-  onHydrateComplete,
 }: Props) {
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
 
   const [refs, setRefs] = useState<RefEntry[] | null>(null);
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
@@ -61,14 +58,19 @@ export const ExplorerView = memo(function ExplorerView({
 
   // Capability-based gating for file operations (create/rename/delete).
   const { canEdit } = useRepoCapabilities();
+  const transfers = useFileTransfers(repo, rev === null);
+  const fileTransfers = useMemo(() => ({
+    hydrate: transfers.hydrate ? (paths: string[]) => transfers.hydrate!({ kind: "custom", paths }) : undefined,
+    dehydrate: transfers.dehydrate ? (paths: string[]) => transfers.dehydrate!({ kind: "custom", paths }) : undefined,
+  }), [transfers]);
 
   // Resolve the repo root filesystem path for file operations.
   // Local repos use repo.path; remote repos extract the path from repo_id.
   const repoRootPath = useMemo(() => {
-    if (repo.path) return repo.path;
     if (repo.is_remote && repo.repo_id.startsWith("ssh://")) {
       return repo.repo_id.slice(repo.repo_id.indexOf("/", "ssh://".length));
     }
+    if (repo.path) return repo.path;
     return undefined;
   }, [repo.path, repo.is_remote, repo.repo_id]);
 
@@ -165,18 +167,22 @@ export const ExplorerView = memo(function ExplorerView({
   }, [repoPath]);
 
   useEffect(() => {
+    let cancelled = false;
     setRefs(null);
+    if (!repo.native_session_id) return;
     rpc
       .listRefs(repo.repo_id)
-      .then((r) => setRefs(r.refs))
-      .catch(() => setRefs([]));
-  }, [repo.repo_id]);
+      .then((r) => { if (!cancelled) setRefs(r.refs); })
+      .catch(() => { if (!cancelled) setRefs([]); });
+    return () => { cancelled = true; };
+  }, [repo.repo_id, repo.native_session_id]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setEntries(null);
+    if (!repo.native_session_id) { setLoading(false); return; }
 
     (async () => {
       // Peel annotated tags to a commit before listing: the SDK's
@@ -206,7 +212,7 @@ export const ExplorerView = memo(function ExplorerView({
     return () => {
       cancelled = true;
     };
-  }, [repo.repo_id, rev]);
+  }, [repo.repo_id, repo.native_session_id, rev]);
 
   const branches = useMemo(() => refs?.filter((r) => r.kind === "branch") ?? [], [refs]);
   const tags = useMemo(() => refs?.filter((r) => r.kind === "tag") ?? [], [refs]);
@@ -467,8 +473,8 @@ export const ExplorerView = memo(function ExplorerView({
               entries={filtered}
               gitStatus={gitStatus}
               hydrationByPath={hydrationByPath}
+              fileTransfers={fileTransfers}
               onOpenFile={onOpenFile}
-              onHydrateComplete={onHydrateComplete}
               workspacePath={repoRootPath}
               repoId={repo.repo_id}
               canEdit={canEdit}

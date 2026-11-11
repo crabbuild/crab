@@ -42,6 +42,7 @@ import type { SshProfile } from "../components/ssh/ssh-profile-types";
  */
 export function SshView() {
   const { state, dispatch } = useStore();
+  const [openError, setOpenError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<SshProfile[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<SshProfile | null>(null);
@@ -154,6 +155,15 @@ export function SshView() {
     } catch {
       // Error handled via IPC events
     }
+  }
+
+  async function handleOpenRepository(profileId: string, remotePath: string) {
+    setOpenError(null);
+    try {
+      if (!window.crab) throw new Error("SSH requires the desktop application");
+      const handle = await window.crab.ssh.openAsRepo(profileId, remotePath);
+      window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: handle.repo_id } }));
+    } catch (error) { setOpenError(error instanceof Error ? error.message : String(error)); }
   }
 
   async function handleDisconnect(profileId: string) {
@@ -447,6 +457,7 @@ export function SshView() {
                 </button>
               </div>
             </header>
+            {openError && <p role="alert" className="px-3 py-2 text-sm text-red-500">{openError}</p>}
             {/* Deploy progress + sync transfer progress */}
             <div className="shrink-0 px-3">
               <DeployProgressIndicator profileId={profile.id} />
@@ -460,6 +471,7 @@ export function SshView() {
                   profileLabel={profile.label}
                   profileColour={profile.colour}
                   initialPath={profile.remotePath || "/"}
+                  onOpenRepo={handleOpenRepository}
                   onOpenTerminal={(pid, path) => {
                     window.dispatchEvent(new CustomEvent("crab:open-ssh-terminal-here", {
                       detail: { profileId: pid, hostname: profile.host, cwd: path, colour: profile.colour },

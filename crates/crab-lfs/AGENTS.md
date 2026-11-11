@@ -14,9 +14,10 @@ migration and VFS pointer publication.
 ## Read first
 
 1. `crates/crab-lfs/src/lib.rs` — payload and lock entry points.
-2. `crates/crab-lfs/src/object_store.rs` — `LfsObjectStore`: upload/download integrity and receipts.
-3. `crates/crab-lfs/src/object_store/origin.rs` — `inspect`: fresh bounded origin verification.
-4. `crates/crab-lfs/src/lock.rs` — `LfsLockManager::unlock_with_id`: holder identity and CAS tombstones.
+2. `crates/crab-lfs/src/read_cache.rs` and `read_session.rs` — bounded proof retention and independently drained verification jobs.
+3. `crates/crab-lfs/src/object_store.rs` — `LfsObjectStore`: upload/download integrity and receipts.
+4. `crates/crab-lfs/src/object_store/origin.rs` — `inspect`: fresh bounded origin verification.
+5. `crates/crab-lfs/src/lock.rs` — `LfsLockManager::unlock_with_id`: holder identity and CAS tombstones.
 
 Trace one transfer path: `crab/src/lfs/transfer_agent.rs` →
 `LfsObjectStore::put_stream_with_size` in
@@ -38,8 +39,8 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
 
 ## Invariants
 
-- Bind a receipt to the metadata returned with verified bytes, never a later
-  HEAD. Serving a second response requires matching strong ETag/version identity;
+- Bind a receipt to the canonical transport and metadata returned with verified
+  bytes, never a later HEAD. Routed/unbound reads cannot reuse canonical receipts. Serving a second response requires matching strong ETag/version identity;
   old verifier receipts cannot establish that proof.
   Source: `crates/crab-lfs/src/object_store.rs`.
 
@@ -57,9 +58,16 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
   every covered block; metadata/path identity alone is insufficient. Cache
   pressure evicts only inactive claims; unretained reads still verify fully.
   A failed read clears its proof for later repair without selecting remote in
-  that call. Close drains jobs and releases sources. This is not a durable GC pin.
+  that call. Operation-session close drains jobs and releases its cache claim;
+  the last cache owner releases retained sources. Native query acknowledgements
+  follow per-operation drain. This is not a durable GC pin.
   Only open-time absence may select remote. Resolve Git settings outside data
   callbacks. Tracked jobs retain global verification admission after cancellation.
+- Remote read-proof retention requires a bound canonical transport and fresh
+  matching HEAD metadata. GET delivery still matches that verified validator;
+  store incarnation, target, key and SHA-256 cannot cross cache authority.
+  Routed/unbound reads keep fresh verification. Full reads retain only verified
+  response metadata at EOF, never a later HEAD. No read writes receipts.
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.

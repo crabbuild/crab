@@ -14,6 +14,8 @@ import { PassThrough } from "node:stream";
 import type { AgentEvent } from "../electron/orchestrator-adapters";
 
 // Mock child_process.spawn before importing the adapter.
+vi.mock("shell-env", () => ({ shellEnv: async () => ({ ...process.env }) }));
+
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),
@@ -123,7 +125,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
       const events: AgentEvent[] = [];
       adapter.onEvent((e) => events.push(e));
 
-      adapter.spawn("Hello backpressure test", "/tmp/bp-test");
+      await adapter.spawn("Hello backpressure test", "/tmp/bp-test");
 
       // Complete the handshake (uses real-ish timing via advanceTimersByTimeAsync)
       // Step 1: initialize
@@ -225,7 +227,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
       const events: AgentEvent[] = [];
       adapter.onEvent((e) => events.push(e));
 
-      adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust");
+      await adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust");
 
       // Complete handshake
       // Step 1: initialize

@@ -99,8 +99,7 @@ export function HydrateScopePicker({
       <div className="rounded border border-gx-border bg-gx-bg-sub p-3">
         {scope.kind === "all" && (
           <p className="text-xs text-gx-muted">
-            All tracked files across the repository. Same as{" "}
-            <code className="kbd">crab hydrate --all</code>.
+            All Crab and Git LFS files in the repository.
           </p>
         )}
 

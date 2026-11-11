@@ -11,16 +11,22 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::repository::{BrowseSession, BrowserEntry, ContentKind, EntryKind, FileMetadata};
+use crate::repository::{BrowseSession, BrowserEntry, EntryKind, FileMetadata};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 use tracing::info;
 
 use crate::{
     AgentError, Result, SharedStdout, cancel::CancelRegistry, git_hunks, indexer, preview,
     rpc::Request, shellout,
 };
+
+mod file_write;
+mod lifecycle;
+mod local_filters;
+mod materialize;
+mod track;
 
 /// Shared state across dispatch tasks. Holds the map of open
 /// repositories keyed by a desktop-assigned id.
@@ -29,6 +35,7 @@ pub struct State {
     #[cfg(unix)]
     pub(crate) native_processes: crate::native_process::NativeProcesses,
     repos: Arc<RwLock<HashMap<String, OpenRepo>>>,
+    lifecycle: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Channel to the background indexer. `None` when the indexer is
     /// disabled or hasn't been spawned yet.
     indexer_tx: Arc<RwLock<Option<mpsc::Sender<indexer::IndexerCommand>>>>,
@@ -55,6 +62,7 @@ impl State {
             #[cfg(unix)]
             native_processes: crate::native_process::NativeProcesses::default(),
             repos: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle: Arc::default(),
             indexer_tx: Arc::new(RwLock::new(None)),
             cancel_registry: CancelRegistry::new(),
             watch_sets: Arc::new(RwLock::new(HashMap::new())),
@@ -93,6 +101,17 @@ impl State {
             .insert(id, OpenRepo { handle, work_dir });
     }
 
+    async fn repository_lifecycle(&self, id: &str) -> OwnedMutexGuard<()> {
+        let owner = {
+            let mut owners = self.lifecycle.lock().await;
+            owners.retain(|_, owner| Arc::strong_count(owner) > 1);
+            owners.entry(id.to_owned()).or_default().clone()
+        };
+        // Replacement and release share admission. Dropping an initialized
+        // session into the map must never overwrite an owner still closing.
+        owner.lock_owned().await
+    }
+
     async fn remove(&self, id: &str) -> Result<()> {
         let repo = self.repos.write().await.remove(id);
         if let Some(repo) = repo {
@@ -114,6 +133,12 @@ impl State {
             }
         }
         result
+    }
+
+    pub(crate) async fn stop_reads(&self) {
+        for repo in self.repos.read().await.values() {
+            repo.handle.stop_reads();
+        }
     }
 
     /// Store a [`WatchSet`] for a repo so worktree handlers can
@@ -142,95 +167,89 @@ pub async fn handle(state: &State, mut req: Request, out: SharedStdout) -> Resul
     crate::storage_auth::scope(auth, handle_request(state, req, out)).await
 }
 
+// Keep discovery and dispatch in one table so an advertised method always has
+// a handler. Session bootstrap uses this before any repository is opened.
+macro_rules! dispatch_methods {
+    ($method:expr, $( $(#[$attribute:meta])* $name:literal => $work:expr ),* $(,)?) => {
+        match $method {
+            "capabilities" => {
+                const METHODS: &[&str] = &["capabilities", $( $(#[$attribute])* $name ),*];
+                Ok(json!({
+                    "protocol": 1,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "methods": METHODS,
+                }))
+            },
+            $( $(#[$attribute])* $name => $work, )*
+            other => Err(AgentError::UnknownMethod(other.to_owned())),
+        }
+    };
+}
+
 async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Result<Value> {
     let Request { method, params, .. } = req;
     crate::storage_auth::validate_target(state, &method, &params).await?;
-    match method.as_str() {
+    dispatch_methods! { method.as_str(),
         #[cfg(unix)]
-        "native_process_open" => {
-            state
-                .native_processes
-                .open(decode(&method, params)?, out)
-                .await
-        }
+        "native_process_open" => state.native_processes.open(decode(&method, params)?, out).await,
         #[cfg(unix)]
         "native_process_write" => state.native_processes.write(decode(&method, params)?).await,
         #[cfg(unix)]
-        "native_process_close_input" => {
-            state
-                .native_processes
-                .close_input(decode(&method, params)?)
-                .await
-        }
+        "native_process_close_input" => state.native_processes.close_input(decode(&method, params)?).await,
         #[cfg(unix)]
         "native_process_ack" => state.native_processes.ack(decode(&method, params)?).await,
         #[cfg(unix)]
         "native_process_stop" => state.native_processes.stop(decode(&method, params)?).await,
         #[cfg(unix)]
-        "native_process_release" => {
-            state
-                .native_processes
-                .release(decode(&method, params)?)
-                .await
-        }
+        "native_process_release" => state.native_processes.release(decode(&method, params)?).await,
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
-        // These flags describe the extended SSH services, whose wire handlers
-        // are not implemented yet. Basic repository RPCs remain available.
-        "capabilities" => Ok(json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "features": {
-                "fileWatching": false,
-                "deltaSync": false,
-                "compression": false,
-                "processManagement": false,
-                "environmentManagement": false,
-                "debugging": false,
-                "search": false,
-                "buildRun": false,
-                "logTailing": false,
-            },
-        })),
         "managed_profiles" => crate::managed_service::profiles(),
         "managed_select_profile" => {
             crate::managed_service::select_profile(decode(&method, params)?)
-        }
+        },
         "managed_login" => crate::managed_service::login(decode(&method, params)?, out).await,
         "managed_organizations" => {
             crate::managed_service::organizations(decode(&method, params)?).await
-        }
+        },
         "managed_repositories" => {
             crate::managed_service::repositories(decode(&method, params)?).await
-        }
+        },
         "managed_create_repository" => {
             crate::managed_service::create_repository(decode(&method, params)?).await
-        }
-        "open_local" => open_local(state, decode(&method, params)?).await,
-        "open_url" => open_url(state, decode(&method, params)?).await,
-        "close" => close(state, decode(&method, params)?).await,
+        },
+        "open_local" => lifecycle::open_local(state, decode(&method, params)?).await,
+        "open_url" => lifecycle::open_url(state, decode(&method, params)?).await,
+        "close" => lifecycle::close(state, decode(&method, params)?).await,
         "auth_status" => auth_status(state, decode(&method, params)?).await,
         "list" => list(state, decode(&method, params)?, out).await,
         "list_refs" => list_refs(state, decode(&method, params)?).await,
         "stat" => stat(state, decode(&method, params)?).await,
-        "pointer_info" => pointer_info(state, decode(&method, params)?).await,
+        "file_open" => file_open(state, decode(&method, params)?).await,
+        "file_chunks" => file_chunks(state, decode(&method, params)?).await,
+        "file_close" => file_close(state, decode(&method, params)?).await,
+        "file_materialize" => materialize::one(state, decode(&method, params)?, out).await,
+        "files_materialize" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Hydrate).await,
+        "files_dehydrate" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Dehydrate).await,
+        "files_restore" => materialize::many(state, decode(&method, params)?, out, materialize::Direction::Restore).await,
         "read_text" => read_text(state, decode(&method, params)?).await,
         "read_bytes" => read_bytes(state, decode(&method, params)?).await,
         "read_range" => read_range(state, decode(&method, params)?).await,
         "preview_parquet" => preview_parquet(state, decode(&method, params)?).await,
         "preview_safetensors" => {
             preview_fmt(state, decode(&method, params)?, preview::safetensors).await
-        }
+        },
         "preview_npy" => preview_fmt(state, decode(&method, params)?, preview::numpy_npy).await,
         "preview_npz" => preview_fmt(state, decode(&method, params)?, preview::numpy_npz).await,
         "preview_zip" => preview_fmt(state, decode(&method, params)?, preview::zip_archive).await,
         "preview_notebook_meta" => {
             preview_fmt(state, decode(&method, params)?, preview::notebook_meta).await
-        }
+        },
         "preview_torch_checkpoint" => {
             preview_fmt(state, decode(&method, params)?, preview::torch_checkpoint).await
-        }
+        },
         "repo_summary" => repo_summary(state, decode(&method, params)?, out).await,
         "git_status_porcelain" => git_status_porcelain(state, decode(&method, params)?).await,
-        "git_diff_file" => git_diff_file(state, decode(&method, params)?).await,
+        "file_diff" => file_diff(state, decode(&method, params)?).await,
         "git_grep" => git_grep(state, decode(&method, params)?).await,
         "search_replace" => search_replace(state, decode(&method, params)?).await,
         "git_log" => git_log(state, decode(&method, params)?).await,
@@ -247,7 +266,15 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::git_commit::GitCommitParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_commit::git_commit(&work_dir, &p).await
-        }
+        },
+        "git_commit_paths" => {
+            let p: crate::git_commit::GitCommitParams = decode(&method, params)?;
+            if p.paths.is_none() {
+                return Err(AgentError::Other("Select the files to commit".into()));
+            }
+            let work_dir = state.get_work_dir(&p.repo_id).await?;
+            crate::git_commit::git_commit(&work_dir, &p).await
+        },
         "git_diff_index_patch" => git_diff_index_patch(state, decode(&method, params)?).await,
         "git_diff_cached_patch" => git_diff_cached_patch(state, decode(&method, params)?).await,
         "git_apply_patch" => git_apply_patch(state, decode(&method, params)?).await,
@@ -257,64 +284,72 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "git_add_paths" => git_add_paths(state, decode(&method, params)?).await,
         "git_reset_paths" => git_reset_paths(state, decode(&method, params)?).await,
         "resolve_ref" => resolve_ref(state, decode(&method, params)?).await,
-        "crab_diff_file" => crab_diff_file(state, decode(&method, params)?).await,
         "hydration_status" => hydration_status(state, decode(&method, params)?).await,
         "about" => about().await,
         "agent_health" => agent_health().await,
-        "cache_clear" => cache_clear().await,
+        "cache_stats" => {
+            cache_operation(
+                state,
+                decode(&method, params)?,
+                crate::cache::Operation::Stats,
+            )
+            .await
+        },
+        "cache_clean" => {
+            let params: CacheParams = decode(&method, params)?;
+            let operation = crate::cache::Operation::Clean {
+                dry_run: params.dry_run,
+            };
+            cache_operation(state, params, operation).await
+        },
         "clone" => clone_repo(decode(&method, params)?, out).await,
         "status" => status(decode(&method, params)?, out).await,
         "hydrate" => hydrate(decode(&method, params)?, out).await,
         "dehydrate" => dehydrate(decode(&method, params)?, out).await,
         "push" => push(decode(&method, params)?, out).await,
         "add" => add(decode(&method, params)?, out).await,
-        "crab_add_auto" => {
-            let p: CrabAddAutoParams = decode(&method, params)?;
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            crab_add_auto(&work_dir, p).await
-        }
         "crab_track_and_add" => {
-            let p: CrabTrackAndAddParams = decode(&method, params)?;
+            let p: track::Params = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
-            crab_track_and_add(&work_dir, p).await
-        }
+            track::run(&work_dir, p).await
+        },
         "crab_add_structured" => {
             let p: CrabAddStructuredParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             let job_id = p.job_id.clone();
             run_cancellable(state, Some(job_id), crab_add_structured(&work_dir, p, out)).await
-        }
+        },
         "crab_push_structured" => {
             let p: CrabPushStructuredParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             let job_id = p.job_id.clone();
             run_cancellable(state, Some(job_id), crab_push_structured(&work_dir, p, out)).await
-        }
+        },
         "staging_stats" => {
             let p: StagingStatsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             staging_stats(&work_dir).await
-        }
+        },
         "staging_clean" => {
             let p: StagingCleanParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             staging_clean(&work_dir, p.prune_abandoned).await
-        }
+        },
         "crab_reset_files" => {
             let p: CrabResetFilesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_reset_files(&work_dir, &p.paths).await
-        }
+        },
         "crab_init" => {
             let p: CrabInitParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crab_init(&work_dir, p).await
-        }
+        },
         "storage_config_get" => {
             let p: RepoIdParams = decode(&method, params)?;
             let repo = state.get(&p.repo_id).await?;
             crate::storage_auth::repository_config(repo.work_dir.as_deref(), &repo.url).await
-        }
+        },
         "storage_config_verify" => {
             let p: StorageVerifyParams = decode(&method, params)?;
             let repo = state.get(&p.repo_id).await?;
@@ -324,142 +359,142 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 p.remote.as_deref(),
             )
             .await
-        }
+        },
         "storage_connection_test" => crate::storage_auth::test_connection().await,
         "git_checkout" => {
             let p: crate::git_branches::CheckoutParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_checkout(&work_dir, &p).await
-        }
+        },
         "git_branch_create" => {
             let p: crate::git_branches::BranchCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_create(&work_dir, &p).await
-        }
+        },
         "git_branch_delete" => {
             let p: crate::git_branches::BranchDeleteParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_delete(&work_dir, &p).await
-        }
+        },
         "git_branch_rename" => {
             let p: crate::git_branches::BranchRenameParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_branch_rename(&work_dir, &p).await
-        }
+        },
         "git_set_upstream" => {
             let p: crate::git_branches::SetUpstreamParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_branches::git_set_upstream(&work_dir, &p).await
-        }
+        },
         "git_worktree_list" => {
             let p: crate::git_worktree::WorktreeListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_list(&work_dir).await
-        }
+        },
         "git_worktree_add" => {
             let p: crate::git_worktree::WorktreeAddParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_add(&work_dir, &p).await
-        }
+        },
         "git_worktree_remove" => {
             let p: crate::git_worktree::WorktreeRemoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_remove(&work_dir, &p).await
-        }
+        },
         "git_worktree_move" => {
             let p: crate::git_worktree::WorktreeMoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_move(&work_dir, &p).await
-        }
+        },
         "git_worktree_prune" => {
             let p: crate::git_worktree::WorktreePruneParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_prune(&work_dir, &p).await
-        }
+        },
         "git_worktree_lock" => {
             let p: crate::git_worktree::WorktreeLockParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_lock(&work_dir, &p).await
-        }
+        },
         "git_worktree_unlock" => {
             let p: crate::git_worktree::WorktreeUnlockParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_unlock(&work_dir, &p).await
-        }
+        },
         "git_worktree_repair" => {
             let p: crate::git_worktree::WorktreeRepairParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_worktree::git_worktree_repair(&work_dir, &p).await
-        }
+        },
         "worktree_list" => {
             let p: WorktreeListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_list(&work_dir).await
-        }
+        },
         "worktree_add" => {
             let p: WorktreeAddManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_add(state, &work_dir, p).await
-        }
+        },
         "worktree_remove" => {
             let p: WorktreeRemoveManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_remove(state, &work_dir, p).await
-        }
+        },
         "worktree_move" => {
             let p: WorktreeMoveManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_move(&work_dir, p).await
-        }
+        },
         "worktree_lock" => {
             let p: WorktreeLockManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_lock(&work_dir, p).await
-        }
+        },
         "worktree_unlock" => {
             let p: WorktreeUnlockManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_unlock(&work_dir, p).await
-        }
+        },
         "worktree_prune" => {
             let p: WorktreePruneManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_prune(&work_dir).await
-        }
+        },
         "worktree_repair" => {
             let p: WorktreeRepairManagerParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_repair(&work_dir, p).await
-        }
+        },
         "worktree_status" => {
             let p: WorktreeStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_status(&work_dir, p).await
-        }
+        },
         "worktree_set_meta" => {
             let p: WorktreeSetMetaParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_set_meta(&work_dir, p).await
-        }
+        },
         "worktree_push_estimate" => {
             let p: WorktreePushEstimateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_push_estimate(&work_dir, p).await
-        }
+        },
         "worktree_create" => {
             let p: WorktreeCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_create(&work_dir, p).await
-        }
+        },
         "worktree_destroy" => {
             let p: WorktreeDestroyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             worktree_destroy(&work_dir, p).await
-        }
+        },
         "task_compute_diff" => {
             let p: crate::task_diff::Params = decode(&method, params)?;
             crate::task_diff::compare(p).await
-        }
+        },
         "task_apply" => {
             let p: TaskApplyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -467,16 +502,16 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             return state.native_processes.apply(work_dir, p).await;
             #[cfg(not(unix))]
             task_apply(&work_dir, p).await
-        }
+        },
         "task_discard" => {
             let p: TaskDiscardParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             task_discard(&work_dir, p).await
-        }
+        },
         "task_check_orphaned" => {
             let p: TaskCheckOrphanedParams = decode(&method, params)?;
             task_check_orphaned(p).await
-        }
+        },
         "git_tag_add" => git_tag_add(state, decode(&method, params)?).await,
         "git_tag_delete" => git_tag_delete(state, decode(&method, params)?).await,
         "git_cherry_pick" => git_cherry_pick(state, decode(&method, params)?).await,
@@ -493,32 +528,32 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::git_remote::FetchAllParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_fetch_all(&work_dir, &p).await
-        }
+        },
         "git_pull_mode" => {
             let p: crate::git_remote::PullParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_pull(&work_dir, &p).await
-        }
+        },
         "git_push_remote" => {
             let p: crate::git_remote::PushParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_push(&work_dir, &p).await
-        }
+        },
         "git_remote_add" => {
             let p: crate::git_remote::RemoteAddParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_add(&work_dir, &p).await
-        }
+        },
         "git_remote_remove" => {
             let p: crate::git_remote::RemoteRemoveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_remove(&work_dir, &p).await
-        }
+        },
         "git_remote_set_url" => {
             let p: crate::git_remote::RemoteSetUrlParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::git_remote::git_remote_set_url(&work_dir, &p).await
-        }
+        },
         "git_config_get" => git_config_get(state, decode(&method, params)?).await,
         "git_activity" => git_activity(state, decode(&method, params)?).await,
         "git_contributors" => git_contributors(state, decode(&method, params)?).await,
@@ -526,7 +561,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
         "git_commit_frequency" => git_commit_frequency(state, decode(&method, params)?).await,
         "git_code_frequency" => git_code_frequency(state, decode(&method, params)?).await,
         "preview_sqlite" => preview_sqlite(state, decode(&method, params)?).await,
-        "duckdb_query" => duckdb_query(state, decode(&method, params)?).await,
+        "file_query" => file_query(state, decode(&method, params)?).await,
         "preview_onnx" => preview_onnx(state, decode(&method, params)?).await,
         "preview_hdf5" => preview_hdf5(state, decode(&method, params)?).await,
         "preview_protobuf" => preview_protobuf(state, decode(&method, params)?).await,
@@ -538,45 +573,45 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::ops::handlers::OpStartParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_start(&work_dir, p).await
-        }
+        },
         "op_continue" => {
             let p: crate::ops::handlers::OpContinueParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_continue(&work_dir, p).await
-        }
+        },
         "op_abort" => {
             let p: crate::ops::handlers::OpAbortParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_abort(&work_dir, p).await
-        }
+        },
         "op_status" => {
             let p: crate::ops::handlers::OpStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_status(&work_dir, p).await
-        }
+        },
         "op_edit_todo" => {
             let p: crate::ops::handlers::OpEditTodoParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::ops::handlers::op_edit_todo(&work_dir, p).await
-        }
+        },
         "conflict_list" => {
             let p: crate::conflicts::ConflictListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::conflict_list(&work_dir).await
-        }
+        },
         "conflict_read_sides" => {
             let p: crate::conflicts::ConflictReadSidesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::conflict_read_sides(&work_dir, &p).await
-        }
+        },
         "git_apply_resolution" => {
             let p: crate::conflicts::ApplyResolutionParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::conflicts::git_apply_resolution(&work_dir, &p).await
-        }
+        },
         "experiments_runs_for_commit" => {
             experiments_runs_for_commit(decode(&method, params)?).await
-        }
+        },
         "experiments_runs_recent" => experiments_runs_recent(decode(&method, params)?).await,
         "experiments_run_detail" => experiments_run_detail(decode(&method, params)?).await,
         "experiments_configure" => experiments_configure(decode(&method, params)?).await,
@@ -584,7 +619,7 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             let p: crate::notebook_strip::NotebookStripParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::notebook_strip::notebook_strip_outputs(&work_dir, &p).await
-        }
+        },
         "storage_summary" => {
             let p: RepoIdParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -593,13 +628,13 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 shellout::run_json(Some(&work_dir), &["metadb", "diagnose", "--json"], &[]),
             )?;
             Ok(json!({ "usage": usage, "metadata": metadata }))
-        }
+        },
         "indexer_status" => indexer_status(state).await,
         "rpc/cancel" => rpc_cancel(state, decode(&method, params)?).await,
         "forge_auth_start" => {
             let p: crate::forge::auth::ForgeAuthStartParams = decode(&method, params)?;
             crate::forge::auth::forge_auth_start(p, out).await
-        }
+        },
         "auth_token_updated" => {
             // Called by the main process after successfully storing an
             // OAuth token in the keychain. The agent can use this to
@@ -615,67 +650,67 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
             )
             .await?;
             Ok(json!({ "ok": true }))
-        }
+        },
         "forge_list_prs" => {
             let p: crate::forge::handlers::ForgeListPrsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_prs(&work_dir).await
-        }
+        },
         "forge_create_pr" => {
             let p: crate::forge::handlers::ForgeCreatePrParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_create_pr(&work_dir, p).await
-        }
+        },
         "forge_pr_detail" => {
             let p: crate::forge::handlers::ForgePrDetailParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_pr_detail(&work_dir, p).await
-        }
+        },
         "forge_pr_comment" => {
             let p: crate::forge::handlers::ForgePrCommentParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_pr_comment(&work_dir, p).await
-        }
+        },
         "forge_submit_review" => {
             let p: crate::forge::handlers::ForgeSubmitReviewParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_submit_review(&work_dir, p).await
-        }
+        },
         "forge_list_checks" => {
             let p: crate::forge::handlers::ForgeListChecksParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_checks(&work_dir, p).await
-        }
+        },
         "forge_list_issues" => {
             let p: crate::forge::handlers::ForgeListIssuesParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::forge::handlers::forge_list_issues(&work_dir, p).await
-        }
+        },
         "workflow_list" => {
             let p: crate::workflow::WorkflowListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_list(&work_dir).await
-        }
+        },
         "workflow_get" => {
             let p: crate::workflow::WorkflowGetParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_get(&work_dir, p).await
-        }
+        },
         "workflow_save" => {
             let p: crate::workflow::WorkflowSaveParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_save(&work_dir, p).await
-        }
+        },
         "workflow_create" => {
             let p: crate::workflow::WorkflowCreateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_create(&work_dir, p).await
-        }
+        },
         "workflow_delete" => {
             let p: crate::workflow::WorkflowDeleteParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_delete(&work_dir, p).await
-        }
+        },
         "workflow_run" => {
             let p: crate::workflow::WorkflowRunParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -686,96 +721,95 @@ async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Resul
                 crate::workflow::workflow_run(&work_dir, p, out),
             )
             .await
-        }
+        },
         "workflow_cancel" => {
             let p: crate::workflow::WorkflowCancelParams = decode(&method, params)?;
             state.get_work_dir(&p.repo_id).await?;
             Ok(json!({ "cancelled": state.cancel_registry.cancel(&p.run_id).await }))
-        }
+        },
         "workflow_validate" => {
             let p: crate::workflow::WorkflowValidateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_validate(&work_dir, p).await
-        }
+        },
         // ── SDK-backed workflow builder verbs ────────────────────────
         "workflow_status" => {
             let p: crate::workflow::WorkflowStatusParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_status(&work_dir, p).await
-        }
+        },
         "workflow_dag" => {
             let p: crate::workflow::WorkflowDagParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_dag(&work_dir, p).await
-        }
+        },
         "workflow_resolve_template" => {
             let p: crate::workflow::WorkflowResolveTemplateParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_resolve_template(&work_dir, p).await
-        }
+        },
         "workflow_template_completions" => {
             let p: crate::workflow::WorkflowTemplateCompletionsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_template_completions(&work_dir, p).await
-        }
+        },
         "workflow_exp_list" => {
             let p: crate::workflow::WorkflowExpListParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_list(&work_dir).await
-        }
+        },
         "workflow_exp_enqueue" => {
             let p: crate::workflow::WorkflowExpEnqueueParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_enqueue(&work_dir, p).await
-        }
+        },
         "workflow_exp_start" => {
             let p: crate::workflow::WorkflowExpStartParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_start(&work_dir, p, out).await
-        }
+        },
         "workflow_exp_stop" => {
             let p: crate::workflow::WorkflowExpStopParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_exp_stop(&work_dir).await
-        }
+        },
         "workflow_migrate_preview" => {
             let p: crate::workflow::WorkflowMigratePreviewParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_migrate_preview(&work_dir, p).await
-        }
+        },
         "workflow_migrate_apply" => {
             let p: crate::workflow::WorkflowMigrateApplyParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             crate::workflow::workflow_migrate_apply(&work_dir, p).await
-        }
+        },
         "write_text" => write_text(state, decode(&method, params)?).await,
         "write_bytes" => write_bytes(state, decode(&method, params)?).await,
         "dedup_savings" => {
             let p: DedupSavingsParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
             dedup_savings(&work_dir, p).await
-        }
+        },
         "git_release_timeline" => git_release_timeline(state, decode(&method, params)?).await,
         "repo_size_history" => repo_size_history(state, decode(&method, params)?).await,
         "git_commit_size_distribution" => {
             git_commit_size_distribution(state, decode(&method, params)?).await
-        }
+        },
         "git_contributor_growth" => git_contributor_growth(state, decode(&method, params)?).await,
         "git_blame" => git_blame(state, decode(&method, params)?).await,
         "git_diff_name_only" => git_diff_name_only(state, decode(&method, params)?).await,
         "system_health" => {
             let p: crate::system_health::SystemHealthParams = decode(&method, params)?;
             crate::system_health::system_health(p).await
-        }
+        },
         "discover_repos" => {
             let p: crate::workspace_discovery::DiscoverReposParams = decode(&method, params)?;
             crate::workspace_discovery::discover_repos(p).await
-        }
+        },
         "batch_git_status" => {
             let p: crate::batch_git_status::BatchGitStatusParams = decode(&method, params)?;
             crate::batch_git_status::batch_git_status(&state.git_status_cache, p).await
-        }
-        other => Err(AgentError::UnknownMethod(other.to_owned())),
+        },
     }
 }
 
@@ -819,7 +853,8 @@ where
     match op_id {
         None => work.await,
         Some(ref id) => {
-            let mut cancel_rx = state.cancel_registry.register(id.clone()).await;
+            let cancel_rx = state.cancel_registry.register(id.clone()).await;
+            tokio::pin!(cancel_rx);
             tokio::pin!(work);
             let result = tokio::select! {
                 biased;
@@ -835,52 +870,6 @@ where
 }
 
 // ---------------- SDK-backed handlers ----------------
-
-#[derive(Debug, Deserialize)]
-struct OpenLocalParams {
-    repo_id: String,
-    path: PathBuf,
-}
-
-async fn open_local(state: &State, p: OpenLocalParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    let repo = BrowseSession::open_local(&p.path).await?;
-    let url = repo.url.clone();
-    let cache_dir = "";
-    let work_dir = repo
-        .work_dir
-        .clone()
-        .ok_or_else(|| AgentError::Other("local repository has no working directory".into()))?;
-    state
-        .insert(p.repo_id.clone(), repo, Some(work_dir.clone()))
-        .await;
-
-    // Ensure the .crab/desktop/ on-disk layout exists with all
-    // expected files at Git's worktree root, even when opened from a subdirectory.
-    ensure_desktop_layout(&work_dir).await;
-
-    // Crash-resume: check for any in-flight ops so the renderer can
-    // show a resume banner immediately without a second RPC.
-    let active_op = find_active_op(&work_dir);
-
-    // Forge provider detection: manual override or auto-detect from
-    // remote URL. Runs async (may probe self-hosted instances).
-    // Also persists provider/owner/name to settings.json so that
-    // subsequent forge RPCs (list_prs, create_pr, etc.) can read them.
-    let detected_forge = crate::forge::detect::detect_and_persist(&work_dir).await;
-    let forge_provider = detected_forge.as_ref().map(|f| f.provider);
-
-    info!(repo_id = %p.repo_id, path = %p.path.display(), forge = ?forge_provider, "opened local repo");
-    Ok(json!({
-        "repo_id": p.repo_id,
-        "url": url,
-        "is_remote": false,
-        "cache_dir": cache_dir,
-        "work_dir": work_dir,
-        "active_op": active_op,
-        "forge_provider": forge_provider,
-    }))
-}
 
 /// Check the ops directory for any InProgress or Paused operation.
 /// Returns a JSON value with the op details, or `null` if none found.
@@ -961,28 +950,6 @@ async fn ensure_desktop_layout(work_dir: &std::path::Path) {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenUrlParams {
-    repo_id: String,
-    url: String,
-}
-
-async fn open_url(state: &State, p: OpenUrlParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    let repo = BrowseSession::open_url(&p.url).await?;
-    let url = repo.url.clone();
-    let is_remote = repo.work_dir.is_none();
-    let cache_dir = "";
-    state.insert(p.repo_id.clone(), repo, None).await;
-    info!(repo_id = %p.repo_id, url = %p.url, "opened url repo");
-    Ok(json!({
-        "repo_id": p.repo_id,
-        "url": url,
-        "is_remote": is_remote,
-        "cache_dir": cache_dir,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
 struct RepoIdParams {
     repo_id: String,
 }
@@ -1001,11 +968,6 @@ struct ListRefsParams {
     /// upper bound — callers that want all refs simply omit this.
     #[serde(default)]
     max: Option<usize>,
-}
-
-async fn close(state: &State, p: RepoIdParams) -> Result<Value> {
-    state.remove(&p.repo_id).await?;
-    Ok(json!({ "closed": p.repo_id }))
 }
 
 async fn auth_status(state: &State, p: RepoIdParams) -> Result<Value> {
@@ -1115,7 +1077,7 @@ async fn list_refs(state: &State, p: ListRefsParams) -> Result<Value> {
     }
     cmd_args.extend(namespace_args);
 
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(&cmd_args)
         .current_dir(&work_dir)
         .output()
@@ -1237,19 +1199,10 @@ async fn stat(state: &State, p: StatParams) -> Result<Value> {
     }
 }
 
-async fn pointer_info(state: &State, p: StatParams) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    repo.pointer_info(&p.path, p.rev.as_deref()).await
-}
-
 #[derive(Debug, Deserialize)]
 struct ReadTextParams {
-    repo_id: String,
-    path: String,
-    #[serde(default)]
-    rev: Option<String>,
-    /// Cap on bytes returned to the UI. Defaults to 512 KiB so the
-    /// renderer can't accidentally DOS itself on a 4 GB pointer.
+    #[serde(flatten)]
+    file: PreviewParams,
     #[serde(default = "default_max_bytes")]
     max_bytes: usize,
 }
@@ -1259,66 +1212,15 @@ fn default_max_bytes() -> usize {
 }
 
 async fn read_text(state: &State, p: ReadTextParams) -> Result<Value> {
-    let repo = state.get(&p.repo_id).await?;
-    match repo.stat(&p.path, p.rev.as_deref()).await {
-        Ok(stat) => {
-            if stat.size as usize > p.max_bytes {
-                return Ok(json!({
-                    "truncated": true,
-                    "size": stat.size,
-                    "text": null,
-                    "reason": format!("file is {} bytes, limit is {}", stat.size, p.max_bytes),
-                }));
-            }
-            let text = repo.read_text(&p.path, p.rev.as_deref()).await?;
-            Ok(json!({
-                "truncated": false,
-                "size": stat.size,
-                "text": text,
-            }))
+    let maximum = p.max_bytes.min(crate::repository::MAX_COMPLETE_BYTES);
+    read_source(state, p.file, |source| async move {
+        if source.size > maximum as u64 {
+            return Ok(json!({ "truncated": true, "size": source.size, "text": null,
+                "reason": format!("file is {} bytes, limit is {maximum}", source.size) }));
         }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: file is untracked but may exist on disk.
-            read_text_from_worktree(state, &p).await
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Filesystem fallback for `read_text` when the SDK reports NotFound
-/// (untracked file). Reads directly from the working tree.
-async fn read_text_from_worktree(state: &State, p: &ReadTextParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::PathNotFound {
-            path: p.path.clone(),
-        });
-    }
-    let metadata = std::fs::metadata(&abs).map_err(AgentError::Io)?;
-    let size = metadata.len() as usize;
-    if size > p.max_bytes {
-        return Ok(json!({
-            "truncated": true,
-            "size": size,
-            "text": null,
-            "untracked": true,
-            "reason": format!("file is {} bytes, limit is {}", size, p.max_bytes),
-        }));
-    }
-    let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-    match String::from_utf8(bytes) {
-        Ok(text) => Ok(json!({
-            "truncated": false,
-            "size": size,
-            "text": text,
-            "untracked": true,
-        })),
-        Err(_) => Err(AgentError::Other(format!(
-            "file is not valid UTF-8: {}",
-            p.path
-        ))),
-    }
+        let bytes = source.read_complete(maximum).await?;
+        Ok(json!({ "truncated": false, "size": source.size, "text": String::from_utf8(bytes.to_vec())? }))
+    }).await
 }
 
 // ─── Worktree list (Pillar B) ────────────────────────────────────────
@@ -2173,7 +2075,7 @@ async fn check_agent_running_in_worktree(worktree_path: &str) -> bool {
 // ─── Task Apply/Discard Helpers ─────────────────────────────────────
 /// Run a git command in the given directory and return stdout.
 async fn run_git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
-    let mut command = shellout::git_command();
+    let mut command = shellout::git_command()?;
     let out = shellout::output(command.args(args).current_dir(cwd)).await?;
 
     if !out.status.success() {
@@ -2202,29 +2104,12 @@ struct WriteTextParams {
 /// Write text content to a file in the working tree.
 ///
 /// Only works for local repos (those with a `work_dir`). The file is
-/// written atomically (write to temp + rename) to avoid partial writes
-/// on crash. Parent directories are created if needed.
+/// published atomically with its existing permissions. Parent directories
+/// are created if needed; paths must resolve inside the working tree.
 async fn write_text(state: &State, p: WriteTextParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-
-    // Ensure parent directories exist.
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(AgentError::Io)?;
-    }
-
-    // Atomic write: write to a sibling temp file, then rename.
-    let tmp = abs.with_extension("crab-tmp");
-    tokio::fs::write(&tmp, p.content.as_bytes())
-        .await
-        .map_err(AgentError::Io)?;
-    tokio::fs::rename(&tmp, &abs)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let size = p.content.len();
+    let bytes = p.content.into_bytes();
+    let size = file_write::write(work_dir, p.path, bytes).await?;
     Ok(json!({ "written": true, "size": size }))
 }
 
@@ -2240,9 +2125,8 @@ struct WriteBytesParams {
 
 /// Write binary content (base64-encoded) to a file in the working tree.
 ///
-/// Same semantics as `write_text` — local repos only, atomic write,
-/// parent directories created as needed. The payload is decoded from
-/// base64 before writing.
+/// Same publication and path semantics as `write_text`. The payload is
+/// decoded from base64 before writing.
 async fn write_bytes(state: &State, p: WriteBytesParams) -> Result<Value> {
     use base64::Engine as _;
 
@@ -2251,165 +2135,52 @@ async fn write_bytes(state: &State, p: WriteBytesParams) -> Result<Value> {
         .map_err(|e| AgentError::Other(format!("invalid base64: {e}")))?;
 
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-
-    // Ensure parent directories exist.
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(AgentError::Io)?;
-    }
-
-    // Atomic write: write to a sibling temp file, then rename.
-    let tmp = abs.with_extension("crab-tmp");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(AgentError::Io)?;
-    tokio::fs::rename(&tmp, &abs)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let size = bytes.len();
+    let size = file_write::write(work_dir, p.path, bytes).await?;
     Ok(json!({ "written": true, "size": size }))
 }
 
-/// Read a file at `(path, rev)` as raw bytes, returned base64-encoded.
-///
-/// The editor UI calls this when a blob looks binary (no UTF-8 decode
-/// available) so it can render a hex preview or media panel without
-/// the text-path's lossy UTF-8 roundtrip. Same size cap as
-/// `read_text` — the ceiling is enforced here rather than trusting
-/// callers to check `stat` first.
 async fn read_bytes(state: &State, p: ReadTextParams) -> Result<Value> {
     use base64::Engine as _;
-
-    let repo = state.get(&p.repo_id).await?;
-    match repo.stat(&p.path, p.rev.as_deref()).await {
-        Ok(stat) => {
-            if stat.size as usize > p.max_bytes {
-                return Ok(json!({
-                    "truncated": true,
-                    "size": stat.size,
-                    "bytes_b64": null,
-                    "reason": format!("file is {} bytes, limit is {}", stat.size, p.max_bytes),
-                }));
-            }
-            let bytes = repo.read(&p.path, p.rev.as_deref()).await?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes.as_ref());
-            Ok(json!({
-                "truncated": false,
-                "size": stat.size,
-                "bytes_b64": encoded,
-            }))
+    let maximum = p.max_bytes.min(crate::repository::MAX_COMPLETE_BYTES);
+    read_source(state, p.file, |source| async move {
+        if source.size > maximum as u64 {
+            return Ok(
+                json!({ "truncated": true, "size": source.size, "bytes_b64": null,
+                "reason": format!("file is {} bytes, limit is {maximum}", source.size) }),
+            );
         }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: file is untracked but may exist on disk.
-            read_bytes_from_worktree(state, &p).await
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Filesystem fallback for `read_bytes` when the SDK reports NotFound
-/// (untracked file). Reads directly from the working tree.
-async fn read_bytes_from_worktree(state: &State, p: &ReadTextParams) -> Result<Value> {
-    use base64::Engine as _;
-
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::PathNotFound {
-            path: p.path.clone(),
-        });
-    }
-    let metadata = std::fs::metadata(&abs).map_err(AgentError::Io)?;
-    let size = metadata.len() as usize;
-    if size > p.max_bytes {
-        return Ok(json!({
-            "truncated": true,
-            "size": size,
-            "bytes_b64": null,
-            "untracked": true,
-            "reason": format!("file is {} bytes, limit is {}", size, p.max_bytes),
-        }));
-    }
-    let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(json!({
-        "truncated": false,
-        "size": size,
-        "bytes_b64": encoded,
-        "untracked": true,
-    }))
+        let bytes = source.read_complete(maximum).await?;
+        Ok(json!({ "truncated": false, "size": source.size,
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes) }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
 struct ReadRangeParams {
-    repo_id: String,
-    path: String,
+    #[serde(flatten)]
+    file: FileIdParams,
     offset: u64,
-    /// Cap at 8 MiB per request — large enough for a Parquet footer or
-    /// a thumbnail, small enough that the renderer stays responsive.
     length: u32,
-    #[serde(default)]
-    rev: Option<String>,
+    op_id: Option<String>,
 }
 
-/// Read a byte range from `(path, rev)`. Returns base64-encoded.
-///
-/// Implementation note: the SDK doesn't yet expose an origin-side
-/// range reader, so for now we read the full blob and slice. That
-/// makes this verb only useful for already-hydrated files; callers
-/// asking for a range on a pointer will get the full file fetched.
-/// The verb's signature is future-proof — when the SDK gains native
-/// range reads the implementation swaps without a breaking change.
 async fn read_range(state: &State, p: ReadRangeParams) -> Result<Value> {
     use base64::Engine as _;
 
     if p.length > 8 * 1024 * 1024 {
-        return Err(AgentError::Other(format!(
-            "read_range length {} exceeds 8 MiB cap",
-            p.length
-        )));
+        return Err(AgentError::Other("read_range length exceeds 8 MiB".into()));
     }
-    let repo = state.get(&p.repo_id).await?;
-    match repo.read(&p.path, p.rev.as_deref()).await {
-        Ok(bytes) => {
-            let end = (p.offset + u64::from(p.length)).min(bytes.len() as u64) as usize;
-            let start = p.offset.min(bytes.len() as u64) as usize;
-            let slice = &bytes[start..end];
-            let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
-            Ok(json!({
-                "offset": start,
-                "length": end - start,
-                "bytes_b64": encoded,
-                "file_size": bytes.len(),
-            }))
-        }
-        Err(AgentError::PathNotFound { .. }) => {
-            // Fallback: read from working tree for untracked files.
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            let abs = work_dir.join(&p.path);
-            if !abs.exists() {
-                return Err(AgentError::PathNotFound {
-                    path: p.path.clone(),
-                });
-            }
-            let bytes = tokio::fs::read(&abs).await.map_err(AgentError::Io)?;
-            let end = (p.offset + u64::from(p.length)).min(bytes.len() as u64) as usize;
-            let start = p.offset.min(bytes.len() as u64) as usize;
-            let slice = &bytes[start..end];
-            let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
-            Ok(json!({
-                "offset": start,
-                "length": end - start,
-                "bytes_b64": encoded,
-                "file_size": bytes.len(),
-                "untracked": true,
-            }))
-        }
-        Err(e) => Err(e.into()),
-    }
+    read_retained(state, p.file, p.op_id, |source| async move {
+        let bytes = source.read_range(p.offset, p.length).await?;
+        Ok(json!({
+            "offset": p.offset.min(source.size),
+            "length": bytes.len(),
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "file_size": source.size,
+        }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2417,71 +2188,173 @@ struct PreviewParams {
     repo_id: String,
     path: String,
     #[serde(default)]
-    // Preserved for wire-compat — previews read from the hydrated
-    // working tree which already reflects the checked-out rev, so we
-    // don't use this field today. Kept so callers can migrate to a
-    // future "preview at historical rev" without a breaking change.
-    #[allow(dead_code)]
     rev: Option<String>,
+    #[serde(default)]
+    op_id: Option<String>,
 }
 
-/// Resolve `(repo_id, path, rev)` to a local working-tree file path,
-/// then hand off to a format-specific previewer.
-///
-/// Why this lives in the agent and not the SDK: the previewers need
-/// a file handle with `Seek`, and the SDK's `read()` produces `Bytes`
-/// in memory. For hydrated files the workspace copy is already on
-/// disk and cheap to re-open; that's the fast path we take here. For
-/// unhydrated pointers the handler returns a structured error so the
-/// UI can prompt the user to hydrate before previewing.
+async fn read_source<F, W>(state: &State, p: PreviewParams, work: F) -> Result<Value>
+where
+    F: FnOnce(Arc<crate::repository::FileSource>) -> W,
+    W: std::future::Future<Output = Result<Value>>,
+{
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let read = async {
+        let source =
+            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone())
+                .await?;
+        let source = Arc::new(source);
+        let result = match scope.check() {
+            Ok(()) => work(source.clone()).await,
+            Err(error) => Err(error),
+        };
+        source.close().await?;
+        result
+    };
+    cancellable_read(state, p.op_id, &scope, read).await
+}
+
+async fn cancellable_read<T>(
+    state: &State,
+    op_id: Option<String>,
+    scope: &crate::repository::ReadScope,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let id = op_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let signal = state.cancel_registry.register(id.clone()).await;
+    tokio::pin!(signal);
+    tokio::pin!(work);
+    let mut cancelled = false;
+    let result = tokio::select! {
+        biased;
+        _ = &mut signal => { scope.cancel(); cancelled = true; work.await },
+        result = &mut work => result,
+    };
+    state.cancel_registry.unregister(&id).await;
+    // Keep terminal failures after draining: an abort cannot hide integrity or
+    // cleanup errors, including parser dependencies that stringify I/O sources.
+    if let Some(error) = scope.failure() {
+        return Err(error);
+    }
+    match result {
+        Err(error) if error.is_cancelled() => Err(AgentError::OpCancelled { op_id: id }),
+        Err(AgentError::Preview { .. } | AgentError::Io(_)) if scope.cancelled_read() => {
+            Err(AgentError::OpCancelled { op_id: id })
+        }
+        Err(error) => Err(error),
+        Ok(_) if cancelled || scope.cancelled_read() => Err(AgentError::OpCancelled { op_id: id }),
+        Ok(value) => Ok(value),
+    }
+}
+
+async fn file_open(state: &State, p: PreviewParams) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let id = uuid::Uuid::new_v4().to_string();
+    let open = async {
+        let source =
+            crate::repository::FileSource::capture(&repo, &p.path, p.rev.as_deref(), scope.clone())
+                .await?;
+        if let Err(error) = scope.check() {
+            source.close().await?;
+            return Err(error);
+        }
+        let file = repo.files.insert(id.clone(), source).await?;
+        let mut info = file.describe();
+        info["file_id"] = json!(id);
+        Ok(info)
+    };
+    let result = cancellable_read(state, p.op_id, &scope, open).await;
+    if result.is_err() {
+        repo.files.remove(&id).await?;
+    }
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct FileIdParams {
+    repo_id: String,
+    file_id: String,
+}
+
+#[derive(Deserialize)]
+struct FileChunksParams {
+    #[serde(flatten)]
+    file: FileIdParams,
+    start: u64,
+    limit: u32,
+    op_id: Option<String>,
+}
+
+async fn file_chunks(state: &State, p: FileChunksParams) -> Result<Value> {
+    if !(1..=512).contains(&p.limit) {
+        return Err(AgentError::Other(
+            "chunk page limit must be between 1 and 512".into(),
+        ));
+    }
+    read_retained(state, p.file, p.op_id, |source| async move {
+        Ok(serde_json::to_value(
+            source.chunk_page(p.start, p.limit).await?,
+        )?)
+    })
+    .await
+}
+
+async fn read_retained<F, W>(
+    state: &State,
+    p: FileIdParams,
+    op_id: Option<String>,
+    work: F,
+) -> Result<Value>
+where
+    F: FnOnce(Arc<crate::repository::FileSource>) -> W,
+    W: std::future::Future<Output = Result<Value>>,
+{
+    let repo = state.get(&p.repo_id).await?;
+    let file = repo.files.get(&p.file_id).await?;
+    let (_guard, source) = file.query().await?;
+    let scope = source.scope();
+    cancellable_read(state, op_id, &scope, work(source)).await
+}
+
+async fn file_close(state: &State, p: FileIdParams) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    repo.files.remove(&p.file_id).await?;
+    Ok(json!({ "closed": p.file_id }))
+}
+
 async fn preview_fmt(
     state: &State,
     p: PreviewParams,
-    f: fn(&std::path::Path) -> Result<Value>,
+    f: fn(preview::PreviewReader) -> Result<Value>,
 ) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::Other(format!(
-            "file not on disk: {} (run `crab hydrate` to materialize it first)",
-            abs.display()
-        )));
-    }
-    // Off-thread: format parsing is CPU-bound (arrow deserialise,
-    // zip inflate). `spawn_blocking` keeps the async dispatch loop
-    // responsive so other verbs keep running during a parse.
-    tokio::task::spawn_blocking(move || f(&abs))
-        .await
-        .map_err(|e| AgentError::Other(format!("join error: {e}")))?
+    read_source(state, p, |source| async move {
+        let reader = preview::PreviewReader::new(source);
+        tokio::task::spawn_blocking(move || f(reader))
+            .await
+            .map_err(std::io::Error::other)?
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
 struct ParquetPreviewParams {
-    repo_id: String,
-    path: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    rev: Option<String>,
-    /// Max rows in the preview body. Clamped to [1, 5000] by the
-    /// parser. Defaults to `DEFAULT_PARQUET_PREVIEW_ROWS` when
-    /// omitted.
+    #[serde(flatten)]
+    file: PreviewParams,
     #[serde(default)]
     max_rows: Option<usize>,
 }
 
 async fn preview_parquet(state: &State, p: ParquetPreviewParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::Other(format!(
-            "file not on disk: {} (run `crab hydrate` to materialize it first)",
-            abs.display()
-        )));
-    }
     let max_rows = p.max_rows.unwrap_or(preview::DEFAULT_PARQUET_PREVIEW_ROWS);
-    tokio::task::spawn_blocking(move || preview::parquet(&abs, max_rows))
-        .await
-        .map_err(|e| AgentError::Other(format!("join error: {e}")))?
+    read_source(state, p.file, |source| async move {
+        let reader = preview::PreviewReader::new(source);
+        tokio::task::spawn_blocking(move || preview::parquet(reader, max_rows))
+            .await
+            .map_err(std::io::Error::other)?
+    })
+    .await
 }
 
 /// Repository summary: total files, by kind, by top-level extension,
@@ -2575,7 +2448,7 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
     // as 0 so the renderer falls back to default behaviour.
     let work_dir = state.get_work_dir(&p.repo_id).await.ok();
     let total_commits: u64 = if let Some(wd) = work_dir {
-        crate::shellout::git_command()
+        crate::shellout::git_command()?
             .args(["rev-list", "--all", "--count"])
             .current_dir(&wd)
             .kill_on_drop(true)
@@ -2602,28 +2475,15 @@ async fn repo_summary(state: &State, p: RepoSummaryParams, out: SharedStdout) ->
     }))
 }
 
-#[derive(Debug, Deserialize)]
-struct GitDiffFileParams {
-    repo_id: String,
-    path: String,
-    /// Compare against this ref. `None` = working tree vs HEAD.
-    #[serde(default)]
-    base: Option<String>,
-    /// Compare HEAD (or base) with this ref. `None` = working tree.
-    #[serde(default)]
-    head: Option<String>,
-    /// When present, the operation is cancellable via `rpc/cancel`.
-    #[serde(default)]
-    op_id: Option<String>,
-}
-
 /// Return `git status --porcelain=v1 -z` parsed into a map of
 /// `{path → two-letter code}`. The working-tree entry loses its two
 /// NUL-separated "new path" companion for renames — we keep the new
 /// path as the key since it's what users expect to click in the UI.
 async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = crate::shellout::git_command()
+    let physical_root = tokio::fs::canonicalize(&work_dir).await?;
+    let publications = crate::file_publications::status_snapshot(&physical_root).await;
+    let out = crate::shellout::git_command()?
         .args(["status", "--porcelain=v1", "-z", "-uall"])
         .current_dir(&work_dir)
         .output()
@@ -2635,6 +2495,7 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
+    let owned_temporaries = publications.finish().await;
     let mut entries: Vec<Value> = Vec::new();
     // -z splits every record (including rename pairs) with NUL. The
     // first two bytes are the XY status codes; then a space; then the
@@ -2653,10 +2514,14 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
             .position(|&b| b == 0)
             .map_or(out.stdout.len(), |p| path_start + p);
         let path = String::from_utf8_lossy(&out.stdout[path_start..path_end]).into_owned();
-        let code = std::str::from_utf8(xy).unwrap_or("??").trim().to_owned();
+        let code = std::str::from_utf8(xy).unwrap_or("??").to_owned();
         // Skip the rename "old path" companion record when present.
         let is_rename = xy[0] == b'R' || xy[0] == b'C' || xy[1] == b'R' || xy[1] == b'C';
-        entries.push(json!({ "path": path, "code": code }));
+        // Internal publication names must not become transient untracked rows.
+        // Exact ownership preserves user files, even with the same name prefix.
+        if code != "??" || !owned_temporaries.contains(&physical_root.join(&path)) {
+            entries.push(json!({ "path": path, "code": code }));
+        }
         i = path_end + 1;
         if is_rename {
             let old_end = out.stdout[i..]
@@ -2669,183 +2534,11 @@ async fn git_status_porcelain(state: &State, p: RepoIdParams) -> Result<Value> {
     Ok(json!({ "entries": entries }))
 }
 
-/// Return `git diff` for a single path as a unified patch string.
-/// If both `base` and `head` are provided, runs `git diff base..head
-/// -- path`. Otherwise defaults to working tree vs HEAD.
-async fn git_diff_file(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let op_id = p.op_id.clone();
-    let work = git_diff_file_work(state, p);
-
-    run_cancellable(state, op_id, work).await
-}
-
-async fn git_diff_file_work(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let mut args: Vec<String> = vec!["diff".into(), "--no-color".into(), "--no-renames".into()];
-    match (p.base.as_deref(), p.head.as_deref()) {
-        (Some(b), Some(h)) => args.push(format!("{b}..{h}")),
-        (Some(b), None) => args.push(b.to_owned()),
-        (None, _) => {}
-    }
-    args.push("--".into());
-    args.push(p.path.clone());
-
-    let out = crate::shellout::git_command()
-        .args(&args)
-        .current_dir(&work_dir)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-    if !out.status.success() {
-        return Err(AgentError::Cli {
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    let patch = String::from_utf8_lossy(&out.stdout).into_owned();
-    Ok(json!({ "path": p.path, "patch": patch }))
-}
-
-/// `crab diff` for a single path. Returns structured chunk-level
-/// diff data as JSON. For crab-tracked files this shows which chunks
-/// were added/removed/modified between two refs. For git-native files
-/// it falls back gracefully. If the CLI isn't installed we surface a
-/// clean error so the UI can fall back to `git_diff_file`.
-async fn crab_diff_file(state: &State, p: GitDiffFileParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-
-    // Fast-fail: only attempt crab diff if the repo has crab configured.
-    // Without a remote, `crab diff` hangs trying to connect to S3.
-    let has_crab = work_dir.join(".crab").join("remote").is_file()
-        || work_dir.join(".crab").join("config.toml").is_file();
-    if !has_crab {
-        return Err(AgentError::Cli {
-            status: -1,
-            stderr: "not a crab-configured repository".to_owned(),
-        });
-    }
-
-    // `crab diff` takes ref1 and ref2 as separate positional arguments
-    // (not the git `base..head` range syntax). ref2 defaults to HEAD when
-    // omitted.
-    let mut args: Vec<String> = vec!["diff".into(), "--json".into(), "--no-color".into()];
-    match (p.base.as_deref(), p.head.as_deref()) {
-        (Some(b), Some(h)) => {
-            args.push(b.to_owned());
-            args.push(h.to_owned());
-        }
-        (Some(b), None) => {
-            args.push(b.to_owned());
-        }
-        (None, Some(h)) => {
-            args.push("HEAD".to_owned());
-            args.push(h.to_owned());
-        }
-        (None, None) => {
-            args.push("HEAD".to_owned());
-        }
-    }
-    args.push("--".into());
-    args.push(p.path.clone());
-
-    // Allow up to 60s for shard resolution from S3.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        shellout::command()?
-            .args(&args)
-            .current_dir(&work_dir)
-            .output(),
-    )
-    .await;
-
-    // If the CLI diff succeeds and found crab-tracked files, return
-    // the rich JSON output. An empty files array means the specific
-    // file isn't pointer-tracked — fall through to git diff.
-    if let Ok(Ok(out)) = &result {
-        if out.status.success() {
-            let body = String::from_utf8_lossy(&out.stdout).into_owned();
-            if body.contains("\"files\":[{") {
-                return Ok(
-                    json!({ "path": p.path, "patch": "", "backend": "crab", "crab_diff": body }),
-                );
-            }
-        }
-    }
-
-    // CLI diff didn't produce results for this file. Check if it's a
-    // pointer via the SDK (instant, local-only) and produce a synthetic
-    // size-based diff so the UI shows something useful.
-    let repo = match state.get(&p.repo_id).await {
-        Ok(r) => r,
-        Err(_) => {
-            return Err(AgentError::Cli {
-                status: -1,
-                stderr: "crab diff produced no results for this file".to_owned(),
-            });
-        }
-    };
-
-    let old_rev = p.base.as_deref();
-    let new_rev = p.head.as_deref().or(Some("HEAD"));
-
-    let new_stat = repo.stat(&p.path, new_rev).await.ok();
-    let old_stat = repo.stat(&p.path, old_rev).await.ok();
-
-    let is_pointer = new_stat
-        .as_ref()
-        .map(|s| s.kind == ContentKind::Crab || s.kind == ContentKind::Lfs)
-        .unwrap_or(false)
-        || old_stat
-            .as_ref()
-            .map(|s| s.kind == ContentKind::Crab || s.kind == ContentKind::Lfs)
-            .unwrap_or(false);
-
-    if !is_pointer {
-        return Err(AgentError::Cli {
-            status: -1,
-            stderr: "file is not a crab/lfs pointer".to_owned(),
-        });
-    }
-
-    // Build a synthetic diff from pointer sizes.
-    let old_size = old_stat.as_ref().map(|s| s.size).unwrap_or(0);
-    let new_size = new_stat.as_ref().map(|s| s.size).unwrap_or(0);
-    let status = if old_size == 0 && new_size > 0 {
-        "added"
-    } else if old_size > 0 && new_size == 0 {
-        "deleted"
-    } else {
-        "modified"
-    };
-    let delta_bytes = if new_size > old_size {
-        new_size - old_size
-    } else {
-        old_size - new_size
-    };
-
-    let synthetic = json!({
-        "files": [{
-            "path": p.path,
-            "status": status,
-            "old_size": old_size,
-            "new_size": new_size,
-            "delta_bytes": delta_bytes,
-            "chunks_added": null,
-            "chunks_removed": null,
-            "chunks_unchanged": null,
-            "old_file_hash": old_stat.as_ref().map(|s| s.pointer_hash.clone()),
-            "new_file_hash": new_stat.as_ref().map(|s| s.pointer_hash.clone()),
-        }],
-        "summary": {
-            "files_changed": 1,
-            "total_delta_bytes": delta_bytes,
-        }
-    });
-
-    Ok(
-        json!({ "path": p.path, "patch": "", "backend": "crab", "crab_diff": synthetic.to_string() }),
-    )
+async fn file_diff(state: &State, p: crate::repository::diff::Params) -> Result<Value> {
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    let operation = crate::repository::diff::compare(&repo, &p, scope.clone());
+    cancellable_read(state, p.op_id.clone(), &scope, operation).await
 }
 
 // ---- Hunk-level staging ---------------------------------------------
@@ -2876,48 +2569,42 @@ struct GitAddPathsParams {
     paths: Vec<String>,
 }
 
-/// Stage files by path using `git add`. Handles untracked files that
-/// `git diff` cannot produce patches for.
+/// Stage literal paths through Git's configured clean filters.
 async fn git_add_paths(state: &State, p: GitAddPathsParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let mut args: Vec<&str> = vec!["add", "--"];
-    let path_refs: Vec<&str> = p.paths.iter().map(String::as_str).collect();
-    args.extend(&path_refs);
-    let out = crate::shellout::git_command()
-        .args(&args)
-        .current_dir(&work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-    if !out.status.success() {
-        return Err(AgentError::Cli {
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
+    if p.paths.is_empty() {
+        return Err(AgentError::Other(
+            "Select at least one file to stage".into(),
+        ));
     }
-    Ok(serde_json::json!({ "staged": p.paths.len() }))
+    for path in &p.paths {
+        if path != "." {
+            crab_sdk::GitPath::new(path.as_bytes().to_vec())?;
+        }
+    }
+    let work_dir = state.get_work_dir(&p.repo_id).await?;
+    let mut args = vec!["--literal-pathspecs", "add", "--"];
+    args.extend(p.paths.iter().map(String::as_str));
+    run_git_simple(&work_dir, &args).await?;
+    Ok(json!({ "staged": p.paths.len() }))
 }
 
-/// Unstage files by path using `git reset HEAD`. Handles files that
-/// were staged via `git add` (including previously untracked files).
+/// Unstage literal paths without changing working contents, including unborn HEAD.
 async fn git_reset_paths(state: &State, p: GitAddPathsParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let mut args: Vec<&str> = vec!["reset", "HEAD", "--"];
-    let path_refs: Vec<&str> = p.paths.iter().map(String::as_str).collect();
-    args.extend(&path_refs);
-    let out = crate::shellout::git_command()
-        .args(&args)
-        .current_dir(&work_dir)
-        .output()
-        .await
-        .map_err(AgentError::Io)?;
-    if !out.status.success() {
-        return Err(AgentError::Cli {
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
+    if p.paths.is_empty() {
+        return Err(AgentError::Other(
+            "Select at least one file to unstage".into(),
+        ));
     }
-    Ok(serde_json::json!({ "unstaged": p.paths.len() }))
+    for path in &p.paths {
+        if path != "." {
+            crab_sdk::GitPath::new(path.as_bytes().to_vec())?;
+        }
+    }
+    let work_dir = state.get_work_dir(&p.repo_id).await?;
+    let mut args = vec!["--literal-pathspecs", "reset", "--"];
+    args.extend(p.paths.iter().map(String::as_str));
+    run_git_simple(&work_dir, &args).await?;
+    Ok(json!({ "unstaged": p.paths.len() }))
 }
 
 async fn git_unstage_hunks(state: &State, p: git_hunks::HunkSetParams) -> Result<Value> {
@@ -2943,8 +2630,7 @@ struct HydrationStatusParams {
 ///
 ///   - `hydrated` — on-disk bytes match the logical size. The file
 ///     is fully materialised.
-///   - `pointer` — on-disk size is small (under 1 KiB) and matches
-///     the usual pointer-blob format. Needs hydrate.
+///   - `pointer` — the bounded working file parses as a Crab or LFS pointer.
 ///   - `partial` — on-disk size is non-zero but doesn't match. Most
 ///     commonly a truncated / stale hydration; we surface as a
 ///     warning state.
@@ -2956,6 +2642,7 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
     let repo = state.get(&p.repo_id).await?;
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let entries = repo.list(None, p.rev.as_deref()).await?;
+    let boundary = tokio::fs::canonicalize(&work_dir).await?;
 
     let mut items: Vec<Value> = Vec::new();
     let mut hydrated = 0u64;
@@ -2971,26 +2658,48 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
         }
         let path_str = e.path.display().to_string();
         let abs = work_dir.join(&e.path);
-        let logical = e.size.unwrap_or(0);
-        logical_bytes += u128::from(logical);
-
-        let md = tokio::fs::metadata(&abs).await.ok();
-        let (state_label, on_disk): (&'static str, u64) = match md {
-            None => ("missing", 0),
-            Some(m) => {
-                let disk = m.len();
-                // Heuristic: pointer blobs are typically ~200-1000
-                // bytes. Anything under 1 KiB we call a pointer.
-                // Equal sizes = hydrated. Anything else is partial.
-                if logical > 0 && disk == logical {
-                    ("hydrated", disk)
-                } else if disk < 1024 {
+        let mut logical = e.size.unwrap_or(0);
+        let mut kind = e.kind;
+        let (state_label, on_disk) = match tokio::fs::symlink_metadata(&abs).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("missing", 0),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if !metadata.is_file() => ("partial", 0),
+            Ok(metadata) => {
+                let disk = metadata.len();
+                let pointer = if disk < crab_git::MAX_LFS_POINTER_SIZE as u64 {
+                    use tokio::io::AsyncReadExt;
+                    let canonical = tokio::fs::canonicalize(&abs).await?;
+                    if !canonical.starts_with(&boundary) {
+                        continue;
+                    }
+                    let mut bytes = Vec::new();
+                    tokio::fs::File::open(&canonical)
+                        .await?
+                        .take(crab_git::MAX_LFS_POINTER_SIZE as u64)
+                        .read_to_end(&mut bytes)
+                        .await?;
+                    match crab_git::classify(&bytes) {
+                        crab_git::PointerKind::Crab(pointer) => {
+                            Some((EntryKind::Pointer, pointer.size))
+                        }
+                        crab_git::PointerKind::Lfs(pointer) => Some((EntryKind::Lfs, pointer.size)),
+                        crab_git::PointerKind::NotAPointer => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((working_kind, working_size)) = pointer {
+                    kind = working_kind;
+                    logical = working_size;
                     ("pointer", disk)
+                } else if disk == logical {
+                    ("hydrated", disk)
                 } else {
                     ("partial", disk)
                 }
             }
         };
+        logical_bytes += u128::from(logical);
         on_disk_bytes += u128::from(on_disk);
         match state_label {
             "hydrated" => hydrated += 1,
@@ -3004,7 +2713,7 @@ async fn hydration_status(state: &State, p: HydrationStatusParams) -> Result<Val
             "state": state_label,
             "on_disk": on_disk,
             "logical": logical,
-            "kind": format!("{:?}", e.kind).to_lowercase(),
+            "kind": format!("{kind:?}").to_lowercase(),
         }));
     }
 
@@ -3094,7 +2803,7 @@ async fn git_grep_work(state: &State, p: GitGrepParams) -> Result<Value> {
         }
     }
 
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3462,7 +3171,7 @@ async fn git_log_work(state: &State, p: GitLogParams) -> Result<Value> {
     // branches), `rev-list --count --all` can take 1-2 seconds on a
     // cold filesystem cache — serializing it after `git log` was the
     // primary bottleneck causing the "Loading git log..." hang.
-    let log_future = crate::shellout::git_command()
+    let log_future = crate::shellout::git_command()?
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3476,7 +3185,7 @@ async fn git_log_work(state: &State, p: GitLogParams) -> Result<Value> {
     } else {
         count_args.push("HEAD".into());
     }
-    let count_future = crate::shellout::git_command()
+    let count_future = crate::shellout::git_command()?
         .args(&count_args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -3557,7 +3266,7 @@ async fn git_stash_list(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     // `%gd` is the stash ref; `%s` the subject. Stash messages
     // typically include the branch name, which we want to show.
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["stash", "list", "--format=%gd%x00%s"])
         .current_dir(&work_dir)
         .output()
@@ -3624,7 +3333,7 @@ async fn git_stash_save(state: &State, p: StashSaveParams) -> Result<Value> {
 async fn git_stash_show(state: &State, p: StashRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     // --stat gives file summary, --patch gives full diff
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["stash", "show", "--stat", "--name-status", &p.stash_ref])
         .current_dir(&work_dir)
         .output()
@@ -3653,7 +3362,7 @@ async fn git_stash_show(state: &State, p: StashRefParams) -> Result<Value> {
 
 async fn git_stash_show_patch(state: &State, p: StashRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["stash", "show", "-p", "--no-color", &p.stash_ref])
         .current_dir(&work_dir)
         .output()
@@ -3671,7 +3380,7 @@ async fn git_stash_show_patch(state: &State, p: StashRefParams) -> Result<Value>
 
 async fn run_git(state: &State, repo_id: &str, args: &[&str]) -> Result<Value> {
     let work_dir = state.get_work_dir(repo_id).await?;
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(args)
         .current_dir(&work_dir)
         .output()
@@ -3750,7 +3459,7 @@ async fn git_commit_changes(state: &State, p: GitCommitChangesParams) -> Result<
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // First, capture commit metadata (mirrors git_log's fields).
-    let meta_out = crate::shellout::git_command()
+    let meta_out = crate::shellout::git_command()?
         .args([
             "log",
             "-1",
@@ -3789,7 +3498,7 @@ async fn git_commit_changes(state: &State, p: GitCommitChangesParams) -> Result<
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let parent_ref = parents.first().copied().unwrap_or(EMPTY_TREE);
 
-    let diff_out = crate::shellout::git_command()
+    let diff_out = crate::shellout::git_command()?
         .args([
             "diff",
             "--numstat",
@@ -3915,7 +3624,7 @@ struct ResolveRefParams {
 async fn resolve_ref(state: &State, p: ResolveRefParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let peel_spec = format!("{}^{{commit}}", p.name);
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["rev-parse", "--verify", &peel_spec])
         .current_dir(&work_dir)
         .output()
@@ -3952,57 +3661,24 @@ async fn about() -> Result<Value> {
     }))
 }
 
-/// Clear the on-disk xorb/shard cache. We prefer the CLI's own
-/// `crab cache clear` when available so the cache-index bookkeeping
-/// stays consistent; if the subcommand doesn't exist, fall back to
-/// removing the cache dir directly (best-effort — partial deletions
-/// are acceptable here because the cache is by definition
-/// regeneratable).
-async fn cache_clear() -> Result<Value> {
-    // Try the CLI path first.
-    let cli_out = tokio::process::Command::new(shellout::resolve_crab_bin())
-        .args(["cache", "clear", "--yes"])
-        .output()
-        .await;
+#[derive(Deserialize)]
+struct CacheParams {
+    repo_id: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
 
-    if let Ok(out) = &cli_out {
-        if out.status.success() {
-            return Ok(json!({
-                "method": "cli",
-                "stdout": String::from_utf8_lossy(&out.stdout).into_owned(),
-            }));
-        }
-    }
-
-    // Fallback: remove the default cache directory directly. We only
-    // touch the crab subdirectory so we can't accidentally wipe
-    // something unrelated.
-    let root = if let Ok(dir) = std::env::var("CRAB_CACHE_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".cache/crab")
-    } else {
-        dirs::cache_dir()
-            .ok_or_else(|| AgentError::Other("platform cache dir not available".into()))?
-            .join("crab")
+async fn cache_operation(
+    state: &State,
+    params: CacheParams,
+    operation: crate::cache::Operation,
+) -> Result<Value> {
+    let repo = match params.repo_id {
+        Some(id) => Some(state.get(&id).await?),
+        None => None,
     };
-    if !root.exists() {
-        return Ok(json!({
-            "method": "noop",
-            "reason": "cache directory does not exist",
-        }));
-    }
-    tokio::task::spawn_blocking({
-        let root = root.clone();
-        move || std::fs::remove_dir_all(&root)
-    })
-    .await
-    .map_err(|e| AgentError::Other(format!("join error: {e}")))?
-    .map_err(AgentError::Io)?;
-    Ok(json!({
-        "method": "fs",
-        "cleared": root.display().to_string(),
-    }))
+    let cwd = repo.as_ref().and_then(|repo| repo.work_dir.as_deref());
+    crate::cache::run(cwd, operation).await
 }
 
 /// Health diagnostics for the renderer's Health panel. Returns
@@ -4361,8 +4037,7 @@ async fn push(p: JobParams, out: SharedStdout) -> Result<Value> {
     // Crab push is driven through `git push`; the remote helper
     // takes over. Calling `git push` here keeps the UI aligned with
     // standard git workflow.
-    let mut command = crate::shellout::git_command();
-    crate::storage_auth::configure_command(&mut command)?;
+    let mut command = crate::shellout::git_command()?;
     let git = command
         .arg("push")
         .current_dir(&p.cwd)
@@ -4468,15 +4143,7 @@ struct StagingStatsParams {
 }
 
 async fn staging_stats(work_dir: &Path) -> Result<Value> {
-    let mut payload =
-        shellout::run_json(Some(work_dir), &["staging", "stats", "--json"], &[]).await?;
-    let mut stats = payload
-        .get_mut("stats")
-        .map(Value::take)
-        .ok_or_else(|| AgentError::Other("staging stats returned no statistics".into()))?;
-    stats["files"] = payload["files"].take();
-    stats["lifecycle"] = payload["lifecycle"].take();
-    Ok(stats)
+    shellout::run_json(Some(work_dir), &["staging", "stats", "--json"], &[]).await
 }
 
 // ---------------- staging_clean ----------------
@@ -4552,7 +4219,7 @@ async fn crab_reset_files(work_dir: &std::path::Path, paths: &[String]) -> Resul
     // For hash-based lookups, scan git ls-files and read pointer blobs
     // to find matching file paths.
     if !hashes_to_find.is_empty() {
-        let ls_output = crate::shellout::git_command()
+        let ls_output = crate::shellout::git_command()?
             .args(["ls-files", "--cached", "-z"])
             .current_dir(work_dir)
             .stdout(std::process::Stdio::piped())
@@ -4657,333 +4324,6 @@ async fn crab_init(work_dir: &std::path::Path, p: CrabInitParams) -> Result<Valu
     Ok(
         json!({ "ok": true, "url": url, "config_path": work_dir.join("crab.toml").display().to_string() }),
     )
-}
-
-// ---------------- crab_add_auto ----------------
-
-#[derive(Debug, Deserialize)]
-struct CrabAddAutoParams {
-    repo_id: String,
-    paths: Vec<String>,
-}
-
-/// One-click "Track with crab" verb for the large-file pre-commit
-/// check. For each path:
-/// 1. Ensures the file extension is registered in `.gitattributes` via `crab track`
-/// 2. Runs `crab add <path>` to chunk + stage the file
-/// 3. Stages the resulting pointer blobs with `git add`
-///
-/// Partial success is acceptable — errors are collected and returned
-/// alongside the count of successfully tracked files.
-async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Result<Value> {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use tracing::{debug, warn};
-
-    let mut tracked: u64 = 0;
-    let mut errors: Vec<Value> = Vec::new();
-    let mut succeeded_paths: Vec<String> = Vec::new();
-    let mut patterns_added: Vec<String> = Vec::new();
-
-    // Step 1: Ensure all unique file extensions are tracked in .gitattributes.
-    // This is idempotent — `crab track` is a no-op if the pattern already exists.
-    let mut seen_extensions: HashSet<String> = HashSet::new();
-    for path in &p.paths {
-        if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            if seen_extensions.insert(ext_lower.clone()) {
-                let glob = format!("*.{}", ext_lower);
-                debug!(glob = %glob, "crab_add_auto: ensuring pattern is tracked");
-                let track_output = shellout::command()?
-                    .args(["track", &glob])
-                    .current_dir(work_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await
-                    .map_err(AgentError::Io)?;
-
-                if track_output.status.success() {
-                    patterns_added.push(glob);
-                } else {
-                    let stderr = String::from_utf8_lossy(&track_output.stderr).into_owned();
-                    warn!(glob = %format!("*.{}", ext_lower), stderr = %stderr, "crab track failed");
-                }
-            }
-        }
-    }
-
-    // Step 2: Run `crab add` for each file path.
-    for path in &p.paths {
-        debug!(path = %path, "crab_add_auto: running crab add");
-        let mut cmd = shellout::command()?;
-        cmd.args(["add", path])
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        crate::storage_auth::configure_command(&mut cmd)?;
-
-        let output = cmd.output().await.map_err(AgentError::Io)?;
-
-        if output.status.success() {
-            tracked += 1;
-            succeeded_paths.push(path.clone());
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            warn!(path = %path, status = output.status.code(), stderr = %stderr, "crab add failed");
-            errors.push(json!({
-                "path": path,
-                "status": output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    // Step 3: Stage the resulting pointer blobs so the index reflects the
-    // tracked state. Only stage paths that succeeded above.
-    if !succeeded_paths.is_empty() {
-        let mut git_args = vec!["add", "--"];
-        let refs: Vec<&str> = succeeded_paths.iter().map(String::as_str).collect();
-        git_args.extend(refs);
-
-        debug!(paths = ?succeeded_paths, "crab_add_auto: staging pointer blobs");
-        let git_output = crate::shellout::git_command()
-            .args(&git_args)
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if !git_output.status.success() {
-            let stderr = String::from_utf8_lossy(&git_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git add (staging) failed after crab add");
-            return Err(AgentError::Cli {
-                status: git_output.status.code().unwrap_or(-1),
-                stderr,
-            });
-        }
-    }
-
-    // Also stage .gitattributes if we added new patterns.
-    if !patterns_added.is_empty() {
-        debug!("crab_add_auto: staging .gitattributes");
-        let _ = crate::shellout::git_command()
-            .args(["add", ".gitattributes"])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await;
-    }
-
-    let mut result = json!({
-        "ok": true,
-        "tracked": tracked,
-        "patterns_added": patterns_added,
-    });
-    if !errors.is_empty() {
-        result["errors"] = json!(errors);
-    }
-    Ok(result)
-}
-
-// ---------------- crab_track_and_add ----------------
-
-#[derive(Debug, Deserialize)]
-struct CrabTrackAndAddParams {
-    repo_id: String,
-    paths: Vec<String>,
-    /// If true, also commit the staged pointer files with an auto-generated message.
-    auto_commit: Option<bool>,
-    /// Custom commit message. If absent and auto_commit is true, generates one.
-    commit_message: Option<String>,
-}
-
-/// Combined track + add + optional commit flow for the desktop wizard.
-///
-/// 1. Registers file extensions in `.gitattributes` via `crab track`
-/// 2. Runs `crab add` for each file (chunk + stage)
-/// 3. Stages pointer blobs + `.gitattributes` via `git add`
-/// 4. Optionally commits with a descriptive message
-///
-/// Returns detailed per-file results so the UI can show granular progress.
-async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams) -> Result<Value> {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use tracing::{debug, warn};
-
-    let mut patterns_added: Vec<String> = Vec::new();
-    let mut files_tracked: Vec<Value> = Vec::new();
-    let mut errors: Vec<Value> = Vec::new();
-
-    // Step 1: Register patterns.
-    let mut seen_extensions: HashSet<String> = HashSet::new();
-    for path in &p.paths {
-        if let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            if seen_extensions.insert(ext_lower.clone()) {
-                let glob = format!("*.{}", ext_lower);
-                debug!(glob = %glob, "crab_track_and_add: registering pattern");
-                let output = shellout::command()?
-                    .args(["track", &glob])
-                    .current_dir(work_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await
-                    .map_err(AgentError::Io)?;
-
-                if output.status.success() {
-                    patterns_added.push(glob);
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    warn!(glob = %format!("*.{}", ext_lower), stderr = %stderr, "crab track failed");
-                }
-            }
-        }
-    }
-
-    // Step 2: Run `crab add` for each file.
-    for path in &p.paths {
-        debug!(path = %path, "crab_track_and_add: running crab add");
-        let mut cmd = shellout::command()?;
-        cmd.args(["add", path])
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        crate::storage_auth::configure_command(&mut cmd)?;
-
-        let output = cmd.output().await.map_err(AgentError::Io)?;
-
-        if output.status.success() {
-            files_tracked.push(json!({
-                "path": path,
-                "status": "ok",
-            }));
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            warn!(path = %path, status = output.status.code(), stderr = %stderr, "crab add failed");
-            errors.push(json!({
-                "path": path,
-                "status": output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    // Step 3: Stage pointer blobs + .gitattributes.
-    let succeeded_paths: Vec<&str> = files_tracked
-        .iter()
-        .filter_map(|f| f["path"].as_str())
-        .collect();
-
-    if !succeeded_paths.is_empty() {
-        let mut git_args: Vec<&str> = vec!["add", "--"];
-        git_args.extend(&succeeded_paths);
-        if !patterns_added.is_empty() {
-            git_args.push(".gitattributes");
-        }
-
-        debug!(paths = ?succeeded_paths, "crab_track_and_add: staging pointer blobs");
-        let git_output = crate::shellout::git_command()
-            .args(&git_args)
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if !git_output.status.success() {
-            let stderr = String::from_utf8_lossy(&git_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git add (staging) failed");
-            return Err(AgentError::Cli {
-                status: git_output.status.code().unwrap_or(-1),
-                stderr,
-            });
-        }
-    } else if !patterns_added.is_empty() {
-        // Stage .gitattributes even if no files succeeded (patterns were still added).
-        let _ = crate::shellout::git_command()
-            .args(["add", ".gitattributes"])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await;
-    }
-
-    // Step 4: Optional auto-commit.
-    let mut commit_sha: Option<String> = None;
-    if p.auto_commit.unwrap_or(false) && !succeeded_paths.is_empty() {
-        let file_names: Vec<&str> = succeeded_paths
-            .iter()
-            .filter_map(|p| Path::new(p).file_name().and_then(|n| n.to_str()))
-            .collect();
-
-        let message = p.commit_message.unwrap_or_else(|| {
-            if file_names.len() == 1 {
-                format!("Track large file: {}", file_names[0])
-            } else {
-                format!(
-                    "Track {} large files: {}",
-                    file_names.len(),
-                    file_names.join(", ")
-                )
-            }
-        });
-
-        debug!(message = %message, "crab_track_and_add: committing");
-        let commit_output = crate::shellout::git_command()
-            .args(["commit", "-m", &message])
-            .current_dir(work_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(AgentError::Io)?;
-
-        if commit_output.status.success() {
-            // Extract the commit SHA from git log.
-            let sha_output = crate::shellout::git_command()
-                .args(["rev-parse", "HEAD"])
-                .current_dir(work_dir)
-                .stdout(std::process::Stdio::piped())
-                .output()
-                .await
-                .map_err(AgentError::Io)?;
-            commit_sha = Some(
-                String::from_utf8_lossy(&sha_output.stdout)
-                    .trim()
-                    .to_owned(),
-            );
-        } else {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
-            warn!(stderr = %stderr, "git commit failed");
-            // Non-fatal: tracking succeeded, commit failed.
-            errors.push(json!({
-                "path": "_commit",
-                "status": commit_output.status.code(),
-                "stderr": stderr,
-            }));
-        }
-    }
-
-    Ok(json!({
-        "ok": true,
-        "patterns_added": patterns_added,
-        "files_tracked": files_tracked,
-        "errors": errors,
-        "commit_sha": commit_sha,
-    }))
 }
 
 // ---------------- serialization helpers ----------------
@@ -5286,7 +4626,7 @@ async fn git_pull_branch(state: &State, p: GitPullBranchParams) -> Result<Value>
     let remote = p.remote.as_deref().unwrap_or("origin");
 
     // Check if the target branch is currently checked out.
-    let head_out = crate::shellout::git_command()
+    let head_out = crate::shellout::git_command()?
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -5341,7 +4681,7 @@ async fn git_config_get(state: &State, p: GitConfigGetParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let mut values = serde_json::Map::new();
     for key in &p.keys {
-        let out = crate::shellout::git_command()
+        let out = crate::shellout::git_command()?
             .args(["config", "--get", key])
             .current_dir(&work_dir)
             .output()
@@ -5376,7 +4716,7 @@ async fn git_blame(state: &State, p: GitBlameParams) -> Result<Value> {
     args.push("--");
     args.push(&p.path);
 
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(&args)
         .current_dir(&work_dir)
         .output()
@@ -5434,7 +4774,7 @@ async fn git_diff_name_only(state: &State, p: GitDiffNameOnlyParams) -> Result<V
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let range = format!("{}...{}", p.base, p.head);
 
-    let out = crate::shellout::git_command()
+    let out = crate::shellout::git_command()?
         .args(["diff", "--name-status", &range])
         .current_dir(&work_dir)
         .output()
@@ -5468,8 +4808,7 @@ async fn git_diff_name_only(state: &State, p: GitDiffNameOnlyParams) -> Result<V
 
 /// Shared helper for simple git commands that return status + output.
 async fn run_git_simple(work_dir: &std::path::Path, args: &[&str]) -> Result<Value> {
-    let mut command = crate::shellout::git_command();
-    crate::storage_auth::configure_command(&mut command)?;
+    let mut command = crate::shellout::git_command()?;
     let out = command
         .args(args)
         .current_dir(work_dir)
@@ -5494,6 +4833,8 @@ mod tests {
     use super::*;
     use std::process::Stdio;
     use tempfile::TempDir;
+
+    mod file_writes;
 
     fn sh(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new("git")
@@ -5532,6 +4873,267 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capabilities_describe_the_native_dispatcher_without_a_repository() {
+        let state = State::new();
+        let out = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+        let request = |method: &str| Request {
+            jsonrpc: Some("2.0".into()),
+            id: Some(json!(1)),
+            method: method.into(),
+            params: json!({}),
+        };
+        let result = handle(&state, request("capabilities"), out.clone())
+            .await
+            .unwrap();
+        assert_eq!(result["protocol"], 1);
+        assert_eq!(result["version"], env!("CARGO_PKG_VERSION"));
+        let methods = result["methods"].as_array().unwrap();
+        for method in [
+            "capabilities",
+            "ping",
+            "open_local",
+            "file_open",
+            "file_chunks",
+            "read_range",
+            "file_materialize",
+            "rpc/cancel",
+            "close",
+        ] {
+            assert!(methods.contains(&json!(method)), "missing {method}");
+        }
+        assert_eq!(
+            methods.len(),
+            methods
+                .iter()
+                .map(Value::to_string)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+        for method in [
+            "compress_file",
+            "chunk_signatures",
+            "watch_start",
+            "unknown",
+        ] {
+            assert!(!methods.contains(&json!(method)));
+            assert!(matches!(
+                handle(&state, request(method), out.clone()).await,
+                Err(AgentError::UnknownMethod(_))
+            ));
+        }
+        assert_eq!(
+            handle(&state, request("ping"), out).await.unwrap()["pong"],
+            result["version"]
+        );
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_repository_open_does_not_replace_the_current_session() {
+        let (_first_directory, first) = git_init_repo();
+        let (_second_directory, second) = git_init_repo();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&first, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state
+            .insert("retained".into(), repo, Some(first.clone()))
+            .await;
+        drop(state.cancel_registry.register("opening".into()).await);
+        state.cancel_registry.cancel("opening").await;
+        let request = serde_json::from_value(json!({
+            "jsonrpc": "2.0", "id": "open", "method": "open_local",
+            "params": { "repo_id": "retained", "path": second, "op_id": "opening" }
+        }))
+        .unwrap();
+        let result = handle(
+            &state,
+            request,
+            Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
+        )
+        .await;
+        let retained = state.get_work_dir("retained").await.unwrap();
+        state.shutdown().await.unwrap();
+        assert!(matches!(result, Err(AgentError::OpCancelled { .. })) && retained == first);
+    }
+
+    #[tokio::test]
+    async fn complete_reads_enforce_limits_against_the_working_source() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"ok").unwrap();
+        assert!(sh(&root, &["add", "file.txt"]).status.success());
+        std::fs::write(root.join("file.txt"), vec![b'x'; 65536]).unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        for text in [true, false] {
+            let params = serde_json::from_value(
+                json!({ "repo_id": "test", "path": "file.txt", "max_bytes": 32 }),
+            )
+            .unwrap();
+            let value = if text {
+                read_text(&state, params).await
+            } else {
+                read_bytes(&state, params).await
+            }
+            .unwrap();
+            let key = if text { "text" } else { "bytes_b64" };
+            assert_eq!(
+                (&value["truncated"], &value["size"], &value[key]),
+                (&json!(true), &json!(65536), &Value::Null)
+            );
+        }
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_ranges_keep_the_capture_until_explicit_close() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"captured").unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state.insert("test".into(), repo, Some(root.clone())).await;
+        let opened = file_open(
+            &state,
+            serde_json::from_value(json!({ "repo_id": "test", "path": "file.txt" })).unwrap(),
+        )
+        .await
+        .unwrap();
+        let file = || {
+            serde_json::from_value(json!({ "repo_id": "test", "file_id": opened["file_id"] }))
+                .unwrap()
+        };
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let worker = state.clone();
+        let id = file();
+        let reading = tokio::spawn(async move {
+            read_retained(&worker, id, Some("range".into()), |source| async move {
+                entered.send(()).unwrap();
+                while source.check_cancelled().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+                source.read_range(0, 8).await?;
+                Ok(Value::Null)
+            })
+            .await
+        });
+        started.await.unwrap();
+        assert!(state.cancel_registry.cancel("range").await);
+        assert!(reading.await.unwrap().unwrap_err().is_cancelled());
+        std::fs::write(root.join("replacement"), b"replacement").unwrap();
+        std::fs::rename(root.join("replacement"), root.join("file.txt")).unwrap();
+        let range = || ReadRangeParams {
+            file: file(),
+            offset: 3,
+            length: 8,
+            op_id: None,
+        };
+        let bytes = read_range(&state, range()).await.unwrap();
+        assert_eq!(
+            bytes,
+            json!({ "offset": 3, "length": 5, "bytes_b64": "dHVyZWQ=", "file_size": 8 })
+        );
+        file_close(&state, file()).await.unwrap();
+        assert!(read_range(&state, range()).await.is_err());
+        state.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_reads_reject_untracked_symlinks_outside_the_repository() {
+        let (directory, root) = git_init_repo();
+        let outside = directory.path().join("outside.txt");
+        std::fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(outside, root.join("link.txt")).unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        for text in [true, false] {
+            let params =
+                serde_json::from_value(json!({ "repo_id": "test", "path": "link.txt" })).unwrap();
+            let error = if text {
+                read_text(&state, params).await
+            } else {
+                read_bytes(&state, params).await
+            }
+            .unwrap_err();
+            assert!(error.to_string().contains("outside the repository"));
+        }
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_read_cancellation_waits_for_work_and_closes_its_source() {
+        let (_directory, root) = git_init_repo();
+        std::fs::write(root.join("file.txt"), b"content").unwrap();
+        let state = State::new();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
+        state.insert("test".into(), repo, Some(root)).await;
+        for failure in [false, true] {
+            let (entered, source) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let worker_state = state.clone();
+            let operation = tokio::spawn(async move {
+                read_source(
+                    &worker_state,
+                    PreviewParams {
+                        repo_id: "test".into(),
+                        path: "file.txt".into(),
+                        rev: None,
+                        op_id: Some("preview".into()),
+                    },
+                    |source| async move {
+                        assert!(entered.send(source.clone()).is_ok());
+                        released.await.unwrap();
+                        if failure {
+                            return Err(AgentError::Integrity {
+                                algorithm: "BLAKE3",
+                                expected: "expected".into(),
+                                actual: "actual".into(),
+                            });
+                        }
+                        let reader = preview::PreviewReader::new(source);
+                        tokio::task::spawn_blocking(move || preview::numpy_npy(reader))
+                            .await
+                            .map_err(std::io::Error::other)?
+                    },
+                )
+                .await
+            });
+            let source = source.await.unwrap();
+            assert!(state.cancel_registry.cancel("preview").await);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while source.check_cancelled().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!operation.is_finished());
+            release.send(()).unwrap();
+            let result = operation.await.unwrap();
+            if failure {
+                assert!(matches!(result, Err(AgentError::Integrity { .. })));
+            } else {
+                assert!(
+                    matches!(result, Err(AgentError::OpCancelled { op_id }) if op_id == "preview")
+                );
+            }
+            assert!(source.read_range(0, 1).await.is_err());
+            assert!(!state.cancel_registry.cancel("preview").await);
+        }
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn git_config_get_returns_set_values() {
         let (_td, root) = git_init_repo();
         // Set a signing key in the repo config.
@@ -5539,7 +5141,9 @@ mod tests {
         let _ = sh(&root, &["config", "commit.gpgsign", "true"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5564,7 +5168,9 @@ mod tests {
         let (_td, root) = git_init_repo();
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5592,7 +5198,9 @@ mod tests {
         let _ = sh(&root, &["config", "gpg.format", "ssh"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let params = GitConfigGetParams {
@@ -5620,7 +5228,9 @@ mod tests {
         let _ = sh(&root, &["branch", "feature"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let result = list_refs(
@@ -5694,7 +5304,9 @@ mod tests {
         let _ = sh(&root, &["commit", "-m", "local change"]);
 
         let state = State::new();
-        let repo = BrowseSession::open_local(&root).await.unwrap();
+        let repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state.insert("test".into(), repo, Some(root)).await;
 
         let result = list_refs(
@@ -5745,12 +5357,15 @@ mod tests {
         let nested = root.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let state = State::new();
-        let opened = open_local(
+        let opened = handle(
             &state,
-            OpenLocalParams {
-                repo_id: "local-root".into(),
-                path: nested.clone(),
+            Request {
+                jsonrpc: Some("2.0".into()),
+                id: Some(json!(1)),
+                method: "open_local".into(),
+                params: json!({ "repo_id": "local-root", "path": nested }),
             },
+            Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
         )
         .await;
         state.shutdown().await.unwrap();
@@ -5885,14 +5500,18 @@ mod tests {
         let state = State::new();
 
         // Open the main repo.
-        let main_repo = BrowseSession::open_local(&root).await.unwrap();
+        let main_repo = BrowseSession::open_local(&root, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state
             .insert("main".into(), main_repo, Some(root.clone()))
             .await;
 
         // Open the worktree as a separate repo context (simulates
         // the renderer calling rpc.openLocal(worktree_path)).
-        let wt_repo = BrowseSession::open_local(&wt_path).await.unwrap();
+        let wt_repo = BrowseSession::open_local(&wt_path, &crate::repository::ReadScope::default())
+            .await
+            .unwrap();
         state
             .insert("wt-feature".into(), wt_repo, Some(wt_path.clone()))
             .await;
@@ -6274,7 +5893,7 @@ mod tests {
 /// contribution heatmap data). Each entry is `{date: "YYYY-MM-DD", count: N}`.
 async fn git_activity(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "log",
             "--all",
@@ -6375,7 +5994,7 @@ async fn git_contributors(state: &State, p: GitContributorsParams) -> Result<Val
         since_flag = "--since=5 years ago".to_string();
         args.push(&since_flag);
     }
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(&args)
         .current_dir(&work_dir)
         .kill_on_drop(true)
@@ -6435,7 +6054,7 @@ async fn git_pulse(state: &State, p: GitPulseParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
     let since_arg = format!("{}.days.ago", p.days);
 
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "log",
             &format!("--since={since_arg}"),
@@ -6580,7 +6199,7 @@ async fn git_commit_frequency(state: &State, p: GitCommitFrequencyParams) -> Res
 
     let since_arg = start_date.format("%Y-%m-%d").to_string();
 
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "log",
             "--all",
@@ -6747,7 +6366,7 @@ async fn compute_code_freq_range(
         args.push(format!("--until={u}"));
     }
 
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(&args)
         .current_dir(work_dir)
         .kill_on_drop(true)
@@ -6932,363 +6551,42 @@ async fn git_code_frequency(state: &State, p: GitCodeFrequencyParams) -> Result<
     Ok(json!({ "weeks": result_weeks }))
 }
 
-// ---- SQLite preview ---------------------------------------------------
-
-/// Preview a SQLite database: list tables, their schemas, and first
-/// 50 rows of each table (capped at 5 tables to keep response size
-/// reasonable).
 async fn preview_sqlite(state: &State, p: PreviewParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let abs = work_dir.join(&p.path);
-    if !abs.exists() {
-        return Err(AgentError::Other(format!(
-            "file not on disk: {} (run `crab hydrate` to materialize it first)",
-            abs.display()
-        )));
-    }
-    let abs_clone = abs.clone();
-    tokio::task::spawn_blocking(move || sqlite_preview(&abs_clone))
-        .await
-        .map_err(|e| AgentError::Other(format!("join error: {e}")))?
-}
-
-fn sqlite_preview(path: &std::path::Path) -> Result<Value> {
-    use rusqlite::Connection;
-
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    database_query(
+        state,
+        p,
+        preview::query::Job::Sqlite(preview::query::SqliteJob::Preview),
     )
-    .map_err(|e| AgentError::Other(format!("sqlite open: {e}")))?;
-
-    // Get table names.
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        .map_err(|e| AgentError::Other(format!("sqlite query: {e}")))?;
-    let table_names: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|e| AgentError::Other(format!("sqlite: {e}")))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let mut tables: Vec<Value> = Vec::new();
-    for name in table_names.iter().take(10) {
-        // Get column info.
-        let pragma = format!("PRAGMA table_info(\"{}\")", name.replace('"', "\"\""));
-        let mut col_stmt = conn
-            .prepare(&pragma)
-            .map_err(|e| AgentError::Other(format!("sqlite pragma: {e}")))?;
-        let columns: Vec<Value> = col_stmt
-            .query_map([], |row| {
-                Ok(json!({
-                    "name": row.get::<_, String>(1)?,
-                    "type": row.get::<_, String>(2)?,
-                    "notnull": row.get::<_, bool>(3)?,
-                    "pk": row.get::<_, bool>(5)?,
-                }))
-            })
-            .map_err(|e| AgentError::Other(format!("sqlite: {e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Get row count.
-        let count: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM \"{}\"", name.replace('"', "\"\"")),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        // Get first 50 rows.
-        let query = format!("SELECT * FROM \"{}\" LIMIT 50", name.replace('"', "\"\""));
-        let mut data_stmt = conn
-            .prepare(&query)
-            .map_err(|e| AgentError::Other(format!("sqlite: {e}")))?;
-        let col_count = data_stmt.column_count();
-        let col_names: Vec<String> = (0..col_count)
-            .map(|i| data_stmt.column_name(i).unwrap_or("?").to_owned())
-            .collect();
-
-        let mut rows: Vec<Value> = Vec::new();
-        let mut row_iter = data_stmt
-            .query([])
-            .map_err(|e| AgentError::Other(format!("sqlite: {e}")))?;
-        while let Some(row) = row_iter
-            .next()
-            .map_err(|e| AgentError::Other(format!("sqlite: {e}")))?
-        {
-            let mut obj = serde_json::Map::new();
-            for i in 0..col_count {
-                let val: Value = match row.get_ref(i) {
-                    Ok(rusqlite::types::ValueRef::Null) => Value::Null,
-                    Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                    Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
-                    Ok(rusqlite::types::ValueRef::Text(t)) => {
-                        json!(String::from_utf8_lossy(t))
-                    }
-                    Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                        json!(format!("<blob {} bytes>", b.len()))
-                    }
-                    Err(_) => Value::Null,
-                };
-                obj.insert(col_names[i].clone(), val);
-            }
-            rows.push(Value::Object(obj));
-        }
-
-        tables.push(json!({
-            "name": name,
-            "columns": columns,
-            "row_count": count,
-            "preview_rows": rows,
-        }));
-    }
-
-    // Get database file size.
-    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    Ok(json!({
-        "kind": "sqlite",
-        "file_size": file_size,
-        "table_count": table_names.len(),
-        "tables": tables,
-    }))
+    .await
 }
-
-// ---- DuckDB SQL query --------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DuckDbQueryParams {
-    repo_id: String,
-    /// SQL query to execute. DuckDB supports querying SQLite files,
-    /// Parquet, CSV, and JSON natively.
+struct FileQueryParams {
+    #[serde(flatten)]
+    file: PreviewParams,
     sql: String,
-    /// Optional path to a file to attach. When provided, the file is
-    /// made available as a DuckDB-attached database or via DuckDB's
-    /// file-reading functions depending on the extension.
-    #[serde(default)]
-    file_path: Option<String>,
-    /// Maximum rows to return. Clamped to [1, 10000]. Defaults to 500.
-    #[serde(default)]
     max_rows: Option<usize>,
 }
 
-/// Execute an arbitrary SQL query via DuckDB. Supports:
-///   - Querying attached SQLite databases
-///   - Reading Parquet files: `SELECT * FROM 'path/to/file.parquet'`
-///   - Reading CSV files: `SELECT * FROM 'path/to/file.csv'`
-///   - In-memory analytics with full SQL (window functions, CTEs, etc.)
-///
-/// The file_path parameter, when provided, is attached as a SQLite
-/// database accessible via the alias `db`.
-async fn duckdb_query(state: &State, p: DuckDbQueryParams) -> Result<Value> {
-    let work_dir = state.get_work_dir(&p.repo_id).await?;
-    let sql = p.sql.clone();
-    let file_path = p.file_path.clone();
-    let max_rows = p.max_rows.unwrap_or(500).clamp(1, 10000);
-
-    tokio::task::spawn_blocking(move || {
-        duckdb_execute_query(&work_dir, &sql, file_path.as_deref(), max_rows)
-    })
-    .await
-    .map_err(|e| AgentError::Other(format!("join error: {e}")))?
+async fn file_query(state: &State, p: FileQueryParams) -> Result<Value> {
+    let job = preview::query::Job::query(&p.file.path, p.sql, p.max_rows)?;
+    database_query(state, p.file, job).await
 }
 
-fn duckdb_execute_query(
-    work_dir: &std::path::Path,
-    sql: &str,
-    file_path: Option<&str>,
-    max_rows: usize,
+async fn database_query(
+    state: &State,
+    p: PreviewParams,
+    job: preview::query::Job,
 ) -> Result<Value> {
-    use duckdb::{Connection, types::Value as DuckValue};
-
-    let conn =
-        Connection::open_in_memory().map_err(|e| AgentError::Other(format!("duckdb open: {e}")))?;
-
-    // If a file path is provided, attach it based on extension.
-    if let Some(fp) = file_path {
-        let abs_path = if std::path::Path::new(fp).is_absolute() {
-            std::path::PathBuf::from(fp)
-        } else {
-            work_dir.join(fp)
-        };
-
-        if !abs_path.exists() {
-            return Err(AgentError::Other(format!(
-                "file not on disk: {} (run `crab hydrate` to materialize it first)",
-                abs_path.display()
-            )));
-        }
-
-        let ext = abs_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        match ext.as_str() {
-            "db" | "sqlite" | "sqlite3" => {
-                // Attach as a SQLite database with alias "db".
-                let attach_sql = format!(
-                    "ATTACH '{}' AS db (TYPE SQLITE, READ_ONLY)",
-                    abs_path.display()
-                );
-                conn.execute_batch(&attach_sql)
-                    .map_err(|e| AgentError::Other(format!("duckdb attach sqlite: {e}")))?;
-                // Set search path so users can query tables without
-                // the "db." prefix — just like a native SQLite client.
-                conn.execute_batch("SET search_path='db,main'")
-                    .map_err(|e| AgentError::Other(format!("duckdb set search_path: {e}")))?;
-            }
-            _ => {
-                // For other formats (parquet, csv, json), DuckDB can
-                // read them directly via SQL — no explicit attach needed.
-                // The user references them in their query as file paths.
-            }
-        }
-    }
-
-    // Set the working directory so relative paths in queries resolve
-    // against the repo root.
-    let set_dir = format!("SET file_search_path='{}'", work_dir.display());
-    conn.execute_batch(&set_dir).ok(); // Best-effort; not all DuckDB versions support this.
-
-    // Execute the query and collect results.
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| AgentError::Other(format!("duckdb prepare: {e}")))?;
-
-    // Collect rows first, then access column metadata after the borrow
-    // on `stmt` is released. We use query_map which internally calls
-    // query() and maps over the rows.
-    let collected_rows: Vec<Vec<DuckValue>> = stmt
-        .query_map([], |row| {
-            // We don't know col_count yet from the statement, but we
-            // can probe columns until we get an error. However, a
-            // simpler approach: use a large upper bound and break on
-            // error. DuckDB's Row::get returns Err for out-of-bounds.
-            let mut values: Vec<DuckValue> = Vec::new();
-            for i in 0..256 {
-                match row.get::<_, DuckValue>(i) {
-                    Ok(val) => values.push(val),
-                    Err(_) => break,
-                }
-            }
-            Ok(values)
-        })
-        .map_err(|e| AgentError::Other(format!("duckdb query: {e}")))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    // Now the mutable borrow on stmt is released. Get column metadata.
-    let col_count = stmt.column_count();
-    let col_names: Vec<String> = (0..col_count)
-        .map(|i| stmt.column_name(i).map_or("?".to_owned(), |v| v.to_owned()))
-        .collect();
-
-    let col_types: Vec<String> = (0..col_count)
-        .map(|i| stmt.column_type(i).to_string())
-        .collect();
-
-    // Build the JSON result from collected rows.
-    let mut result_rows: Vec<Value> = Vec::new();
-    let total_rows = collected_rows.len();
-    let truncated = total_rows > max_rows;
-
-    for row_values in collected_rows.into_iter().take(max_rows) {
-        let mut obj = serde_json::Map::new();
-        for (i, val) in row_values.into_iter().enumerate() {
-            if i >= col_names.len() {
-                break;
-            }
-            let json_val = duckdb_value_to_json(val)?;
-            obj.insert(col_names[i].clone(), json_val);
-        }
-        result_rows.push(Value::Object(obj));
-    }
-
-    Ok(json!({
-        "kind": "duckdb_result",
-        "columns": col_names.iter().zip(col_types.iter()).map(|(name, dtype)| {
-            json!({ "name": name, "type": dtype })
-        }).collect::<Vec<_>>(),
-        "rows": result_rows,
-        "row_count": result_rows.len(),
-        "total_rows": total_rows,
-        "truncated": truncated,
-        "max_rows": max_rows,
-    }))
-}
-
-/// Convert a DuckDB value to a serde_json Value.
-fn duckdb_value_to_json(val: duckdb::types::Value) -> Result<Value> {
-    use duckdb::types::Value as DV;
-    Ok(match val {
-        DV::Null => Value::Null,
-        DV::Boolean(b) => json!(b),
-        DV::TinyInt(n) => json!(n),
-        DV::SmallInt(n) => json!(n),
-        DV::Int(n) => json!(n),
-        DV::BigInt(n) => json!(n),
-        DV::HugeInt(n) => json!(n.to_string()),
-        DV::UHugeInt(n) => json!(n.to_string()),
-        DV::UTinyInt(n) => json!(n),
-        DV::USmallInt(n) => json!(n),
-        DV::UInt(n) => json!(n),
-        DV::UBigInt(n) => json!(n),
-        DV::Float(f) => json!(f),
-        DV::Double(f) => json!(f),
-        DV::Decimal(d) => json!(d.to_string()),
-        DV::Text(s) => json!(s),
-        DV::Blob(b) => json!(format!("<blob {} bytes>", b.len())),
-        DV::Geometry(b) => json!(format!("<geometry {} bytes>", b.len())),
-        DV::Timestamp(_, n) => json!(n),
-        DV::Date32(d) => json!(d),
-        DV::Time64(_, t) => json!(t),
-        DV::Interval {
-            months,
-            days,
-            nanos,
-        } => {
-            json!(format!("{months} months {days} days {nanos} nanos"))
-        }
-        DV::List(items) => {
-            let arr: Vec<Value> = items
-                .into_iter()
-                .map(duckdb_value_to_json)
-                .collect::<Result<_>>()?;
-            Value::Array(arr)
-        }
-        DV::Enum(s) => json!(s),
-        DV::Struct(map) => {
-            let obj: serde_json::Map<String, Value> = map
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), duckdb_value_to_json(v.clone())?)))
-                .collect::<Result<_>>()?;
-            Value::Object(obj)
-        }
-        DV::Array(items) => {
-            let arr: Vec<Value> = items
-                .into_iter()
-                .map(duckdb_value_to_json)
-                .collect::<Result<_>>()?;
-            Value::Array(arr)
-        }
-        DV::Map(map) => {
-            let obj: serde_json::Map<String, Value> = map
-                .iter()
-                .map(|(k, v)| Ok((format!("{:?}", k), duckdb_value_to_json(v.clone())?)))
-                .collect::<Result<_>>()?;
-            Value::Object(obj)
-        }
-        DV::Union(inner) => return duckdb_value_to_json(*inner),
-        _ => {
-            return Err(AgentError::Other(
-                "DuckDB returned an unsupported value type".into(),
-            ));
-        }
-    })
+    let repo = state.get(&p.repo_id).await?;
+    let scope = repo.read_scope();
+    cancellable_read(
+        state,
+        p.op_id,
+        &scope,
+        preview::query::run(&repo, &p.path, p.rev.as_deref(), scope.clone(), job),
+    )
+    .await
 }
 
 // ---- ONNX preview -----------------------------------------------------
@@ -7866,7 +7164,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     let base = p.base.as_deref().unwrap_or("HEAD");
 
     // 1. Upstream tracking.
-    let upstream = shellout::git_command()
+    let upstream = shellout::git_command()?
         .args([
             "for-each-ref",
             "--format=%(upstream:short)",
@@ -7881,7 +7179,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
         .filter(|s| !s.is_empty());
 
     // 2. Ahead/behind vs base.
-    let ab_output = shellout::git_command()
+    let ab_output = shellout::git_command()?
         .args([
             "rev-list",
             "--left-right",
@@ -7911,7 +7209,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
 
     // 3. Ahead/behind vs upstream (if tracking).
     let (upstream_ahead, upstream_behind) = if let Some(ref up) = upstream {
-        let ab = shellout::git_command()
+        let ab = shellout::git_command()?
             .args([
                 "rev-list",
                 "--left-right",
@@ -7943,7 +7241,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
 
     // 4. Recent commits on the branch (last 20).
     let fmt = "%H%x00%an%x00%aI%x00%s";
-    let log_output = shellout::git_command()
+    let log_output = shellout::git_command()?
         .args([
             "log",
             "--max-count=20",
@@ -7971,7 +7269,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     }
 
     // 5. Files changed vs base (diffstat).
-    let diff_output = shellout::git_command()
+    let diff_output = shellout::git_command()?
         .args(["diff", "--stat", "--numstat", &format!("{base}...{branch}")])
         .current_dir(&work_dir)
         .output()
@@ -8001,7 +7299,7 @@ async fn git_branch_info(state: &State, p: GitBranchInfoParams) -> Result<Value>
     }
 
     // 6. Is this the current branch?
-    let current_branch = shellout::git_command()
+    let current_branch = shellout::git_command()?
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()
@@ -8053,7 +7351,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // Get all local branches with their last commit date.
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "for-each-ref",
             "--sort=-committerdate",
@@ -8078,7 +7376,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
     let mut stale_count: u32 = 0;
 
     // Get the default branch (HEAD target) for ahead/behind computation.
-    let default_branch = shellout::git_command()
+    let default_branch = shellout::git_command()?
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8123,7 +7421,7 @@ async fn git_branch_health(state: &State, p: GitBranchHealthParams) -> Result<Va
         let (ahead, behind) = if name == default_branch {
             (0u32, 0u32)
         } else {
-            shellout::git_command()
+            shellout::git_command()?
                 .args([
                     "rev-list",
                     "--left-right",
@@ -8180,7 +7478,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
     // 1. Remotes.
-    let remotes_out = shellout::git_command()
+    let remotes_out = shellout::git_command()?
         .args(["remote", "-v"])
         .current_dir(&work_dir)
         .output()
@@ -8222,7 +7520,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     ];
     let mut config: Vec<Value> = Vec::new();
     for key in &config_keys {
-        let out = shellout::git_command()
+        let out = shellout::git_command()?
             .args(["config", "--get", key])
             .current_dir(&work_dir)
             .output()
@@ -8256,7 +7554,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     hooks.sort();
 
     // 4. Submodules.
-    let submodules_out = shellout::git_command()
+    let submodules_out = shellout::git_command()?
         .args(["submodule", "status"])
         .current_dir(&work_dir)
         .output()
@@ -8284,7 +7582,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
     }
 
     // 5. HEAD info.
-    let head_sha = shellout::git_command()
+    let head_sha = shellout::git_command()?
         .args(["rev-parse", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8294,7 +7592,7 @@ async fn git_repo_info(state: &State, p: RepoIdParams) -> Result<Value> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_default();
 
-    let head_branch = shellout::git_command()
+    let head_branch = shellout::git_command()?
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()
@@ -8473,7 +7771,7 @@ async fn count_pointer_files(work_dir: &Path) -> Result<u64> {
         return Ok(0);
     }
 
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -8514,7 +7812,7 @@ async fn count_pointer_files(work_dir: &Path) -> Result<u64> {
 /// Mode A: repo has pointer files — estimate dedup savings.
 async fn dedup_savings_mode_a(work_dir: &Path, pointer_count: u64) -> Result<Value> {
     // Get total logical bytes from pointer files by summing their declared sizes.
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -8602,7 +7900,7 @@ async fn dedup_savings_mode_b(work_dir: &Path) -> Result<Value> {
     let max_files: usize = 1000;
 
     // Use git ls-files to get tracked files, then check sizes.
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "ls-files",
             "-z",
@@ -8733,7 +8031,7 @@ struct GitReleaseTimelineParams {
 async fn git_release_timeline(state: &State, p: GitReleaseTimelineParams) -> Result<Value> {
     let work_dir = state.get_work_dir(&p.repo_id).await?;
 
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args([
             "tag",
             "--sort=-creatordate",
@@ -8848,7 +8146,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
     }
 
     // Get the first commit date.
-    let first_commit_out = shellout::git_command()
+    let first_commit_out = shellout::git_command()?
         .args(["log", "--reverse", "--format=%aI", "-1"])
         .current_dir(&work_dir)
         .output()
@@ -8882,7 +8180,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
     let current_size = get_current_repo_size(&work_dir).await?;
 
     // Get total number of commits to estimate growth curve.
-    let commit_count_out = shellout::git_command()
+    let commit_count_out = shellout::git_command()?
         .args(["rev-list", "--count", "HEAD"])
         .current_dir(&work_dir)
         .output()
@@ -8941,7 +8239,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
 
         // Count commits up to this date.
         let until_arg = format!("{}T23:59:59", date_str);
-        let count_out = shellout::git_command()
+        let count_out = shellout::git_command()?
             .args(["rev-list", "--count", "--before", &until_arg, "HEAD"])
             .current_dir(&work_dir)
             .output()
@@ -9009,7 +8307,7 @@ async fn repo_size_history(state: &State, p: RepoSizeHistoryParams) -> Result<Va
 /// Get the current total size of tracked files in the repo.
 async fn get_current_repo_size(work_dir: &Path) -> Result<u64> {
     // Use `git ls-files -z` + stat to get total size of tracked files.
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(["ls-files", "-z"])
         .current_dir(work_dir)
         .output()
@@ -9076,7 +8374,7 @@ async fn git_commit_size_distribution(
 
     // Use %H%x00%s as format so we can split SHA and subject by NUL,
     // then --shortstat appends a stats line after each commit.
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(["log", "--shortstat", "--format=%H%x00%s", "-100"])
         .current_dir(&work_dir)
         .output()
@@ -9251,7 +8549,7 @@ async fn git_contributor_growth(state: &State, p: GitContributorGrowthParams) ->
 
     // Run git log with NUL separator between author name and date for
     // reliable parsing (author names can contain spaces, pipes, etc.).
-    let out = shellout::git_command()
+    let out = shellout::git_command()?
         .args(["log", "--all", &since_arg, "--format=%aN%x00%aI"])
         .current_dir(&work_dir)
         .output()

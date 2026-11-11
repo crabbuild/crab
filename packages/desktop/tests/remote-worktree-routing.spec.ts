@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verification test: Remote worktree RPC routing.
  *
@@ -28,7 +29,9 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { RpcRouter, parseRepoId } from "../electron/ssh-router";
+import { withRepositoryRuntimes } from "./repository-runtime-fixture";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter } from "../electron/ssh-router";
 import { RemoteProvider } from "../electron/remote-provider";
 
 // ─── Mock SSH Session Manager ────────────────────────────────────────────────
@@ -44,6 +47,8 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
+  agentSession() { return "ssh:1"; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
 
@@ -93,14 +98,14 @@ const TEST_PROFILE_ID = "my-server";
 const TEST_REPO_ID = `ssh://${TEST_PROFILE_ID}/home/user/project`;
 
 function createTestSetup() {
-  const sessionManager = new MockSessionManager();
+  const sessionManager = withRepositoryRuntimes(new MockSessionManager());
   const channel = new MockChannel();
   const localAgent = { request: vi.fn().mockResolvedValue({ ok: true }) };
 
   sessionManager.setStatus(TEST_PROFILE_ID, "connected");
   sessionManager.setConnection(TEST_PROFILE_ID, channel);
 
-  const router = new RpcRouter(sessionManager as any, localAgent, { requestTimeoutMs: 5000 });
+  const router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections, { requestTimeoutMs: 5000 });
   router.attachChannel(TEST_PROFILE_ID, channel as any);
 
   const fileEditor = new MockFileEditor();
@@ -215,30 +220,6 @@ describe("Remote worktree RPC routing", () => {
     it("returns null for local repo_ids", () => {
       expect(parseRepoId("/Users/user/project")).toBeNull();
       expect(parseRepoId("C:\\Users\\project")).toBeNull();
-    });
-  });
-
-  describe("worktree methods are not blocked during reconnection (read-only)", () => {
-    it("queues git_worktree_list during reconnection (read-only method)", async () => {
-      const { provider, sessionManager } = createTestSetup();
-
-      // Simulate connection loss
-      sessionManager.setStatus(TEST_PROFILE_ID, "reconnecting");
-
-      const params = { repo_id: TEST_REPO_ID };
-
-      // git_worktree_list is not in the WRITE_METHODS set, so it should
-      // be queued (not rejected) during reconnection.
-      const resultPromise = provider.request("git_worktree_list", params);
-
-      // The promise should be pending (queued), not rejected
-      let settled = false;
-      resultPromise.then(() => { settled = true; }).catch(() => { settled = true; });
-
-      // Give microtasks a chance to run
-      await new Promise((r) => setTimeout(r, 10));
-      // It should still be pending (queued for replay)
-      expect(settled).toBe(false);
     });
   });
 

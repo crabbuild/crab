@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Integration test: SSH reconnection flow end-to-end.
  *
@@ -8,7 +9,7 @@
  * 2. Network interruption → system enters reconnection state
  * 3. Read-only operations return stale cached data during reconnection
  * 4. Write operations are rejected immediately
- * 5. Non-cacheable read operations are queued
+ * 5. Only explicitly cacheable metadata can be replayed
  * 6. Reconnection success → queued calls are replayed
  * 7. Closed terminal attachments resume their existing tmux sessions
  * 8. Audit log records the reconnection event
@@ -91,6 +92,7 @@ class MockSshClient extends EventEmitter {
 // ── Mock SSH Session Manager ─────────────────────────────────────
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, any>();
 
@@ -143,7 +145,7 @@ describe("SSH Reconnection Integration", () => {
     // Initialize all subsystem modules
     sessionManager = new MockSessionManager();
     localAgent = new MockLocalAgent();
-    router = new RpcRouter(sessionManager as any, localAgent);
+    router = new RpcRouter(sessionManager as any, localAgent, mockStorageConnections);
     cache = new RemoteCache();
     router.setCache(cache);
     auditLog = new SshAuditLog(auditLogPath);
@@ -243,17 +245,13 @@ describe("SSH Reconnection Integration", () => {
         expect(err.code).toBe("SSH_RECONNECTING");
       }
 
-      // ─── Phase 5: Verify non-cacheable reads are queued ────────
-
-      // git_stash_list is not cacheable, so it gets queued
-      const stashPromise = router.route(
-        REPO_ID, "git_stash_list", { repo_id: REPO_ID },
-      );
-
-      // A second non-cacheable call also gets queued
-      const blamePromise = router.route(
-        REPO_ID, "git_blame", { repo_id: REPO_ID, path: "train.py" },
-      );
+      // Live operations stay bound to the lost agent; only explicitly
+      // cacheable metadata without a stale entry can wait for another session.
+      for (const method of ["git_stash_list", "git_blame", "file_open", "rpc/cancel"]) {
+        await expect(router.route(REPO_ID, method, { repo_id: REPO_ID, op_id: "lost" })).rejects.toMatchObject({ code: "SSH_RECONNECTING" });
+      }
+      const logPromise = router.route(REPO_ID, "git_log", { repo_id: REPO_ID });
+      const hydrationPromise = router.route(REPO_ID, "hydration_status", { repo_id: REPO_ID });
 
       // ─── Phase 6: Simulate reconnection success ────────────────
 
@@ -271,10 +269,10 @@ describe("SSH Reconnection Integration", () => {
           const method = request.method;
 
           let result: unknown;
-          if (method === "git_stash_list") {
-            result = [{ index: 0, message: "WIP on main" }];
-          } else if (method === "git_blame") {
-            result = { lines: [{ author: "user", line: 1 }] };
+          if (method === "git_log") {
+            result = { history: true };
+          } else if (method === "hydration_status") {
+            result = { files: 3 };
           } else {
             result = { ok: true };
           }
@@ -303,11 +301,8 @@ describe("SSH Reconnection Integration", () => {
       await router.replayQueue(PROFILE_ID);
 
       // Verify queued calls resolved with correct data
-      const stashResult = await stashPromise;
-      expect(stashResult).toEqual([{ index: 0, message: "WIP on main" }]);
-
-      const blameResult = await blamePromise;
-      expect(blameResult).toEqual({ lines: [{ author: "user", line: 1 }] });
+      expect(await logPromise).toEqual({ history: true });
+      expect(await hydrationPromise).toEqual({ files: 3 });
 
       // ─── Phase 7: Verify audit log records connect event ───────
 
@@ -417,13 +412,13 @@ describe("SSH Reconnection Integration", () => {
       const promises: Promise<unknown>[] = [];
       for (let i = 0; i < 50; i++) {
         promises.push(
-          router.route(REPO_ID, "git_stash_list", { repo_id: REPO_ID, idx: i }),
+          router.route(REPO_ID, "git_log", { repo_id: REPO_ID, idx: i }),
         );
       }
 
       // Queue one more — should drop the oldest
       const overflowPromise = router.route(
-        REPO_ID, "git_stash_list", { repo_id: REPO_ID, idx: 50 },
+        REPO_ID, "git_log", { repo_id: REPO_ID, idx: 50 },
       );
 
       // The first promise should be rejected due to overflow

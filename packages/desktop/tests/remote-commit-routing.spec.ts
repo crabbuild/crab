@@ -1,3 +1,4 @@
+import { mockStorageConnections } from "./mock-storage-connections";
 /**
  * Verifies that the commit composer's gitCommit RPC call routes
  * correctly for remote repos with ssh:// prefixed repo_ids.
@@ -11,7 +12,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ClientChannel } from "ssh2";
-import { RpcRouter, parseRepoId, routeRpcCall } from "../electron/ssh-router";
+import { parseRepoId } from "../electron/ssh-types";
+import { RpcRouter, routeRpcCall } from "../electron/ssh-router";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +31,7 @@ class MockChannel extends EventEmitter {
 }
 
 class MockSessionManager extends EventEmitter {
+  repositoryWork(): Promise<unknown> | undefined { return undefined; }
   private statuses = new Map<string, string>();
   private connections = new Map<string, { channels: { agent?: MockChannel }; profile?: { operationTimeoutMs?: number } }>();
 
@@ -76,7 +79,7 @@ describe("remote commit routing — gitCommit via RpcRouter", () => {
     sm = new MockSessionManager();
     channel = new MockChannel();
     localAgent = new MockLocalAgent();
-    router = new RpcRouter(sm as any, localAgent);
+    router = new RpcRouter(sm as any, localAgent, mockStorageConnections);
   });
 
   it("routes git_commit to remote agent when repo_id has ssh:// prefix", async () => {

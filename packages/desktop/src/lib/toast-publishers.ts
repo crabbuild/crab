@@ -2,7 +2,7 @@
 // for job completion, PR updates, and agent errors.
 
 import { onAgentEvent, type AgentEvent, type ProgressComplete } from "../ipc";
-import { publishToast } from "./toasts";
+import { dismissToast, publishToast } from "./toasts";
 import { getSettings } from "../settings";
 
 // --- DND helper ---
@@ -38,7 +38,9 @@ export function setupJobCompletionPublisher(): () => void {
     const p = evt.params as ProgressComplete;
     const label = formatOpLabel(p.op);
 
-    if (p.status === 0) {
+    if (p.outcome === "cancelled") {
+      publishToast({ kind: "info", title: `${label} cancelled`, body: "The operation stopped. Files already published remain in place." });
+    } else if (p.status === 0) {
       publishToast({
         kind: "success",
         title: `${label} completed`,
@@ -101,19 +103,30 @@ export interface AgentErrorParams {
  * Returns an unsubscribe function.
  */
 export function setupAgentErrorPublisher(): () => void {
+  let unavailable: string | undefined;
   return onAgentEvent((evt: AgentEvent) => {
+    // Local negotiation repairs service availability independently of each
+    // repository's replay. Retire its outage even if notifications are muted.
+    if (evt.method === "agent/ready") {
+      if (unavailable) dismissToast(unavailable);
+      unavailable = undefined;
+      return;
+    }
     if (isDndActive()) return;
     const { notifications } = getSettings();
     if (notifications.muteAgentErrors && evt.method === "agent/error") return;
+    if (notifications.muteAgentErrors && evt.method === "agent/failed") return;
     if (notifications.muteAgentErrors && evt.method === "agent/exit") return;
 
-    if (evt.method === "agent/error") {
+    if (evt.method === "agent/error" || evt.method === "agent/failed") {
       const p = evt.params as AgentErrorParams;
-      publishToast({
+      if (evt.method === "agent/failed" && unavailable) dismissToast(unavailable);
+      const id = publishToast({
         kind: "error",
-        title: "Agent error",
+        title: evt.method === "agent/failed" ? "Desktop services unavailable" : "Agent error",
         body: p.message,
       });
+      if (evt.method === "agent/failed") unavailable = id;
     } else if (evt.method === "agent/exit") {
       const p = evt.params as { code: number | null; signal: string | null };
       // Only toast unexpected exits (non-zero or signal-killed).
@@ -121,7 +134,8 @@ export function setupAgentErrorPublisher(): () => void {
         const reason = p.signal
           ? `Killed by signal ${p.signal}`
           : `Exited with code ${p.code}`;
-        publishToast({
+        if (unavailable) dismissToast(unavailable);
+        unavailable = publishToast({
           kind: "error",
           title: "Agent crashed",
           body: reason,

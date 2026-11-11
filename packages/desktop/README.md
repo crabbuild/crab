@@ -46,6 +46,59 @@ Repository-local desktop state lives under `.crab/desktop/` at Git's worktree
 root, including when opening a subdirectory. Its scoped ignore file keeps
 generated state out of Git changes; existing tracked files and ignore rules remain.
 
+## File comparisons
+
+Use the file comparison selector for HEAD → Working tree, Index → Working tree,
+or HEAD → Index. History compares a commit with its first parent; an initial
+commit compares with an empty tree.
+Selected comparisons keep their version selector through native recovery and
+refresh their content after the repository reopens. Clean local text/Markdown
+buffers refresh too; pending edits remain visible until saving finishes. Local
+save failures retain the buffer and offer **Retry saving**.
+Quit offers **Keep editing** or **Discard edits** while edits are pending.
+Discarding drops unsent edits; Crab waits for admitted local saves and their
+failure cleanup before exiting.
+SSH document reads and saves retain the caller's native session. A replacement
+blocks stale saves, preserves pending input, and lets the observed new runtime
+retry the editor buffer.
+
+Notebook previews recapture after repository services recover and offer
+**Retry notebook** after a read failure. HTML/SVG outputs render in isolated
+static documents; scripts and automatic external resource loads are disabled.
+Audio/video restore position, volume, mute, playback rate and paused/playing
+intent after reader replacement. If automatic playback is denied, the recovered
+controls remain available for manual Play.
+
+Notebook execution uses a selected local Python environment with Jupyter Client.
+Run All waits for each cell to finish and stops on failure. Live outputs and
+kernel variables survive tab changes and native-reader repair; interrupt,
+restart and busy disconnect/Quit join the existing kernel owner. Runtime
+discovery and optional installation use that Python environment asynchronously.
+Background outputs remain attached to the current cell after it becomes idle;
+rerunning that cell retires the old route. Cancel stops pending environment
+preparation or kernel readiness/restart and joins process cleanup before retry.
+Fresh-environment installation has packaged macOS proof. To run a notebook on
+Jupyter Server, check the local Python runtime, enter the server base URL with
+its token, and select **Connect to server**. Enter a kernel name or use the
+server default. Cells run in the server environment, where their input files
+must be accessible. Use HTTPS for a network server or HTTP for a loopback server.
+
+Installer failure/retry, abrupt kernel recovery, remote network loss, output
+budgets and captured SQL-query recovery remain tracked in the acceptance matrix
+below.
+
+Notebook comparisons show source, outputs, cell details and notebook metadata.
+Show unchanged cells to inspect them, and use the page controls to reach any
+cell or long text/output page. Outputs are displayed as text; comparison does
+not execute notebook code. Cancel stops the current read or comparison, and
+Retry starts it again. Read and parse failures stay visible.
+
+Structured notebook comparison supports nbformat 4, with a 16 MiB combined
+input limit and 100,000 combined cells. A file beyond either limit reports an
+error instead of comparing truncated content. Open or materialize the files to
+inspect their complete content. Other format and transfer qualification remains
+tracked in [the large-file acceptance matrix](docs/large-file-support.md).
+
 ## Build
 
 Requirements: Node 22.12+ within 22.x, npm, Rust 1.97+, Git, and the native C/C++ toolchain used
@@ -84,6 +137,9 @@ scratch directory instead of the developer's Workspace volume.
 `build:agent` builds and stages the complete Rust runtime in
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
+On Linux and macOS, `build:agent` also exports checksummed CLI/agent release
+assets under `release/remote-runtime/`. The release assembler requires every
+supported SSH target and verifies both binaries against their descriptor.
 
 Run `npm run build:agent -- --test` after building the runtime. It sets
 `CRAB_BIN` to the built CLI; worktree tests invoke that real binary.
@@ -119,6 +175,14 @@ platform, architecture, and SHA-256 hashes. Missing or mixed artifacts fail the
 build. The PTY daemon loads from ASAR; native terminal modules and helpers
 remain unpacked for execution.
 `build:electron` also copies the agent manifests and verifies the daemon entry.
+Packaged SSH connections resolve the exact application version and server target
+from official Crab release assets. The resolver verifies the paired CLI/sidecar
+before atomically publishing its device cache; missing or invalid assets fail
+visibly. Development connections use the matching native build directory.
+Connecting with agent deployment enabled verifies and atomically installs that
+pair under the remote user's `.crab/desktop/runtimes/`, then negotiates the real
+native methods before reporting the connection ready. Each native process owns
+its private index; disconnect waits for its cleanup acknowledgement.
 
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
@@ -178,7 +242,11 @@ performs one real, read-only bucket/container listing with a 30-second deadline;
 it reports provider failures without retrying and verifies read/list access,
 not write permission. Ordinary data operations retain retries. Save the
 connection, then choose **Use connection** for the open repository. Clone and Crab
-setup use the same picker and connection test.
+setup use the same picker and connection test. Saving, editing and forgetting
+connections work before native construction, including while login-shell
+discovery is blocked or a startup prerequisite fails. Repairing the prerequisite
+allows native operations to retry in the running app. CLI launch preparation
+shares the asynchronous shell environment and remains cancellable.
 
 | Provider | Built-in credentials | Repository URL |
 | --- | --- | --- |
@@ -262,6 +330,27 @@ location; existing Unix addresses that fit the OS limit remain unchanged.
   events, and displays execution errors even when the CLI fails before a stage
   starts. Structured CLI stdout and live command logs on stderr stay separate.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
+- Dashboard and dataset metadata refresh after native repository recovery while
+  retaining view controls and selection. The Datasets tab under Large Files
+  supports read-only inspection before Crab storage setup; tracking and storage
+  operations retain their setup requirement.
+- Native capability discovery returns `protocol: 1`, the runtime version, and
+  registered RPC method names from the dispatcher itself. SSH negotiation uses
+  the attached channel during deployment; feature gates require the methods
+  actually used by each operation, without inferred minimum versions.
+- SSH repository browsing uses SFTP for directory navigation and the native
+  agent for repository operations, bounded previews and materialization. Opened
+  repository identities gate their own queued metadata on reconnect. A blocked
+  sibling does not hold healthy reads; replay preserves order within each
+  repository and admits at most four calls concurrently. Live content requests
+  belong to the interrupted session and fail.
+- SSH progress reaches Activity only while its native request owns the job and
+  repository. Cancellation waits for the terminal result; unopened SSH identities
+  cannot fall through to local file operations. Editing controls are disabled
+  when the remote native agent is unavailable.
+- Explicit `--user-data-dir` profiles isolate SSH profiles, the SSH database and
+  host trust. The default SSH profile/database location remains `.crab/desktop/`
+  under the user's home directory, as shipped in `v2.0.0-alpha.1`.
 - Closing a remote session drains its SDK client. Agent shutdown cancels and joins outstanding requests
   before closing its SDK clients and SlateDB index.
 

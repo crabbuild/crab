@@ -202,7 +202,7 @@ impl TaskWorkspace {
                 "Workspace retained modified, untracked or ignored source files".into(),
             ));
         }
-        let mut command = crate::shellout::git_command();
+        let mut command = crate::shellout::git_command()?;
         let output = crate::shellout::output(command.current_dir(self.root()).args([
             "ls-files",
             "-v",

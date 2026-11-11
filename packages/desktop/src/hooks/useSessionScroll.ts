@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { useSession, useActiveRepoPath } from "../lib/session-context";
+import { useSession, useActiveRepoKey } from "../lib/session-context";
 import { useSetting } from "../settings";
 
 /** Minimum scrollHeight (px) to consider content "loaded enough" for restore. */
@@ -39,7 +39,7 @@ const SAVE_DEBOUNCE_MS = 250;
 export function useSessionScroll(viewId: string): React.RefObject<HTMLDivElement> {
   const ref = useRef<HTMLDivElement>(null);
   const sessionManager = useSession();
-  const repoPath = useActiveRepoPath();
+  const repoPath = useActiveRepoKey();
   const [restored, setRestored] = useState(false);
   const sessionPersistence = useSetting("sessionPersistence");
   const scrollRestore = sessionPersistence.scrollRestore;
