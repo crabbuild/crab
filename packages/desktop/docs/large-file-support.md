@@ -166,6 +166,13 @@ P0 work. Local worktree/CLI readers keep their existing `.git/lfs` source and
 verification path; no second reconstruction implementation or remote receipt
 writer is introduced.
 
+The SDK platform matrix now runs the cache owner's complete applicable library
+tests with local, HTTP and decoded-range persistence on Linux, macOS and Windows,
+alongside the SDK's real storage integration. This exercises LFS publication,
+leases, journal recovery and cleanup on each native filesystem. Adding the gate
+does not qualify those platforms; its new-head results are still required, as
+are packaged UI recovery and provider-specific profiles.
+
 Transfer admission also validates the current native repository epoch before
 looking up captures or saving an Activity intent. Expired single-file and batch
 hydrate/dehydrate/restore calls retain the shared `NATIVE_SESSION_LOST` error;
@@ -202,6 +209,30 @@ waits for the welcome tour to finish; two simultaneous modal dialogs had made
 the visible Skip control inaccessible. Tests drive the actual in-app
 confirmations and shared menu/radio/button roles without changing byte, staging,
 receipt, cancellation or timing assertions.
+
+### Offline retention boundary
+
+Permanent offline selections cannot use an indefinite row in the disposable
+cache catalog. The shipped cleanup contract in
+[`catalog/removal.rs`](../../../crates/crab-cache/src/catalog/removal.rs)
+permits safe payload reclamation when that catalog is absent or corrupt. A pin
+stored only there could silently lose the content it promises to protect.
+Retained selections need a durable owner outside disposable eviction authority,
+while continuing through the existing verified read/reconstruction path.
+
+Saved bodies alone also cannot reopen a remote snapshot. SDK
+[`capture_repository`](../../../crates/crab-sdk/src/client.rs) loads the root,
+ref frontiers and browse indexes before constructing the captured Git reader;
+Crab content additionally needs its captured pointer catalog. Offline admission
+must bind the saved storage identity, exact commit, selected byte paths and
+required metadata/content closure. Reopening must explicitly select that saved
+capture without probing the origin or silently substituting a newer revision.
+Settings owns selection/removal and usage; Files opens the saved capture and
+Activity owns preparation, cancellation and visible failure. Completion requires
+restart with the entire origin unavailable, budget pressure and explicit cleanup
+preserving selected bytes, exact reads/diffs/previews, and interrupted preparation
+never presenting an incomplete selection as ready. This remains unimplemented
+P0 scope in the priority table, not a claim made by disposable LFS retention.
 
 ### Missing and corrupt SDK content
 

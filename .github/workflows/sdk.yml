@@ -307,6 +307,10 @@ jobs:
         run: |
           "CRAB_SDK_TEST_CRAB_BIN=$env:CARGO_TARGET_DIR\debug\crab.exe" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Test native cache ownership and recovery
+        run: >-
+          cargo +${{ env.SDK_MSRV }} test -p crab-cache --locked --no-default-features
+          --features local-cache,remote-client,xet-chunk-cache --lib
       - run: cargo +${{ env.SDK_MSRV }} test -p crab-sdk --locked --all-features --no-fail-fast
       - name: Set up native fixture Python
         if: runner.os != 'Linux'
