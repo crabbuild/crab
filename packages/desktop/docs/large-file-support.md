@@ -151,12 +151,40 @@ caught a cached cancellation being reported as I/O; the source now preserves
 cancellation and the unchanged close assertion passes.
 
 The earlier unsigned macOS package reproduces the visible restart failure when
-only the LFS origin payload is unavailable. Packaged qualification of this new
-path is pending. This is disposable content retention, not durable offline
-selection: repository metadata reopening and protected offline versions remain
+only the LFS origin payload is unavailable. The new package passes all fifteen
+SDK cases. Three new LFS cases prove exact 4,194,413-byte reuse after application
+restart with that origin payload unavailable, real Settings preview/cleanup and
+physical reclamation, and a shared zero/limited budget across two identities.
+Budget persistence and external CLI changes are visible after restart; zero
+retention still permits exact reads. The fixture records zero origin writes.
+All 869 packaged assets, 1,717 frozen native inputs and the local/SSH native pair
+match the qualification inputs. These are bounded macOS checks against the
+owned S3-compatible fixture; other platforms/providers remain unqualified.
+This is disposable content retention, not durable offline selection:
+repository metadata reopening and protected offline versions remain
 P0 work. Local worktree/CLI readers keep their existing `.git/lfs` source and
 verification path; no second reconstruction implementation or remote receipt
 writer is introduced.
+
+Transfer admission also validates the current native repository epoch before
+looking up captures or saving an Activity intent. Expired single-file and batch
+hydrate/dehydrate/restore calls retain the shared `NATIVE_SESSION_LOST` error;
+they cannot create an Activity record or dispatch work. Four regressions fail
+before this ordering correction; all 53 focused transfer tests pass afterward.
+The packaged stale-reader check supplies a valid operation identity so it reaches
+session validation rather than failing the transfer request's prerequisites.
+The updated unsigned package passes native recovery and both SDK native-crash
+cases: stale captures are rejected, old media URLs expire and fresh Crab/LFS
+captures materialize correctly. Both pending text/Markdown save cases also pass.
+
+Recovery fixtures now use the named Settings radio group and a shared matcher
+for the canonical packaged native executable. The parent PID remains required.
+Passive process captures show the same agent survives a canceled Quit and Git
+metadata relocation; the fixture mismatch was the mounted-volume path alias and
+an assumed trailing argument. Local and SSH editor/publication cases pass after
+the fixture correction, with data, mode, index, failure, reconnect and timing
+assertions retained. Notebook/runtime and other platform qualification remain
+separate from these control-selector and process-identity corrections.
 
 The shared ownership/policy cache checks pass on macOS (234), Windows (117)
 and Linux (235), using each platform's applicable tests. The Windows run initially
