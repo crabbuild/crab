@@ -175,11 +175,8 @@ impl Drop for CacheLease {
 
 impl Drop for CacheReservation {
     fn drop(&mut self) {
-        // Fields drop after this body. Keep the payload flock through row
-        // removal so explicit maintenance cannot race the registration handoff.
-        if let Err(error) = pending::release(self) {
-            tracing::warn!(operation = "release-fill", %error, "cache fill journal retained");
-        }
+        // Keep the payload lease through row removal so explicit maintenance
+        // cannot race the registration handoff.
         remove_owner_row(
             &self.root,
             &self.generation,
@@ -187,6 +184,13 @@ impl Drop for CacheReservation {
             &self.id,
             &self.id,
         );
+        // Windows completes a cancelled temporary's pending deletion only
+        // after its final file-object clone closes. Release this lease before
+        // testing absence, or successful cancellation leaves a stale journal.
+        drop(self.payload_lease.take());
+        if let Err(error) = pending::release(self) {
+            tracing::warn!(operation = "release-fill", %error, "cache fill journal retained");
+        }
     }
 }
 
