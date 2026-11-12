@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
 import { Toggle } from "@/components/ui/toggle";
+import { ControlTooltip } from "@/components/ui/tooltip";
 import { requestConfirmation } from "@/lib/application-dialogs";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -65,6 +66,7 @@ import {
   SplitSquareVertical,
   Terminal as TerminalIcon,
   ShieldCheck,
+  SendToBack,
   Trash2,
   Type,
   Unlock,
@@ -359,7 +361,7 @@ const ptyIpc = {
       env: extraEnv,
       startupCommand,
       ownerPath,
-      sessionType: sessionType ?? "daemon",
+      sessionType,
       ...(agentMeta != null ? { agentMeta } : {}),
     }) as Promise<{ id: string; resolvedSessionType?: "daemon" | "in-process" }>,
   write: (id: string, data: string) =>
@@ -669,7 +671,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
   /** Whether the PTY daemon is ready and circuit breaker state — from PtyModeContext. */
   const { daemonReady, breakerOpen, configuredMode, loading: ptyModeLoading } = usePtyMode();
-  const requestedSessionType = sessionTypeOverride ?? defaultSessionType ?? (configuredMode === "in-process" ? "in-process" : "daemon");
+  const requestedSessionType = sessionTypeOverride ?? defaultSessionType ?? (configuredMode === "daemon" ? "daemon" : "in-process");
   const daemonUnavailable = ptyModeLoading || !daemonReady || breakerOpen;
   const cannotSpawn = requestedSessionType === "daemon" && daemonUnavailable;
   const requestedSessionTypeRef = useRef(requestedSessionType);
@@ -2124,6 +2126,9 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
   );
   const openTerminalIds = new Set(openTerminalTabs.map(({ tab }) => tab.id));
   const backgroundDaemonCount = daemonSessions.filter((session) => !openTerminalIds.has(session.id)).length;
+  const selectedModeDescription = requestedSessionType === "daemon"
+    ? "Daemon terminal — keeps running after Crab closes"
+    : "Normal terminal — ends when its tab or Crab closes";
   const sessionManager = (
     <TerminalSessionManager
       open={sessionsManagerOpen}
@@ -2154,7 +2159,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
         aria-label="Terminal controls"
         className="shrink-0 border-y border-border bg-card"
       >
-        <div className="flex min-h-12 flex-wrap items-center gap-2 px-3 py-2">
+        <div className="flex min-h-9 flex-wrap items-center gap-1.5 px-2 py-1">
           <div
             role="group"
             aria-label="Create terminal"
@@ -2162,28 +2167,31 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           >
             <Button
               variant="default"
-              size="sm"
+              size="icon-xs"
               disabled={cannotSpawn || !initialRestoreComplete}
               onClick={() => void spawnTab(activePaneId)}
               title="New terminal (⌘T)"
+              aria-label="New terminal"
             >
-              <Plus data-icon="inline-start" /> New terminal
+              <Plus aria-hidden="true" />
             </Button>
             <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  aria-label="Terminal mode for new tabs and splits"
-                >
-                  {requestedSessionType === "daemon" ? (
-                    <ShieldCheck data-icon="inline-start" />
-                  ) : (
-                    <TerminalIcon data-icon="inline-start" />
-                  )}
-                  {requestedSessionType === "daemon" ? "Daemon" : "Normal"}
-                  <ChevronDown data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
+              <ControlTooltip title={selectedModeDescription}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="xs"
+                    aria-label="Terminal mode for new tabs and splits"
+                    aria-description={selectedModeDescription}
+                  >
+                    {requestedSessionType === "daemon" ? (
+                      <SendToBack aria-hidden="true" data-icon="inline-start" />
+                    ) : (
+                      <TerminalIcon aria-hidden="true" data-icon="inline-start" />
+                    )}
+                    <ChevronDown aria-hidden="true" data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </ControlTooltip>
               <DropdownMenuContent align="start" className="w-72">
                 <DropdownMenuGroup>
                   <DropdownMenuLabel>New tabs and splits</DropdownMenuLabel>
@@ -2198,6 +2206,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                       value="daemon"
                       disabled={daemonUnavailable}
                     >
+                      <SendToBack aria-hidden="true" />
                       <div className="flex flex-col gap-1">
                         <span>Daemon terminal</span>
                         <span className="text-muted-foreground">
@@ -2206,6 +2215,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                       </div>
                     </DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value="in-process">
+                      <TerminalIcon aria-hidden="true" />
                       <div className="flex flex-col gap-1">
                         <span>Normal terminal</span>
                         <span className="text-muted-foreground">
@@ -2232,7 +2242,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           >
             <Button
               variant="ghost"
-              size="icon-sm"
+              size="icon-xs"
               disabled={cannotSpawn || !initialRestoreComplete}
               onClick={() => splitPane("horizontal")}
               title="Split right (⌘D)"
@@ -2241,7 +2251,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             </Button>
             <Button
               variant="ghost"
-              size="icon-sm"
+              size="icon-xs"
               disabled={cannotSpawn || !initialRestoreComplete}
               onClick={() => splitPane("vertical")}
               title="Split down (⌘⇧D)"
@@ -2252,7 +2262,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="icon-sm"
+                  size="icon-xs"
                   aria-label="Preset layouts"
                   disabled={cannotSpawn || !initialRestoreComplete}
                 >
@@ -2279,40 +2289,43 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           </div>
           <Button
             variant="ghost"
-            size="sm"
+            size="icon-xs"
             disabled={!getActivePane()?.activeTab}
             onClick={() => setSearchVisible((value) => !value)}
             aria-pressed={searchVisible}
             title="Find in terminal (⌘F)"
+            aria-label="Find"
           >
-            <Search data-icon="inline-start" /> Find
+            <Search aria-hidden="true" />
           </Button>
           <Button
             variant="ghost"
-            size="sm"
+            size="icon-xs"
             onClick={() => setSessionsManagerOpen((value) => !value)}
             aria-expanded={sessionsManagerOpen}
             aria-label="Terminal sessions"
+            title={backgroundDaemonCount > 0 ? `Terminal sessions (${backgroundDaemonCount} in background)` : "Terminal sessions"}
+            aria-description={backgroundDaemonCount > 0 ? `${backgroundDaemonCount} background sessions` : undefined}
+            className="relative"
           >
-            <Columns2 data-icon="inline-start" /> Sessions
+            <Columns2 aria-hidden="true" />
             {backgroundDaemonCount > 0 && (
-              <Badge variant="secondary">{backgroundDaemonCount}</Badge>
+              <span aria-hidden="true" className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-primary" />
             )}
           </Button>
           <div className="ml-auto flex items-center gap-1">
             <Toggle
-              size="sm"
+              size="icon-xs"
               pressed={broadcastMode}
               onPressedChange={setBroadcastMode}
               disabled={openTerminalTabs.length < 2 && !broadcastMode}
               title="Broadcast input to all terminals (⌘⇧B)"
-              className="[&_svg]:size-4"
             >
               <Radio /> <span className="sr-only">Broadcast input</span>
             </Toggle>
             <Button
               variant="ghost"
-              size="icon-sm"
+              size="icon-xs"
               onClick={() => {
                 setQuickCmdOpen((value) => !value);
                 setTimeout(() => cmdInputRef.current?.focus(), 50);
@@ -2324,7 +2337,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
             </Button>
             <Button
               variant="ghost"
-              size="icon-sm"
+              size="icon-xs"
               onClick={() => setSettingsOpen((value) => !value)}
               aria-expanded={settingsOpen}
               title="Terminal settings"
@@ -2348,11 +2361,11 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           <div
             role="group"
             aria-label="Terminal settings"
-            className="flex flex-wrap items-center gap-1 border-t border-border px-3 py-2"
+            className="flex flex-wrap items-center gap-1 border-t border-border px-2 py-1"
           >
             <Popover open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
               <PopoverTrigger asChild>
-                <Button variant="ghost" size="sm">
+                <Button variant="ghost" size="xs">
                   <UserPlus data-icon="inline-start" /> Profiles
                 </Button>
               </PopoverTrigger>
@@ -2379,7 +2392,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   aria-label="Terminal colour scheme"
                 >
                   <Palette data-icon="inline-start" /> Colour
@@ -2399,7 +2412,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <PopoverTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   aria-label="Terminal font settings"
                 >
                   <Type data-icon="inline-start" /> Font
@@ -2411,7 +2424,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <PopoverTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   aria-label="Scrollback buffer settings"
                 >
                   <SlidersHorizontal data-icon="inline-start" /> Scrollback
@@ -2423,7 +2436,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <PopoverTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   aria-label="Paste protection settings"
                 >
                   <ShieldCheck data-icon="inline-start" /> Paste protection
@@ -2445,7 +2458,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   aria-label="Scrollbar mode settings"
                 >
                   <SlidersHorizontal data-icon="inline-start" /> Scrollbar
@@ -2461,9 +2474,8 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               />
             </DropdownMenu>
             <Toggle
-              size="sm"
+              size="xs"
               pressed={breadcrumbDefault}
-              className="[&_svg]:size-4"
               onPressedChange={(next) => {
                 setBreadcrumbDefault(next);
                 localStorage.setItem(LS_BREADCRUMB_KEY, String(next));
@@ -2477,7 +2489,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="xs"
                   disabled={!getActivePane()?.activeTab}
                 >
                   <FileDown data-icon="inline-start" /> Export output
@@ -2507,12 +2519,12 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                 className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2"
               >
                 <Badge variant="destructive">Exit {failure.exitCode}</Badge>
-                <Button size="sm" onClick={() => sendErrorToAgent(activeTab)}>
+                <Button size="xs" onClick={() => sendErrorToAgent(activeTab)}>
                   <SendHorizonal data-icon="inline-start" /> Send error to agent
                 </Button>
                 <Button
                   variant="ghost"
-                  size="icon-sm"
+                  size="icon-xs"
                   onClick={() => dismissError(activeTab)}
                   aria-label="Dismiss exit notice"
                 >
@@ -3214,6 +3226,9 @@ function TerminalPane({
 
         // Use a short timeout to let xterm process the click first (for selection detection).
         setTimeout(() => {
+          // Focus can move or a command can start while selection settles.
+          // Never inject cursor keys into a hidden terminal or running program.
+          if (!shellIntegrationRef.current.get(id)?.state.atPrompt) return;
           // If the user is making a selection, don't interfere.
           if (xterm.hasSelection()) return;
 
@@ -3223,14 +3238,15 @@ function TerminalPane({
           // Get the cell position from the mouse coordinates using xterm's
           // internal coordinate system. We calculate the target column from
           // the click position relative to the terminal element.
-          const termElement = xterm.element;
-          if (!termElement) return;
+          const screen = xterm.element?.querySelector(".xterm-screen");
+          if (!screen) return;
 
-          const rect = termElement.getBoundingClientRect();
-          // xterm renders cells in a grid; calculate cell dimensions.
-          const cellWidth = termElement.querySelector(".xterm-rows")?.clientWidth
-            ? termElement.querySelector(".xterm-rows")!.clientWidth / xterm.cols
-            : rect.width / xterm.cols;
+          const rect = screen.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+          const row = Math.floor((e.clientY - rect.top) * xterm.rows / rect.height);
+          const cursorRow = buffer.baseY + buffer.cursorY - buffer.viewportY;
+          if (row !== cursorRow) return;
+          const cellWidth = rect.width / xterm.cols;
 
           const relativeX = e.clientX - rect.left;
           const targetCol = Math.floor(relativeX / cellWidth);
@@ -3428,17 +3444,16 @@ function TerminalPane({
 
         <div className="ml-auto flex shrink-0 items-center gap-1 px-1">
           <Toggle
-            size="sm"
+            size="icon-xs"
             pressed={scrollLocked}
             onPressedChange={onScrollLockToggle}
-            className="[&_svg]:size-4"
             title={scrollLocked ? "Unlock scrolling" : "Lock scrolling"}
           >
             {scrollLocked ? <Lock /> : <Unlock />}
           </Toggle>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Terminal actions">
+              <Button variant="ghost" size="icon-xs" aria-label="Terminal actions">
                 <MoreHorizontal />
               </Button>
             </DropdownMenuTrigger>
@@ -3571,7 +3586,7 @@ function TerminalPane({
           </DropdownMenu>
           <DropdownMenu open={shellMenuOpen} onOpenChange={onShellMenuToggle}>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Select shell">
+              <Button variant="ghost" size="icon-xs" aria-label="Select shell">
                 <TerminalIcon />
               </Button>
             </DropdownMenuTrigger>
@@ -3590,7 +3605,7 @@ function TerminalPane({
           {onClose && (
             <Button
               variant="ghost"
-              size="icon-sm"
+              size="icon-xs"
               onClick={onClose}
               title="Close pane"
             >
@@ -3837,19 +3852,22 @@ function TerminalTabStrip({
         {tabs.map((t) => {
           const sType = sessionTypes.get(t.id) ?? t.resolvedSessionType;
           const isDaemon = sType === "daemon";
+          const ModeIcon = isDaemon ? SendToBack : TerminalIcon;
+          const modeDescription = isDaemon
+            ? "Daemon terminal — keeps running after Crab closes"
+            : "Normal terminal — ends when its tab or Crab closes";
           return (
             <div
               key={t.id}
               data-tab-id={t.id}
               onClick={() => onSetActiveTab(t.id)}
               className={clsx(
-                "group flex h-9 min-w-[160px] max-w-[240px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
+                "group flex h-8 min-w-[128px] max-w-[240px] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 text-[11px]",
                 activeTab === t.id
                   ? "bg-background text-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
               data-session-type={t.sshRemote ? "ssh" : sType}
-              title={isDaemon ? "Daemon terminal — keeps running after Crab closes" : sType === "in-process" ? "Normal terminal — ends when its tab or Crab closes" : undefined}
             >
               {activeTab !== t.id && tabBadges.has(t.id) && (
                 <span
@@ -3860,7 +3878,13 @@ function TerminalTabStrip({
                   aria-label={tabBadges.get(t.id) === "success" ? "Command succeeded" : "Command failed"}
                 />
               )}
-              {sType && <Badge variant="outline" className="shrink-0 px-1.5">{isDaemon ? "Daemon" : "Normal"}</Badge>}
+              {sType && (
+                <ControlTooltip title={modeDescription}>
+                  <span role="img" aria-label={isDaemon ? "Daemon terminal" : "Normal terminal"} className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+                    <ModeIcon aria-hidden="true" className="size-3.5" />
+                  </span>
+                </ControlTooltip>
+              )}
               {t.sshRemote && (
                 <span
                   className="inline-flex max-w-[80px] shrink-0 items-center truncate rounded px-1 py-0.5 text-[9px] font-medium text-foreground"
@@ -3900,6 +3924,7 @@ function TerminalTabStrip({
                   onDoubleClick={() => setRenamingTab(t.id)}
                   className="justify-start min-w-0 flex-1 truncate text-left"
                   title="Double-click to rename"
+                  aria-description={sType ? modeDescription : undefined}
                   aria-pressed={activeTab === t.id}
                 >
                   {t.title}
@@ -3907,7 +3932,7 @@ function TerminalTabStrip({
               )}
               <Button
                 variant="ghost"
-                size="icon-sm"
+                size="icon-xs"
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onCloseTab(t.id); }}
                 className={clsx(
@@ -4000,7 +4025,7 @@ function TerminalSessionManager({
         </div>
         <div className="flex shrink-0 items-center rounded border border-border bg-background p-0.5" aria-label="Pin sidebar side">
           <Toggle
-            size="sm"
+            size="xs"
             type="button"
             onClick={() => onSideChange("left")}
             className={clsx(
@@ -4014,7 +4039,7 @@ function TerminalSessionManager({
             <PanelLeftOpen size={12} />
           </Toggle>
           <Toggle
-            size="sm"
+            size="xs"
             type="button"
             onClick={() => onSideChange("right")}
             className={clsx(

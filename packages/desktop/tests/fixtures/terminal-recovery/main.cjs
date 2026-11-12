@@ -17,11 +17,27 @@ const daemonEntry = entryArg < 0 ? path.join(desktop, 'dist-electron/daemon/daem
 const urlArg = process.argv.indexOf('--renderer-url');
 const rendererUrl = (urlArg < 0 ? 'http://127.0.0.1:5178' : process.argv[urlArg + 1]).replace(/\/$/, '');
 if (!root || root === process.argv[0]) throw new Error('Pass an isolated --fixture-root');
+if (process.argv.includes('--fixture-cli-catalog')) {
+  process.env.CRAB_DESKTOP_SETTINGS_PATH = path.join(root, 'agent-settings.json');
+  const { _setRegistry } = require(path.join(desktop, 'dist-electron/orchestrator-adapters.cjs'));
+  _setRegistry({
+    createAdapter() { throw new Error('The terminal fixture only launches interactive CLIs'); },
+    listRegistered: () => [
+      { type: 'claude-code', name: 'Claude Code', capabilities: {} },
+      { type: 'aider', name: 'Aider', manifest: { binary: 'crab-fixture-uninstalled-aider' }, capabilities: {} },
+    ],
+  });
+  const { registerAgentDetectionIpc } = require(path.join(desktop, 'dist-electron/ssh-agent-detection.cjs'));
+  const { registerTerminalAgentCommand } = require(path.join(desktop, 'dist-electron/terminal-agent-command.cjs'));
+  registerAgentDetectionIpc(ipcMain, () => undefined);
+  registerTerminalAgentCommand(ipcMain, () => process.env.SHELL || '/bin/sh');
+}
 app.setPath('userData', path.join(root, 'profile'));
 let win;
 app.whenReady().then(async () => {
   for (const ws of ['a', 'b']) for (const repo of ['one', 'two']) fs.mkdirSync(path.join(root, ws, repo), { recursive: true });
-  const env = { ...process.env, TERM: 'xterm-256color', CRAB_SHELL_INTEGRATION: '1', CRAB_SHELL_INTEGRATION_DIR: path.join(desktop, 'resources/shell-integration') };
+  // Shell startup files belong to the fixture; host customizations must not alter its input protocol.
+  const env = { ...process.env, HOME: root, ZDOTDIR: root, TERM: 'xterm-256color', CRAB_SHELL_INTEGRATION: '1', CRAB_SHELL_INTEGRATION_DIR: path.join(desktop, 'resources/shell-integration') };
   const daemon = await initializeDaemonSubsystem({
     ipcMain, app, getMainWindow: () => win, getWorkspacePath: () => null,
     socketDir: path.join(root, 'daemon'), daemonEntryPath: daemonEntry,

@@ -14,7 +14,7 @@
  * is open.
  */
 
-import type { DaemonClient } from "./daemon-client";
+import type { DaemonApi } from "./daemon-client";
 import type { CircuitBreaker, CircuitState } from "./circuit-breaker";
 import type { AutoRespawn } from "./auto-respawn";
 import type { IpcMainLike } from "./ipc-bridge";
@@ -91,7 +91,7 @@ export interface DiagnosticsUiIpcOptions {
   /** Electron ipcMain instance. */
   ipcMain: IpcMainLike;
   /** The DaemonClient instance for querying daemon metrics. */
-  client: DaemonClient;
+  client: DaemonApi;
   /** The CircuitBreaker instance for reading breaker state. */
   circuitBreaker: CircuitBreaker;
   /** The AutoRespawn instance for triggering daemon restart. */

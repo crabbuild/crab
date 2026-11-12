@@ -7,7 +7,7 @@
  * Persists configuration to localStorage.
  */
 
-// --- Types ---
+import type { DetectedAgent } from "../../electron/orchestrator-adapters";
 
 export interface SubOption {
   id: string;
@@ -50,6 +50,24 @@ export interface StartupCommand {
   subOptions?: SubOption[];
   /** Agent metadata for daemon session tracking. Injected at spawn time. */
   agentMeta?: { taskId: string; agentType: string; worktreePath: string };
+  /** Registry identity for host-resolved agent launches. Custom shell commands omit it. */
+  agentType?: string;
+}
+
+/** Combine saved preset options with the current host's installed or configured agents. */
+export function availableAgentPresets(commands: readonly StartupCommand[], agents: readonly DetectedAgent[]): StartupCommand[] {
+  const builtins = commands.filter(command => command.category === "builtin");
+  return agents.filter(agent => agent.available || agent.configured).flatMap((agent, index) => {
+    const preset = builtins.find(command => command.command.split(/\s+/, 1)[0] === agent.binary);
+    if (preset && !preset.visible) return [];
+    return [{
+      ...(preset ?? {
+        id: `agent-${agent.type}`, name: agent.name, command: agent.binary,
+        category: "builtin" as const, order: builtins.length + index, visible: true, icon: agent.type,
+      }),
+      agentType: agent.type,
+    }];
+  }).sort((a, b) => a.order - b.order);
 }
 
 export interface PresetManager {

@@ -5,6 +5,16 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/tests/fixtures/shadcn-controls.html");
 });
 
+for (const mode of ["Daemon", "Normal"] as const) {
+  test(`startup readiness restores ${mode} mode after an early IPC query fails`, async ({ page }) => {
+    await page.goto("/tests/fixtures/shadcn-controls.html?startup-mode");
+    await expect(page.getByTestId("startup-mode")).toHaveText("false:false:in-process:auto");
+    await page.getByRole("button", { name: `${mode} ready`, exact: true }).click();
+    await expect(page.getByTestId("startup-mode")).toHaveText(mode === "Daemon"
+      ? "false:true:daemon:daemon" : "false:false:in-process:in-process");
+  });
+}
+
 test("select typeahead is scoped and preserves an empty selection", async ({
   page,
 }) => {
@@ -131,6 +141,28 @@ test("queued dialogs keep results and focus through transitions and cancellation
     .getByRole("textbox", { name: "Name", exact: true })
     .press("Escape");
   await expect(page.getByTestId("result")).toHaveText("Prompt: cancelled");
+});
+
+test("terminal CLI menu filters host availability and keeps preset options", async ({ page }) => {
+  await page.getByRole("button", { name: "Terminal presets", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Configured CLI", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Pi", exact: true }).locator("svg")).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Aider", exact: true })).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
+  await page.getByRole("menuitem", { name: "Resume last session", exact: true }).press("Enter");
+  await expect(page.getByTestId("result")).toHaveText("Launch: '/fixture/claude' --resume");
+});
+
+test("terminal CLI detection failures remain retryable", async ({ page }) => {
+  await page.evaluate(() => { window.crab.orchestrator.detectAgents = async () => ({ success: false, error: "Host probe failed" }); });
+  await page.getByRole("button", { name: "Terminal presets", exact: true }).click();
+  await expect(page.getByRole("menu").getByRole("status")).toContainText("Could not detect agent CLIs");
+  await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toHaveCount(0);
+  await page.evaluate(() => { window.crab.orchestrator.detectAgents = async () => ({ success: true, agents: [] }); });
+  await page.getByRole("menuitem", { name: "Refresh CLI list", exact: true }).click();
+  await expect(page.getByRole("menu").getByRole("status")).toContainText("No agent CLIs found");
+  await expect(page.getByRole("menuitem", { name: "Add custom command…", exact: true })).toBeEnabled();
 });
 
 test("terminal custom commands persist and launch through the shared menu", async ({

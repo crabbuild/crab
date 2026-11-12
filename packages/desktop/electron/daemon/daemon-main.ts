@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { socketAddress } from "./socket-address";
+import { daemonControlRoot, prepareDaemonHistory } from "./daemon-sessions";
 
 import { DaemonServer } from "./daemon-server";
 import { createNodePtySpawner } from "./subprocess-handle";
@@ -314,6 +315,7 @@ async function main(): Promise<void> {
   // Derive paths from socket path
   const socketPath = args.socket;
   const socketDir = path.dirname(socketPath);
+  const controlRoot = daemonControlRoot(socketDir);
   const baseName = path.basename(socketPath, ".sock");
   const tokenPath = path.join(socketDir, `${baseName}.token`);
   const pidPath = path.join(socketDir, `${baseName}.pid`);
@@ -324,7 +326,7 @@ async function main(): Promise<void> {
   // Write a quotas.json.example so users can discover the available keys.
   // This is best-effort — failure is non-fatal.
   try {
-    const examplePath = path.join(socketDir, "quotas.json.example");
+    const examplePath = path.join(controlRoot, "quotas.json.example");
     if (!fs.existsSync(examplePath)) {
       fs.writeFileSync(
         examplePath,
@@ -351,8 +353,16 @@ async function main(): Promise<void> {
     cleanupStaleSocket(socketPath, pidPath);
   }
 
+  // Publish ownership before claiming history. Concurrent app runtimes must
+  // not move these checkpoints while this process starts its terminal host.
+  fs.writeFileSync(pidPath, JSON.stringify({
+    pid: process.pid, startedAtMs: Date.now(), entryPath: process.argv[1] ?? "",
+  }), { mode: 0o600 });
+
   // Instantiate durability subsystems
-  historyManager = new HistoryManager();
+  // Each owner checkpoints only its own sessions. Shared history would offer
+  // cold restore for processes still running in a previous app runtime.
+  historyManager = new HistoryManager({ basePath: prepareDaemonHistory(socketDir) });
   historyManager.prune();
 
   const activityTracker = new SessionActivityBitmap();
@@ -366,7 +376,7 @@ async function main(): Promise<void> {
   quotaManager = new ResourceQuotaManager(
     () => server?.terminalHost.getQuotaSessions() ?? [],
     {
-      configPath: path.join(socketDir, "quotas.json"),
+      configPath: path.join(controlRoot, "quotas.json"),
       onWarning: (message, meta) => logger.warn(message, meta),
       onInfo: (message, meta) => logger.info(message, meta),
     },

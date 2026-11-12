@@ -205,8 +205,8 @@ export class TermRouter {
    *
    * Rules (in priority order):
    * 1. Explicit `sessionType` from the caller is respected.
-   * 2. All ordinary terminals are durable: an agent can be started later
-   *    inside any shell, after the spawn payload has been resolved.
+   * 2. Task/agent-owned sessions remain durable.
+   * 3. Ordinary shells are Normal unless daemon mode was explicitly configured.
    */
   resolveSessionType(
     payload: TermSpawnPayload,
@@ -216,7 +216,7 @@ export class TermRouter {
       return payload.sessionType;
     }
     if (payload.agentMeta) return "daemon";
-    return mode.configuredMode === "in-process" ? "in-process" : "daemon";
+    return mode.configuredMode === "daemon" ? "daemon" : "in-process";
   }
 
   /**

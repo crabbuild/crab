@@ -1142,6 +1142,7 @@ declare global {
       termWrite: (id: string, data: string) => Promise<void>;
       termResize: (id: string, cols: number, rows: number) => Promise<void>;
       termKill: (id: string) => Promise<void>;
+      termAgentCommand: (agentType: string, command: string) => Promise<{ command: string; env?: Record<string, string> }>;
       termListShells: () => Promise<string[]>;
       termPoolHint: (cwd: string) => Promise<void>;
       termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) => Promise<{ success: boolean; error?: string }>;
@@ -1214,7 +1215,7 @@ declare global {
         fallback: { reason: string; error?: string; timestamp: number } | null;
       }>;
       // Subscribe to live PTY mode updates pushed from the main process.
-      onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean }) => void) => () => void;
+      onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean; configuredMode: "auto" | "daemon" | "in-process" }) => void) => () => void;
       onTermLogError: (listener: (evt: { sessionId: string; error: string }) => void) => () => void;
       onTermActivateTab: (listener: (evt: { terminalId: string; tabIndex: number }) => void) => () => void;
       onTermData: (listener: (evt: { id: string; data: string }) => void) => () => void;

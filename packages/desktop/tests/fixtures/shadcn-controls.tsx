@@ -58,6 +58,7 @@ import {
 } from "../../src/lib/application-dialogs";
 import { ToastManager } from "../../src/components/ToastManager";
 import { publishToast } from "../../src/lib/toasts";
+import { PtyModeProvider, usePtyMode } from "../../src/lib/pty-mode-context";
 import "../../src/index.css";
 
 const theme = new URLSearchParams(location.search).get("theme") ?? "dark";
@@ -307,4 +308,31 @@ function Fixture() {
     </main>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+let publishMode: Parameters<typeof window.crab.onPtyMode>[0] | undefined;
+function StartupModeFixture() {
+  const mode = usePtyMode();
+  return <main>
+    <output data-testid="startup-mode">{`${mode.loading}:${mode.daemonReady}:${mode.resolvedMode}:${mode.configuredMode}`}</output>
+    <Button onClick={() => publishMode?.({ daemonReady: true, breakerOpen: false, configuredMode: "daemon" })}>Daemon ready</Button>
+    <Button onClick={() => publishMode?.({ daemonReady: false, breakerOpen: false, configuredMode: "in-process" })}>Normal ready</Button>
+  </main>;
+}
+const startupMode = new URLSearchParams(location.search).has("startup-mode");
+if (startupMode) {
+  window.crab = {
+    getPtyMode: async () => { throw new Error("Terminal IPC not registered yet"); },
+    onPtyMode: listener => { publishMode = listener; return () => { publishMode = undefined; }; },
+  } as typeof window.crab;
+} else {
+  window.crab = {
+    orchestrator: { detectAgents: async () => ({ success: true, agents: [
+      { type: "claude-code", name: "Claude Code", binary: "claude", path: "/fixture/claude", version: "1.0", available: true },
+      { type: "aider", name: "Aider", binary: "aider", path: "", version: "", available: false },
+      { type: "pi", name: "Pi", binary: "pi", path: "/fixture/pi", version: "1.0", available: true },
+      { type: "custom", name: "Configured CLI", binary: "custom", path: "", version: "", available: false, configured: true },
+    ] }) },
+    termAgentCommand: async (_type, command) => ({ command: command.replace(/^\S+/, "'/fixture/claude'") }),
+  } as typeof window.crab;
+}
+createRoot(document.getElementById("root")!).render(startupMode
+  ? <PtyModeProvider><StartupModeFixture /></PtyModeProvider> : <Fixture />);

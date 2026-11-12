@@ -12,7 +12,10 @@ import { spawn, execFile } from "node:child_process";
 import type { AgentProcess, AgentProcessFactory } from "./agent-process";
 import * as readline from "node:readline";
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
+import { constants } from "node:fs";
 import { getExpandedEnv } from "./env/userShellEnv";
+import { readSettings, type StoredAgentConfig } from "./orchestrator-settings";
 
 // ─── macOS Path Normalization ─────────────────────────────────────────────────
 
@@ -429,6 +432,8 @@ export interface DetectedAgent {
   path: string;
   version: string;
   available: boolean;
+  /** An enabled executable was explicitly configured in settings or a manifest. */
+  configured?: boolean;
   /**
    * When true, this agent should be spawned in an interactive terminal
    * rather than through the headless orchestrator adapter. The orchestrator
@@ -457,10 +462,12 @@ const DETECT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 interface DetectCacheEntry {
   agents: DetectedAgent[];
   timestamp: number;
+  settingsKey: string;
 }
 
 let _detectCache: DetectCacheEntry | null = null;
 let _detectInFlight: Promise<DetectedAgent[]> | null = null;
+let _detectInFlightKey = "";
 
 export interface DetectAgentsOptions {
   /** Skip cache and probe the system fresh. */
@@ -475,27 +482,31 @@ export interface DetectAgentsOptions {
  * callers share a single in-flight probe.
  */
 export async function detectAgents(options?: DetectAgentsOptions): Promise<DetectedAgent[]> {
+  const configs = readSettings().orchestratorAgentConfigs;
+  const settingsKey = JSON.stringify(configs);
   const now = Date.now();
-  if (!options?.force && _detectCache && now - _detectCache.timestamp < DETECT_CACHE_TTL_MS) {
+  if (!options?.force && _detectCache?.settingsKey === settingsKey && now - _detectCache.timestamp < DETECT_CACHE_TTL_MS) {
     return _detectCache.agents;
   }
-  if (_detectInFlight) return _detectInFlight;
+  if (_detectInFlight && _detectInFlightKey === settingsKey) return _detectInFlight;
 
-  _detectInFlight = probeAgents()
+  const pending = probeAgents(configs)
     .then((result) => {
-      _detectCache = { agents: result, timestamp: Date.now() };
+      if (_detectInFlight === pending) _detectCache = { agents: result, timestamp: Date.now(), settingsKey };
       return result;
     })
     .finally(() => {
-      _detectInFlight = null;
+      if (_detectInFlight === pending) _detectInFlight = null;
     });
-
-  return _detectInFlight;
+  _detectInFlight = pending;
+  _detectInFlightKey = settingsKey;
+  return pending;
 }
 
 /** Returns the cached agent list without probing. `null` if unseeded. */
 export function getCachedAgents(): DetectedAgent[] | null {
-  return _detectCache?.agents ?? null;
+  return _detectCache?.settingsKey === JSON.stringify(readSettings().orchestratorAgentConfigs)
+    ? _detectCache.agents : null;
 }
 
 /**
@@ -508,7 +519,7 @@ export function prewarmAgents(): void {
   detectAgents().catch(() => {});
 }
 
-async function probeAgents(): Promise<DetectedAgent[]> {
+async function probeAgents(configs: Record<string, unknown>): Promise<DetectedAgent[]> {
   if (!_registry) {
     throw new Error("Agent registry not initialized. Ensure orchestrator-registry is imported.");
   }
@@ -529,7 +540,8 @@ async function probeAgents(): Promise<DetectedAgent[]> {
     registrations.map((reg) => {
       const binary = reg.manifest?.binary ?? builtinBinaryMap[reg.type] ?? reg.type;
       const versionFlag = reg.manifest?.versionFlag ?? "--version";
-      return detectBinaryWithFlag(reg.type, binary, reg.name, versionFlag);
+      const config = (configs[reg.type] ?? {}) as StoredAgentConfig;
+      return detectBinaryWithFlag(reg.type, binary, reg.name, versionFlag, config);
     }),
   );
 
@@ -552,20 +564,30 @@ async function detectBinaryWithFlag(
   binary: string,
   name: string,
   versionFlag: string,
+  config: StoredAgentConfig,
 ): Promise<DetectedAgent> {
-  const binaryPath = await findOnPath(binary);
+  if (config.enabled === false) return { type, name, binary, path: "", version: "", available: false };
+  const configuredPath = config.binaryPath?.trim();
+  const configured = configuredPath || path.isAbsolute(binary) ? { configured: true } : {};
+  const env = await getExpandedEnv(config.env);
+  const binaryPath = await findOnPath(configuredPath || binary, env);
   if (!binaryPath) {
-    return { type, name, binary, path: "", version: "", available: false };
+    return { type, name, binary, path: "", version: "", available: false, ...configured };
   }
 
-  const version = await getVersion(binaryPath, versionFlag);
-  return { type, name, binary, path: binaryPath, version, available: true };
+  const version = await getVersion(binaryPath, versionFlag, env);
+  return { type, name, binary, path: binaryPath, version, available: true, ...configured };
 }
 
 // Detection and process launches share the resolved login environment, so GUI
 // startup never needs a second synchronous shell probe.
-async function findOnPath(binary: string): Promise<string | null> {
-  const env = await getExpandedEnv();
+async function findOnPath(binary: string, env: Record<string, string>): Promise<string | null> {
+  if (path.isAbsolute(binary)) {
+    try {
+      await fs.access(binary, constants.X_OK);
+      return (await fs.stat(binary)).isFile() ? binary : null;
+    } catch { return null; }
+  }
   const command = process.platform === "win32" ? "where" : "which";
   return new Promise(resolve => {
     execFile(command, [binary], { timeout: 5000, env }, (error, stdout) => {
@@ -577,9 +599,9 @@ async function findOnPath(binary: string): Promise<string | null> {
 /**
  * Runs `<binary> <versionFlag>` and returns the version string.
  */
-function getVersion(binaryPath: string, versionFlag: string = "--version"): Promise<string> {
+function getVersion(binaryPath: string, versionFlag: string, env: Record<string, string>): Promise<string> {
   return new Promise((resolve) => {
-    execFile(binaryPath, [versionFlag], { timeout: 5000 }, (err, stdout, stderr) => {
+    execFile(binaryPath, [versionFlag], { timeout: 5000, env }, (err, stdout, stderr) => {
       if (err) {
         resolve("");
         return;

@@ -12,7 +12,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import { DaemonSpawner } from "./daemon-spawner";
-import { DaemonClient } from "./daemon-client";
+import { DaemonClient, type DaemonApi } from "./daemon-client";
+import { DaemonSessions, daemonDirectory } from "./daemon-sessions";
 import { CircuitBreaker } from "./circuit-breaker";
 import { AutoRespawn } from "./auto-respawn";
 import { createDaemonBridge } from "./daemon-bridge";
@@ -68,7 +69,7 @@ export interface InitDaemonOptions {
 export interface DaemonSubsystem {
   /** Whether the daemon connected successfully at startup. */
   daemonReady: boolean;
-  daemonClient: DaemonClient;
+  daemonClient: DaemonApi;
   daemonSpawner: DaemonSpawner;
   autoRespawn: AutoRespawn;
   circuitBreaker: CircuitBreaker;
@@ -84,6 +85,8 @@ export interface DaemonSubsystem {
   daemonEntryFromEnv: boolean;
   /** The resolved daemon entry path. */
   resolvedDaemonEntryPath: string;
+  /** Publish readiness after the app registers terminal IPC for its already-visible window. */
+  publishMode: () => void;
   dispose: () => void;
 }
 
@@ -95,8 +98,9 @@ export async function initializeDaemonSubsystem(
   opts: InitDaemonOptions,
 ): Promise<DaemonSubsystem> {
   const { ipcMain, app, getMainWindow, getWorkspacePath, log } = opts;
+  const configuredMode = parsePtyMode(process.env.CRAB_PTY_MODE);
 
-  const socketDir =
+  const controlRoot =
     opts.socketDir ?? path.join(os.homedir(), ".crab", "desktop", "daemon");
 
   // Resolve the daemon entry path. If an explicit override is provided (tests
@@ -146,14 +150,14 @@ export async function initializeDaemonSubsystem(
       // "No handler registered" errors.
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
+        configuredMode,
         fallback: { reason: "Daemon binary not found", error: msg, timestamp: Date.now() },
       }));
       ipcMain.handle("crab:agent-sessions", () => []);
 
-      const noopSpawner = new DaemonSpawner({ socketDir, entryPath: "" });
+      const noopSpawner = new DaemonSpawner({ socketDir: controlRoot, entryPath: "" });
       const noopClient = new DaemonClient({
-        socketDir,
+        socketDir: controlRoot,
         daemonEntryPath: "",
         onSessionData: () => {},
         onSessionExit: () => {},
@@ -194,6 +198,12 @@ export async function initializeDaemonSubsystem(
         previousEntryPath: null,
         daemonEntryFromEnv: false,
         resolvedDaemonEntryPath: "",
+        publishMode: () => {
+          getMainWindow()?.webContents.send("crab:pty-mode-changed", {
+            daemonReady: false, breakerOpen: false,
+            configuredMode,
+          });
+        },
         dispose: () => {
           ipcMain.removeHandler("crab:pty-mode");
           ipcMain.removeHandler("crab:agent-sessions");
@@ -204,6 +214,7 @@ export async function initializeDaemonSubsystem(
 
   // After the early return above, daemonEntryPath is guaranteed non-null.
   const resolvedEntryPath: string = daemonEntryPath!;
+  const socketDir = daemonDirectory(controlRoot, resolvedEntryPath);
 
   // -------------------------------------------------------------------------
   // Spawner + Client
@@ -238,11 +249,17 @@ export async function initializeDaemonSubsystem(
     win.webContents.send("crab:pty-mode-changed", {
       daemonReady: runtimeDaemonReady,
       breakerOpen: circuitBreaker.state === "open",
+      configuredMode,
     });
   }
 
-  const daemonClient = new DaemonClient({
+  const daemonClient = new DaemonSessions({
     socketDir,
+    controlRoot,
+    log,
+    onSessionsDisconnected: sessionIds => {
+      for (const sessionId of sessionIds) daemonBridge.synthesizeExitEvent(sessionId, -1);
+    },
     daemonEntryPath: resolvedEntryPath,
     onSessionData: (sessionId, data) => {
       bridgeHandleData?.(sessionId, data);
@@ -310,7 +327,7 @@ export async function initializeDaemonSubsystem(
   const autoRespawn = new AutoRespawn(
     {
       spawner: daemonSpawner,
-      getActiveSessionIds: () => daemonBridge.getDaemonSessionIds(),
+      getActiveSessionIds: () => daemonBridge.getDaemonSessionIds().filter(id => daemonClient.ownsCurrentSession(id)),
       synthesizeExitEvent: (sessionId: string, code: number) => {
         // Delegate to the bridge so the renderer receives crab:term-exit with
         // reason: "daemon-disconnected" and the session mappings are cleaned up.
@@ -353,15 +370,14 @@ export async function initializeDaemonSubsystem(
   // Initialize PTY mode (spawns daemon if needed, registers crab:pty-mode)
   // -------------------------------------------------------------------------
 
-  // Detect and handle a path mismatch before spawning. If the PID file
-  // records a different entry path, preserve live terminals. ensureRunning()
-  // can retire a missing runtime only after the daemon atomically accepts idle shutdown.
+  // Inspect the shipped root endpoint without replacing its live owner.
+  // New sessions use the current runtime's separate control directory.
   let pathMismatchResult: PathMismatchResult;
   try {
     pathMismatchResult = detectAndHandlePathMismatch({
-      pidPath: daemonSpawner.pidPath,
-      socketPath: daemonSpawner.socketPath,
-      tokenPath: daemonSpawner.tokenPath,
+      pidPath: path.join(controlRoot, "daemon-v2.pid"),
+      socketPath: path.join(controlRoot, "daemon-v2.sock"),
+      tokenPath: path.join(controlRoot, "daemon-v2.token"),
       currentEntryPath: resolvedEntryPath,
       log,
     });
@@ -395,7 +411,7 @@ export async function initializeDaemonSubsystem(
         ipcMain,
         log,
       },
-      process.env.CRAB_PTY_MODE,
+      configuredMode,
     );
 
     daemonReady = modeResult.resolvedMode === "daemon";
@@ -415,7 +431,7 @@ export async function initializeDaemonSubsystem(
     try {
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
+        configuredMode,
         fallback: { reason: "Daemon initialization failed", error: msg, timestamp: Date.now() },
       }));
     } catch {
@@ -553,6 +569,7 @@ export async function initializeDaemonSubsystem(
     previousEntryPath: pathMismatchResult.pidFileEntryPath,
     daemonEntryFromEnv,
     resolvedDaemonEntryPath: resolvedEntryPath,
+    publishMode: sendPtyModeChanged,
     dispose,
   };
 }

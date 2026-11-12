@@ -176,12 +176,17 @@ describe("TermRouter", () => {
       expect(router.resolveSessionType({ cwd: "/repo", agentMeta: { taskId: "task", agentType: "agent", worktreePath: "/repo" } }, { daemonReady: false, configuredMode: "in-process" })).toBe("daemon");
     });
 
-    it("defaults to durable sessions even without agent metadata", async () => {
-      const { spawn, inProcessBridge, daemonBridge } = buildRouter(true);
+    it.each([true, false])("defaults ordinary shells to Normal with daemonReady=%s", async daemonReady => {
+      const { spawn, inProcessBridge, daemonBridge } = buildRouter(daemonReady);
       const result = await spawn({ cwd: "/home" });
-      expect((result as TermSpawnResult).resolvedSessionType).toBe("daemon");
-      expect(daemonBridge.handleSpawn).toHaveBeenCalledOnce();
-      expect(inProcessBridge.handleSpawn).not.toHaveBeenCalled();
+      expect((result as TermSpawnResult).resolvedSessionType).toBe("in-process");
+      expect(inProcessBridge.handleSpawn).toHaveBeenCalledOnce();
+      expect(daemonBridge.handleSpawn).not.toHaveBeenCalled();
+    });
+
+    it("honors an explicitly configured daemon default for ordinary shells", () => {
+      const { router } = buildRouter(true);
+      expect(router.resolveSessionType({ cwd: "/repo" }, { daemonReady: true, configuredMode: "daemon" })).toBe("daemon");
     });
   });
 

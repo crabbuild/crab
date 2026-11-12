@@ -381,6 +381,8 @@ contextBridge.exposeInMainWorld("crab", {
   termWrite: (id: string, data: string) => ipcRenderer.invoke("crab:term-write", id, data),
   termResize: (id: string, cols: number, rows: number) => ipcRenderer.invoke("crab:term-resize", id, cols, rows),
   termKill: (id: string) => ipcRenderer.invoke("crab:term-kill", id),
+  termAgentCommand: (agentType: string, command: string) =>
+    ipcRenderer.invoke("crab:term-agent-command", { agentType, command }) as Promise<{ command: string; env?: Record<string, string> }>,
   termListShells: () => ipcRenderer.invoke("crab:term-list-shells") as Promise<string[]>,
   termPoolHint: (cwd: string) => ipcRenderer.invoke("crab:term-pool-hint", cwd),
   termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) =>
@@ -465,8 +467,8 @@ contextBridge.exposeInMainWorld("crab", {
   // Subscribe to live PTY mode updates pushed from the main process.
   // Fires when the daemon connects, disconnects, or the circuit breaker
   // changes state. Returns an unsubscribe function.
-  onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean }) => void) => {
-    const handler = (_e: unknown, payload: { daemonReady: boolean; breakerOpen: boolean }) =>
+  onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean; configuredMode: "auto" | "daemon" | "in-process" }) => void) => {
+    const handler = (_e: unknown, payload: { daemonReady: boolean; breakerOpen: boolean; configuredMode: "auto" | "daemon" | "in-process" }) =>
       listener(payload);
     ipcRenderer.on("crab:pty-mode-changed", handler);
     return () => { ipcRenderer.removeListener("crab:pty-mode-changed", handler); };

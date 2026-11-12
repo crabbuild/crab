@@ -10,7 +10,7 @@
  * Exposes the resolved mode via `crab:pty-mode` IPC for diagnostics.
  */
 
-import type { DaemonClient } from "./daemon-client";
+import type { DaemonApi } from "./daemon-client";
 import type { DaemonSpawner } from "./daemon-spawner";
 import type { IpcMainLike } from "./ipc-bridge";
 
@@ -42,7 +42,7 @@ export interface ModeSelectionResult {
 
 export interface ModeSelectionDeps {
   /** The DaemonClient instance. */
-  client: DaemonClient;
+  client: DaemonApi;
   /** The DaemonSpawner instance. */
   spawner: DaemonSpawner;
   /** Electron ipcMain for registering the mode IPC handler. */

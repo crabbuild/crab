@@ -193,7 +193,7 @@ export function SettingsView() {
                   type="button"
                   onClick={() => setSection(s.id)}
                   className={clsx(
-                    "flex w-full items-center gap-2 px-4 py-1.5 text-left text-[13px] transition",
+                    "flex w-full items-center justify-start gap-2 px-4 py-1.5 text-left text-[13px] transition",
                     section === s.id
                       ? "bg-primary/15 text-foreground"
                       : "text-muted-foreground hover:bg-accent hover:text-foreground",

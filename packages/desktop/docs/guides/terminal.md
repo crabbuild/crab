@@ -40,7 +40,9 @@ The terminal detects the user's login shell:
 ### Terminal Modes
 
 Use the mode menu beside **New terminal** to choose the lifetime of new tabs,
-splits, shell selections, and ordinary presets. Existing tabs keep their mode.
+splits, shell selections, and ordinary presets. **Normal** is the default;
+existing tabs keep their mode. `CRAB_PTY_MODE=daemon` explicitly selects a
+daemon default.
 Launch requests carrying task/agent metadata retain daemon ownership.
 
 | Mode | Owner | Closing the tab | Closing Crab |
@@ -50,7 +52,9 @@ Launch requests carrying task/agent metadata retain daemon ownership.
 
 Both modes support the same terminal emulator, search, splits, clipboard,
 shell integration, bookmarks, profiles, and broadcast input. Each tab shows its
-mode. If the daemon is unavailable, select **Normal** explicitly; Crab does not
+mode with an icon: a terminal glyph for **Normal**, the SendToBack glyph for
+**Daemon**. Hover the icon for its lifetime description; the mode menu retains
+both names. If the daemon is unavailable, select **Normal** explicitly; Crab does not
 silently change a terminal's lifetime. Shells start on demand; prewarming is disabled.
 Closing or hiding the last tab leaves its pane empty. Use **New terminal** or
 **Sessions** to open another session; closing a tab does not spawn a replacement.
@@ -88,7 +92,9 @@ Configurable scrollback buffer:
 
 Ordinary local terminals run in the PTY daemon. A command or agent started in
 one of these shells continues when the app closes or updates. Reopening the
-repository attaches to the same process. **Normal** in the toolbar mode menu or
+repository attaches to the same process. If an update removes the older app bundle,
+existing terminals keep their daemon and new terminals use the current runtime.
+Both Daemon and Normal remain available together. **Normal** in the toolbar mode menu or
 **New normal terminal** in the context menu creates an ephemeral terminal.
 Saved normal tabs reopen as fresh shells in their original mode, including when
 the daemon is unavailable. Saved startup commands and credentials are not replayed.
@@ -146,11 +152,22 @@ Quick-launch terminals with pre-configured commands:
 - "Git log" — opens terminal with `git log --oneline`
 - Custom presets definable in settings
 
+The agent menu shows CLIs detected on the local host or explicitly configured
+with an executable override. Saved custom shell commands remain available.
+Configured executable paths, extra arguments, and environment variables apply
+when launching a preset. Disabled agents are hidden. Use **Refresh CLI list**
+after installing a CLI or changing its configuration. Failed detection offers
+a retry without advertising unverified agents.
+
+**New terminal**, **Find**, and **Sessions** use icon-only toolbar buttons;
+hover or focus a button for its tooltip. A dot on Sessions indicates hidden
+sessions, with the count in its tooltip.
+
 ## Layout
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [New terminal] [Daemon ▾] [Split →] [Split ↓] [Find]          │
+│  [+] [Mode ▾]             [Split →] [Split ↓] [Find]          │
 │                          [Sessions] [Broadcast] [Settings]    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Breadcrumb: ~/project (main) $                                 │

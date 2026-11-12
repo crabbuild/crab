@@ -96,14 +96,14 @@ export function PtyModeProvider({ children }: { children: ReactNode }) {
     let offPtyMode: (() => void) | undefined;
     const crab = window.crab as any;
     if (typeof crab?.onPtyMode === "function") {
-      offPtyMode = crab.onPtyMode((mode: { daemonReady: boolean; breakerOpen: boolean }) => {
+      offPtyMode = crab.onPtyMode((mode: { daemonReady: boolean; breakerOpen: boolean; configuredMode: PtyModeState["configuredMode"] }) => {
         if (cancelled) return;
         setState((prev) => ({
           ...prev,
           daemonReady: mode.daemonReady,
           breakerOpen: mode.breakerOpen,
-          // Keep the rest of the fields from the last full fetch; the push
-          // event only carries the fields that change at runtime.
+          resolvedMode: mode.daemonReady ? "daemon" : "in-process",
+          configuredMode: mode.configuredMode,
           loading: false,
         }));
       });
