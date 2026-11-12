@@ -890,7 +890,12 @@ mod tests {
             prefix: String::new(),
             hash: Default::default(),
         };
-        let file = std::fs::File::open(path).unwrap();
+        // Windows needs write attributes to set the fixture's stale mtime.
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
         let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
         file.set_modified(old_time).unwrap();
         assert!(
@@ -1313,7 +1318,9 @@ mod tests {
         let cache_dir = tmp.path().join("chunks");
         let old = write_xet_range(&cache_dir, &[1u8; 8]).await;
         write_xet_range(&cache_dir, &[2u8; 8]).await;
-        fs::File::open(&old)
+        fs::File::options()
+            .write(true)
+            .open(&old)
             .unwrap()
             .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .unwrap();
