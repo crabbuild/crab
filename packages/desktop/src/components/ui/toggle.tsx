@@ -16,6 +16,8 @@ const toggleVariants = cva(
       },
       size: {
         default: "h-9 px-2 min-w-9",
+        xs: "h-7 min-w-7 gap-1.5 px-1.5 text-xs [&_svg]:size-3.5",
+        "icon-xs": "size-7 min-w-7 shrink-0 p-0 [&_svg]:size-3.5",
         sm: "h-8 px-1.5 min-w-8",
         icon: "size-6 min-w-6 shrink-0 p-0",
         lg: "h-10 px-2.5 min-w-10",

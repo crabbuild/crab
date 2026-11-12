@@ -51,7 +51,7 @@ export function PresetDropdown(props: PresetActions) {
     <div className="inline-flex">
       <Button
         variant="ghost"
-        size="icon-sm"
+        size="icon-xs"
         onClick={props.onSpawnPlain}
         title="New terminal (⌘⇧`)"
       >
@@ -60,7 +60,7 @@ export function PresetDropdown(props: PresetActions) {
       <TerminalPresetMenu {...props}>
         <Button
           variant="ghost"
-          size="icon-sm"
+          size="icon-xs"
           aria-label="Terminal presets"
         >
           <ChevronDown />

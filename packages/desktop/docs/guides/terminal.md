@@ -50,7 +50,9 @@ Launch requests carrying task/agent metadata retain daemon ownership.
 
 Both modes support the same terminal emulator, search, splits, clipboard,
 shell integration, bookmarks, profiles, and broadcast input. Each tab shows its
-mode. If the daemon is unavailable, select **Normal** explicitly; Crab does not
+mode with an icon: a terminal glyph for **Normal**, a shield-check glyph for
+**Daemon**. Hover the icon for its lifetime description; the mode menu retains
+both names. If the daemon is unavailable, select **Normal** explicitly; Crab does not
 silently change a terminal's lifetime. Shells start on demand; prewarming is disabled.
 Closing or hiding the last tab leaves its pane empty. Use **New terminal** or
 **Sessions** to open another session; closing a tab does not spawn a replacement.
@@ -152,7 +154,7 @@ Quick-launch terminals with pre-configured commands:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [New terminal] [Daemon ▾] [Split →] [Split ↓] [Find]          │
+│  [New terminal] [Mode ▾]   [Split →] [Split ↓] [Find]          │
 │                          [Sessions] [Broadcast] [Settings]    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Breadcrumb: ~/project (main) $                                 │

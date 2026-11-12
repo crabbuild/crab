@@ -41,9 +41,14 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
     await mode.click();
     await page.getByRole("menuitemradio", { name: /^Normal terminal/ }).press("Enter");
     await expect(mode).toBeFocused();
-    await expect(mode).toContainText("Normal");
+    await expect(mode).toHaveText("");
+    await expect(mode).toHaveAttribute("aria-description", /^Normal terminal/);
     await page.getByRole("button", { name: "New terminal", exact: true }).click();
     await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    const indicator = page.locator('[data-session-type="in-process"]').getByRole("img", { name: "Normal terminal", exact: true });
+    await expect(indicator).toHaveText("");
+    await indicator.hover();
+    await expect(page.getByRole("tooltip")).toContainText("ends when its tab or Crab closes");
     const normalPid = await startAgent(page, "normal");
     const broadcast = page.getByRole("button", { name: /^Broadcast input to all terminals/ });
     await broadcast.click();
@@ -71,8 +76,13 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
     expect(await controls.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     for (const button of await controls.getByRole("button").all()) {
       const box = await button.boundingBox();
-      expect(box && box.height >= 32 && box.width >= 32).toBeTruthy();
+      expect(box && box.height === 28 && box.width >= 28).toBeTruthy();
     }
+    for (const icon of await controls.locator("button svg").all()) {
+      const box = await icon.boundingBox();
+      expect(box && box.width === 14 && box.height === 14).toBeTruthy();
+    }
+    expect((await page.locator('[data-session-type="in-process"]').first().boundingBox())?.height).toBe(32);
     await page.screenshot({ path: test.info().outputPath("terminal-controls-narrow.png") });
     await settings.click();
     await page.getByRole("button", { name: "Hide daemon terminal", exact: true }).click();
