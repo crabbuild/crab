@@ -80,14 +80,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Qualify dense 2 GiB Git ranges and cancellation
+      - name: Qualify dense 2 GiB loose Git ranges and cancellation
         run: |
           python ../../crab/scripts/qualify_sdk.py run \
             --backend desktop-native-git \
             --fixture-digest 515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731 \
-            --output "$CARGO_TARGET_DIR/git-range-proof/report.json" \
+            --output "$CARGO_TARGET_DIR/git-range-proof/loose-report.json" \
             --require-rss-below 536870912 --timeout-seconds 600 -- \
             node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }}
+      - name: Qualify dense 2 GiB packed Git ranges and cancellation
+        run: |
+          python ../../crab/scripts/qualify_sdk.py run \
+            --backend desktop-native-git-packed \
+            --fixture-digest 515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731 \
+            --output "$CARGO_TARGET_DIR/git-range-proof/packed-report.json" \
+            --require-rss-below 536870912 --timeout-seconds 600 -- \
+            node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }} --packed
       - uses: actions/upload-artifact@v4
         if: always()
         with:

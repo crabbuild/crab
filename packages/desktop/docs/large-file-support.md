@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Bound native Git object memory | The [shared blob verifier](../../../crates/crab-git/src/batch.rs), [captured command owner](../agent/src/repository/content/command.rs) and physical Git object reader. | The streaming loose reader reduces dense 2 GiB process-tree RSS from 2,197,651,456 to 124,157,952 bytes on macOS ARM, preserving exact bytes, corruption rejection, repair, cancellation and cleanup. Qualify dense packed/delta and alternate-store workloads, filtered restoration and other platform/entry-point owners. Small parser buffers and compressible fixtures do not establish those bounds. |
+| P0 | Bound native Git object memory | The [shared blob verifier](../../../crates/crab-git/src/batch.rs), [captured command owner](../agent/src/repository/content/command.rs) and physical Git object reader. | The streaming loose reader reduces dense 2 GiB process-tree RSS from 2,197,651,456 to 124,157,952 bytes on macOS ARM. A dense 2 GiB non-delta pack also passes at 124,567,552 bytes, preserving exact bytes, corruption rejection, repair, cancellation and cleanup. A 512 MiB delta still fails at 1,195,114,496 bytes; native Git owns about 1.08 GB. Replace its whole-base/result allocation with bounded decoding, scratch admission and joined cleanup. Qualify dense alternate stores, filtered restoration and remaining GUI/platform/entry-point owners. |
 | P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. A corrected packaged macOS probe verifies the recorded 262,160-byte temporary is removed by retry before Settings cleanup, with exact source bytes and zero origin writes. Admission regressions cover bounded/unlimited/zero-root policy, live fills and replacements. The earlier published head established explicit cleanup only. Next: qualify packaged Windows/Linux recovery and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. The rebased package exceeded the existing five-second visible bulk-hydration deadline, although its failure capture already displayed all three hydrated results. The later durable package passes the canonical case with the unchanged deadline, and passive diagnostics pass. These results do not establish the earlier failure's cause or rule out the previously observed final-file stall. Cold SDK Crab/LFS missing/corrupt reads now have visible typed-error, rejected-read, exact-repair and zero-origin-write macOS proof. Extend those profiles to local/SSH publication and remaining component-owned publishing. The rebased SSH scenario also once switched unexpectedly to Settings after hydration; passive diagnostics and canonical repeats pass, but the navigation cause remains open. |
 | P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | SDK identity namespaces share the physical root catalog with CLI payloads, replacing separate 512 MiB namespace caps. Root policy constrains existing handles and new fills; configured CLI caller ceilings remain additional limits. Packaged macOS proof covers Settings editing, zero-budget exact reads, cross-identity cleanup, physical reclamation, restart persistence and external CLI updates. Retain chosen offline content and qualify eviction of only unpinned cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Cross-platform policy qualification remains required. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | The Intel two-MiB transport deadline is resolved in focused CI without changing its deadline; its matching runtime download/deployment/startup case passed on the earlier head. Complete the final-head platform matrix. Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
@@ -382,10 +382,38 @@ The matching unsigned macOS ARM package passes the selected SQLite/WAL/Crab/LFS
 query workflow and text/SQLite/pointer/audio corruption-and-repair case (two
 cases, 24.4 seconds). Screenshots show the checksum error, repaired SQLite value
 17 and repaired 16-second audio with seeking/playback. All 869 packaged assets
-and the local/SSH native pair match the frozen producer inputs. Dense packed and
-alternate workloads, packed deltas, filtered restoration, other CLI/SDK
-object-reading entry points and the platform matrix retain their own owners and
-still require qualification.
+and the local/SSH native pair match the frozen producer inputs.
+
+The [native qualifier](../scripts/qualify-git-ranges.mjs) also accepts `--packed`
+to exercise a real single-blob pack created by Git. It checks the physical pack
+header and absence of a loose copy. A same-sized valid compressed replacement
+retains the captured pack/index trailer relationship; full blob authentication
+must reject its changed unread suffix. The dense 2 GiB pack occupies
+2,147,811,371 bytes and passes at 124,567,552 bytes process-tree RSS in 142.28
+seconds. The same updated harness repeats loose qualification at 123,109,376
+bytes in 140.61 seconds. Both preserve range bytes, checksum failure, repair,
+typed cancellation, fresh reads, index/source identity and owned cleanup.
+Setup warms the OS cache; successful packed requests take 2.28–17.26 seconds.
+Both physical-format profiles now run serially against the same native producer
+on all five CI targets, each retaining the 512 MiB ceiling and original deadlines.
+This establishes macOS ARM native non-delta pack behavior. Packed deltas, dense
+alternate workloads, filtered restoration, other CLI/SDK object-reading entry
+points and remaining GUI/platform profiles still require qualification.
+
+A separate two-phase delta probe confirms that the non-delta settings do not
+bound delta reconstruction. Preparation and native Git pack verification finish
+before measurement. A valid depth-one 512 MiB blob uses a 24,311-byte delta
+program in a 2,359,920-byte pack. Exact head/middle/tail reads, typed cancellation,
+a fresh read, index/source preservation and close pass in 3.81 seconds, but the
+measured native read process tree peaks at 1,195,114,496 bytes and fails the same
+512 MiB budget. One Git child reaches 1,080,623,104 bytes; the sidecar stays below
+22 MiB. Git's [stream source selection](https://github.com/git/git/blob/v2.50.1/streaming.c#L390-L420)
+uses its in-core reader for deltas. The shared delta decoder also currently
+materializes complete base/result buffers. The next fix must retain one delta
+instruction validator while decoding through bounded buffers and admitted,
+owned scratch, preserve full target checksum verification, and qualify both
+offset and reference bases, cancellation and cleanup. This is an observed P0
+memory failure, not completed delta support.
 
 ### Missing and corrupt SDK content
 

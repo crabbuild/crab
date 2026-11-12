@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { copyFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
@@ -16,6 +16,8 @@ const size = 2 * 1024 ** 3;
 const head = Buffer.from("verified-git-head\n"), tail = Buffer.from("verified-git-tail\n");
 const fixtureDigest = "515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731";
 const pattern = Buffer.concat(Array.from({ length: 2048 }, (_, i) => createHash("sha256").update(`crab-dense-git-block-${i}`).digest()));
+const packed = process.argv[3] === "--packed";
+if (process.argv.length > 4 || (process.argv[3] && !packed)) throw new Error("Usage: qualify-git-ranges.mjs [native-directory] [--packed]");
 const platform = { darwin: "mac", linux: "linux", win32: "win" }[process.platform];
 const directory = path.resolve(process.argv[2] ?? `resources/native/${platform}-${process.arch}`);
 const runtime = JSON.parse(await readFile(path.join(directory, "runtime.json"), "utf8"));
@@ -41,7 +43,7 @@ const env = { ...process.env, CRAB_BIN: crab, CRAB_CACHE_DIR: path.join(evidence
 for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) delete env[name];
 const git = async args => (await execute("git", args, { cwd: source, env })).stdout.trim();
 const report = { schema: "crab.desktop.git-range-qualification", version: 1, runtime, fixtureDigest,
-  logicalBytes: size, fixture: "dense repeating 64 KiB deterministic content; level-0 zlib loose object; OS cache warmed by setup",
+  logicalBytes: size, fixture: `dense repeating 64 KiB deterministic content; level-0 ${packed ? "single full-blob pack" : "zlib loose object"}; OS cache warmed by setup`,
   evidenceDirectory: evidence, ranges: [], verified: false, closed: false };
 const repo = "git-range-qualification";
 let child, exit, rpc, captured, object, swapped = false, failure;
@@ -49,6 +51,23 @@ const backup = path.join(evidence, "original-object");
 const cleanupErrors = [];
 
 async function storeBlob(file) {
+  if (packed) {
+    const packs = path.join(source, ".git/objects/pack"), before = new Set(await readdir(packs));
+    const oid = await git(["-c", "core.compression=0", "-c", "core.bigFileThreshold=1", "hash-object", "--no-filters", "-w", file]);
+    const added = (await readdir(packs)).filter(name => name.endsWith(".pack") && !before.has(name));
+    assert.equal(added.length, 1, "Fixture must create one physical pack");
+    const object = path.join(packs, added[0]), descriptor = await open(object, "r");
+    try {
+      const header = Buffer.alloc(13);
+      assert.equal((await descriptor.read(header, 0, header.length, 0)).bytesRead, header.length);
+      assert.equal(header.subarray(0, 4).toString(), "PACK");
+      assert.equal(header.readUInt32BE(4), 2);
+      assert.equal(header.readUInt32BE(8), 1);
+      assert.equal((header[12] >> 4) & 7, 3, "Stored entry must be a full blob, not a delta");
+    } finally { await descriptor.close(); }
+    await assert.rejects(stat(path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2))), error => error.code === "ENOENT");
+    return { oid, object };
+  }
   // Large hash-object writes can create packs. Keep this fault fixture loose
   // so swapping one captured object's bytes cannot be intercepted by its pack.
   // Format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects#_object_storage
@@ -65,7 +84,7 @@ async function storeBlob(file) {
   const oid = hash.digest("hex"), object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
   await mkdir(path.dirname(object), { recursive: true });
   await rename(temporary, object);
-  return oid;
+  return { oid, object };
 }
 
 async function repair() {
@@ -93,13 +112,13 @@ try {
     assert.equal((await descriptor.write(tail, 0, tail.length, size - tail.length)).bytesWritten, tail.length);
   } finally { await descriptor.close(); }
   assert.equal(await digest(file), fixtureDigest);
-  const oid = await storeBlob(file);
+  const stored = await storeBlob(file), { oid } = stored;
   assert.equal(oid, "5fa9fa26c5fb2dbcb4dacd5d02debc475955a204");
   await git(["update-index", "--add", "--cacheinfo", "100644", oid, "large.bin"]);
   const index = await readFile(path.join(source, ".git/index"));
-  object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
+  object = stored.object;
   report.oid = oid;
-  report.compressedBytes = (await stat(object)).size;
+  report.storedBytes = (await stat(object)).size;
   const log = await open(path.join(evidence, "agent.log"), "w");
   child = spawn(agent, [], { cwd: source, env, stdio: ["pipe", "pipe", log.fd] });
   await log.close();
@@ -163,7 +182,20 @@ try {
     const replacement = await storeBlob(file);
     await changed.write(tail.subarray(-1), 0, 1, size - 1);
     await rename(object, backup); swapped = true;
-    await copyFile(path.join(source, ".git/objects", replacement.slice(0, 2), replacement.slice(2)), object);
+    await copyFile(replacement.object, object);
+    if (packed) {
+      // Git compares the stored trailer with its index at open; keep that
+      // relationship while substituting valid zlib bytes. The captured blob
+      // checksum, not pack naming or a successful Git exit, must reject them.
+      await chmod(object, 0o600);
+      const originalPack = await open(backup, "r"), replacedPack = await open(object, "r+");
+      try {
+        const checksum = Buffer.alloc(20), length = (await originalPack.stat()).size;
+        assert.equal((await replacedPack.stat()).size, length);
+        assert.equal((await originalPack.read(checksum, 0, 20, length - 20)).bytesRead, 20);
+        assert.equal((await replacedPack.write(checksum, 0, 20, length - 20)).bytesWritten, 20);
+      } finally { await originalPack.close(); await replacedPack.close(); }
+    }
   } finally { await changed.close(); }
   await assert.rejects(rpc("read_range", { repo_id: repo, file_id: captured.file_id, offset: 0, length: 4096 }),
     error => error.code === 1003 && /checksum differs/.test(error.message));
