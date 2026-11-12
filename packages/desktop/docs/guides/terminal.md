@@ -52,7 +52,7 @@ Launch requests carrying task/agent metadata retain daemon ownership.
 
 Both modes support the same terminal emulator, search, splits, clipboard,
 shell integration, bookmarks, profiles, and broadcast input. Each tab shows its
-mode with an icon: a terminal glyph for **Normal**, a server glyph for
+mode with an icon: a terminal glyph for **Normal**, the SendToBack glyph for
 **Daemon**. Hover the icon for its lifetime description; the mode menu retains
 both names. If the daemon is unavailable, select **Normal** explicitly; Crab does not
 silently change a terminal's lifetime. Shells start on demand; prewarming is disabled.

@@ -14,7 +14,7 @@ View toolbars have at least 44px of height with 32px action targets and 16px
 icons. Terminal controls use a denser 36px minimum row, 28px buttons with
 14px icons, and 32px tab rows. Creation, search, and sessions use icon-only
 buttons with tooltips and accessible names. Use a terminal glyph for Normal
-and a server glyph for Daemon in the mode selector and tabs. Normal is the
+and the SendToBack glyph for Daemon in the mode selector and tabs. Normal is the
 default for ordinary terminals. Tooltips explain lifetime, and the mode menu
 retains explicit names. Pi uses its multicolor brand mark in the shared agent
 CLI menu.

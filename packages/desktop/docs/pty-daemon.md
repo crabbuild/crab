@@ -77,7 +77,7 @@ in-process terminal** entries so you can override the default at any
 time. The "New daemon terminal" entry is disabled when the daemon is
 unavailable or the circuit breaker is open; a tooltip explains why.
 
-Each tab shows a server icon for **Daemon** or a terminal icon for **Normal**
+Each tab shows the SendToBack icon for **Daemon** or a terminal icon for **Normal**
 next to the title, with a tooltip explaining its lifetime.
 
 ### Error behavior

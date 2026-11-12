@@ -51,7 +51,7 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
   try {
     let page = await app.firstWindow();
     await expect(page.locator('[data-session-type="daemon"]')).toHaveCount(1);
-    await expect(page.getByRole("img", { name: "Daemon terminal", exact: true }).locator("svg.lucide-server")).toBeVisible();
+    await expect(page.getByRole("img", { name: "Daemon terminal", exact: true }).locator("svg.lucide-send-to-back")).toBeVisible();
     for (const [name, tooltip] of [["New terminal", "New terminal (⌘T)"], ["Find", "Find in terminal (⌘F)"], ["Terminal sessions", "Terminal sessions"]]) {
       const button = page.getByRole("button", { name, exact: true });
       await expect(button).toHaveText("");
