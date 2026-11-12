@@ -157,6 +157,58 @@ pub(crate) struct PayloadRemoval {
 }
 
 impl PayloadRemoval {
+    pub(crate) fn clean(
+        &mut self,
+        relative: &Path,
+        mut operation: impl FnMut(Option<&crate::private_fs::FileIdentity>) -> Result<Option<u64>>,
+    ) -> Result<Option<u64>> {
+        if !matches!(entry_kind(relative), EntryKind::Temporary) {
+            return self.remove(relative, || operation(None));
+        }
+        let Some(connection) = self.connection.as_mut() else {
+            return Ok(None);
+        };
+        let result = (|| {
+            if !pending::available(connection, &self.path)? {
+                return Ok(None);
+            }
+            if self.dry_run {
+                return pending::remove(connection, &self.path, relative, true, |identity| {
+                    operation(Some(identity))
+                });
+            }
+            // Journal retirement and conditional unlink share one writer.
+            // A publisher cannot replace ownership between those operations.
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|source| index_error(&self.path, source))?;
+            let result = pending::remove(&transaction, &self.path, relative, false, |identity| {
+                operation(Some(identity))
+            });
+            if pending::removal_finished(&result) {
+                transaction
+                    .commit()
+                    .map_err(|source| index_error(&self.path, source))?;
+            }
+            result
+        })();
+        match result {
+            Err(error)
+                if unusable_catalog(&error)
+                    || matches!(&error, CacheError::Index { source, .. } if matches!(source,
+                    rusqlite::Error::FromSqlConversionFailure(..)
+                    | rusqlite::Error::IntegralValueOutOfRange(..)
+                    | rusqlite::Error::InvalidColumnType(..))) =>
+            {
+                // Without exact journal authority, every temporary is retained.
+                // Safe payload cleanup keeps its existing disposable-index contract.
+                unavailable(&self.path, &error);
+                Ok(None)
+            }
+            result => result,
+        }
+    }
+
     pub(crate) fn open(
         root: Option<&PinnedRoot>,
         display_root: &Path,
@@ -174,10 +226,29 @@ impl PayloadRemoval {
         let connection = if let Some(root) = root {
             match root
                 .open_database(Path::new(CATALOG_FILE), mode, std::time::Duration::ZERO)
-                .and_then(|connection| {
+                .and_then(|mut connection| {
                     if !dry_run {
                         retain_catalog_wal(&connection)
                             .map_err(|source| index_error(&path, source))?;
+                        // Death releases file locks but leaves SQL owners. Clear
+                        // dead rows before cleanup; pending-file journals retain
+                        // their independent exact identities until unlink succeeds.
+                        let cleanup = (|| {
+                            let transaction = connection
+                                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                                .map_err(|source| index_error(&path, source))?;
+                            remove_stale_owners(&transaction, &path)?;
+                            transaction
+                                .commit()
+                                .map_err(|source| index_error(&path, source))
+                        })();
+                        if let Err(error) = cleanup {
+                            if unusable_catalog(&error) {
+                                unavailable(&path, &error);
+                            } else {
+                                return Err(error);
+                            }
+                        }
                     }
                     Ok(connection)
                 }) {
@@ -230,9 +301,7 @@ impl PayloadRemoval {
             None => None,
         };
         let result = operation();
-        let removed_or_missing = matches!(&result, Ok(Some(_)))
-            || matches!(&result, Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound);
-        if removed_or_missing
+        if pending::removal_finished(&result)
             && let Some(transaction) = transaction
             && let Err(source) = transaction.commit()
         {
@@ -299,20 +368,26 @@ pub(super) fn removal_transaction<'a>(
 }
 
 fn check_owners(connection: &rusqlite::Connection, path: &Path, relative: &str) -> Result<()> {
-    let protected: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE relative_path = ?1)
-             OR EXISTS(SELECT 1 FROM reservations WHERE relative_path = ?1)",
-            [relative],
-            |row| row.get(0),
+    // Preview is read-only, so it must distinguish dead rows without repairing
+    // the catalog. File locks still guard the final filesystem operation.
+    let mut statement = connection
+        .prepare(
+            "SELECT pid FROM leases WHERE relative_path = ?1
+         UNION SELECT pid FROM reservations WHERE relative_path = ?1",
         )
         .map_err(|source| index_error(path, source))?;
-    if protected {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "cache payload has an active catalog owner",
-        )
-        .into());
+    let owners = statement
+        .query_map([relative], |row| row.get::<_, u32>(0))
+        .map_err(|source| index_error(path, source))?;
+    for owner in owners {
+        let pid = owner.map_err(|source| index_error(path, source))?;
+        if pid == 0 || pid_is_alive(pid) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "cache payload has an active catalog owner",
+            )
+            .into());
+        }
     }
     Ok(())
 }

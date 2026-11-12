@@ -22,8 +22,56 @@ pub(crate) struct EntryStat {
 
 pub(crate) struct PinnedRoot(platform::Directory);
 
-pub(crate) type RemovePayload<'a> =
-    dyn FnMut(&Path, &mut dyn FnMut() -> Result<Option<u64>>) -> Result<Option<u64>> + 'a;
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    volume: u64,
+    file: [u8; 16],
+    created: std::time::Duration,
+}
+
+impl FileIdentity {
+    fn capture(file: &std::fs::File) -> Result<Self> {
+        #[cfg(any(unix, windows))]
+        {
+            let metadata = file.metadata()?;
+            #[cfg(unix)]
+            let (volume, file) = {
+                use std::os::unix::fs::MetadataExt as _;
+                (metadata.dev(), u128::from(metadata.ino()).to_le_bytes())
+            };
+            #[cfg(windows)]
+            let (volume, file) = platform::file_identity(file)?;
+            // A journal outlives its descriptor. Birth time fences inode/ID
+            // reuse after a dead owner; unavailable identity cannot authorize
+            // recoverable payload allocation on this filesystem.
+            let created = metadata
+                .created()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)?;
+            Ok(Self {
+                volume,
+                file,
+                created,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cache file identity is unavailable",
+        )
+        .into())
+    }
+
+    pub(crate) fn matches(&self, file: &std::fs::File) -> Result<bool> {
+        Ok(*self == Self::capture(file)?)
+    }
+}
+
+pub(crate) type RemovePayload<'a> = dyn FnMut(
+        &Path,
+        &mut dyn FnMut(Option<&FileIdentity>) -> Result<Option<u64>>,
+    ) -> Result<Option<u64>>
+    + 'a;
 
 pub(crate) use platform::Database;
 
@@ -305,6 +353,13 @@ pub(crate) async fn atomic_write(root: &Path, path: &Path, data: &[u8]) -> Resul
 pub(crate) struct PendingFile(platform::TemporaryFile);
 
 impl PendingFile {
+    pub(crate) fn record(&self, destination: &Path) -> Result<(std::path::PathBuf, FileIdentity)> {
+        Ok((
+            destination.with_file_name(self.0.name()?),
+            FileIdentity::capture(self.0.file())?,
+        ))
+    }
+
     #[cfg(test)]
     pub(crate) async fn new(root: &Path, path: &Path) -> Result<Self> {
         let root = root.to_owned();
@@ -868,6 +923,27 @@ mod platform {
             &self.file
         }
 
+        pub(super) fn name(&self) -> Result<&OsStr> {
+            Ok(OsStr::from_bytes(self.temporary.as_bytes()))
+        }
+
+        fn check_name(&self) -> Result<()> {
+            let path = self.directory.path.join(self.name()?);
+            let candidate =
+                self.directory
+                    .open_component(&self.temporary, libc::O_RDONLY, &path)?;
+            let metadata = candidate.metadata()?;
+            validate_metadata(&metadata, &path, false)?;
+            let owned = self.file.metadata()?;
+            // Retaining the original descriptor prevents inode reuse. Check
+            // its name under the parent lock before rename or cancellation;
+            // a substituted file belongs to its replacement owner.
+            if owned.dev() != metadata.dev() || owned.ino() != metadata.ino() {
+                return Err(unsafe_path(&path, "cache temporary identity changed"));
+            }
+            Ok(())
+        }
+
         pub(super) fn copy_on_write_from(&mut self, source_file: &File) -> Result<bool> {
             #[cfg(target_os = "linux")]
             {
@@ -898,6 +974,7 @@ mod platform {
             #[cfg(target_os = "macos")]
             {
                 let _destination_mutation = self.directory.mutation()?;
+                self.check_name()?;
                 self.directory.remove(&self.temporary)?;
                 let clone_path = self
                     .directory
@@ -951,6 +1028,8 @@ mod platform {
         #[cfg(all(feature = "remote-client", feature = "local-cache"))]
         pub(super) fn into_unlinked_file(mut self) -> Result<File> {
             let file = self.file.try_clone()?;
+            let _mutation = self.directory.mutation()?;
+            self.check_name()?;
             self.directory.remove(&self.temporary)?;
             // No pathname may outlive this unpublished stream. Closing its
             // final descriptor also reclaims bytes after cancellation or exit.
@@ -960,6 +1039,7 @@ mod platform {
 
         pub(super) fn commit(mut self) -> Result<()> {
             let _mutation = self.directory.mutation()?;
+            self.check_name()?;
             // SAFETY: both single-component names are relative to the same
             // live directory descriptor. renameat replaces the leaf itself,
             // even if a competing process changed it into a symlink.
@@ -982,7 +1062,17 @@ mod platform {
     impl Drop for TemporaryFile {
         fn drop(&mut self) {
             if !self.published {
-                let _ = self.directory.remove(&self.temporary);
+                let result = (|| -> Result<()> {
+                    let _mutation = self.directory.mutation()?;
+                    self.check_name()?;
+                    self.directory.remove(&self.temporary)?;
+                    Ok(())
+                })();
+                if let Err(error) = result
+                    && !matches!(&error, CacheError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+                {
+                    tracing::warn!(operation = "release-temporary", %error, "cache temporary retained");
+                }
             }
         }
     }
@@ -990,6 +1080,39 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn live_temporary_replacement_is_neither_published_nor_removed() {
+            use std::io::Write as _;
+            for publish in [false, true] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path().join("cache");
+                let destination = root.join("entry");
+                let pending = TemporaryFile::new(&root, &destination).unwrap();
+                let mut writer = pending.file();
+                writer.write_all(b"owned").unwrap();
+                let path = root.join(pending.name().unwrap());
+                let moved = root.join("moved");
+                std::fs::rename(&path, &moved).unwrap();
+                std::fs::write(&path, b"replacement").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                if publish {
+                    assert!(
+                        pending.commit().is_err(),
+                        "published a substituted cache temporary"
+                    );
+                } else {
+                    drop(pending);
+                }
+                assert!(
+                    path.exists(),
+                    "cancellation removed a substituted cache temporary"
+                );
+                assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+                assert_eq!(std::fs::read(moved).unwrap(), b"owned");
+                assert!(!destination.exists());
+            }
+        }
         use std::io::{Read as _, Write as _};
 
         #[test]
@@ -1401,6 +1524,10 @@ mod platform {
 
         pub(super) fn file(&self) -> &File {
             &self.0
+        }
+
+        pub(super) fn name(&self) -> Result<&std::ffi::OsStr> {
+            Err(unsupported(Path::new("cache")))
         }
 
         pub(super) fn lease(&self) -> Result<File> {

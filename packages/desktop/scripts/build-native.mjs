@@ -76,7 +76,9 @@ if (testing) {
   const env = { ...environment, CRAB_BIN: path.join(desktop, "resources", "native", `${platform}-${process.arch}`, `crab${extension}`) };
   // Linux target/linker configuration belongs to this producer environment;
   // host Cargo commands can neither reuse its toolchain nor qualify its output.
-  await run("cargo", ["test", "--release", "--locked", "-p", "crab-cache", "--lib", "--features", "local-cache", "namespace_"], env);
+  for (const filter of ["namespace_", "catalog::", "private_fs::platform::tests"]) {
+    await run("cargo", ["test", "--release", "--locked", "-p", "crab-cache", "--lib", "--features", "local-cache,xet-chunk-cache", filter], env);
+  }
   await run("cargo", ["test", "--release", "-p", "crab-workflow", "--locked", "--lib"], env);
   await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::sole_workflow_file_keeps_discovery_target_identity"], env);
   await run("cargo", ["test", "--release", "-p", "crab", "--locked", "--no-default-features", "--lib", "cmd::run::tests::local_execution_does_not_resolve_the_repository_remote"], env);

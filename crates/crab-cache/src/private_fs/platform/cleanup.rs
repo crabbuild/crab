@@ -46,7 +46,7 @@ pub(in crate::private_fs) fn clean_namespaces(
             let pinned = crate::private_fs::PinnedRoot(child);
             let mut removal = crate::catalog::PayloadRemoval::open(Some(&pinned), &path, dry_run)?;
             pinned.clean(dry_run, cancel, &mut |relative, operation| {
-                removal.remove(relative, operation)
+                removal.clean(relative, operation)
             })
         })();
         match result {
@@ -101,18 +101,29 @@ fn clean_directory(
             EntryKind::Directory => directory
                 .child(&name, false)
                 .and_then(|child| clean_directory(&child, &relative, report, cancel, remove)),
-            EntryKind::Payload => {
+            EntryKind::Payload | EntryKind::Temporary => {
                 let name = component_name(&name)?;
                 // Cancellation is checked again immediately before mutation.
                 check_cancelled(cancel)?;
-                remove(&relative, &mut || {
+                remove(&relative, &mut |identity: Option<
+                    &crate::private_fs::FileIdentity,
+                >| {
                     check_cancelled(cancel)?;
-                    directory.remove_payload(&name, report.dry_run).map(Some)
+                    // A temporary name is a candidate, never deletion authority.
+                    // Its catalog must supply the exact captured file identity.
+                    if identity.is_none() && matches!(entry_kind(&relative), EntryKind::Temporary) {
+                        return Ok(None);
+                    }
+                    directory.remove_payload_if(&name, report.dry_run, &mut |file| {
+                        identity.map_or(Ok(true), |identity| identity.matches(file))
+                    })
                 })
                 .map(|removed| {
                     if let Some(bytes) = removed {
                         report.files_removed += 1;
                         report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
+                    } else {
+                        report.retained_entries += 1;
                     }
                 })
             }
@@ -157,7 +168,7 @@ mod tests {
             Path::new(""),
             &mut report,
             &CancellationToken::new(),
-            &mut |_, operation| operation(),
+            &mut |_, operation| operation(None),
         )
         .unwrap();
         assert_eq!(report.files_removed, 1);

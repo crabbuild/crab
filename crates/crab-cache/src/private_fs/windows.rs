@@ -211,10 +211,14 @@ impl Directory {
             .ok_or_else(|| io::Error::other("unconditional cache removal was skipped").into())
     }
 
-    fn remove_payload(&self, name: &OsStr, dry_run: bool) -> Result<u64> {
+    fn remove_payload_if(
+        &self,
+        name: &OsStr,
+        dry_run: bool,
+        should_remove: &mut dyn FnMut(&mut File) -> Result<bool>,
+    ) -> Result<Option<u64>> {
         component_name(name)?;
-        self.remove_relative_if(Path::new(name), dry_run, &mut |_| Ok(true))?
-            .ok_or_else(|| io::Error::other("unconditional cache removal was skipped").into())
+        self.remove_relative_if(Path::new(name), dry_run, should_remove)
     }
 
     pub(super) fn remove_relative_if(
@@ -479,6 +483,11 @@ fn handle_stat(file: &File) -> Result<HandleStat> {
         directory: standard.Directory,
         reparse: metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
     })
+}
+
+pub(super) fn file_identity(file: &File) -> Result<(u64, [u8; 16])> {
+    let identity = handle_stat(file)?.identity;
+    Ok((identity.volume, identity.id))
 }
 
 fn validate_handle(file: &File, path: &Path, directory: bool) -> Result<()> {
@@ -938,6 +947,12 @@ impl TemporaryFile {
 
     pub(super) fn file(&self) -> &File {
         &self.file
+    }
+
+    pub(super) fn name(&self) -> Result<&OsStr> {
+        self.temporary_path
+            .file_name()
+            .ok_or_else(|| unsafe_path(&self.temporary_path, "temporary cache entry has no name"))
     }
 
     pub(super) fn lease(&self) -> Result<File> {

@@ -30,7 +30,7 @@ pub async fn clean_cache(
     run_cleanup(root, dry_run, cancel, |pinned, root, dry_run, cancel| {
         let mut removal = crate::catalog::PayloadRemoval::open(Some(pinned), root, dry_run)?;
         pinned.clean(dry_run, cancel, &mut |relative, operation| {
-            removal.remove(relative, operation)
+            removal.clean(relative, operation)
         })
     })
     .await
@@ -90,6 +90,7 @@ async fn run_cleanup(
 pub(crate) enum EntryKind {
     Directory,
     Payload,
+    Temporary,
     Retain,
 }
 
@@ -107,10 +108,21 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
     let Some(parts) = components else {
         return EntryKind::Retain;
     };
-    match object_entry_kind(&parts) {
+    let kind = match object_entry_kind(&parts) {
         EntryKind::Retain => range_entry_kind(&parts),
         kind => kind,
+    };
+    if matches!(kind, EntryKind::Retain)
+        && parts.last().is_some_and(|name| name.starts_with(".tmp-"))
+    {
+        let parent = &parts[..parts.len() - 1];
+        if matches!(object_entry_kind(parent), EntryKind::Directory)
+            || matches!(range_entry_kind(parent), EntryKind::Directory)
+        {
+            return EntryKind::Temporary;
+        }
     }
+    kind
 }
 
 pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
