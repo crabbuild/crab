@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Toggle } from "@/components/ui/toggle";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
@@ -19,7 +20,7 @@ ReplaceAll,
 Search,
 WholeWord
 } from "lucide-react";
-import { useCallback,useEffect,useMemo,useRef,useState } from "react";
+import { useCallback,useEffect,useId,useMemo,useRef,useState } from "react";
 import { useSessionScroll } from "../hooks/useSessionScroll";
 import {
   DirEntry,
@@ -132,6 +133,7 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
 
   const cancelRef = useRef<(() => void) | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const fieldId = useId();
   const sessionScrollRef = useSessionScroll("search");
 
   // Focus search input on mount.
@@ -353,12 +355,12 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
       {/* ── Search header ──────────────────────────────────────── */}
       <div className="shrink-0 border-b border-border px-3 py-2">
         {/* Title row with view mode toggles */}
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-1">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             <Search size={11} />
             <span>Search</span>
           </div>
-          <div className="flex items-center gap-0.5">
+          <div className="ml-auto flex items-center gap-0.5">
             <ToolbarButton
               icon={<ChevronRight size={12} />}
               title="Collapse All"
@@ -401,14 +403,16 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
         </div>
 
         {/* Search input row */}
-        <div className="flex items-center gap-1">
+        <div className="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-x-1">
           {/* Toggle replace chevron */}
           <Button
             variant="ghost"
             size="compact"
             type="button"
             onClick={() => setShowReplace(!showReplace)}
-            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="h-8 w-5 shrink-0 rounded p-0 text-muted-foreground"
+            aria-expanded={showReplace}
+            aria-controls={`${fieldId}-replace`}
             title={showReplace ? "Hide Replace" : "Show Replace"}
           >
             {showReplace ? (
@@ -418,90 +422,91 @@ export function SearchView({ repo, onOpenFile, entryByPath }: Props) {
             )}
           </Button>
 
-          <div className="flex flex-1 flex-col gap-1.5">
-            {/* Search field + toggles */}
-            <div className="flex items-center rounded border border-border bg-background focus-within:border-primary">
-              <Input
+          <div className="flex min-w-0 flex-col gap-2">
+            <InputGroup aria-label="Search input">
+              <InputGroupInput
                 ref={searchInputRef}
-                className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
+                aria-label="Search"
                 placeholder="Search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
               />
-              <ToggleButton
-                icon={<CaseSensitive size={13} />}
-                title="Match Case"
-                active={caseSensitive}
-                onClick={() => setCaseSensitive(!caseSensitive)}
-              />
-              <ToggleButton
-                icon={<WholeWord size={13} />}
-                title="Match Whole Word"
-                active={wholeWord}
-                onClick={() => setWholeWord(!wholeWord)}
-              />
-              <ToggleButton
-                icon={<Regex size={13} />}
-                title="Use Regular Expression"
-                active={useRegex}
-                onClick={() => setUseRegex(!useRegex)}
-              />
-            </div>
+              <InputGroupAddon align="inline-end" aria-label="Search options">
+                <ToggleButton
+                  icon={<CaseSensitive size={13} />}
+                  title="Match Case"
+                  active={caseSensitive}
+                  onClick={() => setCaseSensitive(!caseSensitive)}
+                />
+                <ToggleButton
+                  icon={<WholeWord size={13} />}
+                  title="Match Whole Word"
+                  active={wholeWord}
+                  onClick={() => setWholeWord(!wholeWord)}
+                />
+                <ToggleButton
+                  icon={<Regex size={13} />}
+                  title="Use Regular Expression"
+                  active={useRegex}
+                  onClick={() => setUseRegex(!useRegex)}
+                />
+              </InputGroupAddon>
+            </InputGroup>
 
-            {/* Replace field + buttons */}
             {showReplace && (
-              <div className="flex items-center gap-1">
-                <div className="flex flex-1 items-center rounded border border-border bg-background focus-within:border-primary">
-                  <Input
-                    className="min-w-0 flex-1 bg-transparent px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none"
-                    placeholder="Replace"
-                    value={replaceValue}
-                    onChange={(e) => setReplaceValue(e.target.value)}
-                  />
+              <InputGroup id={`${fieldId}-replace`} aria-label="Replace input">
+                <InputGroupInput
+                  aria-label="Replace"
+                  placeholder="Replace"
+                  value={replaceValue}
+                  onChange={(e) => setReplaceValue(e.target.value)}
+                />
+                <InputGroupAddon align="inline-end" aria-label="Replace options">
                   <ToggleButton
                     icon={<CaseSensitive size={13} />}
                     title="Preserve Case"
                     active={preserveCase}
                     onClick={() => setPreserveCase(!preserveCase)}
                   />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="compact"
-                  type="button"
-                  onClick={handleReplaceAll}
-                  disabled={replacing || !query.trim() || !matches || matches.length === 0}
-                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-                  title="Replace All"
-                >
-                  <ReplaceAll size={14} />
-                </Button>
-              </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    type="button"
+                    onClick={handleReplaceAll}
+                    disabled={replacing || !query.trim() || !matches || matches.length === 0}
+                    title="Replace All"
+                  >
+                    <ReplaceAll size={14} />
+                  </Button>
+                </InputGroupAddon>
+              </InputGroup>
             )}
           </div>
         </div>
 
         {/* Files to include / exclude (toggled via filter icon in toolbar) */}
         {showFilters && (
-          <div className="mt-2 space-y-1.5 pl-[22px]">
-            <div>
-              <label className="text-[10px] text-muted-foreground">
+          <div className="mt-3 flex min-w-0 flex-col gap-2 pl-6">
+            <div className="flex min-w-0 flex-col gap-1">
+              <label htmlFor={`${fieldId}-include`} className="text-[11px] text-muted-foreground">
                 files to include
               </label>
               <Input
-                className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
+                id={`${fieldId}-include`}
+                className="w-full"
                 placeholder="e.g. *.ts, src/**"
                 value={includeInput}
                 onChange={(e) => setIncludeInput(e.target.value)}
               />
             </div>
-            <div>
-              <label className="text-[10px] text-muted-foreground">
+            <div className="flex min-w-0 flex-col gap-1">
+              <label htmlFor={`${fieldId}-exclude`} className="text-[11px] text-muted-foreground">
                 files to exclude
               </label>
               <Input
-                className="mt-0.5 w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus:border-primary"
+                id={`${fieldId}-exclude`}
+                className="w-full"
                 placeholder="e.g. *.lock, node_modules/**"
                 value={excludeInput}
                 onChange={(e) => setExcludeInput(e.target.value)}
@@ -1161,15 +1166,10 @@ function ToggleButton({
 }) {
   return (
     <Toggle
-      size="sm"
+      size="icon"
       type="button"
       onClick={onClick}
-      className={clsx(
-        "shrink-0 rounded p-0.5 mx-0.5 transition-colors",
-        active
-          ? "bg-primary/20 text-primary"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
+      className="text-muted-foreground"
       title={title}
       pressed={active}
     >
@@ -1192,15 +1192,10 @@ function ToolbarButton({
 }) {
   return (
     <Toggle
-      size="sm"
+      size="icon"
       type="button"
       onClick={onClick}
-      className={clsx(
-        "rounded p-1 transition-colors",
-        active
-          ? "bg-primary/20 text-primary"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
+      className="text-muted-foreground"
       title={title}
       pressed={active}
     >

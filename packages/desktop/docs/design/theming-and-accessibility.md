@@ -37,7 +37,7 @@ The RGB representation supports Tailwind v3 opacity modifiers such as
 `primary` denotes an action, with its own foreground pair.
 
 Application controls live in `src/components/ui/`: shadcn Button, Input,
-Textarea, Select, Combobox, DropdownMenu, Popover, Checkbox, Switch, RadioGroup,
+Textarea, InputGroup, Select, Combobox, DropdownMenu, Popover, Checkbox, Switch, RadioGroup,
 ToggleGroup, Slider, Calendar, Command, Collapsible, Tabs, Dialog, AlertDialog,
 Tooltip, Resizable, and Sonner notifications. Their source follows shadcn's
 Radix composition adapted to React 18, Tailwind v3 and desktop density.
@@ -45,6 +45,8 @@ Use these primitives instead of native selects, checkboxes, browser prompts,
 or hand-positioned menus. System file pickers and terminal/editor engine
 internals remain platform integrations.
 
+Input groups own the shared border/focus indicator around a field and its addons.
+Compose `InputGroupInput` with `InputGroupAddon` to avoid nested input borders.
 Inputs keep their native change events and forwarded refs. Selection controls
 use value callbacks. Existing application selects namespace Radix item values
 with a leading colon, then remove it at the call site; this preserves selectable
