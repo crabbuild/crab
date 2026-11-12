@@ -425,6 +425,9 @@ After fault removal, cleanup retires the records and an exact-content read
 succeeds with no origin writes. Exact-source focused native checks pass on
 [Linux and Windows](https://github.com/crabbuild/crab/actions/runs/43183402196);
 Windows HTTP-body cases are gated out, while the shared scratch-lifetime case runs.
+The later desktop build `f2f7e171511` repeats the directory-sync failure/repair
+scenario with unchanged cache source: Settings retains a pending record on
+failure, then cleanup retires it and exact reads succeed after repair.
 These checks do not establish physical drive power-loss behavior.
 The macOS sync-image probe replays the last successful flush and finds the exact
 pending identity before the first payload write; its unchanged assertion fails

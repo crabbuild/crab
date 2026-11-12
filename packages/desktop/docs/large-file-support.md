@@ -285,10 +285,25 @@ The shared native Git command builder disables automatic diff refresh while
 retaining mandatory mutation locks. Captured reads now reuse that builder and
 its scoped credentials instead of duplicating command policy. Task comparisons
 permit stat refresh only in their private index, keeping raw filenames consistent
-with patches; checkpoint comparisons use staged or committed content. The focused
-command/credential cases pass. New-package qualification
-remains required; this closes the proven index-mutation defect without claiming
-the unexplained RPC or tracking timing failures are fixed.
+with patches; checkpoint comparisons use staged or committed content. All 37
+focused command, credential, captured-diff, hunk and task-comparison cases pass.
+New-package qualification
+passes on native/renderer build `f2f7e171511`: the canonical selected-identity
+SSH workflow records 13 diff commands, zero diff writes to the real index and
+ten explicit index writes. All twelve SDK cases pass in 42.8 seconds, and the
+continuous writable-store Crab/LFS lifecycle passes in 1.9 minutes. Its 4 KiB
+edit of an 8 MiB file reuses 139 of 140 chunks and adds 36,943 stored xorb bytes;
+this is storage growth, not measured network traffic.
+
+The final package also repeats the real directory-sync fault: cleanup shows
+the I/O error with a pending recovery record and no success message. Repair
+allows cleanup, retires the record and returns exact source bytes with zero
+origin writes. All 1,716 frozen native inputs, 869 renderer/Electron assets and
+the local/SSH runtime pair match this build. The earlier syscall-order trace
+remains attributed to `936d8b34267`; the cache source is unchanged in this
+follow-up. This closes the proven index-mutation defect without claiming the
+unexplained RPC, index-lock or tracking timing failures are fixed. Offline
+retention and the remaining acceptance matrix stay open.
 
 ### Intel SFTP qualification boundary
 
