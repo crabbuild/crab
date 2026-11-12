@@ -381,6 +381,8 @@ contextBridge.exposeInMainWorld("crab", {
   termWrite: (id: string, data: string) => ipcRenderer.invoke("crab:term-write", id, data),
   termResize: (id: string, cols: number, rows: number) => ipcRenderer.invoke("crab:term-resize", id, cols, rows),
   termKill: (id: string) => ipcRenderer.invoke("crab:term-kill", id),
+  termAgentCommand: (agentType: string, command: string) =>
+    ipcRenderer.invoke("crab:term-agent-command", { agentType, command }) as Promise<{ command: string; env?: Record<string, string> }>,
   termListShells: () => ipcRenderer.invoke("crab:term-list-shells") as Promise<string[]>,
   termPoolHint: (cwd: string) => ipcRenderer.invoke("crab:term-pool-hint", cwd),
   termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) =>

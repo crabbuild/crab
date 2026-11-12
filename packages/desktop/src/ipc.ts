@@ -1142,6 +1142,7 @@ declare global {
       termWrite: (id: string, data: string) => Promise<void>;
       termResize: (id: string, cols: number, rows: number) => Promise<void>;
       termKill: (id: string) => Promise<void>;
+      termAgentCommand: (agentType: string, command: string) => Promise<{ command: string; env?: Record<string, string> }>;
       termListShells: () => Promise<string[]>;
       termPoolHint: (cwd: string) => Promise<void>;
       termSaveState: (state: { persistenceKey: string; layout: unknown; scrollbackData: Record<string, string> }) => Promise<{ success: boolean; error?: string }>;

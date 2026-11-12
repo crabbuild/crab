@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   createPresetManager,
+  availableAgentPresets,
   BUILTIN_PRESET_LIST,
   LS_PRESETS_KEY,
   type StartupCommand,
@@ -21,6 +22,18 @@ Object.defineProperty(globalThis, "localStorage", { value: localStorageMock });
 describe("terminal-presets", () => {
   beforeEach(() => {
     localStorageMock.clear();
+  });
+
+  it("shows installed and configured agents while preserving hidden presets", () => {
+    const manager = createPresetManager();
+    manager.setVisibility("builtin-claude", false);
+    const agents = [
+      { type: "claude-code", name: "Claude Code", binary: "claude", available: true },
+      { type: "codex", name: "Codex", binary: "codex", available: true },
+      { type: "aider", name: "Aider", binary: "aider", available: false },
+      { type: "custom", name: "Configured CLI", binary: "custom", available: false, configured: true },
+    ].map(agent => ({ path: "", version: "", ...agent }));
+    expect(availableAgentPresets(manager.getAll(), agents).map(preset => preset.agentType)).toEqual(["codex", "custom"]);
   });
 
   describe("built-in presets", () => {

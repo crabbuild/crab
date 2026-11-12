@@ -1,17 +1,32 @@
 import { test, expect, _electron as electron, type Page } from "@playwright/test";
 import { createServer } from "vite";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
 const desktop = path.resolve(__dirname, "../..");
 const runtimeRequire = createRequire(path.join(desktop, "package.json"));
 
+async function stopFixtureDaemons(root: string) {
+  const runtimes = path.join(root, "daemon/runtimes");
+  const directories = [path.join(root, "daemon"), ...(existsSync(runtimes) ? readdirSync(runtimes).map(name => path.join(runtimes, name)) : [])];
+  for (const directory of directories) {
+    const pidFile = path.join(directory, "daemon-v2.pid");
+    if (!existsSync(pidFile)) continue;
+    const { pid } = JSON.parse(readFileSync(pidFile, "utf8"));
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    await expect.poll(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+    }, { timeout: 10_000 }).toBe(true);
+  }
+}
+
 test("terminal controls keep normal and daemon lifetimes distinct with shared input and recovery", async () => {
   test.setTimeout(90_000);
   const root = mkdtempSync(path.join(tmpdir(), "crab-term-controls-"));
-  const server = await createServer({ root: desktop, server: { host: "127.0.0.1", port: 0, strictPort: false } });
+  const server = await createServer({ root: desktop, cacheDir: path.join(root, "vite-cache"), server: { host: "127.0.0.1", port: 0, strictPort: false } });
   await server.listen();
   const url = server.resolvedUrls?.local[0];
   if (!url) throw new Error("Terminal fixture renderer did not start");
@@ -36,6 +51,12 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
   try {
     let page = await app.firstWindow();
     await expect(page.locator('[data-session-type="daemon"]')).toHaveCount(1);
+    for (const [name, tooltip] of [["New terminal", "New terminal (⌘T)"], ["Find", "Find in terminal (⌘F)"], ["Terminal sessions", "Terminal sessions"]]) {
+      const button = page.getByRole("button", { name, exact: true });
+      await expect(button).toHaveText("");
+      await button.focus();
+      await expect(page.getByRole("tooltip")).toContainText(tooltip);
+    }
     const daemonPid = await startAgent(page, "daemon");
     const mode = page.getByRole("button", { name: "Terminal mode for new tabs and splits", exact: true });
     await mode.click();
@@ -132,18 +153,61 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
   } finally {
     await app.close();
     await server.close();
-    const runtimes = path.join(root, "daemon/runtimes");
-    const directories = [path.join(root, "daemon"), ...(existsSync(runtimes) ? readdirSync(runtimes).map(name => path.join(runtimes, name)) : [])];
-    for (const directory of directories) {
-      const pidFile = path.join(directory, "daemon-v2.pid");
-      if (!existsSync(pidFile)) continue;
-      const { pid } = JSON.parse(readFileSync(pidFile, "utf8"));
-      try { process.kill(pid, "SIGTERM"); } catch {}
-      await expect.poll(() => {
-        try { process.kill(pid, 0); return false; }
-        catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
-      }, { timeout: 10_000 }).toBe(true);
-    }
+    await stopFixtureDaemons(root);
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+
+test("CLI presets show host availability and execute configured paths", async () => {
+  test.skip(process.platform === "win32", "The owned CLI fixture uses a POSIX script");
+  test.setTimeout(90_000);
+  const root = mkdtempSync(path.join(tmpdir(), "crab-host-cli-e2e-"));
+  const bin = path.join(root, "outside PATH");
+  mkdirSync(bin);
+  const binary = path.join(bin, "claude");
+  const proof = path.join(root, "launched.txt");
+  writeFileSync(binary, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "fixture 1.0.0"; else printf "%s\\n" "$@" > "$CLI_PROOF"; printf "host-cli-%s\\n" launched; fi\n', { mode: 0o755 });
+  const settings = path.join(root, "agent-settings.json");
+  const config = { binaryPath: binary, extraArgs: ["saved argument"], env: { CLI_PROOF: proof } };
+  const save = (overrides: object) => writeFileSync(settings, JSON.stringify({ orchestratorAgentConfigs: { "claude-code": { ...config, ...overrides } } }));
+  save({});
+  const server = await createServer({ root: desktop, cacheDir: path.join(root, "vite-cache"), server: { host: "127.0.0.1", port: 0, strictPort: false } });
+  await server.listen();
+  const url = server.resolvedUrls?.local[0];
+  if (!url) throw new Error("Terminal fixture renderer did not start");
+  const app = await electron.launch({ executablePath: runtimeRequire("electron"), args: [path.join(desktop, "tests/fixtures/terminal-recovery/main.cjs"), "--fixture-root", root, "--renderer-url", url, "--fixture-cli-catalog"] });
+  try {
+    const page = await app.firstWindow();
+    await expect(page.locator('[data-session-type="daemon"]')).toHaveCount(1);
+    await page.getByRole("button", { name: "Terminal mode for new tabs and splits", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: /^Normal terminal/ }).click();
+    const menu = page.getByRole("button", { name: "Terminal presets", exact: true });
+    await menu.click();
+    await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Aider", exact: true })).toHaveCount(0);
+    await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
+    await page.getByRole("menuitem", { name: "Resume last session", exact: true }).press("Enter");
+    await expect.poll(() => existsSync(proof) && readFileSync(proof, "utf8")).toBe("saved argument\n--resume\n");
+    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    await expect(page.locator(".xterm-rows").last()).toContainText("host-cli-launched");
+    await menu.click();
+    await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("host-cli-menu.png") });
+    save({ binaryPath: path.join(bin, "missing") });
+    await page.getByRole("menuitem", { name: "Refresh CLI list", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
+    await page.getByRole("menuitem", { name: "Launch Claude Code", exact: false }).press("Enter");
+    await expect(page.getByText("Cannot launch agent CLI", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    save({ enabled: false });
+    await menu.click();
+    await expect(page.getByRole("menu").getByRole("status")).toContainText("No agent CLIs found");
+  } finally {
+    await app.close();
+    await server.close();
+    await stopFixtureDaemons(root);
     rmSync(root, { recursive: true, force: true, maxRetries: 5 });
   }
 });

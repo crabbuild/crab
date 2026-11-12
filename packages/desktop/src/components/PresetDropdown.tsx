@@ -22,12 +22,16 @@ import {
   ChevronDown,
   Pencil,
   Plus,
+  RefreshCw,
   Terminal,
   Trash2,
 } from "lucide-react";
-import { useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
+import type { DetectedAgent } from "../../electron/orchestrator-adapters";
+import { publishToast } from "../lib/toasts";
 import {
   createPresetManager,
+  availableAgentPresets,
   type StartupCommand,
   type SubOption,
 } from "../lib/terminal-presets";
@@ -76,11 +80,36 @@ export function TerminalPresetMenu({
   onSelect, onSpawnPlain,
 }: PresetActions & { children: ReactElement }) {
   const [open, setOpen] = useState(false);
-  const [grouped, setGrouped] = useState(() => createPresetManager().getGrouped(),
-  );
+  const [commands, setCommands] = useState(() => createPresetManager().getAll());
+  const [catalog, setCatalog] = useState<{ agents: DetectedAgent[]; loading: boolean; error?: string }>({ agents: [], loading: true });
+  const [probeRevision, setProbeRevision] = useState(0);
+  const lastProbeRevision = useRef(0);
+  const grouped = {
+    builtin: availableAgentPresets(commands, catalog.agents),
+    custom: commands.filter(command => command.category === "custom" && command.visible),
+  };
   const [form, setForm] = useState<CommandForm | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
-  const refresh = () => setGrouped(createPresetManager().getGrouped());
+  const refresh = () => setCommands(createPresetManager().getAll());
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const force = lastProbeRevision.current !== probeRevision;
+    lastProbeRevision.current = probeRevision;
+    setCatalog({ agents: [], loading: true });
+    // These presets spawn local shells in both the pane and top bar. Remote
+    // repository detection must not advertise a server CLI for a local launch.
+    void (async () => {
+      try {
+        const result = await window.crab.orchestrator.detectAgents({ force });
+        if (!result.success) throw new Error(result.error ?? "Agent detection failed");
+        if (active) setCatalog({ agents: result.agents ?? [], loading: false });
+      } catch (error) {
+        if (active) setCatalog({ agents: [], loading: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+    return () => { active = false; };
+  }, [open, probeRevision]);
     function edit(command?: StartupCommand) {
     setErrors([]);
     setForm({
@@ -94,9 +123,15 @@ export function TerminalPresetMenu({
     });
   }
 
-  function launch(command: StartupCommand) {
+  async function launch(command: StartupCommand) {
     setOpen(false);
-    onSelect(command);
+    try {
+      if (!command.agentType) { onSelect(command); return; }
+      const prepared = await window.crab.termAgentCommand(command.agentType, command.command);
+      onSelect({ ...command, command: prepared.command, env: { ...command.env, ...prepared.env } });
+    } catch (error) {
+      publishToast({ kind: "error", title: "Cannot launch agent CLI", body: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   function launchOption(
@@ -180,10 +215,13 @@ export function TerminalPresetMenu({
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuLabel>Agent CLIs</DropdownMenuLabel>
+          {catalog.loading && <DropdownMenuLabel role="status">Checking available CLIs…</DropdownMenuLabel>}
+          {catalog.error && <DropdownMenuLabel role="status">Could not detect agent CLIs. Refresh to retry.</DropdownMenuLabel>}
+          {!catalog.loading && !catalog.error && grouped.builtin.length === 0 && <DropdownMenuLabel role="status">No agent CLIs found</DropdownMenuLabel>}
           <DropdownMenuGroup>
             {grouped.builtin.map((preset) =>
               preset.subOptions?.length ? (
-                <DropdownMenuSub key={preset.id}>
+                <DropdownMenuSub key={preset.agentType}>
                   <DropdownMenuSubTrigger>
                     <AgentIcon
                       agentName={preset.icon}
@@ -262,13 +300,18 @@ export function TerminalPresetMenu({
                 </DropdownMenuSub>
               ) : (
                 <DropdownMenuItem
-                  key={preset.id}
+                  key={preset.agentType}
                   onSelect={() => launch(preset)}
                 >
                   {preset.name}
                 </DropdownMenuItem>
               ),
             )}
+          </DropdownMenuGroup>
+          <DropdownMenuGroup>
+            <DropdownMenuItem disabled={catalog.loading} onSelect={event => { event.preventDefault(); setProbeRevision(value => value + 1); }}>
+              <RefreshCw /> Refresh CLI list
+            </DropdownMenuItem>
           </DropdownMenuGroup>
           {grouped.custom.length > 0 && (
             <>

@@ -143,6 +143,27 @@ test("queued dialogs keep results and focus through transitions and cancellation
   await expect(page.getByTestId("result")).toHaveText("Prompt: cancelled");
 });
 
+test("terminal CLI menu filters host availability and keeps preset options", async ({ page }) => {
+  await page.getByRole("button", { name: "Terminal presets", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Configured CLI", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Aider", exact: true })).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
+  await page.getByRole("menuitem", { name: "Resume last session", exact: true }).press("Enter");
+  await expect(page.getByTestId("result")).toHaveText("Launch: '/fixture/claude' --resume");
+});
+
+test("terminal CLI detection failures remain retryable", async ({ page }) => {
+  await page.evaluate(() => { window.crab.orchestrator.detectAgents = async () => ({ success: false, error: "Host probe failed" }); });
+  await page.getByRole("button", { name: "Terminal presets", exact: true }).click();
+  await expect(page.getByRole("menu").getByRole("status")).toContainText("Could not detect agent CLIs");
+  await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toHaveCount(0);
+  await page.evaluate(() => { window.crab.orchestrator.detectAgents = async () => ({ success: true, agents: [] }); });
+  await page.getByRole("menuitem", { name: "Refresh CLI list", exact: true }).click();
+  await expect(page.getByRole("menu").getByRole("status")).toContainText("No agent CLIs found");
+  await expect(page.getByRole("menuitem", { name: "Add custom command…", exact: true })).toBeEnabled();
+});
+
 test("terminal custom commands persist and launch through the shared menu", async ({
   page,
 }) => {

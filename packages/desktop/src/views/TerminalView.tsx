@@ -2166,12 +2166,13 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           >
             <Button
               variant="default"
-              size="xs"
+              size="icon-xs"
               disabled={cannotSpawn || !initialRestoreComplete}
               onClick={() => void spawnTab(activePaneId)}
               title="New terminal (⌘T)"
+              aria-label="New terminal"
             >
-              <Plus data-icon="inline-start" /> New terminal
+              <Plus aria-hidden="true" />
             </Button>
             <DropdownMenu>
               <ControlTooltip title={selectedModeDescription}>
@@ -2287,24 +2288,28 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
           </div>
           <Button
             variant="ghost"
-            size="xs"
+            size="icon-xs"
             disabled={!getActivePane()?.activeTab}
             onClick={() => setSearchVisible((value) => !value)}
             aria-pressed={searchVisible}
             title="Find in terminal (⌘F)"
+            aria-label="Find"
           >
-            <Search data-icon="inline-start" /> Find
+            <Search aria-hidden="true" />
           </Button>
           <Button
             variant="ghost"
-            size="xs"
+            size="icon-xs"
             onClick={() => setSessionsManagerOpen((value) => !value)}
             aria-expanded={sessionsManagerOpen}
             aria-label="Terminal sessions"
+            title={backgroundDaemonCount > 0 ? `Terminal sessions (${backgroundDaemonCount} in background)` : "Terminal sessions"}
+            aria-description={backgroundDaemonCount > 0 ? `${backgroundDaemonCount} background sessions` : undefined}
+            className="relative"
           >
-            <Columns2 data-icon="inline-start" /> Sessions
+            <Columns2 aria-hidden="true" />
             {backgroundDaemonCount > 0 && (
-              <Badge variant="secondary">{backgroundDaemonCount}</Badge>
+              <span aria-hidden="true" className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-primary" />
             )}
           </Button>
           <div className="ml-auto flex items-center gap-1">
@@ -3220,6 +3225,9 @@ function TerminalPane({
 
         // Use a short timeout to let xterm process the click first (for selection detection).
         setTimeout(() => {
+          // Focus can move or a command can start while selection settles.
+          // Never inject cursor keys into a hidden terminal or running program.
+          if (!shellIntegrationRef.current.get(id)?.state.atPrompt) return;
           // If the user is making a selection, don't interfere.
           if (xterm.hasSelection()) return;
 
@@ -3229,14 +3237,15 @@ function TerminalPane({
           // Get the cell position from the mouse coordinates using xterm's
           // internal coordinate system. We calculate the target column from
           // the click position relative to the terminal element.
-          const termElement = xterm.element;
-          if (!termElement) return;
+          const screen = xterm.element?.querySelector(".xterm-screen");
+          if (!screen) return;
 
-          const rect = termElement.getBoundingClientRect();
-          // xterm renders cells in a grid; calculate cell dimensions.
-          const cellWidth = termElement.querySelector(".xterm-rows")?.clientWidth
-            ? termElement.querySelector(".xterm-rows")!.clientWidth / xterm.cols
-            : rect.width / xterm.cols;
+          const rect = screen.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+          const row = Math.floor((e.clientY - rect.top) * xterm.rows / rect.height);
+          const cursorRow = buffer.baseY + buffer.cursorY - buffer.viewportY;
+          if (row !== cursorRow) return;
+          const cellWidth = rect.width / xterm.cols;
 
           const relativeX = e.clientX - rect.left;
           const targetCol = Math.floor(relativeX / cellWidth);

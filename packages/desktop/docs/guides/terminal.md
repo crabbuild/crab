@@ -150,11 +150,22 @@ Quick-launch terminals with pre-configured commands:
 - "Git log" — opens terminal with `git log --oneline`
 - Custom presets definable in settings
 
+The agent menu shows CLIs detected on the local host or explicitly configured
+with an executable override. Saved custom shell commands remain available.
+Configured executable paths, extra arguments, and environment variables apply
+when launching a preset. Disabled agents are hidden. Use **Refresh CLI list**
+after installing a CLI or changing its configuration. Failed detection offers
+a retry without advertising unverified agents.
+
+**New terminal**, **Find**, and **Sessions** use icon-only toolbar buttons;
+hover or focus a button for its tooltip. A dot on Sessions indicates hidden
+sessions, with the count in its tooltip.
+
 ## Layout
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [New terminal] [Mode ▾]   [Split →] [Split ↓] [Find]          │
+│  [+] [Mode ▾]             [Split →] [Split ↓] [Find]          │
 │                          [Sessions] [Broadcast] [Settings]    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Breadcrumb: ~/project (main) $                                 │

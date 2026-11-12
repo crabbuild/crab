@@ -21,6 +21,7 @@ import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
 import { getUserShellBaseEnv } from "./env/userShellEnv";
 import { SidecarManager,registerSidecarIpc } from "./sidecars";
+import { registerTerminalAgentCommand } from "./terminal-agent-command";
 import { initializeDaemonSubsystem } from "./daemon/init";
 import { parsePtyMode } from "./daemon/mode-selection";
 import { registerDiagnosticsUiIpc } from "./daemon/diagnostics-ui-ipc";
@@ -965,6 +966,8 @@ function registerIpc(skillManager: SkillManager, storageConnections: StorageConn
   ipcMain.handle("crab:term-pool-hint", async (_evt, _cwd: string) => {
     // No-op: pool disabled.
   });
+
+  registerTerminalAgentCommand(ipcMain, getDefaultShell);
 
   // List available shells on the system.
   ipcMain.handle("crab:term-list-shells", async () => {
