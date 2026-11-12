@@ -39,6 +39,9 @@ applies to subsequent tabs and splits. It does not convert existing processes.
 Normal terminals use the same emulator capabilities with Electron-owned lifetime.
 Daemon unavailability disables durable creation and leaves explicit normal creation
 available. Daemon tab close detaches; normal tab close terminates.
+The window loads before terminal initialization. Once both bridges register their
+IPC handlers, the main process publishes readiness and configured mode so an
+early failed renderer query cannot leave working daemon controls disabled.
 
 Daemon control files remain home-scoped under `daemon/runtimes/<entry-path-hash>/`.
 The app discovers these owners and the root endpoint shipped in v2.0.0-alpha.1.

@@ -2055,6 +2055,10 @@ app.whenReady().then(async () => {
     ipcMain.handle("crab:term-reattach-sessions", () => []);
   }
 
+  // The renderer mounts before daemon initialization. Its first mode query
+  // may have no IPC handler yet; publish after both terminal bridges are ready.
+  daemonSubsystem?.publishMode();
+
   app.on("before-quit", () => {
     if (mainWindow) return;
     termRouter.dispose();

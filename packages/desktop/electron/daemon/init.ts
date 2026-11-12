@@ -85,6 +85,8 @@ export interface DaemonSubsystem {
   daemonEntryFromEnv: boolean;
   /** The resolved daemon entry path. */
   resolvedDaemonEntryPath: string;
+  /** Publish readiness after the app registers terminal IPC for its already-visible window. */
+  publishMode: () => void;
   dispose: () => void;
 }
 
@@ -96,6 +98,7 @@ export async function initializeDaemonSubsystem(
   opts: InitDaemonOptions,
 ): Promise<DaemonSubsystem> {
   const { ipcMain, app, getMainWindow, getWorkspacePath, log } = opts;
+  const configuredMode = parsePtyMode(process.env.CRAB_PTY_MODE);
 
   const controlRoot =
     opts.socketDir ?? path.join(os.homedir(), ".crab", "desktop", "daemon");
@@ -147,7 +150,7 @@ export async function initializeDaemonSubsystem(
       // "No handler registered" errors.
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
+        configuredMode,
         fallback: { reason: "Daemon binary not found", error: msg, timestamp: Date.now() },
       }));
       ipcMain.handle("crab:agent-sessions", () => []);
@@ -195,6 +198,12 @@ export async function initializeDaemonSubsystem(
         previousEntryPath: null,
         daemonEntryFromEnv: false,
         resolvedDaemonEntryPath: "",
+        publishMode: () => {
+          getMainWindow()?.webContents.send("crab:pty-mode-changed", {
+            daemonReady: false, breakerOpen: false,
+            configuredMode,
+          });
+        },
         dispose: () => {
           ipcMain.removeHandler("crab:pty-mode");
           ipcMain.removeHandler("crab:agent-sessions");
@@ -240,6 +249,7 @@ export async function initializeDaemonSubsystem(
     win.webContents.send("crab:pty-mode-changed", {
       daemonReady: runtimeDaemonReady,
       breakerOpen: circuitBreaker.state === "open",
+      configuredMode,
     });
   }
 
@@ -401,7 +411,7 @@ export async function initializeDaemonSubsystem(
         ipcMain,
         log,
       },
-      process.env.CRAB_PTY_MODE,
+      configuredMode,
     );
 
     daemonReady = modeResult.resolvedMode === "daemon";
@@ -421,7 +431,7 @@ export async function initializeDaemonSubsystem(
     try {
       ipcMain.handle("crab:pty-mode", () => ({
         resolvedMode: "in-process",
-        configuredMode: parsePtyMode(process.env.CRAB_PTY_MODE),
+        configuredMode,
         fallback: { reason: "Daemon initialization failed", error: msg, timestamp: Date.now() },
       }));
     } catch {
@@ -559,6 +569,7 @@ export async function initializeDaemonSubsystem(
     previousEntryPath: pathMismatchResult.pidFileEntryPath,
     daemonEntryFromEnv,
     resolvedDaemonEntryPath: resolvedEntryPath,
+    publishMode: sendPtyModeChanged,
     dispose,
   };
 }

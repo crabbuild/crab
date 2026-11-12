@@ -5,6 +5,16 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/tests/fixtures/shadcn-controls.html");
 });
 
+for (const mode of ["Daemon", "Normal"] as const) {
+  test(`startup readiness restores ${mode} mode after an early IPC query fails`, async ({ page }) => {
+    await page.goto("/tests/fixtures/shadcn-controls.html?startup-mode");
+    await expect(page.getByTestId("startup-mode")).toHaveText("false:false:in-process:auto");
+    await page.getByRole("button", { name: `${mode} ready`, exact: true }).click();
+    await expect(page.getByTestId("startup-mode")).toHaveText(mode === "Daemon"
+      ? "false:true:daemon:daemon" : "false:false:in-process:in-process");
+  });
+}
+
 test("select typeahead is scoped and preserves an empty selection", async ({
   page,
 }) => {

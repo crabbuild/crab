@@ -465,8 +465,8 @@ contextBridge.exposeInMainWorld("crab", {
   // Subscribe to live PTY mode updates pushed from the main process.
   // Fires when the daemon connects, disconnects, or the circuit breaker
   // changes state. Returns an unsubscribe function.
-  onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean }) => void) => {
-    const handler = (_e: unknown, payload: { daemonReady: boolean; breakerOpen: boolean }) =>
+  onPtyMode: (listener: (mode: { daemonReady: boolean; breakerOpen: boolean; configuredMode: "auto" | "daemon" | "in-process" }) => void) => {
+    const handler = (_e: unknown, payload: { daemonReady: boolean; breakerOpen: boolean; configuredMode: "auto" | "daemon" | "in-process" }) =>
       listener(payload);
     ipcRenderer.on("crab:pty-mode-changed", handler);
     return () => { ipcRenderer.removeListener("crab:pty-mode-changed", handler); };
