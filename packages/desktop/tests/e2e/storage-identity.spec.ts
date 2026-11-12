@@ -387,7 +387,7 @@ test("device storage identities reach SSH cold reads, replacement and saved rest
           await expect.poll(async () => (
                   (await (await fetch(source.profiles[index].endpoint + "/__fixture_stats")).json()) as { blocked: number }).blocked,
             ).toBeGreaterThan(0);
-          await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+          await page.getByRole("button", { name: "Activity", exact: true }).click();
           await expect(page.getByRole("button", { name: "Cancel materialization", exact: true })).toBeInViewport();
           await page.getByRole("button", { name: "Cancel materialization", exact: true }).click();
           await expect.poll(async () => (await history()).jobs.find(job => job.intent.paths.includes("cold.safetensors"))?.status).toBe("cancelled");
@@ -666,7 +666,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
       if (index === 0) {
         await fetch(connection.endpoint + "/__fixture_pause");
         await page.getByRole("button", { name: "More actions", exact: true }).click();
-        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
         const pending = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
         await pending.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
         await pending.getByRole("button", { name: "Edit Alpha", exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
@@ -683,7 +683,7 @@ test("GUI snapshots at the same URL restore separate saved identities and cold c
         await fetch(connection.endpoint + "/__fixture_release");
       }
       await page.getByRole("button", { name: "More actions", exact: true }).click();
-      await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
       await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
       await dialog.getByLabel("Name (optional)", { exact: true }).fill(connection.name + " snapshot");

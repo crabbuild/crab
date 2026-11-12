@@ -135,7 +135,7 @@ test("whole-file restoration protects literal selections, staging and pending ed
     await receiptFault(true);
     await discard(files[2]);
     expect(readFileSync(path.join(source, files[2]))).toEqual(dirty);
-    await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
     const activityFailure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Reload Activity", exact: true }) });
     await expect(activityFailure).toContainText("Activity could not save");
     await expect(activityFailure).toBeInViewport();
@@ -309,7 +309,7 @@ test("Crab and LFS UI lifecycle preserves bytes and staging across edits, rename
     const preparationEntered = async () => expect.poll(() => application!.evaluate(() =>
       (globalThis as typeof globalThis & { transferPreparation: { arrivals: number } }).transferPreparation.arrivals)).toBe(1);
     const activity = async () => {
-      await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+      await page.getByRole("button", { name: "Activity", exact: true }).click();
       await expect(page.getByRole("button", { name: "Close activity drawer", exact: true })).toBeInViewport();
     };
     await holdPreparation();

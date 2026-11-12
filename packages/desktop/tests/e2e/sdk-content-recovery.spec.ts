@@ -66,7 +66,9 @@ for (const kind of ["crab", "lfs"] as const) {
           await page.getByRole("button", { name: "No thanks", exact: true }).click();
           return page;
         }
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).waitFor();
+        // A first-run modal can cover the shell after an interrupted session.
+        // Wait beneath it, then dismiss the accessible prompt before acting.
+        await page.getByRole("button", { name: "Activity", exact: true, includeHidden: true }).waitFor();
         for (const name of ["Skip", "No thanks"]) {
           const button = page.getByRole("button", { name, exact: true });
           if (await button.isVisible()) await button.click();
@@ -75,7 +77,7 @@ for (const kind of ["crab", "lfs"] as const) {
       };
       const openSnapshot = async (page: Awaited<ReturnType<typeof launch>>, selected = connection) => {
         await page.getByRole("button", { name: "More actions", exact: true }).click();
-        await page.getByRole("button", { name: "Open storage snapshot", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Open storage snapshot", exact: true }).click();
         const dialog = page.getByRole("dialog", { name: "Open storage snapshot", exact: true });
         await dialog.getByLabel("Repository URL", { exact: true }).fill(fixture.url);
         await dialog.getByRole("button", { name: `Edit ${selected.name}`, exact: true }).locator("..").getByRole("button", { name: "Use connection", exact: true }).click();
@@ -93,7 +95,7 @@ for (const kind of ["crab", "lfs"] as const) {
         const initialEpoch = epoch(repoId!);
         if (outcome === "budget") {
           await expect(page.getByText("Read-only storage snapshot", { exact: true })).toBeVisible();
-          await expect(page.getByTitle("Refresh hydration status", { exact: true })).toHaveCount(0);
+          await expect(page.getByRole("button", { name: "Refresh hydration status", exact: true })).toHaveCount(0);
           const payloads = () => inventory().filter(entry => /^namespaces\/[a-f0-9]{64}\/(?:chunks|xorbs|shards|ref-transactions|git-packs)\//.test(entry.path));
           const showExact = async (expected: typeof payload) => {
             await page.locator(`[role="treeitem"][data-item-path="${filename}"]`).click();

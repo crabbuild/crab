@@ -96,12 +96,14 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         application = await electron.launch({ executablePath: packagedExecutable(), args: [`--user-data-dir=${profile}`], env });
         application.process().stderr?.on("data", bytes => { stderr = (stderr + bytes.toString()).slice(-32_000); });
         page = await application.firstWindow();
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).waitFor();
+        // A first-run modal can cover the shell after an interrupted session.
+        // Wait beneath it, then dismiss the accessible prompt before acting.
+        await page.getByRole("button", { name: "Activity", exact: true, includeHidden: true }).waitFor();
         // A hard kill can lose Chromium preferences/recent tabs. Durable Activity
         // must support fresh retry from an empty start as well as a restored tab.
         if (await page.getByRole("button", { name: "Skip", exact: true }).isVisible()) await page.getByRole("button", { name: "Skip", exact: true }).click();
         if (await page.getByRole("button", { name: "No thanks", exact: true }).isVisible()) await page.getByRole("button", { name: "No thanks", exact: true }).click();
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
       };
       const before = await transport(`stream_${outcome === "native-receipt-gap" ? publishedKind : kind}`);
       await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
@@ -161,7 +163,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         killNative();
         await releaseJournal();
         await expect.poll(async () => (await history()).jobs.find(job => job.job_id === original.job_id)?.status).toBe("interrupted");
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
         await expect(page.getByText("Outcome unknown. Check the working files.", { exact: true })).toBeInViewport();
       } else {
         await expect.poll(async () => (await transport("stats")).stream_blocked).toBeGreaterThan(0);
@@ -177,7 +179,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         const status = await call(page, "git_status_porcelain", { repo_id: "recovery" });
         expect((status.entries as Array<{ path: string }>).some(entry => artifacts().some(name => entry.path.startsWith(name + "/")))).toBe(false);
         expect((status.entries as Array<{ path: string }>).some(entry => entry.path === ".crab-publication-user-file")).toBe(true);
-        await page.getByTitle("Toggle Activity (background jobs)", { exact: true }).click();
+        await page.getByRole("button", { name: "Activity", exact: true }).click();
         await expect(page.getByText("1 of 2 files materialized", { exact: true })).toBeInViewport();
         if (outcome === "cleanup-failure") {
           const foreign = path.join(source, artifacts()[0], "foreign.txt");
