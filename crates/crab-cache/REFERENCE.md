@@ -397,6 +397,11 @@ admission. Journal retirement remains disposable; a stale record still requires
 the same exact-file comparison. SQLite documents the
 [WAL durability distinction](https://www.sqlite.org/pragma.html#pragma_synchronous).
 This does not qualify filesystem rename/unlink ordering through power loss.
+The macOS sync-image probe replays the last successful flush and finds the exact
+pending identity before the first payload write; its unchanged assertion fails
+on the earlier package. Settings has bounded real sync-failure/retry proof.
+An I/O error during commit does not prove rollback: callers refresh saved policy
+before reporting its value or retrying maintenance.
 
 Committed catalog state may remain in WAL after all catalog handles close.
 Inspection reads that WAL through the existing read-only private VFS. Copying
