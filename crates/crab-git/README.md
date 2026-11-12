@@ -170,6 +170,15 @@ pack before external stores; alternate lookup uses the same physical database
 rules as loose objects. Full target checksums remain the delivery authority.
 Callers provide the private scratch root/capacity and supervise blocked I/O.
 
+`batch::copy_local_blob` owns loose/packed selection for callers that support
+both formats. `batch::capture_blob` writes that same verified stream to admitted
+anonymous storage, retaining bounded BLAKE3 block proofs authenticated by the
+complete Git checksum. `CapturedBlob::copy_range` checks copied blocks without
+decoding the original object again. Observed source metadata changes invalidate
+reuse; metadata alone never authenticates bytes. Capture storage and decoding
+share scratch admission. Drop captures to release their file and reservation;
+callers own serialization, idle eviction and joined cancellation.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain

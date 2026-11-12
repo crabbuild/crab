@@ -34,9 +34,10 @@ async fn corrupted_git_source(
         assert_eq!(source.read_range(0, 32).await?.as_ref(), &original[..32]);
     }
     let root = directory.path();
-    let Source::Git { oid, .. } = source.source.as_ref() else {
+    let Source::Git { capture } = source.source.as_ref() else {
         return Err(AgentError::Other("expected a captured Git blob".into()));
     };
+    let oid = &capture.oid;
     let mut replacement = original;
     replacement[1024 * 1024 - 1] = b'b';
     std::fs::write(root.join("replacement.bin"), replacement)?;

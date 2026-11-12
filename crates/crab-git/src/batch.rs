@@ -12,6 +12,8 @@ use std::process::Stdio;
 
 mod packed;
 pub use packed::copy_packed_blob;
+mod capture;
+pub use capture::{CapturedBlob, capture_blob, copy_local_blob};
 
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +159,14 @@ pub fn open_loose_blob(
     oid: &str,
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<Option<File>> {
+    Ok(open_loose_at(objects_directory, oid, cancelled)?.map(|(file, _)| file))
+}
+
+fn open_loose_at(
+    objects_directory: &Path,
+    oid: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<(File, PathBuf)>> {
     if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("Git loose lookup requires a hexadecimal object ID"));
     }
@@ -170,8 +180,8 @@ pub fn open_loose_blob(
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         }
-        match File::open(path) {
-            Ok(file) if file.metadata()?.is_file() => Ok(Some(file)),
+        match File::open(&path) {
+            Ok(file) if file.metadata()?.is_file() => Ok(Some((file, path))),
             Ok(_) => Err(invalid("Git loose object is not a regular file")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),

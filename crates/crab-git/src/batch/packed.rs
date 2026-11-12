@@ -32,10 +32,22 @@ pub fn copy_packed_blob(
     scratch: impl FnOnce() -> io::Result<ScratchSpace>,
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<bool> {
+    copy_observed(objects, oid, size, output, scratch, cancelled).map(|origin| origin.is_some())
+}
+
+pub(super) fn copy_observed(
+    objects: &Path,
+    oid: &str,
+    size: u64,
+    output: &mut impl Write,
+    scratch: impl FnOnce() -> io::Result<ScratchSpace>,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Option<super::capture::Origin>> {
     let bytes = oid_bytes(oid)?;
     let Some(mut location) = locate(objects, &bytes, cancelled)? else {
-        return Ok(false);
+        return Ok(None);
     };
+    let origin = super::capture::Origin::new(&location.path, &location.file)?;
     let entry = header(&mut location, bytes.len())?;
     let copy = |destination: &mut dyn Write| {
         if matches!(entry.base, Base::Full) {
@@ -54,7 +66,7 @@ pub fn copy_packed_blob(
     };
     verified(oid, size, output, copy)?;
     check_cancelled(cancelled)?;
-    Ok(true)
+    Ok(Some(origin))
 }
 
 struct Decoder<'a> {

@@ -628,9 +628,10 @@ async fn captured_git_ranges_keep_physical_identity_and_support_large_complete_r
     let source = FileSource::capture(&repo, "file.bin", Some(""), repo.read_scope())
         .await
         .unwrap();
-    let Source::Git { oid, .. } = source.source.as_ref() else {
+    let Source::Git { capture } = source.source.as_ref() else {
         panic!("expected captured Git blob");
     };
+    let oid = &capture.oid;
     tokio::fs::write(root.join("file.bin"), b"replacement")
         .await
         .unwrap();

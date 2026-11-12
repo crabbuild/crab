@@ -12,7 +12,6 @@ use super::*;
 
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const MAX_GIT_SCRATCH_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 pub(in crate::repository) async fn run(
     root: &Path,
@@ -138,23 +137,121 @@ pub(super) async fn blob(
     bytes
         .try_reserve_exact(length)
         .map_err(std::io::Error::other)?;
-    let output = BlobOutput::Range {
-        skip: start,
-        remaining: length,
-        bytes,
-    };
-    Ok(read_blob(root, oid, size, output, scope).await?.into())
+    copy_range(root, oid, size, start..start + length as u64, bytes, scope)
+        .await
+        .map(Bytes::from)
 }
 
-async fn read_blob(
+pub(super) async fn copy_range<W: std::io::Write + Send + 'static>(
     root: &Path,
     oid: &str,
     size: u64,
-    mut output: BlobOutput,
+    range: std::ops::Range<u64>,
+    output: W,
     scope: &ReadScope,
-) -> Result<Vec<u8>> {
+) -> Result<W> {
+    if range.start > range.end || range.end > size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Git range exceeds captured size",
+        )
+        .into());
+    }
+    let output = RangeOutput {
+        skip: range.start,
+        remaining: range.end - range.start,
+        output,
+    };
+    read_blob(root, oid, size, output, scope)
+        .await
+        .map(|output| output.output)
+}
+
+async fn read_blob<W: std::io::Write + Send + 'static>(
+    root: &Path,
+    oid: &str,
+    size: u64,
+    mut output: W,
+    scope: &ReadScope,
+) -> Result<W> {
     let objects = git_path(root, "objects", scope).await?;
-    let captured_oid = oid.to_owned();
+    for fetched in [false, true] {
+        let objects = objects.clone();
+        let captured_oid = oid.to_owned();
+        let (found, next) = blocking(scope, move |cancelled| {
+            let found = crab_git::batch::copy_local_blob(
+                &objects,
+                &captured_oid,
+                size,
+                &mut output,
+                super::git_capture::scratch,
+                cancelled,
+            )?;
+            std::io::Write::flush(&mut output)?;
+            Ok((found, output))
+        })
+        .await?;
+        output = next;
+        if found {
+            return Ok(output);
+        }
+        if !fetched {
+            resolve_blob(root, oid, scope).await?;
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "Git object is unavailable after resolution",
+    )
+    .into())
+}
+
+pub(super) async fn capture_blob(
+    root: &Path,
+    oid: &str,
+    size: u64,
+    scratch: crab_git::incoming_pack::ScratchSpace,
+    scope: &ReadScope,
+) -> Result<crab_git::batch::CapturedBlob> {
+    let objects = git_path(root, "objects", scope).await?;
+    for fetched in [false, true] {
+        let objects = objects.clone();
+        let oid_copy = oid.to_owned();
+        let scratch = scratch.clone();
+        let captured = blocking(scope, move |cancelled| {
+            crab_git::batch::capture_blob(&objects, &oid_copy, size, &scratch, cancelled)
+        })
+        .await?;
+        if let Some(captured) = captured {
+            return Ok(captured);
+        }
+        if !fetched {
+            resolve_blob(root, oid, scope).await?;
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "Git object is unavailable after resolution",
+    )
+    .into())
+}
+
+async fn resolve_blob(root: &Path, oid: &str, scope: &ReadScope) -> Result<()> {
+    // Native Git owns promisor transport and scoped credentials. It resolves
+    // absence without decoding a body; found bytes always use the bounded reader.
+    run(
+        root,
+        &["--no-replace-objects", "cat-file", "-e", oid],
+        scope,
+    )
+    .await
+    .map(drop)
+}
+
+pub(super) async fn blocking<T: Send + 'static>(
+    scope: &ReadScope,
+    copy: impl FnOnce(&dyn Fn() -> bool) -> std::io::Result<T> + Send + 'static,
+) -> Result<T> {
     let cancellation = scope.clone();
     let copied = tokio::task::spawn_blocking(move || {
         let deadline = Instant::now() + READ_TIMEOUT;
@@ -169,121 +266,37 @@ async fn read_blob(
             }
             false
         };
-        let copy = (|| {
-            if let Some(file) =
-                crab_git::batch::open_loose_blob(&objects, &captured_oid, &cancelled)?
-            {
-                crab_git::batch::copy_loose_blob(
-                    file,
-                    &captured_oid,
-                    size,
-                    &mut output,
-                    &cancelled,
-                )?;
-                return Ok::<_, std::io::Error>(true);
-            }
-            let scratch = || {
-                let root = crab_cache::default_cache_root();
-                crab_cache::ensure_private_cache_directory(&root).map_err(std::io::Error::other)?;
-                // Operation scratch is separate from disposable retention. Zero
-                // retention must still permit exact reads; every growth is
-                // admitted, and anonymous files close before joined delivery.
-                Ok(crab_git::incoming_pack::ScratchSpace::new(
-                    &root,
-                    MAX_GIT_SCRATCH_BYTES,
-                ))
-            };
-            crab_git::batch::copy_packed_blob(
-                &objects,
-                &captured_oid,
-                size,
-                &mut output,
-                scratch,
-                &cancelled,
-            )
-        })();
+        let copied = copy(&cancelled);
         if timed_out.get() {
             return Err(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Git read timed out").into(),
             );
         }
-        let found = copy?;
-        std::io::Write::flush(&mut output)?;
-        Ok((found, output))
+        copied.map_err(AgentError::from)
     })
     .await
     .map_err(std::io::Error::other)?;
-    // Physical files and scratch stay owned until the blocking verifier joins.
-    // Only local absence retains Git's existing missing/promisor resolution;
-    // found corrupt data never selects another reconstruction path.
-    let (found, mut output) = finish_io(scope, copied)?;
-    if found {
-        return Ok(output.into_bytes());
-    }
-    let command = blob_batch_command(root, oid)?;
-    let captured_oid = oid.to_owned();
-    let cancellation = scope.clone();
-    let read = move |stdout: std::process::ChildStdout| {
-        // A prefix cannot authenticate a Git OID. Verify the complete stream
-        // before exposing selected bytes, retaining only the requested range.
-        crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut output, &|| {
-            cancellation.check().is_err()
-        })?;
-        std::io::Write::flush(&mut output)?;
-        Ok(output.into_bytes())
-    };
-    let output = execute(command, scope, read, None).await?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(output.stdout)
+    // Keep physical workers and anonymous files joined through cancellation.
+    finish_io(scope, copied)
 }
 
-enum BlobOutput {
-    Range {
-        skip: u64,
-        remaining: usize,
-        bytes: Vec<u8>,
-    },
-    Writer(Box<dyn std::io::Write + Send>),
+struct RangeOutput<W> {
+    skip: u64,
+    remaining: u64,
+    output: W,
 }
 
-impl BlobOutput {
-    fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Self::Range { bytes, .. } => bytes,
-            Self::Writer(_) => Vec::new(),
-        }
-    }
-}
-
-impl std::io::Write for BlobOutput {
+impl<W: std::io::Write> std::io::Write for RangeOutput<W> {
     fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Range {
-                skip,
-                remaining,
-                bytes,
-            } => {
-                let skipped = (*skip).min(input.len() as u64) as usize;
-                *skip -= skipped as u64;
-                let count = (*remaining).min(input.len() - skipped);
-                bytes.extend_from_slice(&input[skipped..skipped + count]);
-                *remaining -= count;
-                Ok(input.len())
-            }
-            Self::Writer(output) => output.write(input),
-        }
+        let skipped = self.skip.min(input.len() as u64) as usize;
+        self.skip -= skipped as u64;
+        let count = self.remaining.min((input.len() - skipped) as u64) as usize;
+        self.output.write_all(&input[skipped..skipped + count])?;
+        self.remaining -= count as u64;
+        Ok(input.len())
     }
-
     fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Range { .. } => Ok(()),
-            Self::Writer(output) => output.flush(),
-        }
+        self.output.flush()
     }
 }
 
@@ -308,34 +321,7 @@ pub(super) async fn copy_blob(
     output: impl std::io::Write + Send + 'static,
     scope: &ReadScope,
 ) -> Result<()> {
-    let output = BlobOutput::Writer(Box::new(output));
     read_blob(root, oid, size, output, scope).await.map(drop)
-}
-
-fn blob_batch_command(root: &Path, oid: &str) -> Result<std::process::Command> {
-    use std::io::{Seek, Write};
-    let mut input = tempfile::tempfile()?;
-    writeln!(input, "{oid}")?;
-    input.rewind()?;
-    // Packed non-delta blobs must stream even below Git's usual large-file
-    // threshold. Bound its mapped pack windows independently of Rust buffers;
-    // these options belong only to this captured read, never repository config.
-    let mut command = git_command(
-        root,
-        &[
-            "--no-replace-objects",
-            "-c",
-            "core.bigFileThreshold=1",
-            "-c",
-            "core.packedGitWindowSize=32m",
-            "-c",
-            "core.packedGitLimit=64m",
-            "cat-file",
-            "--batch",
-        ],
-    )?;
-    command.stdin(Stdio::from(input));
-    Ok(command)
 }
 
 pub(super) async fn git_path(root: &Path, name: &str, scope: &ReadScope) -> Result<PathBuf> {

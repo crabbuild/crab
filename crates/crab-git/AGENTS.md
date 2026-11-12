@@ -67,6 +67,12 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   prefer their source pack. Final target checksums authorize delivery; callers
   supply scratch policy and retain joined I/O through cancellation.
   Sources: `batch/packed.rs`, `batch/pack_index.rs`, `delta::copy`.
+- Captured local Git ranges retain admitted anonymous bytes with block proofs
+  authenticated by the complete Git checksum. Origin metadata may invalidate
+  reuse but never authorize returned bytes. Callers own idle eviction, shared
+  operational disk admission and draining before close. Storage decline uses
+  the same complete physical verifier; source corruption must remain visible.
+  Sources: `batch/capture.rs`; desktop `content/git_capture.rs`.
 
 ## Features and platform
 

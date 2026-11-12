@@ -195,6 +195,18 @@ pub(crate) struct ScratchFile {
     length: u64,
 }
 
+impl ScratchFile {
+    pub(crate) fn reserve(&mut self, bytes: u64) -> io::Result<()> {
+        self.charge.add(bytes.saturating_sub(self.length))?;
+        self.length = self.length.max(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.file.metadata().map_err(scratch_io)
+    }
+}
+
 impl Write for ScratchFile {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let end = self

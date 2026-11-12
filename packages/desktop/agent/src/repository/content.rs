@@ -8,6 +8,7 @@ use super::*;
 
 pub(super) mod command;
 pub(crate) mod diff;
+mod git_capture;
 mod materialize;
 mod publication;
 mod restore;
@@ -147,8 +148,7 @@ enum Source {
         modified: Option<SystemTime>,
     },
     Git {
-        root: PathBuf,
-        oid: String,
+        capture: git_capture::GitCapture,
     },
     Pointer {
         reader: super::native::CapturedRead,
@@ -322,8 +322,7 @@ impl FileSource {
             scope,
             size,
             source: Arc::new(Source::Git {
-                root: root.into(),
-                oid,
+                capture: git_capture::GitCapture::new(root, oid, size),
             }),
         })
     }
@@ -358,7 +357,7 @@ impl FileSource {
     pub(crate) fn describe(&self) -> Value {
         let (kind, representation, hash, oid) = match self.source.as_ref() {
             Source::Local { .. } => ("git", "working_file", None, None),
-            Source::Git { oid, .. } => ("git", "git_blob", None, Some(oid.as_str())),
+            Source::Git { capture } => ("git", "git_blob", None, Some(capture.oid.as_str())),
             Source::Pointer { identity, .. } => {
                 let (kind, hash) = match identity {
                     Identity::Blake3(hash) => ("crab", hash),
@@ -442,6 +441,9 @@ impl FileSource {
     pub(crate) async fn release_reader(&self) -> Result<()> {
         if let Source::Pointer { reader, .. } = self.source.as_ref() {
             reader.close().await?;
+        }
+        if let Source::Git { capture } = self.source.as_ref() {
+            capture.close().await;
         }
         Ok(())
     }
@@ -559,7 +561,7 @@ impl FileSource {
                 }
                 bytes.into()
             }
-            Source::Git { root, oid } => self.read_git(root, oid, start, length).await?,
+            Source::Git { capture } => capture.range(start, length, &self.scope).await?,
             Source::Pointer { reader, .. } => {
                 reader
                     .open(&self.scope.stop)
@@ -606,7 +608,9 @@ impl FileSource {
                     .run(remote_bytes(snapshot, path, options, length))
                     .await;
             }
-            Source::Git { root, oid } => return self.read_git(root, oid, 0, length).await,
+            Source::Git { capture } => {
+                return capture.range(0, length, &self.scope).await;
+            }
             _ => {}
         }
         let mut output = Vec::new();
@@ -619,8 +623,8 @@ impl FileSource {
 
     pub(crate) async fn copy_complete_to_file(&self, file: std::fs::File) -> Result<()> {
         self.scope.check()?;
-        if let Source::Git { root, oid } = self.source.as_ref() {
-            return command::copy_blob(root, oid, self.size, file, &self.scope).await;
+        if let Source::Git { capture } = self.source.as_ref() {
+            return capture.copy_complete(file, &self.scope).await;
         }
         let mut output = tokio::fs::File::from_std(file);
         let copied = match self.source.as_ref() {
@@ -676,10 +680,6 @@ impl FileSource {
         }
         self.read_range(self.size, 0).await?;
         self.scope.check()
-    }
-
-    async fn read_git(&self, root: &Path, oid: &str, start: u64, length: usize) -> Result<Bytes> {
-        command::blob(root, oid, start, length, self.size, &self.scope).await
     }
 }
 

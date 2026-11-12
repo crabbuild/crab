@@ -180,9 +180,13 @@ try {
   });
   assert.equal((await rpc("ping", {})).pong, runtime.version);
   await rpc("open_local", { repo_id: repo, path: source });
-  captured = await rpc("file_open", { repo_id: repo, path: "large.bin", rev: "" });
-  assert.equal(captured.size, size);
-  assert.equal(captured.representation, "git_blob");
+  const capture = async () => {
+    const file = await rpc("file_open", { repo_id: repo, path: "large.bin", rev: "" });
+    assert.equal(file.size, size);
+    assert.equal(file.representation, "git_blob");
+    return file;
+  };
+  captured = await capture();
   const read = async offset => {
     const started = performance.now();
     const result = await rpc("read_range", { repo_id: repo, file_id: captured.file_id, offset, length: 4096 });
@@ -195,7 +199,11 @@ try {
     assert.equal(result.offset, offset); assert.equal(result.length, expected.length); assert.equal(result.file_size, size);
     assert.deepEqual(Buffer.from(result.bytes_b64, "base64"), expected);
     const phase = report.ranges.length === 0 ? "first capture read" : "subsequent capture read";
-    report.ranges.push({ offset, length: expected.length, elapsedMs: performance.now() - started, phase });
+    const elapsedMs = performance.now() - started;
+    report.ranges.push({ offset, length: expected.length, elapsedMs, phase });
+    if (report.ranges.length === 2 || report.ranges.length === 3) {
+      assert.ok(elapsedMs < 5_000, `Warm captured range took ${elapsedMs.toFixed(1)}ms`);
+    }
   };
   for (const offset of [0, size / 2 - 17, size - 4096]) await read(offset);
 
@@ -230,6 +238,10 @@ try {
     await repair();
     await read(size - 4096);
   }
+  // Warm reads can finish before cancellation arrives. Reopen an uncaptured
+  // source so this check still interrupts real verification and drains its IO.
+  assert.equal((await rpc("file_close", { repo_id: repo, file_id: captured.file_id })).closed, captured.file_id);
+  captured = await capture();
   const operation = randomUUID();
   const stopped = assert.rejects(rpc("read_range", { repo_id: repo, file_id: captured.file_id, offset: 0, length: 4096, op_id: operation }),
     error => error.code === 1010 && error.data?.kind === "op_cancelled" && error.data.op_id === operation);
