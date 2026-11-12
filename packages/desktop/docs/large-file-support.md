@@ -408,12 +408,33 @@ a fresh read, index/source preservation and close pass in 3.81 seconds, but the
 measured native read process tree peaks at 1,195,114,496 bytes and fails the same
 512 MiB budget. One Git child reaches 1,080,623,104 bytes; the sidecar stays below
 22 MiB. Git's [stream source selection](https://github.com/git/git/blob/v2.50.1/streaming.c#L390-L420)
-uses its in-core reader for deltas. The shared delta decoder also currently
-materializes complete base/result buffers. The next fix must retain one delta
+uses its in-core reader for deltas. That producer's shared delta decoder also
+materializes complete base/result buffers. The replacement must retain one delta
 instruction validator while decoding through bounded buffers and admitted,
 owned scratch, preserve full target checksum verification, and qualify both
 offset and reference bases, cancellation and cleanup. This is an observed P0
 memory failure, not completed delta support.
+
+The subsequent local implementation adds bounded physical packed reads. Index
+versions 1/2, 64-bit offsets and SHA-1/SHA-256 use direct file windows. Offset and
+reference delta ancestry is collected iteratively; reference bases prefer the
+source pack before external aliases. One anonymous admitted file holds all
+programs, while seekable base/result files share the same scratch authority.
+This bounds descriptors and avoids recursive stack growth. The existing delta
+walker now supports buffered validation/application and seekable copying; the
+existing full-object verifier still authorizes delivery. Files close before the
+joined read returns, including cancellation or disk rejection. Desktop scratch
+has an 8 GiB operation ceiling and a 1,024-entry ancestry limit, independent of
+retention policy; zero retention continues to permit exact reads.
+
+Twenty-three shared batch/physical-read tests, nine delta tests, 17 incoming-pack
+consumer tests and the sibling I/O source-mapping test pass. Native content has
+39 passing cases and nine existing ignored cases. Proof includes native-verified
+128-link ancestry, large index offsets, both hash/base forms, index version one,
+in-pack reference priority, disk rejection and cancellation after output starts.
+Strict shared lint and production agent lint pass with the latter's existing
+warnings. Release memory measurements and packaged qualification for this
+implementation are pending; the prior package remains attributed to `cc90`.
 
 ### Missing and corrupt SDK content
 

@@ -18,7 +18,7 @@ use sha1::{Digest, Sha1};
 use crate::delta;
 
 mod prepared;
-mod scratch;
+pub(crate) mod scratch;
 pub use prepared::{ExternalDeltaBase, PreparePackError, PreparedPack};
 pub use scratch::{ScratchAdmission, ScratchError, ScratchSpace};
 use scratch::{ScratchDirectory, ScratchFile};

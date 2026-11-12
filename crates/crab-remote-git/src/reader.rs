@@ -4376,6 +4376,7 @@ fn map_delta_error(error: delta::DeltaError, oid: gix_hash::ObjectId) -> Error {
         delta::DeltaError::Allocation { requested, source } => {
             Error::Allocation { requested, source }
         }
+        delta::DeltaError::Io(source) => Error::Storage(crab_storage::StorageError::Io { source }),
         delta::DeltaError::Cancelled => Error::Cancelled,
     }
 }
@@ -4424,6 +4425,20 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
+
+    #[test]
+    fn delta_io_mapping_preserves_the_original_source() {
+        let source = std::io::Error::new(std::io::ErrorKind::PermissionDenied, std::fmt::Error);
+        let error = map_delta_error(
+            delta::DeltaError::Io(source),
+            gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1),
+        );
+        assert!(
+            matches!(error, Error::Storage(crab_storage::StorageError::Io { source })
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+                && source.get_ref().is_some_and(|source| source.is::<std::fmt::Error>()))
+        );
+    }
 
     #[test]
     fn rejects_reconstructed_bytes_with_wrong_object_id() {

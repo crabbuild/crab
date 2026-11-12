@@ -10,6 +10,9 @@ use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+mod packed;
+pub use packed::copy_packed_blob;
+
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobHeader {
@@ -80,8 +83,6 @@ pub fn copy_loose_blob(
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<()> {
     let mut reader = BufReader::with_capacity(64 * 1024, input);
-    let mut decoder = flate2::Decompress::new(true);
-    let mut buffer = [0u8; 64 * 1024];
     let expected = format!("blob {size}\0");
     let mut header_bytes = 0;
     let mut body = ObjectBody::new(
@@ -93,37 +94,53 @@ pub fn copy_loose_blob(
         0,
         Some(output),
     )?;
+    let accept = |bytes: &[u8]| {
+        let count = (expected.len() - header_bytes).min(bytes.len());
+        if bytes[..count] != expected.as_bytes()[header_bytes..header_bytes + count] {
+            return Err(invalid("Git loose blob header differs from captured size"));
+        }
+        header_bytes += count;
+        body.push(&bytes[count..])
+    };
+    inflate(&mut reader, cancelled, accept)?;
+    if header_bytes != expected.len() {
+        return Err(invalid("incomplete Git loose blob header"));
+    }
+    body.finish()?;
+    finish(&mut reader, cancelled)
+}
+
+fn inflate(
+    reader: &mut impl BufRead,
+    cancelled: &dyn Fn() -> bool,
+    mut accept: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<u64> {
+    let mut decoder = flate2::Decompress::new(true);
+    let mut buffer = [0u8; 64 * 1024];
     loop {
         check_cancelled(cancelled)?;
         let before_in = decoder.total_in();
         let before_out = decoder.total_out();
-        let input = reader.fill_buf()?;
         let status = decoder
-            .decompress(input, &mut buffer, flate2::FlushDecompress::None)
+            .decompress(
+                reader.fill_buf()?,
+                &mut buffer,
+                flate2::FlushDecompress::None,
+            )
             .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
         let consumed = (decoder.total_in() - before_in) as usize;
         let produced = (decoder.total_out() - before_out) as usize;
         reader.consume(consumed);
-        let count = (expected.len() - header_bytes).min(produced);
-        if buffer[..count] != expected.as_bytes()[header_bytes..header_bytes + count] {
-            return Err(invalid("Git loose blob header differs from captured size"));
-        }
-        header_bytes += count;
-        body.push(&buffer[count..produced])?;
+        accept(&buffer[..produced])?;
         if status == flate2::Status::StreamEnd {
-            if header_bytes != expected.len() {
-                return Err(invalid("incomplete Git loose blob header"));
-            }
-            body.finish()?;
-            return finish(&mut reader, cancelled);
+            return Ok(decoder.total_out());
         }
-        // High-level zlib readers can report EOF for a truncated footer and
-        // read_exact retries Interrupted. Keep decoding/cancellation outside
-        // that adapter so only StreamEnd authorizes successful completion.
+        // Only StreamEnd authenticates the footer. Keep cancellation outside
+        // high-level read adapters, which may retry Interrupted or accept EOF.
         if consumed == 0 && produced == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "incomplete Git loose zlib object",
+                "incomplete Git zlib object",
             ));
         }
     }
@@ -143,6 +160,30 @@ pub fn open_loose_blob(
     if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("Git loose lookup requires a hexadecimal object ID"));
     }
+    find_in_databases(objects_directory, cancelled, |directory| {
+        let path = directory.join(&oid[..2]).join(&oid[2..]);
+        match path.metadata() {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(invalid("Git loose object is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        match File::open(path) {
+            Ok(file) if file.metadata()?.is_file() => Ok(Some(file)),
+            Ok(_) => Err(invalid("Git loose object is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    })
+}
+
+fn find_in_databases<T>(
+    objects_directory: &Path,
+    cancelled: &dyn Fn() -> bool,
+    mut find: impl FnMut(&Path) -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
     let mut pending = vec![(objects_directory.to_owned(), 0)];
     let mut visited = HashSet::new();
     const MAX_ALTERNATE_BYTES: usize = 8 * 1024 * 1024;
@@ -164,19 +205,8 @@ pub fn open_loose_blob(
             continue;
         }
         spend(directory.as_os_str().as_encoded_bytes().len())?;
-        let path = directory.join(&oid[..2]).join(&oid[2..]);
-        match path.metadata() {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(invalid("Git loose object is not a regular file"));
-            }
-            Ok(_) => match File::open(&path) {
-                Ok(file) if file.metadata()?.is_file() => return Ok(Some(file)),
-                Ok(_) => return Err(invalid("Git loose object is not a regular file")),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        if let Some(value) = find(&directory)? {
+            return Ok(Some(value));
         }
         // Git links entries at depths 0..=5, then searches those databases
         // without following their own alternates. Cycles are duplicate paths.
@@ -440,6 +470,17 @@ impl<'a> ObjectBody<'a> {
             )));
         }
         Ok(self.captured)
+    }
+}
+
+impl Write for ObjectBody<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.push(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

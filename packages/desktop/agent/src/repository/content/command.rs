@@ -12,6 +12,7 @@ use super::*;
 
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_GIT_SCRATCH_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 pub(in crate::repository) async fn run(
     root: &Path,
@@ -155,47 +156,69 @@ async fn read_blob(
     let objects = git_path(root, "objects", scope).await?;
     let captured_oid = oid.to_owned();
     let cancellation = scope.clone();
-    let opened = tokio::task::spawn_blocking(move || {
-        crab_git::batch::open_loose_blob(&objects, &captured_oid, &|| cancellation.check().is_err())
-            .map_err(AgentError::from)
+    let copied = tokio::task::spawn_blocking(move || {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let timed_out = std::cell::Cell::new(false);
+        let cancelled = || {
+            if cancellation.check().is_err() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                timed_out.set(true);
+                return true;
+            }
+            false
+        };
+        let copy = (|| {
+            if let Some(file) =
+                crab_git::batch::open_loose_blob(&objects, &captured_oid, &cancelled)?
+            {
+                crab_git::batch::copy_loose_blob(
+                    file,
+                    &captured_oid,
+                    size,
+                    &mut output,
+                    &cancelled,
+                )?;
+                return Ok::<_, std::io::Error>(true);
+            }
+            let scratch = || {
+                let root = crab_cache::default_cache_root();
+                crab_cache::ensure_private_cache_directory(&root).map_err(std::io::Error::other)?;
+                // Operation scratch is separate from disposable retention. Zero
+                // retention must still permit exact reads; every growth is
+                // admitted, and anonymous files close before joined delivery.
+                Ok(crab_git::incoming_pack::ScratchSpace::new(
+                    &root,
+                    MAX_GIT_SCRATCH_BYTES,
+                ))
+            };
+            crab_git::batch::copy_packed_blob(
+                &objects,
+                &captured_oid,
+                size,
+                &mut output,
+                scratch,
+                &cancelled,
+            )
+        })();
+        if timed_out.get() {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "Git read timed out").into(),
+            );
+        }
+        let found = copy?;
+        std::io::Write::flush(&mut output)?;
+        Ok((found, output))
     })
     .await
     .map_err(std::io::Error::other)?;
-    let loose = finish_io(scope, opened)?;
-    if let Some(file) = loose {
-        let cancellation = scope.clone();
-        let oid = oid.to_owned();
-        let copied = tokio::task::spawn_blocking(move || {
-            let deadline = Instant::now() + READ_TIMEOUT;
-            let timed_out = std::cell::Cell::new(false);
-            let cancelled = || {
-                if cancellation.check().is_err() {
-                    return true;
-                }
-                if Instant::now() >= deadline {
-                    timed_out.set(true);
-                    return true;
-                }
-                false
-            };
-            let copied =
-                crab_git::batch::copy_loose_blob(file, &oid, size, &mut output, &cancelled);
-            if timed_out.get() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Git read timed out",
-                )
-                .into());
-            }
-            copied?;
-            std::io::Write::flush(&mut output)?;
-            Ok(output.into_bytes())
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-        // A loose reader owns its descriptor until the blocking verifier joins.
-        // Native Git maps whole loose objects; streaming keeps dense reads bounded.
-        return finish_io(scope, copied);
+    // Physical files and scratch stay owned until the blocking verifier joins.
+    // Only local absence retains Git's existing missing/promisor resolution;
+    // found corrupt data never selects another reconstruction path.
+    let (found, mut output) = finish_io(scope, copied)?;
+    if found {
+        return Ok(output.into_bytes());
     }
     let command = blob_batch_command(root, oid)?;
     let captured_oid = oid.to_owned();

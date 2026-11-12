@@ -265,3 +265,70 @@ async fn captured_git_reads_keep_exact_bytes_in_packs_and_alternate_stores() -> 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn captured_git_delta_ranges_and_copies_preserve_bytes_and_index() -> Result<()> {
+    let (directory, repo) = repository().await;
+    let root = directory.path();
+    let mut bodies = [vec![b'x'; 1024 * 1024], vec![b'x'; 1024 * 1024]];
+    bodies[1][1024 * 1024 - 1] = b'y';
+    let names = ["base.bin", "target.bin"];
+    let mut oids = Vec::new();
+    for (name, bytes) in names.iter().zip(&bodies) {
+        std::fs::write(root.join(name), bytes)?;
+        let output = git(root, &["hash-object", "--no-filters", "-w", name]).await?;
+        let oid = String::from_utf8(output)?.trim().to_owned();
+        git(
+            root,
+            &["update-index", "--add", "--cacheinfo", "100644", &oid, name],
+        )
+        .await?;
+        oids.push(oid);
+    }
+    let packed = git(
+        root,
+        &[
+            "pack-objects",
+            "--all",
+            "--indexed-objects",
+            "--delta-base-offset",
+            "--threads=1",
+            ".git/objects/pack/pack",
+        ],
+    )
+    .await?;
+    let packed = String::from_utf8(packed)?;
+    let index_path = format!(".git/objects/pack/pack-{}.idx", packed.trim());
+    let verification = String::from_utf8(git(root, &["verify-pack", "-v", &index_path]).await?)?;
+    let delta = verification
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.len() == 7).then(|| fields[0].to_owned())
+        })
+        .ok_or_else(|| std::io::Error::other("fixture must contain an actual Git delta"))?;
+    let selected = oids
+        .iter()
+        .position(|oid| oid == &delta)
+        .ok_or_else(|| std::io::Error::other("fixture delta must identify a selected file"))?;
+    git(root, &["prune-packed"]).await?;
+    let index = std::fs::read(root.join(".git/index"))?;
+    let source = FileSource::capture(&repo, names[selected], Some(""), repo.read_scope()).await?;
+    assert_eq!(
+        source.read_range(65533, 128).await?.as_ref(),
+        &bodies[selected][65533..65661]
+    );
+    assert_eq!(
+        source.read_complete(bodies[selected].len()).await?.as_ref(),
+        bodies[selected].as_slice()
+    );
+    let output = tempfile::NamedTempFile::new()?;
+    source
+        .copy_complete_to_file(output.as_file().try_clone()?)
+        .await?;
+    assert_eq!(std::fs::read(output.path())?, bodies[selected]);
+    assert_eq!(std::fs::read(root.join(".git/index"))?, index);
+    source.close().await?;
+    repo.close().await?;
+    Ok(())
+}

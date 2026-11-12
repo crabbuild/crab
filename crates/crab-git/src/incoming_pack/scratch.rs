@@ -67,6 +67,21 @@ impl ScratchSpace {
         &self.root
     }
 
+    pub(crate) fn anonymous_file(&self) -> io::Result<ScratchFile> {
+        // tempfile unlinks immediately on Unix and uses DELETE_ON_CLOSE on
+        // Windows. Process death cannot strand decoded read bodies on disk.
+        let file = tempfile::tempfile_in(self.path()).map_err(scratch_io)?;
+        Ok(ScratchFile {
+            file,
+            charge: Arc::new(Charge {
+                space: self.clone(),
+                bytes: Mutex::new(0),
+            }),
+            position: 0,
+            length: 0,
+        })
+    }
+
     pub(super) fn directory(&self, parent: &Path, prefix: &str) -> io::Result<ScratchDirectory> {
         Ok(ScratchDirectory {
             directory: tempfile::Builder::new()
@@ -126,7 +141,7 @@ impl Drop for Charge {
             Err(poisoned) => poisoned.into_inner(),
         };
         *total -= held;
-        // The owning directory has already removed its files. A rejected shrink
+        // The owning directory or anonymous file has already closed. A rejected shrink
         // retains the caller's larger reservation until request cleanup.
         if let Err(error) = self.space.state.admission.resize(*total) {
             tracing::warn!(error = ?error, "Git scratch reservation shrink failed");
@@ -173,7 +188,7 @@ impl ScratchDirectory {
     }
 }
 
-pub(super) struct ScratchFile {
+pub(crate) struct ScratchFile {
     file: File,
     charge: Arc<Charge>,
     position: u64,

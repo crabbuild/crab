@@ -60,7 +60,13 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   zlib StreamEnd and physical EOF. Alternates preserve native Git path bytes,
   quoting, relative bases, cycles and recursion limits within a metadata budget.
   Source: `batch::open_loose_blob / copy_loose_blob`; desktop range and file-copy
-  requests share this descriptor/worker owner. Packed data retains supervised Git.
+  requests share this descriptor/worker owner.
+- Local packed copies read bounded index windows and collect delta ancestry
+  iteratively. One admitted anonymous program file and seekable bases/results
+  avoid whole-object RAM and recursive stack/descriptor growth. Reference bases
+  prefer their source pack. Final target checksums authorize delivery; callers
+  supply scratch policy and retain joined I/O through cancellation.
+  Sources: `batch/packed.rs`, `batch/pack_index.rs`, `delta::copy`.
 
 ## Features and platform
 

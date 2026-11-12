@@ -161,6 +161,15 @@ owner as batch reads, with fixed 64 KiB buffers. It requires the exact loose
 header, declared body, zlib end marker and input EOF. Failed output remains
 untrusted. Callers own cancellation, joined I/O and physical-source selection.
 
+`batch::copy_packed_blob` uses direct index windows and physical zlib reads for
+local SHA-1/SHA-256 packs, including version 1/2 indexes and large offsets.
+Delta ancestry is collected iteratively; one anonymous file holds the programs,
+and seekable bases/results share `ScratchSpace` growth admission. Deep chains do
+not multiply stack frames or file descriptors. Reference bases prefer their own
+pack before external stores; alternate lookup uses the same physical database
+rules as loose objects. Full target checksums remain the delivery authority.
+Callers provide the private scratch root/capacity and supervise blocked I/O.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain
@@ -200,8 +209,9 @@ user-facing decision without re-parsing error strings.
 
 ## Incoming pack boundary
 
-`delta::validate` and `delta::apply` share one instruction decoder, so metadata
-inspection and reconstruction enforce the same copy ranges and output sizes.
+`delta::validate`, `delta::apply` and seekable-base `delta::copy` share one
+instruction decoder, so metadata inspection and reconstruction enforce the same
+copy ranges and output sizes. Streaming copies retain source/writer errors.
 Validation does not allocate the reconstructed object; application also checks
 the supplied base length and reserves output fallibly.
 
