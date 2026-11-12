@@ -49,6 +49,11 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   repacking retains its deliberately selected shallow frontier.
   Source: `crates/crab-git/src/lib.rs`.
 
+- Batch verification, small-object visits and whole-blob copies share the same
+  checksum/framing owner. Copy output remains untrusted until successful EOF;
+  callers discard failed output and drain their process workers before cleanup.
+  Source: `crates/crab-git/src/batch.rs`.
+
 ## Features and platform
 
 `facade` enables the optional high-level gix dependency. `process` enables the shared `process::OwnedChild` group/job lifetime owner used by CLI and desktop. Neither is enabled by default. Git-spawning tests need Git on PATH; inspect locked dependency source before altering validation or process contracts.

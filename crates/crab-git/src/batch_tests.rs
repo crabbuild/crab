@@ -67,6 +67,65 @@ fn verifies_binary_empty_and_large_blobs_without_large_reads() {
 }
 
 #[test]
+fn streaming_blob_copies_are_bounded_and_byte_exact() {
+    struct Output(Vec<u8>);
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            assert!(bytes.len() <= 64 * 1024);
+            let count = bytes.len().min(7);
+            self.0.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for body in [vec![], vec![0, 255, b'\n', 13], vec![0x80; 256 * 1024]] {
+        let (blob, wire) = frame(&body);
+        let oid = gix_hash::ObjectId::Sha1(blob.oid).to_string();
+        let mut output = Output(Vec::new());
+        copy_blob(wire.as_slice(), &oid, blob.size, &mut output, &|| false).unwrap();
+        assert_eq!(output.0, body);
+    }
+}
+
+#[test]
+fn streaming_blob_copies_reject_corruption_and_invalid_framing() {
+    let (blob, valid) = frame(b"data");
+    let oid = gix_hash::ObjectId::Sha1(blob.oid).to_string();
+    for wire in [
+        format!("{oid} blob 4\nevil\n").into_bytes(),
+        format!("{oid} tree 4\ndata\n").into_bytes(),
+        format!("{oid} blob 5\ndata\n").into_bytes(),
+        format!("{oid} blob 4\ndata!").into_bytes(),
+        [valid, b"extra".to_vec()].concat(),
+    ] {
+        assert!(copy_blob(wire.as_slice(), &oid, blob.size, &mut io::sink(), &|| false).is_err());
+    }
+}
+
+#[test]
+fn streaming_blob_copy_preserves_writer_errors() {
+    struct Denied;
+    impl Write for Denied {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let (blob, wire) = frame(b"data");
+    let oid = gix_hash::ObjectId::Sha1(blob.oid).to_string();
+    assert_eq!(
+        copy_blob(wire.as_slice(), &oid, blob.size, &mut Denied, &|| false)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
 fn git_dir_verifier_handles_large_output_before_a_large_request_list() {
     let repo = tempfile::tempdir().unwrap();
     let output = Command::new("git")
@@ -123,6 +182,14 @@ fn cancellation_and_reader_failures_do_not_become_integrity_proof() {
         calls.get() == 3
     });
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    calls.set(0);
+    let oid = gix_hash::ObjectId::Sha1(blob.oid).to_string();
+    let error = copy_blob(bytes.as_slice(), &oid, blob.size, &mut io::sink(), &|| {
+        calls.set(calls.get() + 1);
+        calls.get() == 3
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     struct Denied;
     impl Read for Denied {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
@@ -197,6 +264,16 @@ fn sha256_blob_identity_is_verified_without_enabling_native_sha256_transport() {
     )
     .unwrap();
     assert_eq!(visited, body);
+    let mut copied = Vec::new();
+    copy_blob(
+        wire.as_slice(),
+        &oid,
+        body.len() as u64,
+        &mut copied,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(copied, body);
     let wrong = "0".repeat(64);
     assert!(
         visit_small_blobs(

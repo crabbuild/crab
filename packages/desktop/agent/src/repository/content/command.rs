@@ -126,8 +126,27 @@ pub(super) async fn blob(
     scope: &ReadScope,
 ) -> Result<Bytes> {
     let partial = start + (length as u64) < size;
-    let command = git_command(root, &["--no-replace-objects", "cat-file", "blob", oid])?;
+    // Prefix readers stop their Git child once the selected bytes arrive.
+    // Whole bodies must authenticate before callers expose or publish them.
+    let complete = start == 0 && length as u64 == size;
+    let command = if complete {
+        blob_batch_command(root, oid)?
+    } else {
+        git_command(root, &["--no-replace-objects", "cat-file", "blob", oid])?
+    };
+    let captured_oid = oid.to_owned();
+    let cancellation = scope.clone();
     let read = move |mut stdout: std::process::ChildStdout| {
+        if complete {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length)
+                .map_err(std::io::Error::other)?;
+            crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut bytes, &|| {
+                cancellation.check().is_err()
+            })?;
+            return Ok(bytes);
+        }
         let discarded = std::io::copy(&mut (&mut stdout).take(start), &mut std::io::sink())?;
         if discarded != start {
             return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
@@ -167,19 +186,20 @@ pub(super) async fn blob_size(root: &Path, oid: &str, scope: &ReadScope) -> Resu
     .map_err(|error| std::io::Error::other(error).into())
 }
 
-pub(super) async fn blob_to_file(
+pub(super) async fn copy_blob(
     root: &Path,
     oid: &str,
     size: u64,
-    mut file: std::fs::File,
+    mut output: impl std::io::Write + Send + 'static,
     scope: &ReadScope,
 ) -> Result<()> {
-    let command = git_command(root, &["--no-replace-objects", "cat-file", "blob", oid])?;
-    let read = move |mut stdout: std::process::ChildStdout| {
-        let copied = std::io::copy(&mut (&mut stdout).take(size), &mut file)?;
-        if copied != size || stdout.read(&mut [0])? != 0 {
-            return Err(std::io::Error::other("Git blob differs from captured size"));
-        }
+    let command = blob_batch_command(root, oid)?;
+    let oid = oid.to_owned();
+    let cancellation = scope.clone();
+    let read = move |stdout: std::process::ChildStdout| {
+        crab_git::batch::copy_blob(stdout, &oid, size, &mut output, &|| {
+            cancellation.check().is_err()
+        })?;
         Ok(Vec::new())
     };
     let output = execute(command, scope, read, false, None).await?;
@@ -192,46 +212,14 @@ pub(super) async fn blob_to_file(
     Ok(())
 }
 
-pub(super) async fn verify_blob(
-    root: &Path,
-    oid: &str,
-    size: u64,
-    scope: &ReadScope,
-) -> Result<()> {
-    use std::io::{BufRead, Seek, Write};
+fn blob_batch_command(root: &Path, oid: &str) -> Result<std::process::Command> {
+    use std::io::{Seek, Write};
     let mut input = tempfile::tempfile()?;
     writeln!(input, "{oid}")?;
     input.rewind()?;
     let mut command = git_command(root, &["--no-replace-objects", "cat-file", "--batch"])?;
     command.stdin(Stdio::from(input));
-    let oid = oid.to_owned();
-    let cancelled = scope.clone();
-    let read = move |stdout| {
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut header = Vec::new();
-        (&mut reader).take(128).read_until(b'\n', &mut header)?;
-        if header != format!("{oid} blob {size}\n").as_bytes() {
-            return Err(std::io::Error::other(
-                "Git blob differs from the captured index source",
-            ));
-        }
-        crab_git::batch::visit_small_blobs(
-            std::io::Read::chain(std::io::Cursor::new(header), reader),
-            [oid.as_str()],
-            0,
-            &|| cancelled.check().is_err(),
-            |_, _| Ok(()),
-        )?;
-        Ok(Vec::new())
-    };
-    let output = execute(command, scope, read, false, None).await?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(())
+    Ok(command)
 }
 
 pub(super) async fn index_path(root: &Path, scope: &ReadScope) -> Result<PathBuf> {

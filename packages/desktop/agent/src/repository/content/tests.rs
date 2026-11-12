@@ -2,6 +2,8 @@ use super::*;
 use crate::shellout;
 use tokio::io::AsyncWriteExt;
 
+mod git_checksums;
+
 async fn repository() -> (tempfile::TempDir, BrowseSession) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

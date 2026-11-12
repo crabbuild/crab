@@ -56,6 +56,9 @@ The main surfaces are:
   Git objects and pack mechanics;
 - `pack_writer` for checksummed SHA-1 pack construction from sized readers,
   with a caller-selected output limit and cooperative cancellation;
+- `batch` for bounded verification and copying of raw Git blobs against
+  captured object IDs, kinds and sizes; copy callers discard output on error
+  and own process cancellation and publication after successful verification;
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
   pointer-aware repository behavior;
 - `tag` and `push_state` for annotated refs and push bookkeeping;

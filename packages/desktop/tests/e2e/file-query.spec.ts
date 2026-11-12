@@ -108,7 +108,7 @@ test("SQL uses selected SQLite, WAL, LFS and Crab sources and joins cancellation
     const handle = await call(page, "open_local", { repo_id: "file-query", path: source });
     await page.evaluate(({ handle, source }) => window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } })), { handle, source });
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Files", exact: true }).click();
-    const revision = page.getByRole("combobox").filter({ has: page.getByRole("option", { name: "HEAD (default)", exact: true }) });
+    const revision = page.getByRole("combobox").filter({ hasText: /HEAD \(default\)|query-before/ });
     await chooseSelect(revision, { label: "query-before" });
     const open = (file: string) => page.locator(`[role="treeitem"][data-item-path="${file}"]`).click();
     const editor = page.getByRole("textbox", { name: "SQL query", exact: true });

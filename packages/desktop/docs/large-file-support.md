@@ -251,6 +251,23 @@ a visible snapshot-opening failure. The probe observes the current gap; it
 does not qualify offline reopening. The canonical retention test continues to
 cover the narrower case where only the origin LFS payload is unavailable.
 
+### Complete ordinary Git body verification
+
+Complete Git-backed reads and database snapshot copies authenticate the captured
+object ID, kind, size, body terminator and EOF through the shared Git batch
+verifier. The native copier also handles restoration's pre/post-conversion proof
+using a sink. Git may return a valid compressed body under the wrong object
+filename and exit successfully; length and process status alone cannot authorize
+a decoded preview or publication. Buffered reads expose no bytes on failure,
+and temporary-file callers retain cleanup ownership until the copier returns.
+
+The same bounded checksum loop handles copying, administrative blob verification
+and small-object visits. Working-file descriptor checks, Crab/LFS reconstruction
+and SDK remote Git decoding retain their existing owners. Partial Git ranges
+still use the selected-prefix path; their captured integrity work remains open
+and is not qualified by whole-body copy checks. Durable offline captures also
+remain unimplemented.
+
 ### Missing and corrupt SDK content
 
 The desktop RPC boundary distinguishes SDK `NotFound` and `Corruption` without

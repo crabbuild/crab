@@ -128,7 +128,7 @@ impl GitRestoration {
             Workspace::create(&index.root, working.temporary_parent()?, scope).await?;
         let (workspace, private_index) = workspace.additional_temporary().await?;
         let result = async {
-            command::verify_blob(&index.root, &index.oid, *size, scope).await?;
+            command::copy_blob(&index.root, &index.oid, *size, std::io::sink(), scope).await?;
             let mut input = tokio::fs::File::open(source_index).await?;
             let mut output = tokio::fs::File::from_std(private_index.as_file().try_clone()?);
             tokio::io::copy(&mut input, &mut output).await?;
@@ -143,7 +143,7 @@ impl GitRestoration {
             .await?;
             // Verify the immutable input again before publishing Git's converted
             // bytes. The recorded temporary stays owned until pipe workers join.
-            command::verify_blob(&index.root, &index.oid, *size, scope).await?;
+            command::copy_blob(&index.root, &index.oid, *size, std::io::sink(), scope).await?;
             let runtime = tokio::runtime::Handle::current();
             let captured = self.clone();
             tokio::task::spawn_blocking(move || {

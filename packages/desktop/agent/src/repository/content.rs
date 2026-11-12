@@ -625,7 +625,7 @@ impl FileSource {
     pub(crate) async fn copy_complete_to_file(&self, file: std::fs::File) -> Result<()> {
         self.scope.check()?;
         if let Source::Git { root, oid } = self.source.as_ref() {
-            return command::blob_to_file(root, oid, self.size, file, &self.scope).await;
+            return command::copy_blob(root, oid, self.size, file, &self.scope).await;
         }
         let mut output = tokio::fs::File::from_std(file);
         let copied = match self.source.as_ref() {

@@ -31,10 +31,36 @@ pub fn verify_blob_batch(
             &oid,
             Some(blob.size),
             0,
+            None,
             &mut buffer,
             cancelled,
         )?;
     }
+    finish(&mut reader, cancelled)
+}
+
+/// Copy one raw Git blob batch response while verifying its captured identity.
+///
+/// Errors can follow partial writes; callers must discard output on failure
+/// and supervise blocked I/O and process cancellation separately.
+pub fn copy_blob(
+    input: impl Read,
+    oid: &str,
+    size: u64,
+    output: &mut impl Write,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    let mut reader = BufReader::new(input);
+    let mut buffer = [0u8; 64 * 1024];
+    read_object(
+        &mut reader,
+        oid,
+        Some(size),
+        0,
+        Some(output),
+        &mut buffer,
+        cancelled,
+    )?;
     finish(&mut reader, cancelled)
 }
 
@@ -112,6 +138,7 @@ pub fn visit_small_blobs<'a>(
             oid,
             None,
             capture_limit,
+            None,
             &mut buffer,
             cancelled,
         )? {
@@ -126,6 +153,7 @@ fn read_object(
     oid: &str,
     blob_size: Option<u64>,
     capture_limit: usize,
+    mut output: Option<&mut dyn Write>,
     buffer: &mut [u8],
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<Option<Vec<u8>>> {
@@ -168,6 +196,9 @@ fn read_object(
         let wanted = remaining.min(buffer.len() as u64) as usize;
         reader.read_exact(&mut buffer[..wanted])?;
         hasher.update(&buffer[..wanted]);
+        if let Some(output) = &mut output {
+            output.write_all(&buffer[..wanted])?;
+        }
         if let Some(body) = &mut body {
             body.extend_from_slice(&buffer[..wanted]);
         }
