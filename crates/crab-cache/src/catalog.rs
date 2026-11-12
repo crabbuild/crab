@@ -121,13 +121,14 @@ impl CacheReservation {
     #[cfg(all(feature = "remote-client", feature = "local-cache"))]
     pub(crate) async fn anonymous_file(self) -> Result<(std::fs::File, Self)> {
         tokio::task::spawn_blocking(move || {
-            self.generation
-                .validate(&self.root, Path::new(CATALOG_FILE))?;
-            let file = self
-                .root
-                .pending_file(&self.relative_path)?
-                .into_unlinked_file()?;
-            Ok((file, self))
+            let ReservedFile {
+                pending,
+                reservation,
+            } = self.pending_file_sync()?;
+            let file = pending.into_unlinked_file()?;
+            // Windows defers unlink until the stream's final handle closes.
+            // Keep its exact journal authority through that stream lifetime.
+            Ok((file, reservation))
         })
         .await
         .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
@@ -157,7 +158,7 @@ impl CacheReservation {
         let pending = self.pending_file().await?;
         let mut writer = pending.file()?;
         writer.write_all(data).await?;
-        writer.sync_all().await?;
+        writer.flush().await?;
         drop(writer);
         pending.commit().await
     }

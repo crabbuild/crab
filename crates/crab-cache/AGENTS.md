@@ -55,7 +55,14 @@ payload cleanup contract when a disposable index is unavailable.
 
 Identity insertion and explicit root-budget changes use FULL WAL commits;
 disposable accounting stays NORMAL. Do not expose a payload writer before its
-identity commit succeeds. Process-death proof does not establish filesystem
+identity commit succeeds. Flush the empty inode/name before capturing that
+identity, or creation metadata can be lost while partial bytes survive.
+The private publication owner flushes complete bytes,
+then rename and its captured parent. Creation and unlink flush their parent;
+retiring an absent temporary requires persisted absence at the nearest existing
+parent. Keep async writers drained with `flush` before handing off to commit.
+HTTP completion uses journaled `responses/` temporaries through final file close,
+including Windows' deferred deletion. Process-death proof does not establish filesystem
 rename/unlink durability through power loss.
 
 ## Invariants

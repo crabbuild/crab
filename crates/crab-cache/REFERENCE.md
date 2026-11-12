@@ -396,7 +396,29 @@ user policy must outlive process exit. A failed identity commit prevents writer
 admission. Journal retirement remains disposable; a stale record still requires
 the same exact-file comparison. SQLite documents the
 [WAL durability distinction](https://www.sqlite.org/pragma.html#pragma_synchronous).
-This does not qualify filesystem rename/unlink ordering through power loss.
+Temporary allocation flushes its empty inode and parent before SQL captures
+identity; payload bytes cannot precede that durable creation metadata.
+File publication now flushes complete bytes before rename and its captured
+parent afterward. New directories and unlink also flush the parent. A temporary
+that is already absent cannot retire its journal until absence is flushed at the
+nearest existing parent; a failed flush retains recovery authority. The shared
+owner handles decoded ranges, objects, hints and copied Git packs. Async writers
+drain before this publication worker. Preview/cleanup dry runs remain read-only.
+
+Windows directory chains keep their existing deny-delete pins. A writable
+handle reopens that pinned directory for `FlushFileBuffers`, whose API requires
+[GENERIC_WRITE](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+The [owned NTFS probe](https://github.com/crabbuild/crab/actions/runs/43178147526)
+confirms that the read-only handle fails while the writable handle flushes.
+Deletion reaches the directory only after the final file-object clone closes.
+HTTP completion therefore journals exact scratch identity in `responses/`
+through that lifetime; cleanup recognizes this directory without treating raw
+responses as immutable object payloads. Unrecorded/replaced files stay retained.
+
+A packaged macOS trace reproduces the earlier gap: two decoded-range renames
+had no corresponding parent flush after their journals were retired. Updated
+package ordering, failure/retry and cross-platform native proof are in progress.
+These checks do not establish physical drive power-loss behavior.
 The macOS sync-image probe replays the last successful flush and finds the exact
 pending identity before the first payload write; its unchanged assertion fails
 on the earlier package. Settings has bounded real sync-failure/retry proof.

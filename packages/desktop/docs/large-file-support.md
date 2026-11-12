@@ -227,6 +227,31 @@ offline-retention behavior.
 The fault library and diagnostic test remain external qualification artifacts;
 no production fault hook, cache-name deletion rule or new setting is added.
 
+### Cache filesystem ordering
+
+A packaged native trace found two decoded-range renames whose journals had
+retired without flushing their captured parent. SQL durability alone did not
+establish that ordering. The private cache owner now flushes the empty temporary
+inode and name before recording identity, complete bytes before rename, and
+the parent after creation, rename and unlink. Cancellation and recovery must
+persist observed absence before retiring a record, including missing ancestors.
+Writers drain async buffers before entering this shared publication worker.
+
+The [owned Windows NTFS probe](https://github.com/crabbuild/crab/actions/runs/43178147526)
+confirms that directory flush needs a writable handle and that deletion remains
+pending until the final file-object close. Captured Windows directory chains
+retain their deny-delete pins while the flush opens the required writable
+handle. HTTP completion now uses journaled `responses/` scratch through final
+close, retaining its existing stream/reservation ownership. Unknown and replaced
+entries remain protected; no compatibility reader or runtime option is added.
+
+The local combined-feature cache checks pass 60 catalog, 46 private-filesystem
+and five HTTP completion cases, plus strict Clippy. The later empty-identity
+flush also repeats the catalog checks. Exact-source Windows/Linux native tests,
+the rebuilt package, unchanged syscall-order assertions and real directory-sync
+failure/repair proof are in progress. Physical drive power-loss behavior and
+other filesystems remain separate qualification profiles.
+
 ### Intel SFTP qualification boundary
 
 Intel CI passed matching CLI/sidecar download, deployment and startup, but the

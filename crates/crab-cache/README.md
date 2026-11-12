@@ -57,7 +57,11 @@ Fills reserve capacity and publish
 privately through the shared catalog. Before writing payload bytes, reserved
 files durably record their exact temporary identity before exposing a writer.
 Saved root budgets use the same FULL WAL synchronization policy; disposable
-accounting retains NORMAL synchronization. Full filesystem power-loss recovery
+accounting retains NORMAL synchronization. The private publication owner flushes
+file contents before rename and the captured parent afterward. Parent creation,
+unlink and journal retirement after observed absence also require directory
+flushes. HTTP completion keeps exact journal authority for `responses/` scratch
+until its final handle closes. Full filesystem power-loss recovery
 remains a separate qualification gate.
 The family participates in stats,
 health, prune, verification, and cleanup. Git structure, sidecars, visible
