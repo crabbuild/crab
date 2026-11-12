@@ -1,11 +1,12 @@
 /**
  * Provider-aware agent icons using official brand SVG paths.
  *
- * Sources (all permissively licensed):
+ * Sources:
  * - Claude: Simple Icons (CC0 1.0) — https://simpleicons.org/?q=claude
  * - OpenAI: Bootstrap Icons (MIT) — https://icons.getbootstrap.com/icons/openai/
  * - Gemini: Simple Icons (CC0 1.0) — https://simpleicons.org/?q=googlegemini
  * - OpenCode, Qwen, Aider: stylized marks (no official SVG available)
+ * - Pi: supplied brand SVG, cropped to the mark's bounds for menu sizing
  */
 
 import clsx from "clsx";
@@ -21,6 +22,7 @@ export type AgentProvider =
   | "aider"
   | "kiro"
   | "q"
+  | "pi"
   | "custom";
 
 /**
@@ -38,6 +40,7 @@ export function resolveAgentProvider(agentName: string | undefined | null): Agen
   if (n.includes("qwen") || n.includes("dashscope") || n.includes("alibaba")) return "qwen";
   if (n.includes("aider")) return "aider";
   if (n.includes("kiro")) return "kiro";
+  if (n === "pi") return "pi";
   if (n === "q" || n.includes("amazon q") || n.includes("q chat") || n.includes("q developer")) return "q";
   return "custom";
 }
@@ -113,6 +116,8 @@ export function agentProviderLabel(agentName: string | undefined | null): string
       return "Kiro";
     case "q":
       return "Amazon Q";
+    case "pi":
+      return "Pi";
     case "custom":
     default:
       return "Custom";
@@ -153,6 +158,8 @@ export function AgentIcon({ agentName, size = 12, className }: Props) {
       return <KiroMark size={size} className={cls} />;
     case "q":
       return <AmazonQMark size={size} className={cls} />;
+    case "pi":
+      return <PiMark size={size} className={cls} />;
     case "custom":
     default:
       return <CustomMark size={size} className={cls} />;
@@ -162,6 +169,16 @@ export function AgentIcon({ agentName, size = 12, className }: Props) {
 // ── Individual marks ───────────────────────────────────────────────
 
 type MarkProps = { size: number; className?: string };
+
+function PiMark({ size, className }: MarkProps) {
+  return (
+    <svg width={size} height={size} viewBox="165.29 165.29 469.43 469.43" className={className} aria-hidden>
+      <path fill="#F09082" d="M165.29 165.29H517.36V400H400V282.65H165.29Z" />
+      <path fill="#4D9ABF" d="M165.29 282.65H282.65V400H400V517.36H282.65V634.72H165.29Z" />
+      <path fill="#F1BE58" d="M517.36 400H634.72V634.72H517.36Z" />
+    </svg>
+  );
+}
 
 /**
  * Anthropic Claude — official logo from Bootstrap Icons (MIT).

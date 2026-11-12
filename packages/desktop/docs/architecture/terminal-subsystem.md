@@ -11,19 +11,20 @@ detection.
 ```mermaid
 flowchart LR
   View[TerminalView and xterm] -->|terminal IPC| Router[TermRouter]
-  Router -->|default| Daemon[Detached PTY daemon]
-  Router -->|explicit local terminal| Local[Electron-owned PTY]
+  Router -->|explicit daemon or task-owned| Daemon[Detached PTY daemon]
+  Router -->|default Normal terminal| Local[Electron-owned PTY]
   View -->|SSH terminal IPC| Remote[RemoteTerminalManager]
   Remote -->|SSH attachment| Tmux[Remote tmux PTY]
   View -->|layout changes| Store[Profile layout store]
 ```
 
-The daemon owns ordinary local shells and their foreground agents. Electron
-owns routing and renderer attachments. Closing an app window, quitting, or
+Electron owns ordinary Normal terminals, routing, and renderer attachments.
+The daemon owns explicitly durable shells and task/agent sessions.
+Closing an app window, quitting, or
 upgrading disconnects the client without killing daemon PTYs. The next app
 instance discovers live owners and routes each existing session back to its daemon.
 New sessions use the current application's runtime, so deleting an older app bundle
-does not block daemon creation. An explicitly requested in-process terminal remains ephemeral.
+does not block daemon creation. Normal terminals remain ephemeral.
 The packaged daemon launches through its logical
 `app.asar/dist-electron/daemon/daemon-main.cjs` entry. Electron resolves its native
 modules into the unpacked files; using the physical `.unpacked` entry makes

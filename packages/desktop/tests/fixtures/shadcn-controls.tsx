@@ -328,6 +328,7 @@ if (startupMode) {
     orchestrator: { detectAgents: async () => ({ success: true, agents: [
       { type: "claude-code", name: "Claude Code", binary: "claude", path: "/fixture/claude", version: "1.0", available: true },
       { type: "aider", name: "Aider", binary: "aider", path: "", version: "", available: false },
+      { type: "pi", name: "Pi", binary: "pi", path: "/fixture/pi", version: "1.0", available: true },
       { type: "custom", name: "Configured CLI", binary: "custom", path: "", version: "", available: false, configured: true },
     ] }) },
     termAgentCommand: async (_type, command) => ({ command: command.replace(/^\S+/, "'/fixture/claude'") }),

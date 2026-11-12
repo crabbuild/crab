@@ -147,6 +147,7 @@ test("terminal CLI menu filters host availability and keeps preset options", asy
   await page.getByRole("button", { name: "Terminal presets", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Configured CLI", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Pi", exact: true }).locator("svg")).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Aider", exact: true })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
   await page.getByRole("menuitem", { name: "Resume last session", exact: true }).press("Enter");

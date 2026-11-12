@@ -58,12 +58,12 @@ sessions and in-process user shells open at the same time.
 
 ### Default rules
 
-Ordinary terminal spawns default to `"daemon"`. An explicit
-`CRAB_PTY_MODE=in-process` setting retains its ephemeral-shell contract. An agent may be started
-interactively after shell creation, so durability cannot depend on detecting an
-agent in the initial spawn payload. Explicit `"in-process"` requests remain
-available for ephemeral terminals. Unavailable daemon service is a typed error,
-not a silent downgrade to a process that dies with the app.
+Ordinary terminal spawns default to **Normal** (`"in-process"`). Select
+**Daemon** from the mode menu for terminals that must survive app closure,
+or set `CRAB_PTY_MODE=daemon` to explicitly select a daemon default.
+Task/agent-owned sessions retain daemon ownership. Existing tabs keep their
+recorded mode. Unavailable daemon service is a typed error, not a silent
+downgrade to a process that dies with the app.
 
 Terminal IDs use a UUID after `term-d-` or `term-l-`, and durable sessions have a
 repository/task owner prefix. IDs do not collide with surviving sessions after
@@ -77,8 +77,8 @@ in-process terminal** entries so you can override the default at any
 time. The "New daemon terminal" entry is disabled when the daemon is
 unavailable or the circuit breaker is open; a tooltip explains why.
 
-Each tab shows a small badge — **daemon** or **local** — next to the
-title so you can tell which backend is in use at a glance.
+Each tab shows a server icon for **Daemon** or a terminal icon for **Normal**
+next to the title, with a tooltip explaining its lifetime.
 
 ### Error behavior
 
@@ -96,8 +96,8 @@ Controls whether the daemon is started at all.
 
 | Value        | Behavior |
 |--------------|----------|
-| `auto`       | Attempt to start the daemon. Durable spawns fail visibly if unavailable; explicit local terminals remain available. This is the default. |
-| `daemon`     | Require the daemon; throw a fatal error if it cannot start. |
+| `auto`       | Start the daemon service for opt-in durable sessions; ordinary shells default to Normal. Durable spawns fail visibly if unavailable. This is the default. |
+| `daemon`     | Require the daemon and default ordinary shells to Daemon; throw a fatal error if it cannot start. |
 | `in-process` | Skip the daemon; ordinary shells are ephemeral. Explicit durable/agent requests fail visibly. |
 
 ```bash

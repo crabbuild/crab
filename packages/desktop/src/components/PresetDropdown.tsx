@@ -303,6 +303,11 @@ export function TerminalPresetMenu({
                   key={preset.agentType}
                   onSelect={() => launch(preset)}
                 >
+                  <AgentIcon
+                    agentName={preset.icon}
+                    size={13}
+                    className={agentAccentColor(preset.icon)}
+                  />
                   {preset.name}
                 </DropdownMenuItem>
               ),

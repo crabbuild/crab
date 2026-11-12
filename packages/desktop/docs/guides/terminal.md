@@ -40,7 +40,9 @@ The terminal detects the user's login shell:
 ### Terminal Modes
 
 Use the mode menu beside **New terminal** to choose the lifetime of new tabs,
-splits, shell selections, and ordinary presets. Existing tabs keep their mode.
+splits, shell selections, and ordinary presets. **Normal** is the default;
+existing tabs keep their mode. `CRAB_PTY_MODE=daemon` explicitly selects a
+daemon default.
 Launch requests carrying task/agent metadata retain daemon ownership.
 
 | Mode | Owner | Closing the tab | Closing Crab |
@@ -50,7 +52,7 @@ Launch requests carrying task/agent metadata retain daemon ownership.
 
 Both modes support the same terminal emulator, search, splits, clipboard,
 shell integration, bookmarks, profiles, and broadcast input. Each tab shows its
-mode with an icon: a terminal glyph for **Normal**, a shield-check glyph for
+mode with an icon: a terminal glyph for **Normal**, a server glyph for
 **Daemon**. Hover the icon for its lifetime description; the mode menu retains
 both names. If the daemon is unavailable, select **Normal** explicitly; Crab does not
 silently change a terminal's lifetime. Shells start on demand; prewarming is disabled.

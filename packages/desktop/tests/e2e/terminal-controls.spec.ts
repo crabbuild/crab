@@ -51,6 +51,7 @@ test("terminal controls keep normal and daemon lifetimes distinct with shared in
   try {
     let page = await app.firstWindow();
     await expect(page.locator('[data-session-type="daemon"]')).toHaveCount(1);
+    await expect(page.getByRole("img", { name: "Daemon terminal", exact: true }).locator("svg.lucide-server")).toBeVisible();
     for (const [name, tooltip] of [["New terminal", "New terminal (⌘T)"], ["Find", "Find in terminal (⌘F)"], ["Terminal sessions", "Terminal sessions"]]) {
       const button = page.getByRole("button", { name, exact: true });
       await expect(button).toHaveText("");
@@ -179,9 +180,8 @@ test("CLI presets show host availability and execute configured paths", async ()
   const app = await electron.launch({ executablePath: runtimeRequire("electron"), args: [path.join(desktop, "tests/fixtures/terminal-recovery/main.cjs"), "--fixture-root", root, "--renderer-url", url, "--fixture-cli-catalog"] });
   try {
     const page = await app.firstWindow();
-    await expect(page.locator('[data-session-type="daemon"]')).toHaveCount(1);
-    await page.getByRole("button", { name: "Terminal mode for new tabs and splits", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: /^Normal terminal/ }).click();
+    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Terminal mode for new tabs and splits", exact: true })).toHaveAttribute("aria-description", /^Normal terminal/);
     const menu = page.getByRole("button", { name: "Terminal presets", exact: true });
     await menu.click();
     await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
@@ -189,7 +189,7 @@ test("CLI presets show host availability and execute configured paths", async ()
     await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
     await page.getByRole("menuitem", { name: "Resume last session", exact: true }).press("Enter");
     await expect.poll(() => existsSync(proof) && readFileSync(proof, "utf8")).toBe("saved argument\n--resume\n");
-    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(2);
     await expect(page.locator(".xterm-rows").last()).toContainText("host-cli-launched");
     await menu.click();
     await expect(page.getByRole("menuitem", { name: "Claude Code", exact: true })).toBeVisible();
@@ -200,7 +200,7 @@ test("CLI presets show host availability and execute configured paths", async ()
     await page.getByRole("menuitem", { name: "Claude Code", exact: true }).press("ArrowRight");
     await page.getByRole("menuitem", { name: "Launch Claude Code", exact: false }).press("Enter");
     await expect(page.getByText("Cannot launch agent CLI", { exact: true })).toBeVisible();
-    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(1);
+    await expect(page.locator('[data-session-type="in-process"]')).toHaveCount(2);
     save({ enabled: false });
     await menu.click();
     await expect(page.getByRole("menu").getByRole("status")).toContainText("No agent CLIs found");

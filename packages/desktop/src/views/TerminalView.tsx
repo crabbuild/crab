@@ -66,6 +66,7 @@ import {
   SplitSquareVertical,
   Terminal as TerminalIcon,
   ShieldCheck,
+  Server,
   Trash2,
   Type,
   Unlock,
@@ -360,7 +361,7 @@ const ptyIpc = {
       env: extraEnv,
       startupCommand,
       ownerPath,
-      sessionType: sessionType ?? "daemon",
+      sessionType,
       ...(agentMeta != null ? { agentMeta } : {}),
     }) as Promise<{ id: string; resolvedSessionType?: "daemon" | "in-process" }>,
   write: (id: string, data: string) =>
@@ -670,7 +671,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
 
   /** Whether the PTY daemon is ready and circuit breaker state — from PtyModeContext. */
   const { daemonReady, breakerOpen, configuredMode, loading: ptyModeLoading } = usePtyMode();
-  const requestedSessionType = sessionTypeOverride ?? defaultSessionType ?? (configuredMode === "in-process" ? "in-process" : "daemon");
+  const requestedSessionType = sessionTypeOverride ?? defaultSessionType ?? (configuredMode === "daemon" ? "daemon" : "in-process");
   const daemonUnavailable = ptyModeLoading || !daemonReady || breakerOpen;
   const cannotSpawn = requestedSessionType === "daemon" && daemonUnavailable;
   const requestedSessionTypeRef = useRef(requestedSessionType);
@@ -2183,7 +2184,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                     aria-description={selectedModeDescription}
                   >
                     {requestedSessionType === "daemon" ? (
-                      <ShieldCheck aria-hidden="true" data-icon="inline-start" />
+                      <Server aria-hidden="true" data-icon="inline-start" />
                     ) : (
                       <TerminalIcon aria-hidden="true" data-icon="inline-start" />
                     )}
@@ -2205,7 +2206,7 @@ export function TerminalView({ repo, persistenceKey, onSendErrorToAgent, visible
                       value="daemon"
                       disabled={daemonUnavailable}
                     >
-                      <ShieldCheck aria-hidden="true" />
+                      <Server aria-hidden="true" />
                       <div className="flex flex-col gap-1">
                         <span>Daemon terminal</span>
                         <span className="text-muted-foreground">
@@ -3851,7 +3852,7 @@ function TerminalTabStrip({
         {tabs.map((t) => {
           const sType = sessionTypes.get(t.id) ?? t.resolvedSessionType;
           const isDaemon = sType === "daemon";
-          const ModeIcon = isDaemon ? ShieldCheck : TerminalIcon;
+          const ModeIcon = isDaemon ? Server : TerminalIcon;
           const modeDescription = isDaemon
             ? "Daemon terminal — keeps running after Crab closes"
             : "Normal terminal — ends when its tab or Crab closes";
