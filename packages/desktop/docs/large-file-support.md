@@ -29,7 +29,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 
 | Priority | Next closure | Canonical boundary | Required proof |
 | --- | --- | --- | --- |
-| P0 | Bound native Git object memory | The [shared blob verifier](../../../crates/crab-git/src/batch.rs), [captured command owner](../agent/src/repository/content/command.rs) and physical Git object reader. | The dense 2 GiB loose-object probe verifies bytes, corruption rejection, repair and cancellation, but peaks at 2,197,651,456 bytes RSS and fails the 512 MiB process-tree budget. Individual-process profiling attributes the peak to native Git. Qualify the replacement loose reader and packed/alternate formats without weakening captured identity or cleanup. Small parser buffers and the earlier compressible fixture do not establish whole-process bounds. |
+| P0 | Bound native Git object memory | The [shared blob verifier](../../../crates/crab-git/src/batch.rs), [captured command owner](../agent/src/repository/content/command.rs) and physical Git object reader. | The streaming loose reader reduces dense 2 GiB process-tree RSS from 2,197,651,456 to 124,157,952 bytes on macOS ARM, preserving exact bytes, corruption rejection, repair, cancellation and cleanup. Qualify dense packed/delta and alternate-store workloads, filtered restoration and other platform/entry-point owners. Small parser buffers and compressible fixtures do not establish those bounds. |
 | P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. A corrected packaged macOS probe verifies the recorded 262,160-byte temporary is removed by retry before Settings cleanup, with exact source bytes and zero origin writes. Admission regressions cover bounded/unlimited/zero-root policy, live fills and replacements. The earlier published head established explicit cleanup only. Next: qualify packaged Windows/Linux recovery and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. The rebased package exceeded the existing five-second visible bulk-hydration deadline, although its failure capture already displayed all three hydrated results. The later durable package passes the canonical case with the unchanged deadline, and passive diagnostics pass. These results do not establish the earlier failure's cause or rule out the previously observed final-file stall. Cold SDK Crab/LFS missing/corrupt reads now have visible typed-error, rejected-read, exact-repair and zero-origin-write macOS proof. Extend those profiles to local/SSH publication and remaining component-owned publishing. The rebased SSH scenario also once switched unexpectedly to Settings after hydration; passive diagnostics and canonical repeats pass, but the navigation cause remains open. |
 | P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | SDK identity namespaces share the physical root catalog with CLI payloads, replacing separate 512 MiB namespace caps. Root policy constrains existing handles and new fills; configured CLI caller ceilings remain additional limits. Packaged macOS proof covers Settings editing, zero-budget exact reads, cross-identity cleanup, physical reclamation, restart persistence and external CLI updates. Retain chosen offline content and qualify eviction of only unpinned cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Cross-platform policy qualification remains required. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | The Intel two-MiB transport deadline is resolved in focused CI without changing its deadline; its matching runtime download/deployment/startup case passed on the earlier head. Complete the final-head platform matrix. Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
@@ -338,7 +338,7 @@ All 869 assets, 1,718 frozen native inputs and the local/SSH pair match native
 producer `4450f88e12fd1067eaf7316fff00571e2ccd0a03`; input digest:
 `7e60a8e657c3f2c520b665049533bd406fc4e973270d4688645ae8969a01c5a5`.
 
-A separate dense 2 GiB probe exposes an unresolved memory boundary. Its valid
+A separate dense 2 GiB probe of that producer exposes a physical-reader memory boundary. Its valid
 level-zero zlib loose object occupies 2,147,729,435 bytes. Selected bytes, suffix
 corruption rejection, repair, typed cancellation, index/source preservation and
 close all pass, but process-tree RSS reaches 2,197,651,456 bytes. The 512 MiB
@@ -346,8 +346,9 @@ qualification therefore fails despite a successful native exit. The first read
 takes 19.29 seconds; later reads vary from 1.40 to 8.57 seconds. Setup warms the
 OS cache, so this does not qualify cold physical I/O. Git's
 [loose-object stream](https://github.com/git/git/blob/v2.50.1/streaming.c#L215-L246)
-maps the compressed object, matching the per-process measurements below. Dense native Git memory is P0 work
-in the single priority queue above; the hashing improvement does not close it.
+maps the compressed object, matching the per-process measurements below. The
+hashing improvement does not close this memory failure; it motivates the
+streaming reader below.
 
 An instrumented repeat attributes 2,141,782,016 bytes RSS to one native Git child;
 at the process-tree peak the sidecar uses 17,235,968 bytes and the Node harness
@@ -361,10 +362,30 @@ a 64 MiB mapping limit; these settings affect only the captured read process.
 Fifteen shared tests and 38 native content tests pass, including packed/alternate
 byte parity, truncated-footer rejection and cancellation. Strict shared-crate and production
 agent lint pass. One direct edge records the already-locked `gix-quote` 0.7.2;
-no dependency version or checksum changes. Release-built dense memory and
-packaged qualification for this replacement are still pending. Packed deltas,
-filtered restoration, other CLI/SDK object-reading entry points and the platform
-matrix retain their own owners and still require dense qualification.
+no dependency version or checksum changes.
+
+Native producer `cc90d6706d9ee0f0ec4d67a4d6c1d3893778e0eb` passes the strengthened
+repository qualifier with that same dense 2 GiB object. Process-tree peak RSS is
+124,157,952 bytes under the unchanged 512 MiB ceiling; the sidecar's individual
+peak is 21,299,200 bytes. Exact head/middle/tail ranges, unread-suffix rejection,
+repair, typed cancellation, a fresh read, index/source preservation and owned
+cleanup all pass. The complete fixture takes 163.51 seconds, including writing
+and replacing physical objects. Successful 4 KiB reads take 1.40–9.38 seconds;
+the first takes 4.81 seconds. Whole-body decoding and verification still happen
+on every request, and setup warms the OS cache: efficient warm ranges and cold
+physical I/O remain unqualified. The same dense fixture now runs on all five
+native CI targets with the original limits and integrity assertions.
+
+Frozen native inputs: 1,718 files, digest
+`087a967eca0aaac9dd00c4b1513ada11f3783a635e55ca23600385e99993086f`.
+The matching unsigned macOS ARM package passes the selected SQLite/WAL/Crab/LFS
+query workflow and text/SQLite/pointer/audio corruption-and-repair case (two
+cases, 24.4 seconds). Screenshots show the checksum error, repaired SQLite value
+17 and repaired 16-second audio with seeking/playback. All 869 packaged assets
+and the local/SSH native pair match the frozen producer inputs. Dense packed and
+alternate workloads, packed deltas, filtered restoration, other CLI/SDK
+object-reading entry points and the platform matrix retain their own owners and
+still require qualification.
 
 ### Missing and corrupt SDK content
 

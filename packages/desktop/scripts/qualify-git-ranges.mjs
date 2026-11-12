@@ -14,7 +14,8 @@ import { createDeflate } from "node:zlib";
 const execute = promisify(execFile);
 const size = 2 * 1024 ** 3;
 const head = Buffer.from("verified-git-head\n"), tail = Buffer.from("verified-git-tail\n");
-const fixtureDigest = "4f7eb1a4a45d43b4d7e36edd9b8bdbfa3a807d9b5578d1cc467d20cf99913596";
+const fixtureDigest = "515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731";
+const pattern = Buffer.concat(Array.from({ length: 2048 }, (_, i) => createHash("sha256").update(`crab-dense-git-block-${i}`).digest()));
 const platform = { darwin: "mac", linux: "linux", win32: "win" }[process.platform];
 const directory = path.resolve(process.argv[2] ?? `resources/native/${platform}-${process.arch}`);
 const runtime = JSON.parse(await readFile(path.join(directory, "runtime.json"), "utf8"));
@@ -40,7 +41,7 @@ const env = { ...process.env, CRAB_BIN: crab, CRAB_CACHE_DIR: path.join(evidence
 for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) delete env[name];
 const git = async args => (await execute("git", args, { cwd: source, env })).stdout.trim();
 const report = { schema: "crab.desktop.git-range-qualification", version: 1, runtime, fixtureDigest,
-  logicalBytes: size, fixture: "sparse file; highly compressible Git object; OS cache warmed by setup",
+  logicalBytes: size, fixture: "dense repeating 64 KiB deterministic content; level-0 zlib loose object; OS cache warmed by setup",
   evidenceDirectory: evidence, ranges: [], verified: false, closed: false };
 const repo = "git-range-qualification";
 let child, exit, rpc, captured, object, swapped = false, failure;
@@ -57,7 +58,10 @@ async function storeBlob(file) {
     yield header;
     for await (const bytes of createReadStream(file)) { hash.update(bytes); yield bytes; }
   })(), { objectMode: false });
-  await pipeline(input, createDeflate(), createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+  // Sparse or highly compressed objects hide Git's whole-loose-object mapping.
+  // Stored zlib blocks exercise the physical 2 GiB source without relying on
+  // filesystem sparse allocation or compressor behavior on a particular runner.
+  await pipeline(input, createDeflate({ level: 0 }), createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
   const oid = hash.digest("hex"), object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
   await mkdir(path.dirname(object), { recursive: true });
   await rename(temporary, object);
@@ -76,13 +80,21 @@ try {
   const file = path.join(source, "large.bin");
   const descriptor = await open(file, "w");
   try {
-    await descriptor.truncate(size);
+    const block = Buffer.concat(Array(16).fill(pattern));
+    for (let offset = 0; offset < size; offset += block.length) {
+      let written = 0;
+      while (written < block.length) {
+        const result = await descriptor.write(block, written, block.length - written, offset + written);
+        assert.ok(result.bytesWritten > 0, "Dense fixture write must make progress");
+        written += result.bytesWritten;
+      }
+    }
     assert.equal((await descriptor.write(head, 0, head.length, 0)).bytesWritten, head.length);
     assert.equal((await descriptor.write(tail, 0, tail.length, size - tail.length)).bytesWritten, tail.length);
   } finally { await descriptor.close(); }
   assert.equal(await digest(file), fixtureDigest);
   const oid = await storeBlob(file);
-  assert.equal(oid, "5e604980012d82c094e926b9814d98699ad80c1f");
+  assert.equal(oid, "5fa9fa26c5fb2dbcb4dacd5d02debc475955a204");
   await git(["update-index", "--add", "--cacheinfo", "100644", oid, "large.bin"]);
   const index = await readFile(path.join(source, ".git/index"));
   object = path.join(source, ".git/objects", oid.slice(0, 2), oid.slice(2));
@@ -133,6 +145,7 @@ try {
     const started = performance.now();
     const result = await rpc("read_range", { repo_id: repo, file_id: captured.file_id, offset, length: 4096 });
     const expected = Buffer.alloc(4096);
+    for (let i = 0; i < expected.length; i++) expected[i] = pattern[(offset + i) % pattern.length];
     for (const [position, marker] of [[0, head], [size - tail.length, tail]]) {
       const from = Math.max(offset, position), to = Math.min(offset + expected.length, position + marker.length);
       if (from < to) marker.copy(expected, from - offset, from - position, to - position);

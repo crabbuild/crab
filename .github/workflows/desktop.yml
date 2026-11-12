@@ -80,11 +80,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Qualify bounded Git ranges and cancellation
+      - name: Qualify dense 2 GiB Git ranges and cancellation
         run: |
           python ../../crab/scripts/qualify_sdk.py run \
             --backend desktop-native-git \
-            --fixture-digest 4f7eb1a4a45d43b4d7e36edd9b8bdbfa3a807d9b5578d1cc467d20cf99913596 \
+            --fixture-digest 515a224ca4c51ce3dbabf555d1d1da8d2fceeccfc9d0b24903b74dba1f6a2731 \
             --output "$CARGO_TARGET_DIR/git-range-proof/report.json" \
             --require-rss-below 536870912 --timeout-seconds 600 -- \
             node packages/desktop/scripts/qualify-git-ranges.mjs packages/desktop/resources/native/${{ matrix.target }}
