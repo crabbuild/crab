@@ -32,7 +32,7 @@ The acceptance matrix defines completion. The checkpoints below record evidence.
 | P0 | Finish transfer and cache recovery | The main-process [Activity owner](../electron/file-transfers.ts), native publication owner and captured storage readers. | Durable intent, preparation cancellation, renderer reload and explicit restart retry have bounded macOS proof. Cold storage response interruption, completed-sibling preservation, scratch recovery and cleanup-failure counts now have bounded macOS proof. Both rename/receipt process boundaries now have Crab/LFS proof; captured-source provenance has packaged local/SSH and restart proof. Origin-response accounting is implemented through the shared transport boundary. Packaged local/SSH receipt and restart proof is complete for the bounded Crab/LFS fixture. The Windows restoration/index correction and scratch replacement fixture now pass all 11 applicable focused Windows tests; matching-CLI and packaged platform gates remain open. A corrected packaged macOS probe verifies the recorded 262,160-byte temporary is removed by retry before Settings cleanup, with exact source bytes and zero origin writes. Admission regressions cover bounded/unlimited/zero-root policy, live fills and replacements. The earlier published head established explicit cleanup only. Next: qualify packaged Windows/Linux recovery and allocation-before-record gaps. SDK partial-response retry and namespace cleanup now have bounded macOS proof. The rebased package exceeded the existing five-second visible bulk-hydration deadline, although its failure capture already displayed all three hydrated results. The later durable package passes the canonical case with the unchanged deadline, and passive diagnostics pass. These results do not establish the earlier failure's cause or rule out the previously observed final-file stall. Cold SDK Crab/LFS missing/corrupt reads now have visible typed-error, rejected-read, exact-repair and zero-origin-write macOS proof. Extend those profiles to local/SSH publication and remaining component-owned publishing. The rebased SSH scenario also once switched unexpectedly to Settings after hydration; passive diagnostics and canonical repeats pass, but the navigation cause remains open. |
 | P0 | Enforce storage policy | Existing verified read/cache owners; Settings remains the policy UI. | SDK identity namespaces share the physical root catalog with CLI payloads, replacing separate 512 MiB namespace caps. Root policy constrains existing handles and new fills; configured CLI caller ceilings remain additional limits. Packaged macOS proof covers Settings editing, zero-budget exact reads, cross-identity cleanup, physical reclamation, restart persistence and external CLI updates. Retain chosen offline content and qualify eviction of only unpinned cache. Disk retention and operation read limits are separate policies. Active reads, dirty working files and referenced staging must survive pressure, restart and cleanup failure. Cross-platform policy qualification remains required. |
 | P0 | Complete recovery parity | [ProviderRegistry](../electron/provider-registry.ts), local/SSH readiness owners, the encrypted vault and existing document/read owners. | The Intel two-MiB transport deadline is resolved in focused CI without changing its deadline; its matching runtime download/deployment/startup case passed on the earlier head. Complete the final-head platform matrix. Drive auxiliary worktree and cross-repository comparisons, read-only model isolation, Dashboard, Datasets and shared hydration state through their UI entry points during storage rebind and SSH reconnect. Request-owned Git children and native Apply workers now carry the selected saved identity, including filters and hooks. Qualify remaining background Git/status work, removal during SDK opening, real jump-host cancellation and repeated shutdown. |
-| P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
+| P1 | Scale database and notebook workloads | The [captured reader](../agent/src/repository/content.rs), [native query owner](../agent/src/preview/query.rs), [file query session](../src/lib/file-query.ts) and [kernel owner](../electron/jupyter-kernel.ts). | Measure dense multi-GiB scan memory and use captured ranges for selective Parquet scans. Ordinary Git ranges now authenticate the complete captured object with bounded memory; the 2 GiB fixture measures about 3.7 seconds per 4 KiB request, including warm reads. Retain bounded authenticated proofs or verified bytes to remove repeated whole-object verification without trusting Git exit status or filesystem identity alone. Extend WAL and crash qualification across platforms. Exercise notebook installer failure, worker death, output budgets and network loss, including retry during native-reader outage. |
 | P1 | Complete advanced repository workflows | Existing provider mutations, [captured diffs](../agent/src/repository/content/diff.rs) and workspace operation owners. | Finish standalone editor RPC parity and task-worktree ownership. Qualify LFS migration, extensions and supported locks, ordinary Git captures, review and mode diffs, plain Git patch cancellation and crash drafts. Distinguish optional SDK configuration absence from missing content objects. |
 | P1 | Finish truthful inspection and bounded formats | Captured native/storage metadata, format parsers and exact filesystem-publication ownership. | Report local/cache/available/pending bytes accurately; retain unknown measurements as unknown. Read-only storage snapshots now skip working-tree hydration subscriptions through the shared hook and show their mode in the footer; packaged macOS snapshot, local hydration and selected-identity SSH cold read/hydration/restart checks pass. Other targets and providers remain open. Bound plain-text pointers and decoded formats, and show malformed/oversized failures. Load picker profiles from the canonical `crab.toml` policy, removing the retired `.crab/prefetch.toml` parser. Complete remaining format comparisons and consolidate duplicate command/Activity completion notifications. Dataset mtime filtering needs a native timestamp contract and recursive catalog proof. Apply exact temporary-file ownership to workspace polling and native batch dirty counts; qualify very large inventories, network filesystems and external linked-worktree Git-control changes. |
 
@@ -266,9 +266,10 @@ and small-object visits. Working-file descriptor checks, Crab/LFS reconstruction
 and SDK remote Git decoding retain their existing owners. Partial Git ranges
 now use that same whole-object verifier, retaining only selected bytes and
 requiring successful EOF and process exit. The unchecked early-success path
-is removed. Each range scans the complete compressed Git object; packaged
-range behavior and multi-GiB memory/latency need separate qualification from
-the complete-body checkpoint below. Durable offline captures remain unimplemented.
+is removed. Each range scans the complete decoded Git body; memory stays
+bounded by the selected range and the verifier's 64 KiB buffer. This guarantees
+integrity but repeats whole-object work on warm reads. Durable offline captures
+remain unimplemented.
 
 The complete-read, file-copy and small-pointer regressions fail before their
 source corrections. Nine shared Git tests and 34 focused native content tests
@@ -296,6 +297,29 @@ runtime pair. Native input digest:
 Earlier cache/SDK/platform receipts retain their own producer attribution.
 This package qualifies the complete Git paths on macOS; partial Git ranges,
 durable offline versions and the remaining platform/provider matrix stay open.
+
+The subsequent native producer `0a6c98b1f21be7b2726c02d493659f263ee19af1`
+qualifies partial Git reads on macOS ARM. All 37 focused content tests pass,
+with nine existing ignored cases. The release-built native qualifier reads
+4 KiB at the head, unaligned middle and tail of a 2 GiB object, rejects a changed
+unread suffix, then proves repair, typed cancellation and a fresh exact read.
+The process tree peaks at 135,430,144 bytes RSS; the complete fixture takes
+33.56 seconds. Its sparse source produces a 2,087,325-byte compressed object,
+and setup warms the OS cache. This is bounded-memory integrity evidence,
+not dense or cold-origin performance proof. Each successful range takes
+3.65–3.71 seconds: warm range efficiency remains P1 work. Its owner must retain
+bounded authenticated proofs or verified bytes; a successful earlier Git exit,
+path identity or matching size cannot authenticate a later selected range.
+
+The matching unsigned package passes the selected SQL workflow and the extended
+corruption/repair case (two cases, 29.3 seconds). The latter checks a direct
+captured range and a 3,072,044-byte WAV with corruption beyond the media window.
+Audio shows a checksum error before repair, then reports its 16-second duration,
+seeks and plays after repair. All 869 packaged assets, 1,718 frozen native inputs
+and the local/SSH pair match. Native input digest:
+`422c339854eab7e6feb9990a5ee5865fa148a5b1ab60457e98cb909789eedaee`.
+The qualifier is wired into all five native CI targets with the existing SDK
+memory reporter; their new-head results remain required.
 
 ### Missing and corrupt SDK content
 
