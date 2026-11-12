@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
-import clsx from "clsx";
 import type { LucideIcon } from "lucide-react";
 import { Loader2 } from "lucide-react";
 
@@ -38,16 +37,16 @@ export interface ViewToolbarProps {
 export function ViewToolbar({ title, icon: Icon, actions, onAction, trailing }: ViewToolbarProps) {
   return (
     <div
-      className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2"
+      className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-3 py-1.5"
       role="toolbar"
       aria-label={title}
     >
       <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-        {Icon && <Icon size={14} className="text-muted-foreground" />}
+        {Icon && <Icon size={16} className="text-muted-foreground" />}
         <span>{title}</span>
       </div>
 
-      <div className="flex items-center gap-[4px]">
+      <div className="flex flex-wrap items-center gap-1">
         {actions.map((action) => (
           <ActionButton key={action.id} action={action} onAction={onAction} />
         ))}
@@ -68,24 +67,17 @@ function ActionButton({
 
   const tooltip = shortcut ? `${label} (${shortcut})` : label;
 
-  const className = clsx(
-    "h-6 w-6 min-w-0 rounded p-0 text-muted-foreground",
-    active && "text-foreground",
-  );
-  const icon = loading ? (
-        <Loader2 size={14} className="animate-spin" />
-      ) : (
-        <ActionIcon size={14} />
-      );
+  const icon = loading ? <Loader2 className="animate-spin" /> : <ActionIcon />;
   if (active !== undefined)
     return (
-    <Toggle
+      <Toggle
         title={tooltip}
-      aria-label={tooltip}
-      disabled={disabled || loading}
+        aria-label={tooltip}
+        disabled={disabled || loading}
         pressed={active}
         onPressedChange={() => onAction(id)}
-        className={className}
+        size="sm"
+        className="[&_svg]:size-4"
       >
         {icon}
       </Toggle>
@@ -93,13 +85,12 @@ function ActionButton({
   return (
     <Button
       variant="ghost"
-      size="compact"
+      size="icon-sm"
       type="button"
       title={tooltip}
       aria-label={tooltip}
       disabled={disabled || loading}
       onClick={() => onAction(id)}
-      className={className}
     >
       {icon}
     </Button>

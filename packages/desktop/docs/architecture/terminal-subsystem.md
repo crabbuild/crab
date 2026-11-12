@@ -30,6 +30,13 @@ node-pty expand its helper path twice and prevents macOS shell creation.
 Live daemon replacement is deferred while PTYs exist: the adopted-fd backend
 cannot resize those PTYs. Application updates can reuse the existing owner.
 
+Repository and task surfaces compose `TerminalView`, including its emulator,
+input routing, toolbar, and persistence. The toolbar's Daemon/Normal selection
+applies to subsequent tabs and splits. It does not convert existing processes.
+Normal terminals use the same emulator capabilities with Electron-owned lifetime.
+Daemon unavailability disables durable creation and leaves explicit normal creation
+available. Daemon tab close detaches; normal tab close terminates.
+
 Daemon control files remain home-scoped. Unix socket paths that fit retain
 the address shipped in v2.0.0-alpha.1. Longer paths use a hash of the complete
 control path in a private, user-owned directory under `/tmp`; tokens and PID
@@ -48,6 +55,10 @@ The layout store saves tab identities, pane membership, nested split directions
 and sizes, active tabs and focused pane whenever they change. Writes use atomic
 replacement, independent of window-close and updater event timing. Existing v1
 flat layouts remain readable for the v2.0.0-alpha.1 upgrade boundary.
+Each saved local tab records its resolved session type. Normal tabs restore as
+fresh normal shells without requiring the daemon; a daemon-list failure must
+not block them or change their ownership. Layouts predating this field keep the
+existing live-session discovery and configured-default behavior.
 
 Warm attach maps saved identities to live sessions before reconstructing the
 split tree. Snapshots enter the alternate screen before painting agent content;

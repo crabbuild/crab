@@ -50,6 +50,8 @@ import {
 } from "../../src/components/ui/collapsible";
 import { ApplicationDialogs } from "../../src/components/ApplicationDialogs";
 import { TerminalPresetMenu } from "../../src/components/PresetDropdown";
+import { ViewToolbar, type ToolbarAction } from "../../src/components/ViewToolbar";
+import { RefreshCw, Check, Trash2 } from "lucide-react";
 import {
   requestConfirmation,
   requestPrompt,
@@ -104,6 +106,12 @@ const pasteCases: Record<string, PasteAnalysis> = {
 };
 
 function Fixture() {
+  const [amend, setAmend] = useState(false);
+  const toolbarActions: ToolbarAction[] = [
+    { id: "refresh", label: "Refresh files", icon: RefreshCw },
+    { id: "amend", label: "Amend commit", icon: Check, active: amend },
+    { id: "delete", label: "Delete files", icon: Trash2, disabled: true },
+  ];
   const [value, setValue] = useState("one");
   const [pasteCase, setPasteCase] = useState<string | null>(null);
   const [result, setResult] = useState("Ready");
@@ -125,6 +133,10 @@ function Fixture() {
     <main className="mx-auto grid max-w-3xl grid-cols-1 gap-5 p-8">
       <h1 className="text-lg font-semibold">Crab shadcn controls</h1>
       <ComposerFixture />
+      <ViewToolbar title="Repository files" actions={toolbarActions} onAction={(id) => {
+        if (id === "amend") setAmend(value => !value);
+        setResult(`Toolbar: ${id}`);
+      }} />
       <Select
         value={":" + value}
         onValueChange={(selected) => {

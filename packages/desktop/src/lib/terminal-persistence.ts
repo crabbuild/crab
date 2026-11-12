@@ -17,6 +17,7 @@ export interface PersistedSession {
   env?: Record<string, string>;
   startupCommand?: string;
   title: string;
+  resolvedSessionType?: LeafTab["resolvedSessionType"];
   /** Path to serialized scrollback file (from SerializeAddon). */
   scrollbackPath?: string;
   sshRemote?: LeafTab["sshRemote"];
@@ -63,6 +64,7 @@ export interface TerminalViewState {
     cwd?: string;
     env?: Record<string, string>;
     startupCommand?: string;
+    resolvedSessionType?: LeafTab["resolvedSessionType"];
   }>;
   splits: SplitArrangement[];
   activeTabIndex: number;
@@ -94,6 +96,7 @@ export function serializeLayout(state: TerminalViewState): PersistedLayout {
     ...(tab.env && Object.keys(tab.env).length > 0 ? { env: tab.env } : {}),
     ...(tab.startupCommand ? { startupCommand: tab.startupCommand } : {}),
     title: tab.title,
+    ...(tab.resolvedSessionType ? { resolvedSessionType: tab.resolvedSessionType } : {}),
   }));
 
   const layout: PersistedLayout = {
@@ -233,6 +236,11 @@ function validateSession(data: unknown): PersistedSession | null {
     title: obj.title,
   };
 
+  if (obj.resolvedSessionType !== undefined) {
+    if (obj.resolvedSessionType !== "daemon" && obj.resolvedSessionType !== "in-process") return null;
+    session.resolvedSessionType = obj.resolvedSessionType;
+  }
+
   if (obj.env !== undefined && obj.env !== null) {
     if (typeof obj.env !== "object" || Array.isArray(obj.env)) return null;
     const env = obj.env as Record<string, unknown>;
@@ -311,7 +319,7 @@ export function captureLayout(tree: SplitNode, activePaneId: string, cwd: (tab: 
   const arrangement = serializeTree(tree);
   const layout = {
     ...serializeLayout({
-      tabs: tabs.map(tab => ({ id: tab.id, title: tab.title, shell: tab.shell, cwd: cwd(tab) })),
+      tabs: tabs.map(tab => ({ id: tab.id, title: tab.title, shell: tab.shell, cwd: cwd(tab), resolvedSessionType: tab.resolvedSessionType })),
       splits: arrangement ? [arrangement] : [],
       activeTabIndex: Math.max(0, tabs.findIndex(tab => tab.id === active?.activeTab)),
     }),

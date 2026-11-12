@@ -27,11 +27,11 @@ app.whenReady().then(async () => {
     socketDir: path.join(root, 'daemon'), daemonEntryPath: daemonEntry,
     log: (level, message) => console[level === 'warn' ? 'warn' : 'log'](message),
   });
-  if (!daemon.daemonReady) throw new Error('Verification daemon unavailable');
+  if (!daemon.daemonReady && process.env.CRAB_PTY_MODE !== 'in-process') throw new Error('Verification daemon unavailable');
   const local = createInProcessBridge({ app, getMainWindow: () => win, getDefaultShell: () => process.env.SHELL || '/bin/sh', buildTerminalEnv: extra => ({ ...env, ...extra }), shellEnvPromise: Promise.resolve(env), writeSessionLog: () => {} });
   const router = new TermRouter({
     ipcMain, circuitBreaker: daemon.circuitBreaker, getMainWindow: () => win,
-    modeResolution: { current: () => ({ daemonReady: daemon.daemonClient.isConnected }) },
+    modeResolution: { current: () => ({ daemonReady: daemon.daemonClient.isConnected, configuredMode: process.env.CRAB_PTY_MODE }) },
     daemonBridge: { ...daemon.daemonBridge, handleSpawn: async (payload, id) => ({ daemonSessionId: (await daemon.daemonBridge.handleSpawn({ ...payload, env: { ...env, ...payload.env } }, id)).id }) },
     inProcessBridge: { handleSpawn: (payload, id) => local.handleSpawn(payload, id), handleWrite: (id, data) => local.handleWrite(null, id, data), handleResize: (id, cols, rows) => local.handleResize(null, id, cols, rows), handleKill: id => local.handleKill(null, id), dispose: () => local.dispose() },
   });
