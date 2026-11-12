@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writ
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
-import { call, packagedExecutable } from "./packaged-app";
+import { answerConfirmation, call, packagedExecutable } from "./packaged-app";
 import type { FileTransferActivity, FileTransferJob, FileTransferSource } from "../../electron/file-transfers";
 import type { StorageConnectionInput } from "../../electron/storage-connection-types";
 import type { RepoHandle } from "../../src/ipc";
@@ -108,7 +108,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
       const before = await transport(`stream_${outcome === "native-receipt-gap" ? publishedKind : kind}`);
       await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
       await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-      await page.getByRole("tab", { name: "Custom", exact: true }).click();
+      await page.getByRole("radio", { name: "Custom", exact: true }).click();
       for (const file of files) await page.getByRole("checkbox", { name: new RegExp(file) }).check();
       let lostReceipt: Promise<void> | undefined;
       if (outcome === "receipt-gap") {
@@ -198,7 +198,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
           // publication. Recovery must dispose of the now-empty owned directory.
           rmSync(foreign);
           await page.getByRole("button", { name: "Close activity drawer", exact: true }).click();
-          await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
           await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P");
           const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
           await palette.getByRole("combobox").fill("Crab: Dehydrate File");
@@ -207,6 +207,7 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
           await fileInput.fill(files[1]);
           await fileInput.press("Enter");
           await expect(palette).toHaveCount(0);
+          await answerConfirmation(page, /^Dehydrate /);
           await expect.poll(() => readFileSync(path.join(source, files[1])).equals(pointer)).toBe(true);
           await expect.poll(async () => (await history()).jobs.some(job => job.op === "dehydrate" && job.status === "done")).toBe(true);
           expect(artifacts()).toHaveLength(0);
@@ -248,8 +249,9 @@ for (const kind of ["crab", "lfs"] as const) for (const outcome of ["cancel", "n
         const recoveredStatus = await call(page, "git_status_porcelain", { repo_id: "recovery" });
         expect((recoveredStatus.entries as Array<{ path: string }>).some(entry => artifacts().some(name => entry.path.startsWith(name + "/")))).toBe(false);
       }
-      await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+
       await page.getByRole("button", { name: "Retry transfer", exact: true }).first().click();
+      await answerConfirmation(page, /Hydrate 1 file/);
       await expect.poll(() => sha(readFileSync(path.join(source, files[1]))), { timeout: 40_000 }).toBe(hashes[1]);
       await expect.poll(async () => (await history()).jobs.some(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])).toBe(true);
       const retry = (await history()).jobs.find(job => job.job_id !== original.job_id && job.status === "done" && job.intent.paths.length === 1 && job.intent.paths[0] === files[1])!;

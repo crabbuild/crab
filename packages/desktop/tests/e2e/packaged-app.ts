@@ -69,6 +69,10 @@ export async function call(page: Page, method: string, params: unknown): Promise
   }, { method, params });
 }
 
+export async function answerConfirmation(page: Page, message: RegExp, accept = true): Promise<void> {
+  await page.getByRole("alertdialog", { name: message }).getByRole("button", { name: accept ? "Confirm" : "Cancel", exact: true }).click();
+}
+
 export async function closeFixtureDaemon(home: string): Promise<void> {
   // Only callers that created this HOME own its daemon. Tests inheriting the
   // developer's HOME must leave that durable process running.

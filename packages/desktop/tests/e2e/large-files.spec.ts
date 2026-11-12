@@ -342,7 +342,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     }).toBe("pointer");
     await page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("button", { name: "Large Files", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
     for (const file of ["staged.safetensors", "lfs.safetensors", tinyPath]) {
       await page.getByRole("checkbox", { name: new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).check();
     }
@@ -433,7 +433,7 @@ test("packaged desktop previews large pointers and materializes Crab and LFS con
     await expect.poll(() => readFileSync(path.join(source, tinyPath)).equals(tinyContent)).toBe(true);
     await primary.getByRole("button", { name: "Large Files", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate", exact: true }).click();
-    await page.getByRole("tab", { name: "Custom", exact: true }).click();
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
     for (const file of ["staged.safetensors", "lfs.safetensors"]) {
       await page.getByRole("checkbox", { name: new RegExp(file) }).check();
     }
