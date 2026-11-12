@@ -45,7 +45,7 @@ products must refresh the saved policy even when maintenance fails.
 
 Complete LFS payloads use native SHA-256 in `local_cache/lfs_file.rs`. Fills
 share the root journal and policy. Captured readers hand descriptors to the LFS
-integrity owner; they must drain and release verification sources before
+integrity owner; they must drain verification readers before
 finishing the cache claim. Keep this family in health, stats, verification,
 prune and explicit cleanup. Disposable retention does not grant offline pins.
 

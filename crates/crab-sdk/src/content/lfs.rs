@@ -9,6 +9,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::remote_error::consumer_error;
 use crate::{Error, ErrorKind, ReadOptions};
 
+// Amortize the verifier's block reads while stream delivery remains 64 KiB.
+const CACHED_READ_BYTES: u64 = 1024 * 1024;
+
 pub(crate) async fn deliver(
     runtime: &super::crab::ContentRuntime,
     bytes: Bytes,
@@ -34,8 +37,14 @@ pub(crate) async fn deliver(
     let cancellation = operation.cancellation();
     let cache = runtime.local_cache().await.map_err(consumer_error)?;
     if let Some(cache) = cache
-        && let Some((source, session, first)) =
-            open_cached(cache, &pointer, &range, cancellation).await?
+        && let Some((source, session, first)) = open_cached(
+            cache,
+            &pointer,
+            &range,
+            cancellation,
+            runtime.lfs_proofs.clone(),
+        )
+        .await?
     {
         let _ = ready.send(());
         let result = deliver_cached(
@@ -48,8 +57,8 @@ pub(crate) async fn deliver(
             cancellation,
         )
         .await;
-        // The proof cache retains a descriptor. Release it before finishing the
-        // cache claim, or Windows cleanup cannot reclaim the selected payload.
+        // Drain descriptor readers before releasing the captured cache lease.
+        // Shared block proofs retain no filesystem handles between operations.
         session.close().await;
         return match result {
             Ok(()) => source
@@ -111,7 +120,7 @@ pub(crate) async fn deliver(
                         && let Err(error) = writer.write(&bytes).await
                     {
                         tracing::warn!(%error, "LFS cache fill failed");
-                        fill = None;
+                        abort_fill(fill.take()).await;
                     }
                     super::deliver_bytes(bytes, &send, cancellation).await?;
                 }
@@ -130,6 +139,7 @@ pub(crate) async fn deliver(
             }
         }
     }.await;
+    abort_fill(fill.take()).await;
     // Cancellation may drop a hashing join future. Drain its admitted job
     // before the SDK worker can finalize the Git session or report completion.
     session.close().await;
@@ -141,6 +151,7 @@ async fn open_cached(
     pointer: &crab_git::LfsPointer,
     range: &Range<u64>,
     cancel: &tokio_util::sync::CancellationToken,
+    proofs: crab_lfs::LfsReadCache,
 ) -> crab_remote_git::Result<Option<(LfsCacheFile, crab_lfs::LfsReadSession, Bytes)>> {
     let source = match cache.open_lfs_file(&pointer.oid, pointer.size).await {
         Ok(Some(source)) => source,
@@ -150,8 +161,8 @@ async fn open_cached(
             return Ok(None);
         }
     };
-    let session = crab_lfs::LfsReadSession::default();
-    let first_range = range.start..range.end.min(range.start.saturating_add(64 * 1024));
+    let session = crab_lfs::LfsReadSession::new(proofs);
+    let first_range = range.start..range.end.min(range.start.saturating_add(CACHED_READ_BYTES));
     match read_cached(&source, &session, pointer, first_range, cancel).await {
         Ok(first) => Ok(Some((source, session, first))),
         Err(error) => {
@@ -186,7 +197,7 @@ async fn deliver_cached(
         .await
         .map_err(CachedError::Delivery)?;
     while offset < range.end {
-        let end = range.end.min(offset.saturating_add(64 * 1024));
+        let end = range.end.min(offset.saturating_add(CACHED_READ_BYTES));
         let bytes = read_cached(source, session, pointer, offset..end, cancel)
             .await
             .map_err(CachedError::Read)?;
@@ -196,6 +207,14 @@ async fn deliver_cached(
         offset = end;
     }
     Ok(())
+}
+
+async fn abort_fill(fill: Option<crab_cache::local_cache::LfsCacheFill>) {
+    if let Some(fill) = fill
+        && let Err(error) = fill.abort().await
+    {
+        tracing::warn!(%error, "LFS cache fill drain failed");
+    }
 }
 
 async fn read_cached(

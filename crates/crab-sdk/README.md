@@ -139,7 +139,9 @@ retain fresh verification. Reads do not write remote receipts.
 An explicit `storage::ContentCache` also retains complete verified LFS reads.
 Payloads share its identity namespace, root retention budget and cleanup with
 Crab content. Later streams verify the captured cached file's complete SHA-256,
-then check bounded block proofs for delivered ranges. Closing a stream drains
+then retain bounded block proofs for later captured descriptors. Complete cached
+delivery verifies blocks in 1 MiB batches and emits at most 64 KiB per stream
+item. Proofs keep no file handles between operations. Closing a stream drains
 verification before releasing its cache claim. Corrupt cache may select origin
 before delivery; failures after delivery starts remain visible. Partial origin
 reads do not publish incomplete LFS bodies. This disposable cache can survive

@@ -65,9 +65,10 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
   callbacks. Tracked jobs retain global verification admission after cancellation.
 - `LfsReadSession::read_opened_range` uses an already-captured descriptor through
   that same verifier. Proof keys bind source key, SHA-256 and declared size;
-  an ambient pathname cannot redirect the read. External cache owners retain
-  their lease through delivery and release operation-scoped proofs before
-  finishing it. Do not retain a cache file descriptor beyond its eviction lease.
+  an ambient pathname cannot redirect the read. Captured proofs retain only
+  block hashes between operations; each read checks its supplied descriptor.
+  External cache owners retain their lease through delivery and drain jobs
+  before finishing it. Do not retain a descriptor beyond its eviction lease.
 - Remote read-proof retention requires a bound canonical transport and fresh
   matching HEAD metadata. GET delivery still matches that verified validator;
   store incarnation, target, key and SHA-256 cannot cross cache authority.

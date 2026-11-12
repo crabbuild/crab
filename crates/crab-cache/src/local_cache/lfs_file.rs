@@ -21,7 +21,7 @@ impl LfsCacheFile {
         self.file.try_clone()
     }
 
-    /// Source key for a caller-owned, operation-scoped verification cache.
+    /// Source key for caller-owned verification proofs.
     #[must_use]
     pub fn key(&self) -> &Path {
         &self.path
@@ -43,6 +43,8 @@ impl LfsCacheFile {
 /// Journaled, bounded-memory publication of a complete SHA-256 LFS object.
 pub struct LfsCacheFill {
     cache: Arc<LocalCache>,
+    // Release the writer before its journal owner; Windows can defer unlink
+    // until that final file handle closes.
     writer: tokio::fs::File,
     pending: ReservedFile,
     hash: Sha256,
@@ -53,6 +55,12 @@ pub struct LfsCacheFill {
 }
 
 impl LfsCacheFill {
+    /// Drain admitted writes before releasing an unpublished fill.
+    pub async fn abort(mut self) -> Result<()> {
+        self.writer.flush().await?;
+        Ok(())
+    }
+
     /// Append bytes without permitting a fill beyond its reserved complete size.
     pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         let written = self
@@ -233,7 +241,7 @@ mod tests {
         }
         let mut fill = cache.begin_lfs_fill(&oid, 5).await.unwrap().unwrap();
         fill.write(b"ri").await.unwrap();
-        drop(fill);
+        fill.abort().await.unwrap();
         cache.catalog().maintain().await.unwrap();
         assert_eq!(
             crate::CacheCatalog::read_only_stats(cache.catalog().root())

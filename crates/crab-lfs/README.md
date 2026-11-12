@@ -51,6 +51,13 @@ or a matching pathname never substitutes for content verification; replacing
 or unlinking the path cannot redirect a retained source. A failed range clears
 that proof for a fresh later repair, while the failing call remains an error.
 
+`read_opened_range` checks a caller-captured file through the same verifier.
+It scopes proofs to source key, SHA-256, size and captured-source mode. Unlike
+worktree selection, only block hashes survive between these operations; later
+reads check their newly supplied descriptor. A cache owner can therefore drain
+its session, release the file lease and reclaim disk space while an idle snapshot
+retains bounded verification proofs. A proof never authorizes a pathname reopen.
+
 `LfsReadCache` separates checked-source retention from verification jobs.
 `LfsReadSession::new(cache.clone())` owns one independently drained operation;
 its close releases that cache claim. Drop the shared cache after all sessions

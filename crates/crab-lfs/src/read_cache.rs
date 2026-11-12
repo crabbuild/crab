@@ -40,12 +40,18 @@ impl LfsReadCache {
         path: PathBuf,
         oid: [u8; 32],
         size: u64,
+        captured: bool,
     ) -> std::io::Result<Option<LocalEntry>> {
         let mut cache = self
             .0
             .lock()
             .map_err(|_| std::io::Error::other("LFS source retention is unavailable"))?;
-        Ok(cache.local.claim(LocalKey { path, oid, size }))
+        Ok(cache.local.claim(LocalKey {
+            path,
+            oid,
+            size,
+            captured,
+        }))
     }
 
     pub(crate) fn matches_remote(
@@ -143,6 +149,7 @@ struct LocalKey {
     path: PathBuf,
     oid: [u8; 32],
     size: u64,
+    captured: bool,
 }
 
 impl LocalKey {
@@ -238,6 +245,7 @@ mod tests {
         let full_size = MAX_LOCAL_PROOF_BYTES / 32 * LOCAL_BLOCK_BYTES as u64;
         let key = |name: &str| LocalKey {
             oid: [1; 32],
+            captured: false,
             path: name.into(),
             size: full_size,
         };

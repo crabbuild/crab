@@ -71,10 +71,23 @@ pub(super) async fn verify_retention(
     let object = crab_lfs::LfsObjectStore::object_path_for_prefix("repository", &oid);
     let size = original.len() as u64;
     let first = new_client();
+    let snapshot = open_snapshot(&first).await;
+    let mut cancelled = snapshot
+        .open_file(GitPath::new("z-lfs").unwrap())
+        .await
+        .unwrap();
+    assert!(cancelled.next().await.unwrap().is_some());
+    cancelled.close().await.unwrap();
+    let after_cancel = crab_cache::CacheCatalog::read_only_stats(cache).unwrap();
     assert_eq!(
-        read(&open_snapshot(&first).await, 0..size).await.unwrap(),
-        original
+        (
+            after_cancel.entries,
+            after_cancel.temporary_bytes,
+            after_cancel.reservations_bytes
+        ),
+        (0, 0, 0)
     );
+    assert_eq!(read(&snapshot, 0..size).await.unwrap(), original);
     first.close().await.unwrap();
     storage.delete(&object).await.unwrap();
     let restarted = new_client();
@@ -101,19 +114,23 @@ pub(super) async fn verify_retention(
         .await
         .unwrap();
     let repaired = new_client();
+    let snapshot = open_snapshot(&repaired).await;
+    assert_eq!(read(&snapshot, 0..size).await.unwrap(), original);
     assert_eq!(
-        read(&open_snapshot(&repaired).await, 0..size)
-            .await
-            .unwrap(),
-        original
+        read(&snapshot, 1..size - 1).await.unwrap(),
+        original[1..original.len() - 1]
     );
-    repaired.close().await.unwrap();
+    super::ranges::verify_limits(&snapshot, b"z-lfs").await;
     assert_eq!(std::fs::read(&retained).unwrap(), original);
 
     let catalog = crab_cache::CacheCatalog::new(cache.to_owned(), None);
     catalog.set_retention_budget(Some(0)).await.unwrap();
     catalog.maintain().await.unwrap();
-    assert!(!retained.exists());
+    assert!(
+        !retained.exists(),
+        "idle snapshot proofs must not retain file descriptors or disk leases"
+    );
+    repaired.close().await.unwrap();
     let disabled = new_client();
     assert_eq!(
         read(&open_snapshot(&disabled).await, 0..size)

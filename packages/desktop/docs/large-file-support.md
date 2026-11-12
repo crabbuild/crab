@@ -131,14 +131,20 @@ Fills reserve the declared size and use the common exact-temporary journal;
 incomplete, canceled or hash-invalid bodies never publish. Partial origin reads
 continue through the canonical LFS verifier without retaining an incomplete body.
 Cached reads use captured descriptors through that same whole-file and bounded
-block verifier. Verification drains before the cache read owner releases its
-claim. Cancellation preserves healthy cached bytes. Source key, SHA-256 and size
-jointly scope retained proofs.
+block verifier. Between operations, captured proofs retain only hashes; each
+later read checks its newly supplied descriptor. Idle snapshots therefore permit
+eviction. Delivery batches cache reads in 1 MiB while emitting at most 64 KiB
+per stream item. Verification and admitted cache writes drain before close
+acknowledgement. Cancellation preserves healthy cached bytes. Source key,
+SHA-256, size and captured-source mode jointly scope retained proofs.
 
 Native checks cover accounting, exact cleanup, corruption, caller size conflicts,
 active reads under pressure and zero retention. Real SDK integration covers a new
 client reading exact complete/ranged bytes after the origin payload is removed,
-corrupt-cache repair and zero-budget reads. Origin corruption/admission assertions
+corrupt-cache repair, canceled-fill drain, response limits and zero-budget reads.
+The live-snapshot check retains block proofs while maintenance reclaims the file.
+An exact descriptor-replacement regression fails before the proof ownership
+correction and passes afterward. Origin corruption/admission assertions
 retain cold reads with a zero-retention cache; they cannot use a warm immutable
 object as evidence about the current origin. The existing archive-close test
 caught a cached cancellation being reported as I/O; the source now preserves
