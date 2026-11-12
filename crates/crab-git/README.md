@@ -152,6 +152,15 @@ response against their captured OIDs, kinds and sizes, hashing bodies through a
 64 KiB buffer with Git-compatible collision detection. Missing, reordered,
 truncated, extra and checksum-invalid responses fail.
 
+`batch::open_loose_blob` locates a regular object in the selected physical
+database or its alternates, preserving native path bytes and Git's quoting,
+relative roots, duplicate suppression and depth limit. Alternate metadata and
+retained paths share an 8 MiB budget. Opening is not verification:
+`batch::copy_loose_blob` streams the zlib file through the same body/checksum
+owner as batch reads, with fixed 64 KiB buffers. It requires the exact loose
+header, declared body, zlib end marker and input EOF. Failed output remains
+untrusted. Callers own cancellation, joined I/O and physical-source selection.
+
 The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain

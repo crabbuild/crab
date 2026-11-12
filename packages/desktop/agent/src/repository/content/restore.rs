@@ -106,7 +106,7 @@ impl GitRestoration {
         } = self.as_ref();
         scope.check()?;
         working.check_metadata()?;
-        let source_index = command::index_path(&index.root, scope).await?;
+        let source_index = command::git_path(&index.root, "index", scope).await?;
         let (workspace, temporary) =
             Workspace::create(&index.root, working.temporary_parent()?, scope).await?;
         let (workspace, private_index) = workspace.additional_temporary().await?;

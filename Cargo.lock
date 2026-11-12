@@ -2888,6 +2888,7 @@ dependencies = [
  "gix-odb",
  "gix-pack",
  "gix-packetline",
+ "gix-quote",
  "gix-ref",
  "gix-traverse",
  "gix-url",

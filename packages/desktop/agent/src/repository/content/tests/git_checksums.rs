@@ -210,3 +210,58 @@ async fn verified_git_ranges_preserve_unaligned_bytes_and_clamp_at_eof() -> Resu
     repo.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn captured_git_reads_keep_exact_bytes_in_packs_and_alternate_stores() -> Result<()> {
+    let body = (0..128 * 1024 + 17)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    for packed in [false, true] {
+        let (directory, repo, source) = indexed_git_source(&body).await?;
+        let root = directory.path();
+        let oid = String::from_utf8(git(root, &["rev-parse", ":file.bin"]).await?)?;
+        let oid = oid.trim();
+        let loose = root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+        if packed {
+            git(
+                root,
+                &[
+                    "pack-objects",
+                    "--all",
+                    "--indexed-objects",
+                    ".git/objects/pack/pack",
+                ],
+            )
+            .await?;
+            git(root, &["prune-packed"]).await?;
+        } else {
+            let alternate = root.join("alternate store").join(&oid[..2]);
+            std::fs::create_dir_all(&alternate)?;
+            std::fs::rename(&loose, alternate.join(&oid[2..]))?;
+            std::fs::write(
+                root.join(".git/objects/info/alternates"),
+                b"../../alternate store\n",
+            )?;
+        }
+        assert!(
+            !loose.exists(),
+            "fixture must exercise the selected storage format"
+        );
+        assert_eq!(
+            source.read_range(65533, 128).await?.as_ref(),
+            &body[65533..65661]
+        );
+        assert_eq!(
+            source.read_complete(body.len()).await?.as_ref(),
+            body.as_slice()
+        );
+        let copy = tempfile::NamedTempFile::new()?;
+        source
+            .copy_complete_to_file(copy.as_file().try_clone()?)
+            .await?;
+        assert_eq!(std::fs::read(copy.path())?, body);
+        source.close().await?;
+        repo.close().await?;
+    }
+    Ok(())
+}

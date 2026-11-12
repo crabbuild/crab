@@ -34,6 +34,7 @@ gix-object = { workspace = true }
 gix-odb = { workspace = true, features = ["sha1"] }
 gix-pack = { workspace = true, features = ["sha1"] }
 gix-packetline = { workspace = true, features = ["blocking-io"] }
+gix-quote = "0.7.2"
 gix-ref = { workspace = true, features = ["sha1"] }
 gix-traverse = { workspace = true }
 gix-url = { workspace = true }

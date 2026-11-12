@@ -55,6 +55,12 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   SHA-1 uses the same hardware-accelerated collision detector as generated
   objects, preserving Gitoxide's collision error and unmodified digest.
   Source: `crates/crab-git/src/batch.rs`.
+- Loose-object copies stream zlib input through the same body verifier without
+  mapping the compressed object. Require the declared header, size, Git checksum,
+  zlib StreamEnd and physical EOF. Alternates preserve native Git path bytes,
+  quoting, relative bases, cycles and recursion limits within a metadata budget.
+  Source: `batch::open_loose_blob / copy_loose_blob`; desktop range and file-copy
+  requests share this descriptor/worker owner. Packed data retains supervised Git.
 
 ## Features and platform
 

@@ -11,6 +11,7 @@ use crab_git::process::OwnedChild;
 use super::*;
 
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
+const READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub(in crate::repository) async fn run(
     root: &Path,
@@ -132,25 +133,81 @@ pub(super) async fn blob(
         )
         .into());
     }
-    let mut selected = SelectedBytes {
-        skip: start,
-        remaining: length,
-        bytes: Vec::new(),
-    };
-    selected
-        .bytes
+    let mut bytes = Vec::new();
+    bytes
         .try_reserve_exact(length)
         .map_err(std::io::Error::other)?;
+    let output = BlobOutput::Range {
+        skip: start,
+        remaining: length,
+        bytes,
+    };
+    Ok(read_blob(root, oid, size, output, scope).await?.into())
+}
+
+async fn read_blob(
+    root: &Path,
+    oid: &str,
+    size: u64,
+    mut output: BlobOutput,
+    scope: &ReadScope,
+) -> Result<Vec<u8>> {
+    let objects = git_path(root, "objects", scope).await?;
+    let captured_oid = oid.to_owned();
+    let cancellation = scope.clone();
+    let opened = tokio::task::spawn_blocking(move || {
+        crab_git::batch::open_loose_blob(&objects, &captured_oid, &|| cancellation.check().is_err())
+            .map_err(AgentError::from)
+    })
+    .await
+    .map_err(std::io::Error::other)?;
+    let loose = finish_io(scope, opened)?;
+    if let Some(file) = loose {
+        let cancellation = scope.clone();
+        let oid = oid.to_owned();
+        let copied = tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + READ_TIMEOUT;
+            let timed_out = std::cell::Cell::new(false);
+            let cancelled = || {
+                if cancellation.check().is_err() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    timed_out.set(true);
+                    return true;
+                }
+                false
+            };
+            let copied =
+                crab_git::batch::copy_loose_blob(file, &oid, size, &mut output, &cancelled);
+            if timed_out.get() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Git read timed out",
+                )
+                .into());
+            }
+            copied?;
+            std::io::Write::flush(&mut output)?;
+            Ok(output.into_bytes())
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        // A loose reader owns its descriptor until the blocking verifier joins.
+        // Native Git maps whole loose objects; streaming keeps dense reads bounded.
+        return finish_io(scope, copied);
+    }
     let command = blob_batch_command(root, oid)?;
     let captured_oid = oid.to_owned();
     let cancellation = scope.clone();
     let read = move |stdout: std::process::ChildStdout| {
         // A prefix cannot authenticate a Git OID. Verify the complete stream
         // before exposing selected bytes, retaining only the requested range.
-        crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut selected, &|| {
+        crab_git::batch::copy_blob(stdout, &captured_oid, size, &mut output, &|| {
             cancellation.check().is_err()
         })?;
-        Ok(selected.bytes)
+        std::io::Write::flush(&mut output)?;
+        Ok(output.into_bytes())
     };
     let output = execute(command, scope, read, None).await?;
     if !output.status.success() {
@@ -159,27 +216,51 @@ pub(super) async fn blob(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    Ok(output.stdout.into())
+    Ok(output.stdout)
 }
 
-struct SelectedBytes {
-    skip: u64,
-    remaining: usize,
-    bytes: Vec<u8>,
+enum BlobOutput {
+    Range {
+        skip: u64,
+        remaining: usize,
+        bytes: Vec<u8>,
+    },
+    Writer(Box<dyn std::io::Write + Send>),
 }
 
-impl std::io::Write for SelectedBytes {
+impl BlobOutput {
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Range { bytes, .. } => bytes,
+            Self::Writer(_) => Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for BlobOutput {
     fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
-        let skip = self.skip.min(input.len() as u64) as usize;
-        self.skip -= skip as u64;
-        let count = self.remaining.min(input.len() - skip);
-        self.bytes.extend_from_slice(&input[skip..skip + count]);
-        self.remaining -= count;
-        Ok(input.len())
+        match self {
+            Self::Range {
+                skip,
+                remaining,
+                bytes,
+            } => {
+                let skipped = (*skip).min(input.len() as u64) as usize;
+                *skip -= skipped as u64;
+                let count = (*remaining).min(input.len() - skipped);
+                bytes.extend_from_slice(&input[skipped..skipped + count]);
+                *remaining -= count;
+                Ok(input.len())
+            }
+            Self::Writer(output) => output.write(input),
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        match self {
+            Self::Range { .. } => Ok(()),
+            Self::Writer(output) => output.flush(),
+        }
     }
 }
 
@@ -201,26 +282,11 @@ pub(super) async fn copy_blob(
     root: &Path,
     oid: &str,
     size: u64,
-    mut output: impl std::io::Write + Send + 'static,
+    output: impl std::io::Write + Send + 'static,
     scope: &ReadScope,
 ) -> Result<()> {
-    let command = blob_batch_command(root, oid)?;
-    let oid = oid.to_owned();
-    let cancellation = scope.clone();
-    let read = move |stdout: std::process::ChildStdout| {
-        crab_git::batch::copy_blob(stdout, &oid, size, &mut output, &|| {
-            cancellation.check().is_err()
-        })?;
-        Ok(Vec::new())
-    };
-    let output = execute(command, scope, read, None).await?;
-    if !output.status.success() {
-        return Err(AgentError::Cli {
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(())
+    let output = BlobOutput::Writer(Box::new(output));
+    read_blob(root, oid, size, output, scope).await.map(drop)
 }
 
 fn blob_batch_command(root: &Path, oid: &str) -> Result<std::process::Command> {
@@ -228,23 +294,47 @@ fn blob_batch_command(root: &Path, oid: &str) -> Result<std::process::Command> {
     let mut input = tempfile::tempfile()?;
     writeln!(input, "{oid}")?;
     input.rewind()?;
-    let mut command = git_command(root, &["--no-replace-objects", "cat-file", "--batch"])?;
+    // Packed non-delta blobs must stream even below Git's usual large-file
+    // threshold. Bound its mapped pack windows independently of Rust buffers;
+    // these options belong only to this captured read, never repository config.
+    let mut command = git_command(
+        root,
+        &[
+            "--no-replace-objects",
+            "-c",
+            "core.bigFileThreshold=1",
+            "-c",
+            "core.packedGitWindowSize=32m",
+            "-c",
+            "core.packedGitLimit=64m",
+            "cat-file",
+            "--batch",
+        ],
+    )?;
     command.stdin(Stdio::from(input));
     Ok(command)
 }
 
-pub(super) async fn index_path(root: &Path, scope: &ReadScope) -> Result<PathBuf> {
+pub(super) async fn git_path(root: &Path, name: &str, scope: &ReadScope) -> Result<PathBuf> {
     let source = run(
         root,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        &["rev-parse", "--path-format=absolute", "--git-path", name],
         scope,
     )
     .await?;
     let source = source.strip_suffix(b"\n").unwrap_or(&source);
     let source = source.strip_suffix(b"\r").unwrap_or(source);
-    Ok(PathBuf::from(
-        std::str::from_utf8(source).map_err(std::io::Error::other)?,
-    ))
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(source.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathBuf::from(
+            std::str::from_utf8(source).map_err(std::io::Error::other)?,
+        ))
+    }
 }
 
 pub(super) async fn converted_blob_to_file(
@@ -319,19 +409,23 @@ async fn execute(
             if result.is_err() {
                 child.stop()?;
             }
-            // The verifier can observe cancellation before the pipe owner does.
-            // Preserve typed cancellation after stopping its child; actual
-            // checksum and other I/O failures must retain their own identity.
-            if matches!(&result, Err(AgentError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
-                && scope.cancelled_read()
-            {
-                scope.check()?;
-            }
-            result
+            finish_io(&scope, result)
         })
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+fn finish_io<T>(scope: &ReadScope, result: Result<T>) -> Result<T> {
+    // File and pipe verifiers can observe cancellation before their owner.
+    // Callers retain joined I/O through delivery; checksum and I/O failures
+    // must keep their identity even when cancellation also arrived.
+    let interrupted = matches!(&result, Err(AgentError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        && scope.cancelled_read();
+    if result.is_ok() || interrupted {
+        scope.check()?;
+    }
+    result
 }
 
 fn communicate<'a>(
@@ -363,7 +457,7 @@ fn communicate<'a>(
     let mut stdout: Option<Vec<u8>> = None;
     let mut stderr: Option<Vec<u8>> = None;
     let mut status = None;
-    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+    let deadline = Instant::now() + READ_TIMEOUT;
     let mut reported = Instant::now();
     loop {
         scope.check()?;
